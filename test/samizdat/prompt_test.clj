@@ -41,7 +41,13 @@
              (str/join ", " phantom)))))
 
 (deftest no-unsubstituted-placeholders
-  ;; The prompt is assembled from a template; a `{{...}}` reaching the model
-  ;; means an edit broke the substitution seam.
-  (let [prompt (loop/system-prompt)]
-    (is (not (re-find #"\{\{[^}]+\}\}" prompt)))))
+  ;; The prompt is assembled from a template; a substitution placeholder
+  ;; reaching the model means an edit broke the seam. `{{env/NAME}}` is
+  ;; excluded on purpose — it is documented runtime syntax the shell tool
+  ;; resolves at spawn, not a template hole the loader should have filled.
+  (let [prompt (loop/system-prompt)
+        holes (->> (re-seq #"\{\{([^}]+)\}\}" prompt)
+                   (map second)
+                   (remove #(str/starts-with? % "env/")))]
+    (is (empty? holes)
+        (str "unfilled template placeholders: " (str/join ", " holes)))))

@@ -273,6 +273,20 @@
       PRIMARY KEY (name, version)
     )"])
 
+(def ^:private v8
+  ;; Session permission grants. When a command that would ask is approved by a
+  ;; human, the grant persists here scoped to its run and is consulted ahead of
+  ;; the base rules on later commands. Human-only writes: nothing the model
+  ;; emits reaches this table (the model has no edge into grants — see the
+  ;; security model, docs/security.md). A grant can never override a hard deny.
+  ["CREATE TABLE IF NOT EXISTS grants (
+      id         INTEGER PRIMARY KEY AUTOINCREMENT,
+      run_id     TEXT NOT NULL,
+      pattern    TEXT NOT NULL,
+      created_at TEXT NOT NULL
+    )"
+   "CREATE INDEX IF NOT EXISTS idx_grants_run ON grants(run_id)"])
+
 (def migrations
   "Ordered. Index 0 is migration 1; PRAGMA user_version holds the count applied."
-  [v1 v2 v3 v4 v5 v6 v7])
+  [v1 v2 v3 v4 v5 v6 v7 v8])

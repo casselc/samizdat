@@ -35,6 +35,7 @@
   (:require [clojure.string :as str]
             [samizdat.agent.state :as state]
             [samizdat.llm.message :as message]
+            [samizdat.security.policy :as policy]
             [samizdat.store.journal :as journal]
             [samizdat.store.tasks :as tasks]))
 
@@ -430,6 +431,24 @@
                         " dead end.")))
             :progress? true
             :thesis thesis)))))
+
+;; --- the shell ---------------------------------------------------------------
+
+(defmethod run-tool "shell" [{:keys [branch] :as ctx}]
+  ;; Every command faces the permission engine, runs under a scrubbed
+  ;; environment, and its output is redacted before it returns — one call into
+  ;; samizdat.security.policy, which owns all three. A denied or unapproved
+  ;; command never spawns. The result's :category is what the cull guard reads:
+  ;; a policy refusal is :neutral (the branch did nothing wrong, the harness
+  ;; declined), a real command failure is :failure.
+  (if-let [m (missing ctx :command)]
+    (malformed branch m)
+    (let [r (policy/run-shell ctx)]
+      (assoc r :branch branch
+             ;; A policy refusal is journalled as declined, like a phase
+             ;; refusal, so the record can tell it from a command that ran
+             ;; and failed.
+             :policy-refusal? (contains? #{:deny :ask} (get-in r [:policy :effect]))))))
 
 ;; --- the task board ----------------------------------------------------------
 

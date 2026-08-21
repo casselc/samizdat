@@ -30,6 +30,22 @@ give_up({reason})
     Stop working this line and say why.
 ```
 
+### Doing work
+
+```
+shell({command})
+    Run a shell command. Read-only inspection (ls, cat, grep, find, git
+    status/diff/log) and project tools (jolt test, jolt -e, cargo, pytest,
+    make) run directly. Interpreters, network commands, git push, and
+    installs need a human to approve them first — you will be told when a
+    command needs approval rather than it running. Destructive system
+    commands are refused outright.
+
+    To use a secret without seeing it, reference it as {{env/NAME}} in the
+    command; the value is substituted when the command runs and never appears
+    in your context or the output.
+```
+
 ### The task board
 
 ```
