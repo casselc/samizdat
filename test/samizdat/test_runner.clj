@@ -55,6 +55,7 @@
             [mycelium.validation-test]
             [mycelium.workflow-test]
             [samizdat.agent-test]
+            [samizdat.tasks-test]
             [samizdat.llm-test]
             [samizdat.prompt-test]
             [samizdat.server-test]
@@ -111,6 +112,7 @@
     samizdat.store-test
     samizdat.llm-test
     samizdat.agent-test
+    samizdat.tasks-test
     samizdat.prompt-test
     samizdat.server-test
     samizdat.gui-api-test

@@ -1,0 +1,241 @@
+;; samizdat - a self-hosting agentic harness
+;; Copyright (C) 2026 Dmitri Sotnikov
+;;
+;; This program and the accompanying materials are made available under
+;; the terms of the Eclipse Public License 2.0 which is available at
+;; https://www.eclipse.org/legal/epl-2.0/
+;;
+;; SPDX-License-Identifier: EPL-2.0
+
+(ns samizdat.tasks-test
+  "The task board: dirge's issues schema generalized (epic_id -> parent_id +
+  a type column, session scoping -> run scoping) plus the contract fields
+  that make a task a delegable unit, and the model-facing `task` tool."
+  (:require [clojure.data.json :as json]
+            [clojure.string :as str]
+            [clojure.test :refer [deftest testing is]]
+            [jolt.fs :as fs]
+            [samizdat.agent.loop :as aloop]
+            [samizdat.agent.state :as state]
+            [samizdat.agent.tools :as tools]
+            [samizdat.llm.client :as llm]
+            [samizdat.store.db :as db]
+            [samizdat.store.runs :as runs]
+            [samizdat.store.tasks :as tasks]))
+
+(defmacro with-db [[binding] & body]
+  `(let [~binding (db/open! ":memory:")]
+     (try ~@body (finally (db/close ~binding)))))
+
+;; --- store ------------------------------------------------------------------
+
+(deftest create-and-get-roundtrip
+  (with-db [c]
+    (let [id (tasks/create! c {:title "wire the loop"
+                               :body "the loop must load from a manifest"
+                               :contract "loop compiles from db manifest at boot"
+                               :tests "test/samizdat/loop_manifest_test.clj"})]
+      (is (str/starts-with? id "sz-"))
+      (let [t (tasks/get-task c id)]
+        (is (= "wire the loop" (:title t)))
+        (is (= "task" (:type t)))
+        (is (= "open" (:status t)))
+        (is (= "normal" (:priority t)))
+        (is (nil? (:run_id t)) "unclaimed tasks are backlog")
+        (is (nil? (:parent_id t)))
+        (is (= "loop compiles from db manifest at boot" (:contract t)))
+        (is (= "test/samizdat/loop_manifest_test.clj" (:tests t)))
+        (is (some? (:created_at t)))
+        (is (nil? (:closed_at t)))))))
+
+(deftest status-aliases-normalize
+  ;; dirge's vocabulary: models say todo/wip/completed/wontfix and the board
+  ;; must not fork into synonym lanes.
+  (with-db [c]
+    (doseq [[alias canonical] {"todo" "open" "backlog" "open" "pending" "open"
+                               "wip" "in_progress" "doing" "in_progress"
+                               "completed" "done" "finished" "done"
+                               "wontfix" "cancelled"}]
+      (let [id (tasks/create! c {:title alias :status alias})]
+        (is (= canonical (:status (tasks/get-task c id)))
+            (str alias " should normalize to " canonical))))
+    (is (thrown? Exception (tasks/create! c {:title "bad" :status "resting"}))
+        "an unknown status is an error, not a new lane")))
+
+(deftest priority-aliases-normalize
+  (with-db [c]
+    (doseq [[alias canonical] {"p0" "high" "p1" "high" "urgent" "high"
+                               "p2" "normal"
+                               "p3" "low" "p4" "low" "minor" "low"
+                               "high" "high" "normal" "normal" "low" "low"}]
+      (let [id (tasks/create! c {:title alias :priority alias})]
+        (is (= canonical (:priority (tasks/get-task c id)))
+            (str alias " should normalize to " canonical))))))
+
+(deftest terminal-status-stamps-closed-at
+  (with-db [c]
+    (let [id (tasks/create! c {:title "t"})]
+      (tasks/update! c id {:status "done"})
+      (is (some? (:closed_at (tasks/get-task c id))))
+      ;; Reopening clears the stamp: a closed_at on an open task lies.
+      (tasks/update! c id {:status "open"})
+      (is (nil? (:closed_at (tasks/get-task c id)))))))
+
+(deftest parent-child-hierarchy
+  ;; An epic is a TYPE of task, so epics can belong to epics and the model
+  ;; decides how many levels it wants.
+  (with-db [c]
+    (let [epic (tasks/create! c {:title "harness v1" :type "epic"})
+          child (tasks/create! c {:title "step 1" :parent-id epic})
+          grand (tasks/create! c {:title "step 1a" :parent-id child})]
+      (is (= epic (:parent_id (tasks/get-task c child))))
+      (is (= [child] (mapv :id (tasks/children-of c epic))))
+      (is (= [grand] (mapv :id (tasks/children-of c child)))))
+    (is (thrown? Exception (tasks/create! c {:title "orphan" :parent-id "sz-nope"}))
+        "a parent that does not exist is an error")))
+
+(deftest board-ordering-and-terminal-exclusion
+  ;; dirge's ordering: status (in_progress, blocked, open) then priority then
+  ;; recency. Terminal tasks are history, not board.
+  (with-db [c]
+    (let [open-lo (tasks/create! c {:title "open-low" :priority "low"})
+          open-hi (tasks/create! c {:title "open-high" :priority "high"})
+          blocked (tasks/create! c {:title "blocked" :status "blocked"})
+          wip     (tasks/create! c {:title "wip" :status "in_progress" :priority "low"})
+          done    (tasks/create! c {:title "done"})]
+      (tasks/update! c done {:status "done"})
+      (is (= [wip blocked open-hi open-lo]
+             (mapv :id (tasks/board c {})))
+          "in_progress before blocked before open; priority within status")
+      (is (not-any? #{done} (map :id (tasks/board c {})))
+          "terminal tasks stay off the board"))))
+
+(deftest backlog-claim-and-run-scope
+  (with-db [c]
+    (let [rid (runs/start-run! c {:problem "p"})
+          other (runs/start-run! c {:problem "q"})
+          t1 (tasks/create! c {:title "for anyone"})
+          t2 (tasks/create! c {:title "already mine" :run-id rid :status "in_progress"})]
+      (is (= [t1] (mapv :id (tasks/backlog c))))
+      (testing "claim! assigns the run and marks in_progress"
+        (is (some? (tasks/claim! c t1 rid)))
+        (let [t (tasks/get-task c t1)]
+          (is (= rid (:run_id t)))
+          (is (= "in_progress" (:status t))))
+        (is (empty? (tasks/backlog c))))
+      (testing "a task claimed by one run refuses another"
+        (is (nil? (tasks/claim! c t1 other)))
+        (is (= rid (:run_id (tasks/get-task c t1)))))
+      (testing "the board scopes to a run plus the backlog"
+        (let [t3 (tasks/create! c {:title "unclaimed"})
+              board (tasks/board c {:run-id rid})]
+          (is (= #{t1 t2 t3} (set (map :id board)))
+              "a run sees its own tasks and the open backlog")
+          (is (not-any? #(= other (:run_id %)) board)
+              "another run's claimed tasks are not on this run's board"))))))
+
+(deftest update-bumps-updated-at
+  (with-db [c]
+    (let [id (tasks/create! c {:title "t"})]
+      ;; Distinct timestamps without sleeping: pin created_at into the past.
+      (db/execute! c ["UPDATE tasks SET updated_at = '2020-01-01T00:00:00Z' WHERE id = ?" id])
+      (tasks/update! c id {:body "new body"})
+      (is (not= "2020-01-01T00:00:00Z" (:updated_at (tasks/get-task c id)))))))
+
+(deftest board-survives-reopen
+  ;; The board is durable state, not context state: kill the process, reopen
+  ;; the file, the board is still there.
+  (let [path (str "/tmp/samizdat-tasks-test-" (random-uuid) ".sqlite3")]
+    (try
+      (let [c (db/open! path)
+            id (tasks/create! c {:title "durable" :contract "still here"})]
+        (db/close c)
+        (let [c2 (db/open! path)]
+          (try
+            (is (= "durable" (:title (tasks/get-task c2 id))))
+            (is (= [id] (mapv :id (tasks/board c2 {}))))
+            (finally (db/close c2)))))
+      (finally (fs/delete-if-exists path)))))
+
+;; --- the task tool ----------------------------------------------------------
+
+(defn- run-tool [c rid tool-name args]
+  (tools/run-tool {:tool-name tool-name :args args
+                   :branch (state/new-branch {:id "B1" :problem "p"})
+                   :conn c :run-id rid :turn 1}))
+
+(deftest task-tool-create-and-show
+  (with-db [c]
+    (let [rid (runs/start-run! c {:problem "p"})
+          r (run-tool c rid "task" {:action "create" :title "split the parser"
+                                    :contract "parser handles nested fences"
+                                    :tests "test/parser_test.clj"})]
+      (is (= :neutral (:category r)) "bookkeeping is not progress")
+      (let [id (re-find #"sz-[0-9a-f]+" (:result r))]
+        (is (some? id))
+        (let [shown (:result (run-tool c rid "task" {:action "show" :id id}))]
+          (is (str/includes? shown "split the parser"))
+          (is (str/includes? shown "parser handles nested fences"))
+          (is (str/includes? shown "test/parser_test.clj")))))))
+
+(deftest task-tool-list-board
+  (with-db [c]
+    (let [rid (runs/start-run! c {:problem "p"})]
+      (run-tool c rid "task" {:action "create" :title "first thing"})
+      (run-tool c rid "task" {:action "create" :title "second thing" :priority "high"})
+      (let [listing (:result (run-tool c rid "task" {:action "list"}))]
+        (is (str/includes? listing "first thing"))
+        (is (str/includes? listing "second thing"))))))
+
+(deftest task-tool-claim-update-close
+  (with-db [c]
+    (let [rid (runs/start-run! c {:problem "p"})
+          id (tasks/create! c {:title "claim me"})]
+      (run-tool c rid "task" {:action "claim" :id id})
+      (is (= rid (:run_id (tasks/get-task c id))))
+      (run-tool c rid "task" {:action "update" :id id :status "blocked"
+                              :body "waiting on the schema"})
+      (let [t (tasks/get-task c id)]
+        (is (= "blocked" (:status t)))
+        (is (= "waiting on the schema" (:body t))))
+      (run-tool c rid "task" {:action "close" :id id})
+      (let [t (tasks/get-task c id)]
+        (is (= "done" (:status t)))
+        (is (some? (:closed_at t)))))))
+
+(deftest task-tool-bad-calls-are-mechanics
+  ;; A bad id or a missing action is a call made wrong, not a failed line of
+  ;; inquiry — same reasoning as fetch_artifact's miss.
+  (with-db [c]
+    (let [rid (runs/start-run! c {:problem "p"})]
+      (is (= :mechanics (:category (run-tool c rid "task" {:action "show" :id "sz-nope"}))))
+      (is (= :mechanics (:category (run-tool c rid "task" {}))))
+      (is (= :mechanics (:category (run-tool c rid "task" {:action "levitate"}))))
+      (is (str/includes? (:result (run-tool c rid "task" {:action "create"}))
+                         "title")
+          "create without a title says what is missing"))))
+
+;; --- through the loop ------------------------------------------------------
+
+(deftest the-model-works-the-board-through-the-fence
+  ;; End to end minus the provider: a scripted model creates a task and then
+  ;; closes it, through the real fence parse, dispatch, and journal append.
+  (with-db [c]
+    (let [rid (runs/start-run! c {:problem "p"})
+          _ (runs/open-branch! c rid {:branch-id "B1"})
+          ctx {:conn c :run-id rid :max-turns 10
+               :llm-adapter :a :llm-config {:max-tokens 16384}}
+          b (state/new-branch {:id "B1" :problem "p"})
+          fence (fn [m] {:content (str "```tool-call\n" (json/write-str m) "\n```")
+                         :finish-reason "stop"})
+          b1 (with-redefs [llm/chat (fn [& _] (fence {:name "task"
+                                                      :args {:action "create"
+                                                             :title "prove the loop"
+                                                             :contract "task rows appear"}}))]
+               (aloop/run-turn ctx b 1))
+          id (:id (first (tasks/board c {:run-id rid})))]
+      (is (some? id) "the scripted turn created a task")
+      (with-redefs [llm/chat (fn [& _] (fence {:name "task"
+                                               :args {:action "close" :id id}}))]
+        (aloop/run-turn ctx b1 2))
+      (is (= "done" (:status (tasks/get-task c id)))))))

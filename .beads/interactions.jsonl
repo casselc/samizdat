@@ -4,3 +4,4 @@
 {"id":"int-30e7f38b","kind":"field_change","created_at":"2026-08-21T19:43:19.448877Z","actor":"Yogthos","issue_id":"karamazov-ioo.3","extra":{"field":"status","new_value":"closed","old_value":"in_progress","reason":"Closed"}}
 {"id":"int-ed9f6270","kind":"field_change","created_at":"2026-08-21T19:51:49.500845Z","actor":"Yogthos","issue_id":"karamazov-ioo.2","extra":{"field":"status","new_value":"in_progress","old_value":"open"}}
 {"id":"int-9b8f4528","kind":"field_change","created_at":"2026-08-21T20:08:14.839876Z","actor":"Yogthos","issue_id":"karamazov-ioo.2","extra":{"field":"status","new_value":"closed","old_value":"in_progress","reason":"Closed"}}
+{"id":"int-5741d6f7","kind":"field_change","created_at":"2026-08-21T20:15:09.889304Z","actor":"Yogthos","issue_id":"karamazov-ioo.5","extra":{"field":"status","new_value":"in_progress","old_value":"open"}}

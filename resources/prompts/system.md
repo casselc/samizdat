@@ -30,6 +30,26 @@ give_up({reason})
     Stop working this line and say why.
 ```
 
+### The task board
+
+```
+task({action, ...})
+    Ground your work in durable tasks. Actions:
+      create {title, body?, type?, priority?, parentId?, contract?, tests?}
+          A task can parent other tasks; an epic is just a task with
+          type "epic". contract and tests are the delegation spec: what
+          the work must satisfy and the tests that define delivery.
+          Pass backlog: true to leave it unclaimed.
+      list                 The board: your run's tasks plus the open backlog.
+      show {id}            One task in full, with its children.
+      update {id, ...}     Change fields; status aliases like todo/wip/done
+                           normalize.
+      claim {id}           Take a backlog task for this run.
+      close {id, status?}  done (default) or cancelled.
+    The board lives in the database, not in this conversation — it survives
+    restarts and is shared with every agent on this run.
+```
+
 ### Reading the record
 
 ```

@@ -35,7 +35,8 @@
   (:require [clojure.string :as str]
             [samizdat.agent.state :as state]
             [samizdat.llm.message :as message]
-            [samizdat.store.journal :as journal]))
+            [samizdat.store.journal :as journal]
+            [samizdat.store.tasks :as tasks]))
 
 (defmulti run-tool
   (fn [ctx] (:tool-name ctx)))
@@ -429,6 +430,103 @@
                         " dead end.")))
             :progress? true
             :thesis thesis)))))
+
+;; --- the task board ----------------------------------------------------------
+
+(defn- task-line [t]
+  (str (:id t) " [" (:status t) "/" (:priority t)
+       (when-not (= "task" (:type t)) (str " " (:type t)))
+       (when (:parent_id t) (str " < " (:parent_id t)))
+       "] " (:title t)))
+
+(defn- render-task [conn t]
+  (str (task-line t)
+       (when (seq (:body t)) (str "\n\n" (:body t)))
+       (when (seq (:contract t)) (str "\n\nCONTRACT\n" (:contract t)))
+       (when (seq (:tests t)) (str "\n\nTESTS\n" (:tests t)))
+       (when-let [kids (seq (tasks/children-of conn (:id t)))]
+         (str "\n\nCHILDREN\n" (str/join "\n" (map task-line kids))))))
+
+(def ^:private task-usage
+  (str "Actions: create {title, body?, type?, priority?, parentId?, contract?, tests?},"
+       " list, show {id}, update {id, ...fields}, claim {id}, close {id, status?}."))
+
+(defmethod run-tool "task" [{:keys [branch conn run-id] :as ctx}]
+  ;; Every action is `ok` (:neutral) on purpose: working the board is
+  ;; bookkeeping, and bookkeeping is not progress — the same reasoning as
+  ;; fetch_artifact. Grounding work in tasks is required; credit for the work
+  ;; itself comes from artifacts. Bad ids, bad statuses, and unknown actions
+  ;; are :mechanics — calls made wrong, not failed lines of inquiry.
+  (let [action (some-> (arg ctx :action) str str/trim str/lower-case not-empty)
+        want (fn [k] (let [v (arg ctx k)]
+                       (when-not (and (some? v) (not (and (string? v) (str/blank? v))))
+                         (malformed branch (str "`task " action "` needs `" (name k) "`. "
+                                                task-usage)))))]
+    (try
+      (case action
+        nil
+        (malformed branch (str "`task` needs an `action`. " task-usage))
+
+        "create"
+        (or (want :title)
+            (let [id (tasks/create! conn {:title (arg ctx :title)
+                                          :body (arg ctx :body)
+                                          :type (arg ctx :type)
+                                          :status (arg ctx :status)
+                                          :priority (arg ctx :priority)
+                                          :parent-id (arg ctx :parentId)
+                                          :contract (arg ctx :contract)
+                                          :tests (arg ctx :tests)
+                                          :run-id (when-not (arg ctx :backlog) run-id)})]
+              (ok branch (str "Created " (task-line (tasks/get-task conn id))))))
+
+        "list"
+        (let [rows (tasks/board conn {:run-id run-id})]
+          (ok branch (if (seq rows)
+                       (str/join "\n" (map task-line rows))
+                       "The board is empty.")))
+
+        "show"
+        (or (want :id)
+            (if-let [t (tasks/get-task conn (arg ctx :id))]
+              (ok branch (render-task conn t))
+              (malformed branch (str "No task " (arg ctx :id) "."))))
+
+        "update"
+        (or (want :id)
+            (if-not (tasks/get-task conn (arg ctx :id))
+              (malformed branch (str "No task " (arg ctx :id) "."))
+              (let [t (tasks/update! conn (arg ctx :id)
+                                     {:title (arg ctx :title)
+                                      :body (arg ctx :body)
+                                      :type (arg ctx :type)
+                                      :status (arg ctx :status)
+                                      :priority (arg ctx :priority)
+                                      :parent-id (arg ctx :parentId)
+                                      :contract (arg ctx :contract)
+                                      :tests (arg ctx :tests)})]
+                (ok branch (str "Updated " (task-line t))))))
+
+        "claim"
+        (or (want :id)
+            (if-let [t (tasks/claim! conn (arg ctx :id) run-id)]
+              (ok branch (str "Claimed " (task-line t)))
+              (malformed branch (str "Cannot claim " (arg ctx :id)
+                                     ": no such task, or another run holds it."))))
+
+        "close"
+        (or (want :id)
+            (if-not (tasks/get-task conn (arg ctx :id))
+              (malformed branch (str "No task " (arg ctx :id) "."))
+              (let [t (tasks/close! conn (arg ctx :id) (or (arg ctx :status) "done"))]
+                (ok branch (str "Closed " (task-line t))))))
+
+        (malformed branch (str "Unknown task action `" action "`. " task-usage)))
+      (catch Throwable e
+        ;; Unknown statuses, missing parents: the store's validation errors are
+        ;; calls made wrong, and the message already says what was wrong.
+        (malformed branch (str "`task " action "` refused: " (ex-message e)
+                               "\n" task-usage))))))
 
 ;; --- the journal, readable --------------------------------------------------
 

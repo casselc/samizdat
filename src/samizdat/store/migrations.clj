@@ -234,6 +234,32 @@
   ;; (gen-30 B3.2 was culled with exactly that false reason).
   ["ALTER TABLE turns ADD COLUMN policy_refusal INTEGER"])
 
+(def ^:private v6
+  ;; The task board. dirge's issues schema with two generalizations: epic_id
+  ;; becomes a self-referential parent_id plus a type column (an epic is a
+  ;; TYPE of task, so epics nest and the model decides how many levels it
+  ;; wants), and session scoping becomes run scoping (run_id NULL = passive
+  ;; backlog, set = claimed onto that run's active board). contract and tests
+  ;; are what make a task a delegable unit: the spec the work must satisfy
+  ;; and the tests that define delivery, per the decomposition design.
+  ["CREATE TABLE IF NOT EXISTS tasks (
+      id          TEXT PRIMARY KEY,
+      title       TEXT NOT NULL,
+      body        TEXT NOT NULL DEFAULT '',
+      type        TEXT NOT NULL DEFAULT 'task',
+      status      TEXT NOT NULL DEFAULT 'open',
+      priority    TEXT NOT NULL DEFAULT 'normal',
+      parent_id   TEXT REFERENCES tasks(id),
+      run_id      TEXT,
+      contract    TEXT NOT NULL DEFAULT '',
+      tests       TEXT NOT NULL DEFAULT '',
+      created_at  TEXT NOT NULL,
+      updated_at  TEXT NOT NULL,
+      closed_at   TEXT
+    )"
+   "CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status)"
+   "CREATE INDEX IF NOT EXISTS idx_tasks_parent ON tasks(parent_id)"])
+
 (def migrations
   "Ordered. Index 0 is migration 1; PRAGMA user_version holds the count applied."
-  [v1 v2 v3 v4 v5])
+  [v1 v2 v3 v4 v5 v6])
