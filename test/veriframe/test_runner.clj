@@ -14,6 +14,46 @@
   suite runs against the live process without paying startup again."
   (:require [clojure.test :as t]
             [maestro.core-test]
+            [mycelium.cell-test]
+            [mycelium.coercion-test]
+            [mycelium.compose-test]
+            [mycelium.constraints-test]
+            [mycelium.core-test]
+            [mycelium.default-transition-test]
+            [mycelium.defcell-test]
+            [mycelium.dev-test]
+            [mycelium.error-groups-test]
+            [mycelium.error-handler-test]
+            [mycelium.error-messages-test]
+            [mycelium.error-taxonomy-test]
+            [mycelium.execution-tracing-test]
+            [mycelium.fragment-test]
+            [mycelium.generate-stubs-test]
+            [mycelium.halt-resume-test]
+            [mycelium.infer-schema-test]
+            [mycelium.input-schema-test]
+            [mycelium.integration-test]
+            [mycelium.interceptor-test]
+            [mycelium.invoke-cell-test]
+            [mycelium.join-test]
+            [mycelium.lite-schema-test]
+            [mycelium.manifest-test]
+            [mycelium.middleware-test]
+            [mycelium.orchestrate-test]
+            [mycelium.propagate-keys-test]
+            [mycelium.queue-integration-test]
+            [mycelium.queue-test]
+            [mycelium.registry-test]
+            [mycelium.resilience-test]
+            [mycelium.schema-error-test]
+            [mycelium.schema-test]
+            [mycelium.store-test]
+            [mycelium.system-test]
+            [mycelium.timeout-test]
+            [mycelium.transform-test]
+            [mycelium.validate-warn-test]
+            [mycelium.validation-test]
+            [mycelium.workflow-test]
             [veriframe.engine-test]
             [veriframe.agent-test]
             [veriframe.llm-test]
@@ -31,6 +71,46 @@
 
 (def namespaces
   '[maestro.core-test
+    mycelium.cell-test
+    mycelium.coercion-test
+    mycelium.compose-test
+    mycelium.constraints-test
+    mycelium.core-test
+    mycelium.default-transition-test
+    mycelium.defcell-test
+    mycelium.dev-test
+    mycelium.error-groups-test
+    mycelium.error-handler-test
+    mycelium.error-messages-test
+    mycelium.error-taxonomy-test
+    mycelium.execution-tracing-test
+    mycelium.fragment-test
+    mycelium.generate-stubs-test
+    mycelium.halt-resume-test
+    mycelium.infer-schema-test
+    mycelium.input-schema-test
+    mycelium.integration-test
+    mycelium.interceptor-test
+    mycelium.invoke-cell-test
+    mycelium.join-test
+    mycelium.lite-schema-test
+    mycelium.manifest-test
+    mycelium.middleware-test
+    mycelium.orchestrate-test
+    mycelium.propagate-keys-test
+    mycelium.queue-integration-test
+    mycelium.queue-test
+    mycelium.registry-test
+    mycelium.resilience-test
+    mycelium.schema-error-test
+    mycelium.schema-test
+    mycelium.store-test
+    mycelium.system-test
+    mycelium.timeout-test
+    mycelium.transform-test
+    mycelium.validate-warn-test
+    mycelium.validation-test
+    mycelium.workflow-test
     veriframe.faithful-test
     veriframe.store-test
     veriframe.llm-test

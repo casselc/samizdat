@@ -1,0 +1,115 @@
+{:paths ["src" "vendor" "resources"]
+
+ ;; Git deps are fetched into ~/.jolt/gitlibs by jolt. Full SHAs only —
+ ;; `git fetch` can't resolve short ones.
+ :deps {;; provider calls (clj-http-lite over jolt.ffi sockets + OpenSSL + libz)
+        ;; v0.0.3 honours :conn-timeout: it bounds the connect itself through a
+        ;; non-blocking socket, which needs jolt 0.6.8's :varargs FFI marker
+        ;; (fcntl is variadic, and on Apple arm64 a fixed-arity binding
+        ;; silently corrupts the stack-passed argument).
+        jolt-lang/http-client
+        {:git/url "https://github.com/jolt-lang/http-client"
+         :git/tag "v0.0.3"
+         :git/sha "add8184b819b69dcfed1305b9577eb8794f76409"}
+
+        ;; durable sessions: jdbc.core over the system libsqlite3 via jolt.ffi
+        jolt-lang/db
+        {:git/url "https://github.com/jolt-lang/db"
+         :git/sha "c3ed5b333b5feed615d49c118493a00edc537739"}
+
+        ;; nREPL middleware (sessions, interruptible eval, completion, lookup) so
+        ;; an editor can drive the running harness. See core/start-nrepl!.
+        jolt-lang/nrepl
+        {:git/url "https://github.com/jolt-lang/nrepl"
+         :git/sha "10bf63fd19f66b39587f4a5756d0644231b2d4c1"}
+
+        ;; OpenSSL/SecureRandom shims. http-client pulls this in too; jolt.deps
+        ;; reconciles the duplicate libssl/libcrypto natives to a single load.
+        jolt-lang/jolt-crypto
+        {:git/url "https://github.com/jolt-lang/jolt-crypto"
+         :git/sha "1ab72aa5f73be7ec41f01086953ffb43ecd3d84e"}
+
+        org.clojure/data.json
+        {:git/url "https://github.com/clojure/data.json"
+         :git/sha "94463ffb54482427fd9b31f264b06bff6dcfd557"}
+
+        ;; vendor/mycelium — schema contracts and validation. malli.generator
+        ;; hard-requires test.check at namespace load, and mycelium.dev loads
+        ;; malli.generator, so test.check rides along in the main deps.
+        metosin/malli {:mvn/version "0.17.0"}
+        org.clojure/test.check {:mvn/version "1.1.1"}
+
+        ;; clojure.tools.logging ported to jolt (stderr backend, :info+ default)
+        org.clojure/tools.logging
+        {:git/url "https://github.com/jolt-lang/logging"
+         :git/sha "ec6747e55583118d881faf4ab41e68d7e587ce4c"}
+
+        ;; java.time host shim. tools.logging formats timestamps with
+        ;; DateTimeFormatter, which core does not provide (RFC 0008), so
+        ;; logging anything without this dep throws at the first log call.
+        ;; bc85090 brings DateTimeFormatterBuilder.appendFraction (PR #7/#8),
+        ;; which malli.transform's date formatter needs at namespace load.
+        jolt-lang/time
+        {:git/url "https://github.com/jolt-lang/time"
+         :git/sha "bc85090dae95d103ba04f4ea9687945cf46fb19e"}}
+
+ ;; The vendored HTTP server (vendor/ring_chez/adapter.clj) binds BSD sockets
+ ;; through the running process's own libc symbols, so they must be loaded
+ ;; before that namespace is required.
+ :jolt/native [{:name "libc (POSIX sockets)" :process true}]
+
+ :nrepl/middleware [nrepl.middleware/default-middleware]
+
+ :aliases {:test {:extra-paths ["test" "gui"]
+                  :main-opts ["-m" "veriframe.test-runner"]}
+           ;; command-line nREPL client, plus the test tree, so the live
+           ;; process can run the suite over nREPL without paying startup:
+           ;;   (require 'veriframe.test-runner :reload-all)
+           ;;   (veriframe.test-runner/run)
+           :dev  {:extra-paths ["dev" "test"]}
+
+           ;; The GUI is an optional component and a strict HTTP client of the
+           ;; server: its source root and its GTK/GL deps live ONLY under this
+           ;; alias, so `jolt serve` and `jolt -M:test` stay headless and never
+           ;; load a native toolkit.
+           :gui  {:extra-paths ["gui"]
+                  :extra-deps
+                  {;; glimmer is now the portable reactive core only — ratom,
+                   ;; the component model and the reconciler — and knows about
+                   ;; no toolkit. v0.1.0 is the release that split GTK out.
+                   ;; It still carries the two fixes this GUI needs: the swap!
+                   ;; nil-argument fix, and :scroll-top on :scrolled, without
+                   ;; which the inspector opens part-way down the previous
+                   ;; selection.
+                   jolt-lang/glimmer
+                   {:git/url "https://github.com/jolt-lang/glimmer.git"
+                    :git/tag "v0.1.0"
+                    :git/sha "5581c331c51aff989259b9e8e92ec920fe5e6741"}
+                   ;; The GTK4 backend: the widgets, the prop/signal wiring and
+                   ;; the app loop, registered through glimmer.backend. It also
+                   ;; owns the GTK/GLib :jolt/native declarations, which is why
+                   ;; none appear here. `glimmer.ffi` and `glimmer.widget` live
+                   ;; here now as `glimmer-gtk.ffi` and `glimmer-gtk.widget`.
+                   jolt-lang/glimmer-gtk
+                   {:git/url "https://github.com/jolt-lang/glimmer-gtk.git"
+                    :git/tag "v0.1.0"
+                    :git/sha "ce79d45698d36ccf496397bb85974e3cce6abfd8"}
+                   ;; Pinned past the split too: glimmer-gl.gtk registers
+                   ;; :gl-area and :scale into the widget registry, which now
+                   ;; lives in glimmer-gtk, so an older glimmer-gl fails to
+                   ;; load with `Could not locate glimmer/ffi`.
+                   jolt-lang/glimmer-gl
+                   {:git/url "https://github.com/jolt-lang/glimmer-gl.git"
+                    :git/tag "v0.1.0"
+                    :git/sha "ae9a53291c553e89dde79a90389224f46e5e7fa8"}}
+                  :main-opts ["-m" "veriframe.gui.core"]}}
+
+ :tasks {serve {:doc "start the harness (HTTP + nREPL) and park"
+                :main-opts ["-m" "veriframe.core"]}
+         ;; A shell-string task, because a :tasks :main-opts entry cannot carry
+         ;; an -A alias — main-opts are only ever main-opts.
+         dev   "jolt -A:dev -m veriframe.core"
+         smoke {:doc "Phase 0 platform probes: z3, swipl, sqlite, https, server"
+                :main-opts ["-m" "veriframe.smoke"]}
+         test  "jolt -M:test"
+         gui   "jolt -M:gui"}}
