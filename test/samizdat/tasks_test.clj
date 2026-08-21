@@ -164,6 +164,34 @@
                    :branch (state/new-branch {:id "B1" :problem "p"})
                    :conn c :run-id rid :turn 1}))
 
+;; --- the done gate on a coding run (no artifacts) ---------------------------
+
+(deftest done-ships-a-coding-answer-with-figures
+  ;; The first self-modification run did the work correctly — wrote code, wrote
+  ;; a test, ran it — and could not ship, because the number-coverage rung
+  ;; refused an answer containing "0 failures" / "3 tests" when the run had no
+  ;; artifacts to cover them. A coding run's evidence is tests passing, not
+  ;; confirmed claims, so with empty evidence the rung must not fire.
+  (with-db [c]
+    (let [rid (runs/start-run! c {:problem "add a truncate-middle function with tests"})]
+      (runs/open-branch! c rid {:branch-id "B1"})
+      (let [r (tools/run-tool
+               {:tool-name "done"
+                :args {:answer "Added truncate-middle; its 3 tests pass with 0 failures."}
+                :branch (state/new-branch {:id "B1"
+                                           :problem "add a truncate-middle function with tests"})
+                :conn c :run-id rid :turn 1})]
+        (is (:done? r) "an honest coding answer with figures ships")
+        (is (= :success (:category r))))))
+  (testing "a blank answer still cannot ship"
+    (with-db [c]
+      (let [rid (runs/start-run! c {:problem "p"})]
+        (runs/open-branch! c rid {:branch-id "B1"})
+        (let [r (tools/run-tool {:tool-name "done" :args {:answer ""}
+                                 :branch (state/new-branch {:id "B1" :problem "p"})
+                                 :conn c :run-id rid :turn 1})]
+          (is (not (:done? r))))))))
+
 (deftest task-tool-create-and-show
   (with-db [c]
     (let [rid (runs/start-run! c {:problem "p"})

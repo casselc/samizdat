@@ -126,8 +126,17 @@
    ["ln **" :allow] ["chmod **" :allow]
    ;; project-scoped runners — jolt/clojure toolchain for THIS project, plus
    ;; the common ecosystems dirge trusts. Bare interpreters stay excluded.
-   ["jolt test **" :allow] ["jolt -M:test **" :allow] ["jolt build **" :allow]
+   ;; The project's own toolchain — running its tests and evaluating Clojure
+   ;; in the project image is the core self-modification workflow, and jolt
+   ;; runs THIS project's code (same trust as editing it). The colon-alias
+   ;; forms (`-A:test`, `-M:test`, `-A:dev`) need their own patterns: a
+   ;; trailing ` **` makes args optional only after a space, so `jolt -A **`
+   ;; does not match `jolt -A:test …`. Surfaced by the first dogfood run,
+   ;; which blocked on exactly this and needed a manual grant to proceed.
+   ["jolt test **" :allow] ["jolt build **" :allow]
    ["jolt -e **" :allow] ["jolt -A **" :allow] ["jolt -M **" :allow]
+   ["jolt -A:test **" :allow] ["jolt -M:test **" :allow] ["jolt -A:dev **" :allow]
+   ["jolt -A:test -e **" :allow] ["jolt -M:test -e **" :allow]
    ["clj -M **" :allow] ["clojure -M **" :allow] ["lein test **" :allow]
    ["cargo check **" :allow] ["cargo build **" :allow] ["cargo test **" :allow]
    ["cargo fmt **" :allow] ["cargo clippy **" :allow] ["cargo run **" :allow]

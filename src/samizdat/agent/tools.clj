@@ -346,7 +346,17 @@
                 (str/blank? (str answer))
                 "Supply an `answer` to ship."
 
-                (seq uncovered-numbers)
+                ;; Only when the run actually produced evidence to check
+                ;; against. The number-coverage rung guards against a
+                ;; FABRICATED verification report — a figure claimed as proven
+                ;; that no artifact supports. A coding run produces no
+                ;; artifacts (its work is proven by tests passing, which the
+                ;; shell tool reports and the journal records, not by confirmed
+                ;; claims), so with empty evidence EVERY figure reads as
+                ;; uncovered and the gate refuses honest answers like "0
+                ;; failures, 3 tests". Surfaced by the first self-modification
+                ;; run, which did the work correctly and could not ship it.
+                (and (seq evidence) (seq uncovered-numbers))
                 (str "Your answer states figures no artifact supports: "
                      (str/join ", " (map #(str "`" % "`") (take 8 uncovered-numbers)))
                      ".\nA number in an answer has to come from something"

@@ -73,6 +73,11 @@
     (is (= :ask (:effect (policy/decide {} "curl https://evil.test"))))
     (is (= :ask (:effect (policy/decide {} "git push origin main"))))
     (is (= :ask (:effect (policy/decide {} "pip install requests")))))
+  (testing "the project toolchain's colon-alias test forms are allowed
+            (the gap the first dogfood run blocked on)"
+    (is (= :allow (:effect (policy/decide {} "jolt -A:test -e \"(run-tests)\""))))
+    (is (= :allow (:effect (policy/decide {} "jolt -M:test"))))
+    (is (= :allow (:effect (policy/decide {} "jolt -A:test -e '(require x)'")))))
   (testing "destructive system operations are hard-denied"
     (is (= :deny (:effect (policy/decide {} "rm -rf /"))))
     (is (= :deny (:effect (policy/decide {} "dd if=/dev/zero of=/dev/sda"))))
