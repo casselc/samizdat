@@ -1,0 +1,38 @@
+.nrepl-port
+*.sqlite3
+.cache/
+.cpcache/
+target/
+
+# AOT build output: a 20MB self-contained binary plus its intermediates.
+/veriframe
+veriframe.build/
+
+# Lean toolchain, fetched by tools/setup-lean.sh. Mathlib's prebuilt oleans run
+# to several GB and the repl binary is ~190MB; both are reproducible from the
+# script and neither belongs in git.
+tools/lean-workspace/.lake/
+tools/lean-workspace/lake-manifest.json
+tools/lean-repl/
+
+# Papers read while designing this. PLAN.md says what came from each.
+2*v[0-9]/
+rax-results-*/
+
+# Beads / Dolt files (added by bd init)
+.dolt/
+*.db
+.beads-credential-key
+
+# Octave dumps its workspace here if a session exits without saving.
+octave-workspace
+
+# A draft blog post about the project, kept locally rather than shipped.
+blog.md
+
+# The design log: reasoning, measurements, and every bug found along the way.
+# Kept locally rather than shipped.
+PLAN.md
+
+# jolt classpath cache, regenerated on every run
+.jolt/cpcache/
