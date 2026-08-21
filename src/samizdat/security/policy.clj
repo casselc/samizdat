@@ -25,7 +25,8 @@
   (:require [clojure.string :as str]
             [samizdat.engine.proc :as proc]
             [samizdat.security.secrets :as secrets]
-            [samizdat.store.grants :as grants]))
+            [samizdat.store.grants :as grants]
+            [samizdat.util :as util]))
 
 ;; --- glob → matcher ---------------------------------------------------------
 
@@ -234,8 +235,12 @@
                   (str "[timed out after " (:ms r) "ms]")
                   (str (:out r)
                        (when (seq (:err r)) (str "\n" (:err r)))))
-            redacted (secrets/redact (subs out 0 (min (count out) max-output-chars))
-                                     known)]
+            ;; Redact the WHOLE output first, then truncate — so a secret that
+            ;; would straddle the truncation boundary is caught before the cut.
+            ;; truncate-middle keeps the head AND tail, because the end of a
+            ;; command's output (a test summary, an exit line) is as load-
+            ;; bearing as the start.
+            redacted (util/truncate-middle (secrets/redact out known) max-output-chars)]
         {:category (if (and (not (:timeout r)) (zero? (or (:exit r) 0)))
                      :success :failure)
          :progress? true

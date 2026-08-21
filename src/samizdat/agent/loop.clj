@@ -31,6 +31,7 @@
             [samizdat.llm.message :as message]
             [samizdat.store.artifacts :as artifacts]
             [samizdat.store.failures :as failures]
+            [samizdat.store.interventions :as interventions]
             [samizdat.store.journal :as journal]
             [samizdat.store.runs :as runs]))
 
@@ -444,13 +445,42 @@
     (runs/set-thesis! conn run-id (:id branch) t))
   nil)
 
+(defn- drain-directives!
+  "Apply the human directives waiting at this boundary. The single-branch
+  driver only sees the branch-scoped kinds: `message` and `review` become a
+  :pending-directive the arbiter puts at priority zero; the scheduler-only
+  kinds (cull/fork/pause/resume) belong to the beam and are rejected here with
+  a reason rather than accepted silently. Returns the branch, possibly carrying
+  a :pending-directive. Shares the interventions queue with the HTTP control
+  surface, so a REPL steer and a UI steer are the same event."
+  [conn run-id branch turn]
+  (if-not (and conn run-id)
+    branch
+    (reduce
+     (fn [b d]
+       (case (:kind d)
+         ("message" "review")
+         (do (interventions/resolve! conn run-id (:id d) :applied nil turn)
+             (assoc b :pending-directive d))
+         "extend"
+         b ;; handled by control/extend! against the runs row, not here
+         (do (interventions/resolve! conn run-id (:id d) :rejected
+                                     (str (:kind d) " applies to the beam scheduler,"
+                                          " not a single-branch run")
+                                     turn)
+             b)))
+     branch
+     (interventions/pending conn run-id (:id branch)))))
+
 (defn steer-step
-  "Predictions settle, then the single boundary: at most one steer, chosen in
-  priority, plus the context block. Returns the branch ready for its next
-  turn (or carrying the final answer when the turn shipped)."
+  "Predictions settle, pending human directives drain, then the single
+  boundary: at most one steer, chosen in priority (a human directive outranks
+  every machine gate), plus the context block. Returns the branch ready for its
+  next turn (or carrying the final answer when the turn shipped)."
   [{:keys [conn run-id max-turns] :as ctx} before branch turn {:keys [parsed result]}]
   (let [tool (:name parsed)
-        branch (settle-predictions! conn branch turn [tool] before branch)]
+        branch (settle-predictions! conn branch turn [tool] before branch)
+        branch (drain-directives! conn run-id branch turn)]
     (if (:done? result)
       (state/add-message branch "user" (truncate (:result result)))
       ;; No green snapshots are taken without an engine session, so
