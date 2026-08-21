@@ -19,7 +19,13 @@
   write files through `cat > f <<EOF` fights the tool surface, and the point of
   the dogfood is to see it change code, not wrestle heredocs."
   (:require [clojure.string :as str]
-            [jolt.fs :as fs]))
+            [jolt.fs :as fs]
+            [samizdat.lisp :as lisp]))
+
+(def ^:private clojure-exts #{"clj" "cljc" "cljs" "cljd" "edn" "bb"})
+
+(defn- clojure-file? [path]
+  (contains? clojure-exts (last (str/split (str path) #"\."))))
 
 (def ^:private max-read-chars 60000)
 
@@ -74,10 +80,25 @@
 
       :else
       (if-let [abs (resolve-under-root (or root ".") path)]
-        (do
+        ;; Paren repair for Clojure sources: models drop trailing closers, and
+        ;; a file that does not read is a file that does not load. A trailing
+        ;; truncation or over-close is fixed mechanically and noted; a mid-file
+        ;; imbalance is written as-is with the imbalance reported, because
+        ;; closing it would silently re-parent code (see samizdat.lisp).
+        (let [content (str content)
+              {:keys [status content* note]}
+              (if (clojure-file? path)
+                (let [r (lisp/balance content)]
+                  {:status (:status r) :content* (or (:content r) content) :note (:note r)})
+                {:status :balanced :content* content})]
           (when-let [parent (fs/parent abs)]
             (fs/create-dirs parent))
-          (spit abs (str content))
-          {:result (str "Wrote " (count (str content)) " chars to " path ".")
-           :category :success :progress? true :branch branch})
+          (spit abs content*)
+          {:result (str "Wrote " (count content*) " chars to " path "."
+                        (when (= :repaired status) (str "\n[harness] " note))
+                        (when (= :unbalanced status)
+                          (str "\n[harness] Written as given, but the Clojure does not"
+                               " balance: " note " It will not load until you fix it.")))
+           :category :success :progress? true :branch branch
+           :repaired? (= :repaired status)})
         (miss branch (str "Path " path " is outside the project root and cannot be written."))))))

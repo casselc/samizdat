@@ -1,7 +1,0 @@
-{
-  "database": "dolt",
-  "backend": "dolt",
-  "dolt_mode": "embedded",
-  "dolt_database": "karamazov",
-  "project_id": "4a3edd30-a5f2-4fca-999a-8ad3048aedcc"
-}
