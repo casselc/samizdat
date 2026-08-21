@@ -1,0 +1,237 @@
+;; Gate thresholds and budgets, as data rather than constants in code.
+;;
+;; This is the AHE component-observability idea applied cheaply: every
+;; threshold is a file a run records the digest of, so a later evolution loop
+;; has somewhere to write and every pass-rate change localizes to one file.
+;;
+;; Each budget declares its KIND, which is the distinction dirge PR 739 found
+;; made the thresholds legible:
+;;
+;;   :cost-ceiling  bounds sub-LLM spend. Never scaled up for a struggling run
+;;                  — that means spending more on the run already in trouble.
+;;   :re-fire-guard compensates for a predicate that cannot tell "happened"
+;;                  from "happened and I already reacted". Safe to scale.
+;;   :threshold     a real decision boundary.
+;;
+;; `capability-tunable?` is false wherever the capability tier has no standing
+;; to move the number. The tier observes tool-call mechanics only, so it may
+;; tune argument-hygiene budgets and may never relax a verification or
+;; progress guard (dirge PR 740).
+
+{:cull-threshold
+ {:value 3 :kind :threshold :capability-tunable? false
+  :doc "Consecutive failed verifications before a branch is culled."}
+
+ :cull-recent-window
+ {:value 5 :kind :threshold :capability-tunable? false
+  :doc "A confirmed artifact this recently protects a branch from culling."}
+
+ :stuck-threshold
+ {:value 2 :kind :threshold :capability-tunable? false
+  :doc "Consecutive unproductive verifications before the stuck gate fires.
+
+        STRICTLY BELOW cull-threshold, and that is the whole point (vf-31m).
+        Both were 3, so the gate that says change your approach arrived on the
+        turn the branch became eligible to be killed for not having changed
+        it — and every move it predicts (retract, decompose, change technique)
+        costs at least one turn. The README recorded the consequence without
+        naming the cause: stuck fired and was obeyed zero times. A gate whose
+        advice takes turns to follow, firing at the moment turns run out, is
+        broken on inspection.
+
+        gate-config-is-coherent asserts the inequality, so a later tuning pass
+        cannot quietly close the gap again."}
+
+ :reframe-grace
+ {:value 4 :kind :threshold :capability-tunable? false
+  :doc "Turns a branch is spared the consecutive-failure cull after the stuck
+        gate has dropped it into a reframe, and the window the withheld
+        approach stays withheld for.
+
+        A branch told to abandon its approach carries the failures that caused
+        the reframe, so without this it is culled mid-reframe for exactly the
+        thing it was told to stop doing (vf-31m). The reprieve machinery
+        already existed for Pareto-spared branches and is documented there as
+        'a loan with a clock, not an exemption'; this is the same shape.
+
+        The loan and the restriction expire together, deliberately: it would
+        be incoherent to keep refusing an approach after the branch has lost
+        the protection it was given to replace it. cull-hard-multiple still
+        ends it early — a branch failing at twice the cull threshold is not
+        reframing."}
+
+ :stale-approach-threshold
+ {:value 0.6 :kind :threshold :capability-tunable? false
+  :doc "Jaccard cutoff for deciding a claim re-runs the approach the branch was
+        told to abandon. Sameness rather than mere failure, so a branch
+        grinding genuinely different steps of a long proof is not punished for
+        the proof being long (vf-9wx). Same shingle machinery and same
+        UNCALIBRATED 0.6 as sketch-duplicate-threshold, inherited from ledger
+        claim dedup — where, unlike here, it was tuned on claims."}
+
+ :progress-stall-threshold
+ {:value 4 :kind :threshold :capability-tunable? false
+  :doc "Turns with no progress event before the stall nudge fires. Arms only
+        after the first progress event; see prologue-cap for the other case."}
+
+ :prologue-cap
+ {:value 8 :kind :threshold :capability-tunable? false
+  :doc "Turns a branch may take having produced nothing at all. The stall
+        counter arms on a progress event, so a run that produced nothing never
+        armed it and the monitor was structurally blind to the one case it most
+        needed to report (dirge PR 739, dirge-t5dh)."}
+
+ :max-stall-nudges
+ {:value 2 :kind :re-fire-guard :capability-tunable? true
+  :doc "How often the stall nudge may re-fire on one branch."}
+
+ :max-stuck-hints
+ {:value 3 :kind :re-fire-guard :capability-tunable? true
+  :doc "How often the stuck hint may re-fire on one branch."}
+
+ :max-milestone-nudges
+ {:value 1 :kind :re-fire-guard :capability-tunable? false
+  :doc "The milestone fires once per branch, on the first confirmation."}
+
+ :max-emergency-reviews
+ {:value 1 :kind :re-fire-guard :capability-tunable? false
+  :doc "The emergency review fires once per branch. It was the one steer gate
+        with no guard, and a live knights-3 run (2026-08-06) showed why that
+        matters: its precondition held across three consecutive boundaries and
+        it re-fired on every one, all predictions unmet — the exact
+        happened-versus-already-reacted blindness re-fire guards exist for.
+        Once: the steer either lands or the cull proceeds on its own."}
+
+ :max-tier-escalations
+ {:value 2 :kind :re-fire-guard :capability-tunable? false
+  :doc "How often the fast-green-only escalation may fire."}
+
+ :max-done-blocks
+ {:value 3 :kind :cost-ceiling :capability-tunable? false
+  :doc "How often `done` may be refused before the branch is told to give up.
+        A cost ceiling because each refusal spends another model turn."}
+
+ :fast-verify-edit-threshold
+ {:value 3 :kind :threshold :capability-tunable? false
+  :doc "Artifacts produced with nothing from the slow tier run before the
+        mid-run tier nudge fires."}
+
+ :turn-budget-notices
+ {:value [0.6 0.85] :kind :threshold :capability-tunable? false
+  :doc "Fractions of the turn cap at which the model is told where it stands.
+        The cap was enforced but invisible to the model (dirge PR 738)."}
+
+ :wind-down-fraction
+ {:value 0.85 :kind :threshold :capability-tunable? false
+  :doc "Fraction of the turn cap at which the branch is told to stop exploring
+        and ship what it has. Sized so the reserved tail fits an audit plus a
+        done call for a branch with confirmed artifacts: UCLA's harness found a
+        run with no reserved shipping tail spends its whole budget exploring
+        and ships nothing."}
+
+ :max-wind-down-steers
+ {:value 1 :kind :re-fire-guard :capability-tunable? false
+  :doc "How often the wind-down rung may fire on one branch. Once: the steer
+        either lands or it does not."}
+
+ :max-safe-state-aborts
+ {:value 2 :kind :re-fire-guard :capability-tunable? false
+  :doc "How often the safe-state rung may fire on one branch. Not
+        capability-tunable: this rung spends a hard-capped abort and, in a
+        non-advisory mode, rebuilds an engine process."}
+
+ :max-total-branches
+ {:value 8 :kind :cost-ceiling :capability-tunable? false
+  :doc "Total branches per run including forked children. A cost ceiling:
+        every branch is a concurrent provider call per turn plus its own
+        engine process.
+
+        Lowered from 15 after gen-21 measured what 15 actually costs. Asked
+        for width 5, it reached 11 active by round 18 — beam_width is the
+        floor the harness refills toward, not a cap — and spent 2.46M tokens
+        for 4 confirmed artifacts before being stopped. The forks were
+        genuinely distinct, so this is not a diversity problem; it is that
+        the ceiling was set without anyone having measured the bill."}
+
+ :prediction-window
+ {:value 3 :kind :threshold :capability-tunable? false
+  :doc "Turns a gate's declared prediction has to come true in before it
+        settles as unmet."}
+
+ :critic-every
+ {:value 5 :kind :cost-ceiling :capability-tunable? false
+  :doc "Turns between critic scorings of one branch. Every scoring is a
+        sub-LLM call, so this is spend, and it is per active branch."}
+
+ :cull-hard-multiple
+ {:value 2 :kind :threshold :capability-tunable? false
+  :doc "Multiple of cull-threshold at which a Pareto-spared branch is culled
+        regardless of its scores. The reprieve is a loan with a clock, not an
+        exemption — Pareto's known weakness is permissiveness."}
+
+ :fork-invite-floor
+ {:value {:viability 4 :progress 3} :kind :threshold :capability-tunable? false
+  :doc "Minimum critic scores before a branch is invited to fork. Below
+        this, growth spends budget on lines not yet earning it."}
+
+ :juvenile-grace
+ {:value 8 :kind :threshold :capability-tunable? false
+  :doc "Turns a newly forked branch may take before the cull rule applies to
+        it at all. Generation 9 forked for the first time and every child was
+        dead within twelve turns: progress and momentum are age-correlated,
+        so a branch born at turn 15 scores 1 on progress by definition and its
+        mature parent dominates it on every objective one turn later.
+        Selection that runs before an offspring can express itself culls on
+        age rather than on merit. Sized to fit a thesis, a first encoding and
+        a first verification — long enough to produce one confirmation, short
+        enough that a genuinely dead line does not linger."}
+
+ :branch-out-cooldown
+ {:value 6 :kind :re-fire-guard :capability-tunable? true
+  :doc "Turns before the branch-out rung may ask the same branch again.
+        Generation 9 fired it on turns 14, 15 and 16 — one fork, then two
+        re-fires while the branch was still acting on the first — and the
+        whole fork budget was gone by turn 16 of a 65-turn run. The
+        precondition (a confirmation exists, the beam has room) stays true
+        for as long as the branch is productive, which is exactly the
+        happened-versus-already-reacted blindness a cooldown fixes."}
+
+ :max-branch-outs
+ {:value 6 :kind :re-fire-guard :capability-tunable? false
+  :doc "How often the branch-out rung may fire on one branch. This is the
+        reproduction half of the loop, so it is a guard rather than a cost
+        ceiling: each firing asks for offspring, and a branch that keeps
+        confirming should keep being asked, but not on every boundary while
+        it is busy complying."}
+
+ :max-repopulates
+ {:value 8 :kind :re-fire-guard :capability-tunable? false
+  :doc "How often the repopulate rung may ask one branch to refill the beam.
+        Higher than :max-branch-outs, because this fires when the beam is
+        already below width and a run that stops asking at that point simply
+        finishes at width one — which is what five straight campaign runs did.
+        The per-branch fork-invite cooldown still spaces the asks out, so this
+        is the ceiling on a long collapse, not on a burst."}
+
+ :fork-invite-cooldown
+ {:value 6 :kind :re-fire-guard :capability-tunable? true
+  :doc "Turns before the same branch may be invited to fork again. The
+        invitation predicate cannot tell 'strong' from 'strong and already
+        asked', which is the shape re-fire guards exist for."}
+
+ :explore-cap
+ {:value 5 :kind :threshold :capability-tunable? false
+  :doc "Turns a branch may spend in the explore prologue before it is forced
+        into build. The sketch tool is new — no generation has run with it —
+        so 5 is a judgement call with no data behind it: a couple of searches
+        and a sketch attempt or two, against prologue-cap's 8. The forced
+        transition is the release valve that keeps a branch which cannot get
+        a skeleton to elaborate from being locked out of verification for the
+        whole run."}
+
+ :sketch-duplicate-threshold
+ {:value 0.6 :kind :threshold :capability-tunable? false
+  :doc "Jaccard cutoff for refusing a sketch too close to a live sibling's.
+        UNCALIBRATED: the sketch tool landed after gen-30, so there is no
+        historical sketch data to tune against, and 0.6 is inherited from
+        ledger claim dedup, where it was tuned on claims, not plans."}}

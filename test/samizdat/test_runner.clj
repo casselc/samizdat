@@ -1,4 +1,4 @@
-;; veriframe - a claim-first verification harness
+;; samizdat - a self-hosting agentic harness
 ;; Copyright (C) 2026 Dmitri Sotnikov
 ;;
 ;; This program and the accompanying materials are made available under
@@ -7,10 +7,10 @@
 ;;
 ;; SPDX-License-Identifier: EPL-2.0
 
-(ns veriframe.test-runner
+(ns samizdat.test-runner
   "jolt -M:test — run every test namespace and exit non-zero on failure.
 
-  Also callable from a connected editor as (veriframe.test-runner/run) so the
+  Also callable from a connected editor as (samizdat.test-runner/run) so the
   suite runs against the live process without paying startup again."
   (:require [clojure.test :as t]
             [maestro.core-test]
@@ -54,20 +54,17 @@
             [mycelium.validate-warn-test]
             [mycelium.validation-test]
             [mycelium.workflow-test]
-            [veriframe.engine-test]
-            [veriframe.agent-test]
-            [veriframe.llm-test]
-            [veriframe.pool-test]
-            [veriframe.prompt-test]
-            [veriframe.server-test]
-            [veriframe.store-test]
-            [veriframe.gui-api-test]
-            [veriframe.gui-graph-test]
-            [veriframe.gui-style-test]
-            [veriframe.gui-input-test]
-            [veriframe.gui-mathtext-test]
-            [veriframe.gui-newrun-test]
-            [veriframe.faithful-test]))
+            [samizdat.agent-test]
+            [samizdat.llm-test]
+            [samizdat.prompt-test]
+            [samizdat.server-test]
+            [samizdat.store-test]
+            [samizdat.gui-api-test]
+            [samizdat.gui-graph-test]
+            [samizdat.gui-style-test]
+            [samizdat.gui-input-test]
+            [samizdat.gui-mathtext-test]
+            [samizdat.gui-newrun-test]))
 
 (def namespaces
   '[maestro.core-test
@@ -111,20 +108,17 @@
     mycelium.validate-warn-test
     mycelium.validation-test
     mycelium.workflow-test
-    veriframe.faithful-test
-    veriframe.store-test
-    veriframe.llm-test
-    veriframe.agent-test
-    veriframe.pool-test
-    veriframe.prompt-test
-    veriframe.server-test
-    veriframe.gui-api-test
-    veriframe.gui-graph-test
-    veriframe.gui-style-test
-    veriframe.gui-input-test
-    veriframe.gui-mathtext-test
-    veriframe.gui-newrun-test
-    veriframe.engine-test])
+    samizdat.store-test
+    samizdat.llm-test
+    samizdat.agent-test
+    samizdat.prompt-test
+    samizdat.server-test
+    samizdat.gui-api-test
+    samizdat.gui-graph-test
+    samizdat.gui-style-test
+    samizdat.gui-input-test
+    samizdat.gui-mathtext-test
+    samizdat.gui-newrun-test])
 
 (defn run []
   (apply t/run-tests namespaces))

@@ -61,11 +61,11 @@
  :nrepl/middleware [nrepl.middleware/default-middleware]
 
  :aliases {:test {:extra-paths ["test" "gui"]
-                  :main-opts ["-m" "veriframe.test-runner"]}
+                  :main-opts ["-m" "samizdat.test-runner"]}
            ;; command-line nREPL client, plus the test tree, so the live
            ;; process can run the suite over nREPL without paying startup:
-           ;;   (require 'veriframe.test-runner :reload-all)
-           ;;   (veriframe.test-runner/run)
+           ;;   (require 'samizdat.test-runner :reload-all)
+           ;;   (samizdat.test-runner/run)
            :dev  {:extra-paths ["dev" "test"]}
 
            ;; The GUI is an optional component and a strict HTTP client of the
@@ -102,14 +102,14 @@
                    {:git/url "https://github.com/jolt-lang/glimmer-gl.git"
                     :git/tag "v0.1.0"
                     :git/sha "ae9a53291c553e89dde79a90389224f46e5e7fa8"}}
-                  :main-opts ["-m" "veriframe.gui.core"]}}
+                  :main-opts ["-m" "samizdat.gui.core"]}}
 
  :tasks {serve {:doc "start the harness (HTTP + nREPL) and park"
-                :main-opts ["-m" "veriframe.core"]}
+                :main-opts ["-m" "samizdat.core"]}
          ;; A shell-string task, because a :tasks :main-opts entry cannot carry
          ;; an -A alias — main-opts are only ever main-opts.
-         dev   "jolt -A:dev -m veriframe.core"
+         dev   "jolt -A:dev -m samizdat.core"
          smoke {:doc "Phase 0 platform probes: z3, swipl, sqlite, https, server"
-                :main-opts ["-m" "veriframe.smoke"]}
+                :main-opts ["-m" "samizdat.smoke"]}
          test  "jolt -M:test"
          gui   "jolt -M:gui"}}

@@ -5,19 +5,14 @@
 target/
 
 # AOT build output: a 20MB self-contained binary plus its intermediates.
-/veriframe
-veriframe.build/
-
-# Lean toolchain, fetched by tools/setup-lean.sh. Mathlib's prebuilt oleans run
-# to several GB and the repl binary is ~190MB; both are reproducible from the
-# script and neither belongs in git.
-tools/lean-workspace/.lake/
-tools/lean-workspace/lake-manifest.json
-tools/lean-repl/
+/samizdat
+samizdat.build/
 
 # Papers read while designing this. PLAN.md says what came from each.
+# research/ carries third-party licensed material and stays out of git.
 2*v[0-9]/
 rax-results-*/
+research/
 
 # Beads / Dolt files (added by bd init)
 .dolt/

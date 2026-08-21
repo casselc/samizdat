@@ -1,0 +1,281 @@
+name: tests
+
+on:
+  push:
+    branches: [main, clojure]
+  pull_request:
+    branches: [main, clojure]
+  workflow_dispatch:
+
+# Cancel in-progress runs on the same ref when a new commit lands.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  fast:
+    name: engines + control layer (no Lean)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      # Building jolt from source needs Chez and a C toolchain; the release
+      # binary is self-contained, so the install script is the cheap path.
+      - name: Install jolt
+        # Retried, and the download separated from running it. raw.githubusercontent
+        # rate-limits Actions runners and answers 403: run 31650998920 died exactly
+        # that way ("curl: (22) The requested URL returned error: 403") on a commit
+        # whose own tests were fine, and the same URL served 200 from elsewhere
+        # minutes later. Fetching to a file first also means a rate-limit page can
+        # never be fed to bash as if it were the installer.
+        run: |
+          for i in 1 2 3; do
+            curl -fsSL https://raw.githubusercontent.com/jolt-lang/jolt/main/install \
+              -o /tmp/jolt-install && break
+            echo "attempt $i failed; retrying in $((i * 5))s" >&2
+            sleep $((i * 5))
+          done
+          test -s /tmp/jolt-install || { echo "could not fetch the jolt installer" >&2; exit 1; }
+          bash /tmp/jolt-install --dir "$HOME/.local/bin"
+          echo "$HOME/.local/bin" >> $GITHUB_PATH
+
+      - name: Install Z3, SWI-Prolog and Octave
+        # Octave is installed so its tests and probe actually RUN. They skip
+        # when the binary is absent, and a skipped test reads identically to a
+        # passing one in a summary, which is how the Lean engine stayed green
+        # while every call to it failed.
+        #
+        # `swi-prolog`, not `swi-prolog-core`. The core package omits the
+        # bundled library packs, and resources/prolog/session.pl needs
+        # library(http/json) to frame its replies and library(time) for a real
+        # call_with_time_limit/2. Without them the session never loads, every
+        # Prolog engine call returns nil, and 22 tests fail a long way from the
+        # cause. Which is exactly what happened: this workflow failed on every
+        # run from the day it was written.
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y z3 swi-prolog octave
+          z3 --version
+          swipl --version
+
+      - name: SWI-Prolog has the libraries session.pl needs
+        # Load the real file rather than probing for libraries by name, so this
+        # cannot drift from what the engine actually consults. Fails here, at
+        # the install, instead of as a wall of unrelated test failures.
+        # No pipe into tee: a pipeline reports the LAST command's status, so
+        # tee succeeding would mask swipl failing and the check would pass
+        # while proving nothing.
+        run: |
+          swipl -g "consult('resources/prolog/session.pl'), halt(0)" -t "halt(1)"
+          # TWO -g flags, not one goal. clpfd DEFINES #= when it loads, and a
+          # term is read in full before it runs, so putting the use_module and
+          # the #= in one goal makes #= an unparseable operator. session.pl
+          # loads clpfd first for the same reason.
+          swipl -g "use_module(library(clpfd))" \
+                -g "X #= 2+3, format('clpfd ok: ~w~n',[X]), halt(0)" -t "halt(1)"
+
+      - name: Cache jolt gitlibs
+        uses: actions/cache@v4
+        with:
+          path: ~/.jolt/gitlibs
+          key: jolt-gitlibs-${{ hashFiles('deps.edn') }}
+
+      - name: Fetch dependencies
+        run: jolt -P
+
+      - name: Test suite
+        # Offline and deterministic: engines, linters, templates, the arbiter,
+        # gate config, verdict parsing, the journal. No provider calls.
+        run: jolt -M:test
+
+  smoke:
+    name: platform probes
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    needs: fast
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install jolt
+        # Retried, and the download separated from running it. raw.githubusercontent
+        # rate-limits Actions runners and answers 403: run 31650998920 died exactly
+        # that way ("curl: (22) The requested URL returned error: 403") on a commit
+        # whose own tests were fine, and the same URL served 200 from elsewhere
+        # minutes later. Fetching to a file first also means a rate-limit page can
+        # never be fed to bash as if it were the installer.
+        run: |
+          for i in 1 2 3; do
+            curl -fsSL https://raw.githubusercontent.com/jolt-lang/jolt/main/install \
+              -o /tmp/jolt-install && break
+            echo "attempt $i failed; retrying in $((i * 5))s" >&2
+            sleep $((i * 5))
+          done
+          test -s /tmp/jolt-install || { echo "could not fetch the jolt installer" >&2; exit 1; }
+          bash /tmp/jolt-install --dir "$HOME/.local/bin"
+          echo "$HOME/.local/bin" >> $GITHUB_PATH
+
+      - name: Install Z3 and SWI-Prolog
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y z3 swi-prolog octave
+
+      - name: Cache jolt gitlibs
+        uses: actions/cache@v4
+        with:
+          path: ~/.jolt/gitlibs
+          key: jolt-gitlibs-${{ hashFiles('deps.edn') }}
+
+      - name: Probes
+        # Every probe corresponds to a stated risk in PLAN.md: concurrent swipl
+        # sessions, FTS5 through the FFI binding, serialized store access,
+        # HTTPS surviving the nREPL load, and /health answering while a handler
+        # is busy. The provider probes skip without a key rather than failing,
+        # so a fork with no secret still gets a useful run.
+        env:
+          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+        run: jolt smoke
+
+  build:
+    name: standalone binary
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    needs: fast
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install jolt
+        # Retried, and the download separated from running it. raw.githubusercontent
+        # rate-limits Actions runners and answers 403: run 31650998920 died exactly
+        # that way ("curl: (22) The requested URL returned error: 403") on a commit
+        # whose own tests were fine, and the same URL served 200 from elsewhere
+        # minutes later. Fetching to a file first also means a rate-limit page can
+        # never be fed to bash as if it were the installer.
+        run: |
+          for i in 1 2 3; do
+            curl -fsSL https://raw.githubusercontent.com/jolt-lang/jolt/main/install \
+              -o /tmp/jolt-install && break
+            echo "attempt $i failed; retrying in $((i * 5))s" >&2
+            sleep $((i * 5))
+          done
+          test -s /tmp/jolt-install || { echo "could not fetch the jolt installer" >&2; exit 1; }
+          bash /tmp/jolt-install --dir "$HOME/.local/bin"
+          echo "$HOME/.local/bin" >> $GITHUB_PATH
+
+      - name: Cache jolt gitlibs
+        uses: actions/cache@v4
+        with:
+          path: ~/.jolt/gitlibs
+          key: jolt-gitlibs-${{ hashFiles('deps.edn') }}
+
+      # `jolt build` embeds only what it can reach statically, so this job
+      # guards against a dynamic require silently dropping a subtree from the
+      # image — which happened once and only surfaced at startup.
+      - name: Build
+        run: jolt build -m veriframe.core -o veriframe
+
+      # Two assertions. That it starts and serves, and that its TLS still works:
+      # a built image used to resolve SSL_* to whatever the process linked rather
+      # than the OpenSSL under :jolt/native, which faulted instead of erroring.
+      # The boot-time provider warm-up drives a real handshake, and without a key
+      # it fails on auth AFTER the handshake — so the thing to assert is the
+      # absence of the fault, which needs no secret.
+      - name: Binary starts and serves
+        run: |
+          HARNESS_PORT=3010 HARNESS_DB=ci.sqlite3 ./veriframe >boot.log 2>&1 &
+          for i in $(seq 1 30); do
+            curl -sf http://127.0.0.1:3010/health >/dev/null && break
+            sleep 2
+          done
+          curl -sf http://127.0.0.1:3010/health | tee /dev/stderr | grep -q '"status":"ok"'
+          cat boot.log
+          ! grep -q 'invalid memory reference' boot.log
+          grep -q 'nREPL server started' boot.log
+
+  lean:
+    name: full suite with Lean 4 and Mathlib
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    needs: fast
+    # Mathlib runs to several GB even from the olean cache, so this does not
+    # gate a pull request. It runs on main and on demand.
+    if: github.event_name != 'pull_request'
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install jolt
+        # Retried, and the download separated from running it. raw.githubusercontent
+        # rate-limits Actions runners and answers 403: run 31650998920 died exactly
+        # that way ("curl: (22) The requested URL returned error: 403") on a commit
+        # whose own tests were fine, and the same URL served 200 from elsewhere
+        # minutes later. Fetching to a file first also means a rate-limit page can
+        # never be fed to bash as if it were the installer.
+        run: |
+          for i in 1 2 3; do
+            curl -fsSL https://raw.githubusercontent.com/jolt-lang/jolt/main/install \
+              -o /tmp/jolt-install && break
+            echo "attempt $i failed; retrying in $((i * 5))s" >&2
+            sleep $((i * 5))
+          done
+          test -s /tmp/jolt-install || { echo "could not fetch the jolt installer" >&2; exit 1; }
+          bash /tmp/jolt-install --dir "$HOME/.local/bin"
+          echo "$HOME/.local/bin" >> $GITHUB_PATH
+
+      - name: Install Z3 and SWI-Prolog
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y z3 swi-prolog octave
+
+      - name: Install elan
+        run: |
+          curl https://raw.githubusercontent.com/leanprover/elan/master/elan-init.sh -sSf \
+            | sh -s -- -y --default-toolchain none
+          echo "$HOME/.elan/bin" >> $GITHUB_PATH
+
+      - name: Cache Lean toolchain
+        uses: actions/cache@v4
+        with:
+          path: ~/.elan/toolchains
+          key: elan-${{ hashFiles('tools/lean-workspace/lean-toolchain') }}
+
+      - name: Cache Mathlib packages and oleans
+        uses: actions/cache@v4
+        with:
+          path: |
+            tools/lean-workspace/.lake
+            tools/lean-workspace/lake-manifest.json
+          key: lake-${{ hashFiles('tools/lean-workspace/lakefile.toml', 'tools/lean-workspace/lean-toolchain') }}
+
+      - name: Cache the repl build
+        uses: actions/cache@v4
+        with:
+          path: tools/lean-repl
+          key: lean-repl-${{ hashFiles('tools/setup-lean.sh') }}
+
+      - name: Fetch Mathlib and build the repl
+        run: ./tools/setup-lean.sh
+
+      - name: Cache jolt gitlibs
+        uses: actions/cache@v4
+        with:
+          path: ~/.jolt/gitlibs
+          key: jolt-gitlibs-${{ hashFiles('deps.edn') }}
+
+      - name: Test suite
+        run: jolt -M:test
+
+      - name: Lean reachable from the harness
+        # The three details that cost time to find: the repl must be spawned
+        # through `lake env` from the workspace, `lake` needs an absolute path
+        # because a child resolves its executable against the parent's PATH,
+        # and the repl has to be pinned to the commit whose toolchain matches
+        # the workspace rather than handed an override.
+        run: |
+          jolt -e "(require '[veriframe.engine.lean-repl :as lr] '[veriframe.config :as c])
+                   (let [cfg (get-in (c/load-config) [:engines :lean])
+                         s (lr/create-session cfg)]
+                     (try
+                       (assert (some? (lr/mathlib-env s)))
+                       (assert (:ok (lr/run-command s \"theorem ci (n : Nat) : n + 0 = n := by simp\")))
+                       (println :lean-ok)
+                       (finally (lr/dispose! s))))"
