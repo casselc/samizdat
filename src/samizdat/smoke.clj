@@ -22,6 +22,8 @@
             [jolt.http-client :as http]
             [jolt.process :as p]
             [samizdat.config :as config]
+            [samizdat.llm.client :as llm]
+            [samizdat.llm.registry :as registry]
             [samizdat.store.db :as db]
             [samizdat.system :as system]))
 
@@ -94,16 +96,19 @@
 
 ;; --- network ----------------------------------------------------------------
 
-(defn- provider-check [{:keys [base-url api-key model timeout-ms]}]
+(defn- provider-check [{:keys [provider api-key model] :as llm-cfg}]
+  ;; Through the adapter, not base-url + "/models": the models endpoint is
+  ;; provider-specific (DeepSeek serves chat under /beta but models at the
+  ;; root), and the adapter is the one place that knows. Naive concatenation
+  ;; had this probe failing 404 against a perfectly healthy provider.
   (if (str/blank? api-key)
     [:skip "no API key in the environment"]
-    (let [resp (http/get (str base-url "/models")
-                         {:headers {"Authorization" (str "Bearer " api-key)}
-                          :socket-timeout timeout-ms})]
-      (if (and (= 200 (:status resp)) (str/includes? (:body resp) model))
-        [:pass (str model " listed")]
-        [:fail (str "status " (:status resp) ", model " model
-                    (when-not (str/includes? (:body resp) model) " NOT listed"))]))))
+    (let [models (llm/list-models (registry/adapter-for provider) llm-cfg)]
+      (cond
+        (empty? models)        [:fail "provider listed no models"]
+        (some #{model} models) [:pass (str model " listed")]
+        :else                  [:fail (str model " NOT listed; available: "
+                                          (str/join ", " (take 5 models)))]))))
 
 (defn- long-request-check [{:keys [base-url api-key model timeout-ms]}]
   ;; A five-minute TLS read is the shape of every real provider call here, and
