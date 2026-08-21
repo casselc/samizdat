@@ -32,9 +32,16 @@
               ;; second arm. Note the TypeScript default, deepseek-reasoner,
               ;; is no longer served by the API.
               :model    "deepseek-v4-flash"}
-   :glm      {:base-url "https://open.bigmodel.cn/api/paas/v4"
+   ;; The coding endpoint, not the general /api/paas/v4: it is the one dirge
+   ;; drives GLM through in practice, tuned for agentic coding traffic. Same
+   ;; OpenAI-compatible chat-completions surface, so the openai-family adapter
+   ;; handles it unchanged.
+   :glm      {:base-url "https://open.bigmodel.cn/api/coding/paas/v4"
               :key-env  "ZHIPU_API_KEY"
-              :model    "glm-5.1"}
+              :model    "glm-5.3"
+              ;; GLM benefits from a low temperature on coding tasks (dirge
+              ;; pins 0.2); the loop leaves it unset for other providers.
+              :temperature 0.2}
    :openai   {:base-url "https://api.openai.com/v1"
               :key-env  "OPENAI_API_KEY"
               :model    "gpt-4o"}
@@ -47,6 +54,17 @@
    :ollama   {:base-url "http://127.0.0.1:11434"
               :key-env  nil
               :model    "qwen3"}})
+
+(def providers-for-test
+  "The static provider table, exposed for tests — a live load-config picks a
+  provider from the environment, which a test cannot pin without touching env."
+  providers)
+
+(defn provider-temperature
+  "The temperature a provider runs at: its own default, or the 0.7 family
+  fallback. The one place the precedence lives, so config and tests agree."
+  [provider]
+  (or (:temperature (providers provider)) 0.7))
 
 (defn- env [k] (let [v (jolt.host/getenv k)] (when-not (str/blank? v) v)))
 
@@ -91,7 +109,10 @@
                   ;; takes reasoning_effort per run and overrides this.
                   :reasoning-effort (env "HARNESS_REASONING_EFFORT")
                   :max-tokens  (or (env-long "HARNESS_MAX_TOKENS") 16384)
-                  :temperature 0.7
+                  ;; A provider default (GLM pins 0.2 for coding) wins over the
+                  ;; family default of 0.7; HARNESS_TEMPERATURE overrides both.
+                  :temperature (or (some-> (env "HARNESS_TEMPERATURE") parse-double)
+                                   (provider-temperature provider))
                   ;; Per-read inactivity bound (SO_RCVTIMEO on the socket).
                   :timeout-ms  (or (env-long "HARNESS_TIMEOUT_MS") 300000)
                   ;; Bound on the TCP handshake alone. Honoured as of
