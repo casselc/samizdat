@@ -22,6 +22,7 @@
             [mycelium.default-transition-test]
             [mycelium.defcell-test]
             [mycelium.dev-test]
+            [mycelium.effects-test]
             [mycelium.error-groups-test]
             [mycelium.error-handler-test]
             [mycelium.error-messages-test]
@@ -77,6 +78,7 @@
     mycelium.default-transition-test
     mycelium.defcell-test
     mycelium.dev-test
+    mycelium.effects-test
     mycelium.error-groups-test
     mycelium.error-handler-test
     mycelium.error-messages-test

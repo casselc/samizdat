@@ -136,10 +136,20 @@
     (.append sb "digraph {\n")
     (.append sb "  rankdir=LR;\n")
     (.append sb "  node [shape=box];\n")
-    ;; Add regular cell nodes (excluding join members)
-    (doseq [[cell-name _cell-def] cells]
+    ;; Add regular cell nodes (excluding join members). Effectful cells are
+    ;; filled and name their effects; a cell that never declared is dashed —
+    ;; visibly unaccounted for rather than silently passing as pure.
+    (doseq [[cell-name cell-def] cells]
       (when-not (contains? join-members cell-name)
-        (.append sb (str "  " (dot-id cell-name) ";\n"))))
+        (let [info (cell/effects-info cell-def)
+              attrs (cond
+                      (:pure info)    nil
+                      (:effects info) (str " [style=filled fillcolor=lightsalmon"
+                                           " tooltip=\"effects: "
+                                           (str/join " " (map str (sort (:effects info))))
+                                           "\"]")
+                      :else           " [style=dashed tooltip=\"effects undeclared\"]")]
+          (.append sb (str "  " (dot-id cell-name) (or attrs "") ";\n")))))
     ;; Add join subgraph clusters
     (doseq [[join-name join-def] joins-map]
       (.append sb (str "  subgraph cluster_" (name join-name) " {\n"))

@@ -93,6 +93,68 @@
   []
   (keys (dissoc (methods cell-spec) :default)))
 
+;; --- purity -------------------------------------------------------------------
+;; A cell declares either `:pure true` or `:effects [:fs :net ...]` — what it
+;; touches beyond its data. The declaration is data for three consumers: graph
+;; readers (dot, briefs), compile-time validation (which warns about cells that
+;; never said), and the mutation-protocol soak (which stubs effectful cells to
+;; shadow-run a workflow). Undeclared is tolerated for compatibility but never
+;; passes for pure: an unaccounted-for cell is treated as possibly effectful.
+
+(defn effects-declared?
+  "Whether the cell said anything about its effects."
+  [spec]
+  (boolean (or (:pure spec) (seq (:effects spec)))))
+
+(defn pure?
+  "Whether the cell declared itself pure. Undeclared is NOT pure."
+  [spec]
+  (true? (:pure spec)))
+
+(defn effects
+  "The declared effect set. Empty for pure and for undeclared cells —
+  effects-declared? is how those two are told apart."
+  [spec]
+  (set (:effects spec)))
+
+(defn validate-effects-declaration!
+  "Throws unless the :pure/:effects declaration is well-formed: :pure may only
+  be true, :effects only a non-empty collection of keywords, and the two are
+  mutually exclusive. Absent is fine."
+  [cell-id {:keys [pure] :as spec}]
+  (let [fx (:effects spec)]
+    (when (and (contains? spec :pure) (not (true? pure)))
+      (throw (ex-info (str cell-id ": :pure may only be true — a cell that is"
+                           " not pure declares :effects instead")
+                      {:id cell-id :pure pure})))
+    (when (and (true? pure) (seq fx))
+      (throw (ex-info (str cell-id ": declares both :pure true and :effects — "
+                           "it cannot be both")
+                      {:id cell-id :effects fx})))
+    (when (contains? spec :effects)
+      (when-not (and (coll? fx) (seq fx) (every? keyword? fx))
+        (throw (ex-info (str cell-id ": :effects must be a non-empty collection"
+                             " of keywords, e.g. [:fs :net :proc]")
+                        {:id cell-id :effects fx}))))))
+
+(defn effects-info
+  "Resolves a cell reference to its effects declaration:
+  {:pure true}, {:effects #{...}}, or {:undeclared true}.
+
+  Accepts a spec map, a manifest cell-def carrying its own declaration, a
+  cell-def carrying an :id to resolve against the registry, or a bare cell-id
+  keyword."
+  [cell-ref]
+  (let [spec (cond
+               (keyword? cell-ref) (get-cell cell-ref)
+               (and (map? cell-ref) (effects-declared? cell-ref)) cell-ref
+               (map? cell-ref) (or (some-> (:id cell-ref) get-cell) cell-ref)
+               :else nil)]
+    (cond
+      (pure? spec) {:pure true}
+      (seq (effects spec)) {:effects (effects spec)}
+      :else {:undeclared true})))
+
 (defn defcell
   "Registers a cell with less boilerplate than the raw defmethod.
    Eliminates ID duplication — the cell-id is specified once.
@@ -130,8 +192,9 @@
   (when-not (and (map? opts) (string? (:doc opts)) (seq (:doc opts)))
     (throw (ex-info (str "defcell " cell-id ": opts map with non-empty :doc string is required")
                     {:id cell-id})))
+  (validate-effects-declaration! cell-id opts)
   (let [schema-keys #{:input :output}
-        opt-keys    #{:doc :requires :async?}
+        opt-keys    #{:doc :requires :async? :pure :effects}
         raw-schema  (let [s (select-keys opts schema-keys)]
                       (when (seq s) s))
         schema      raw-schema
@@ -139,6 +202,8 @@
         spec        (cond-> {:id cell-id :handler handler-fn :doc (:doc extra)}
                       schema (assoc :schema schema)
                       (:requires extra) (assoc :requires (:requires extra))
-                      (:async? extra) (assoc :async? (:async? extra)))]
+                      (:async? extra) (assoc :async? (:async? extra))
+                      (:pure extra) (assoc :pure true)
+                      (:effects extra) (assoc :effects (vec (:effects extra))))]
     (.addMethod cell-spec cell-id (constantly spec))
     spec))

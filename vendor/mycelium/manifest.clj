@@ -275,6 +275,16 @@
                                                  (str "  " (pr-str label) " — predicate evaluates your output"))
                                                dispatches))
                                 "\n"))
+        effects-info (cell/effects-info cell-def)
+        effects-val  (cond (:pure effects-info)    :pure
+                           (:effects effects-info) (:effects effects-info)
+                           :else                   :undeclared)
+        effects-line (str "Effects: "
+                          (cond
+                            (:pure effects-info) "pure — no side effects"
+                            (:effects effects-info) (str/join ", " (map str (sort (:effects effects-info))))
+                            :else "undeclared — treat as possibly effectful")
+                          "\n")
         prompt      (str "## Cell: " id "\n"
                          (when doc (str "\n## Purpose\n" doc "\n"))
                          "\n## Contract\n\n"
@@ -282,7 +292,8 @@
                          output-section "\n\n"
                          "Required resources: " (if (seq requires)
                                                   (str/join ", " (map pr-str requires))
-                                                  "none") "\n\n"
+                                                  "none") "\n"
+                         effects-line "\n"
                          (when dispatch-section
                            (str dispatch-section "\n"))
                          "\n## Example Data\n\n"
@@ -297,6 +308,7 @@
      :doc         doc
      :schema      schema
      :requires    (or requires [])
+     :effects     effects-val
      :examples    {:input input-ex :output output-ex}
      :prompt      prompt})))
 

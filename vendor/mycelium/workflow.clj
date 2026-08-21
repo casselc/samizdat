@@ -1439,4 +1439,26 @@
        (let [names (mapv #(get state->names % %) (:no-path-to-end analysis))]
          (throw (ex-info (str "States with no path to end: " names)
                          {:no-path-to-end names :analysis analysis}))))
-     (fsm/compile spec))))
+     ;; Effects accounting: a cell that never said whether it is pure is a
+     ;; warning, not an error — compatibility — but the compiled workflow
+     ;; carries the list so nothing downstream has to re-derive it.
+     (let [undeclared (keep (fn [[cell-name cell-id]]
+                              (when (:undeclared (cell/effects-info cell-id))
+                                {:type :undeclared-effects
+                                 :cell cell-name
+                                 :cell-id cell-id}))
+                            cell-ids)]
+       (cond-> (fsm/compile spec)
+         (seq undeclared) (assoc :mycelium/compile-warnings (vec undeclared)))))))
+
+(defn workflow-effects
+  "One map from cell name to what running that cell would touch:
+  {:pure true}, {:effects #{...}}, or {:undeclared true} — resolved from the
+  workflow definition's cell refs against the registry. This is the mutation
+  protocol's soak input: the cells to stub are exactly the non-pure ones."
+  [{:keys [cells]}]
+  (into {}
+        (map (fn [[cell-name cell-ref]]
+               [cell-name (cell/effects-info
+                           (:id (normalize-cell-ref cell-name cell-ref)))]))
+        cells))
