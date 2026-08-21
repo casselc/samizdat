@@ -32,8 +32,7 @@
             [samizdat.store.artifacts :as artifacts]
             [samizdat.store.failures :as failures]
             [samizdat.store.journal :as journal]
-            [samizdat.store.runs :as runs])
-  (:refer-clojure :exclude [run!]))
+            [samizdat.store.runs :as runs]))
 
 (def max-result-chars 4000)
 
@@ -174,7 +173,7 @@
     (and (:truncated (fence/signals response parsed))
          (or (nil? parsed) (= "__parse_error__" (:name parsed))))))
 
-(defn- call-model
+(defn call-model
   "One model call, retried once at a doubled budget when the first response hit
   the token cap before emitting a tool call.
 
@@ -237,342 +236,305 @@
                             turn))
     (assoc after :open-predictions (vec kept))))
 
+(defn phase-valve
+  "The release valve for the explore prologue (vf-b25): a branch that cannot
+  get a skeleton to elaborate must not be locked out of verification for the
+  whole run, so at the cap the prologue is declared over and the branch told
+  why. The message lands before the model call so the next response actually
+  sees it."
+  [branch turn]
+  (cond-> branch
+    (state/explore-cap-expired? branch (gates/threshold :explore-cap) turn)
+    (-> (state/enter-build turn)
+        (state/add-message
+         "user"
+         ;; "prologue" only for a branch that has never left explore. Once a
+         ;; reframe can send one back (vf-9wx) the same message on a re-entry
+         ;; would be describing something that is not happening.
+         (str "[harness] "
+              (if (:reframe-entered-turn branch)
+                "Your re-planning budget is spent: "
+                "The explore prologue is over: ")
+              (gates/threshold :explore-cap)
+              " turns without a sketch on record. You are in the"
+              " BUILD phase — Lean verification is available and"
+              " `sketch` is not. The way forward is to prove your"
+              " claims directly.")))))
+
+(defn provider-error-step
+  "A provider failure is not the branch's fault and must not count against it
+  as a verification failure."
+  [{:keys [conn run-id]} branch turn error]
+  (log/warn "branch" (:id branch) "turn" turn "model call failed:" error)
+  (journal/record-turn! conn run-id
+                        {:branch-id (:id branch) :turn turn
+                         :tool-name "__provider_error__" :result error
+                         :category "neutral"})
+  (state/add-message branch "user"
+                     (str "[harness] The provider call failed: " error
+                          " Try again.")))
+
+(defn absorb-response
+  "Fold the model's response into the branch: parse the fence, record the
+  mechanics signals, and append what the assistant actually said — opener
+  included, because storing the bare completion would leave a turn beginning
+  mid-fence in the transcript, misrepresenting the format back to the model
+  on every later turn."
+  [branch response]
+  (let [content (:content response)
+        ;; The prefill the request ended with, if any. Without it the response
+        ;; starts mid-fence and parses as a no-call — the very failure the
+        ;; prefill exists to prevent.
+        prefill (:prefill branch)
+        parsed (fence/parse-tool-call content {:prefill prefill})
+        signals (fence/signals response parsed)
+        said (fence/reattach content prefill)]
+    {:parsed parsed
+     :signals signals
+     :said said
+     :branch (-> branch
+                 ;; Cleared here, not where it was set: one steer forecloses
+                 ;; prose on one turn. Leaving it would make every later turn
+                 ;; start inside a fence.
+                 (dissoc :prefill)
+                 (state/add-message "assistant" said)
+                 (state/record-mechanics signals))}))
+
+(defn no-call-step
+  "No usable call. Say exactly what was wrong; a bare \"try again\" produces
+  another identical attempt."
+  [{:keys [conn run-id]} branch turn {:keys [parsed signals said response]}]
+  (let [msg (cond
+              (:truncated signals)
+              (str "[harness] Your response hit the token limit before you"
+                   " emitted a tool call. Think less and call a tool.")
+              (nil? parsed)
+              (str "[harness] No ```tool-call block in your response."
+                   " Every turn must end with exactly one.")
+              :else
+              (str "[harness] Your tool-call block did not parse: "
+                   (:parse-error parsed)))]
+    ;; The response matters most on THIS path. A turn that produced no usable
+    ;; call records nothing else about what the model did, and without the
+    ;; text there is no way to tell a model that rambled from one that emitted
+    ;; the wrong fence from one that answered in prose.
+    ;; `mechanics`, not `failure`. The branch produced no claim, so there is
+    ;; nothing here to hold against its line of inquiry — the same reasoning
+    ;; as the provider-error path. The count is still kept and still bounds
+    ;; the branch; see record-outcome.
+    (journal/record-turn! conn run-id
+                          {:branch-id (:id branch) :turn turn
+                           :tool-name (or (:name parsed) "__no_call__")
+                           :result msg :category "mechanics"
+                           :parse-error (:parse-error parsed)
+                           :auto-repaired (:auto-repaired? parsed)
+                           :assistant-text said
+                           :reasoning-text (:reasoning response)
+                           ;; A turn that produced no usable call still cost
+                           ;; tokens, and those are the ones worth counting.
+                           :usage (:usage response)})
+    (-> branch
+        (state/record-outcome {:category :mechanics :progress? false})
+        (state/add-message "user" msg)
+        ;; And make the next request end mid-fence, so prose is not an
+        ;; available reply. Telling the model to emit a fence is the
+        ;; suggesting form; this is the withholding form, which is the one
+        ;; that has ever worked — see arbiter/prefill-for. Bare, with no tool
+        ;; named: nothing is being steered — the branch had a plan and failed
+        ;; to act on it, and picking its next call for it would replace a
+        ;; mechanics failure with the harness doing the reasoning.
+        (assoc :prefill "```tool-call\n"))))
+
+(defn tool-step
+  "Dispatch the parsed call: phase policy first, then the tool, then the
+  branch bookkeeping the outcome demands. Returns {:branch :result :tool}."
+  [ctx branch turn parsed]
+  (let [tool (:name parsed)
+        ;; Phase policy is consulted before dispatch: a refused call never
+        ;; reaches a tool, and the refusal is journalled like any other turn
+        ;; (vf-b25, vf-eaw). One place owns the refusals — tools/phase-refusal.
+        refusal (tools/phase-refusal
+                 (assoc ctx :branch branch :turn turn
+                        :tool-name tool :args (:args parsed)))
+        result (or refusal
+                   (tools/run-tool (assoc ctx :branch branch :turn turn
+                                          :tool-name tool :args (:args parsed))))
+        branch (-> (:branch result)
+                   ;; Any attempt at an engine clears the search counter,
+                   ;; including one that fails — trying is what the refusal
+                   ;; asks for, not succeeding.
+                   (cond-> (contains? state/verification-tools tool)
+                     (dissoc :searches-since-attempt))
+                   ;; The tool and the claim ride along so the branch can
+                   ;; remember what it was grinding when it failed — which is
+                   ;; what the stuck gate withholds (vf-9wx).
+                   (state/record-outcome
+                    (assoc result :tool tool
+                           :claim (or (get-in parsed [:args :claim])
+                                      (when (#{"proof_start" "proof_step"} tool)
+                                        (get-in branch [:proof :claim])))))
+                   (state/add-turn {:turn turn :tool tool
+                                    :category (:category result)
+                                    ;; Kept for failures AND malformed calls,
+                                    ;; only so repeating-failure? can see a
+                                    ;; loop. The turns table holds the
+                                    ;; authoritative result.
+                                    :error (when (#{:failure :mechanics}
+                                                  (:category result))
+                                             (str (:result result)))}))
+        ;; 29 of gen-20's 57 failures were four identical (tool, message)
+        ;; pairs, and the harness answered the fifth exactly as it answered
+        ;; the first. Say something different instead.
+        result (if (state/repeating-failure? branch tool (str (:result result)))
+                 (update result :result
+                         #(str % "\n\n[harness] This exact call has now"
+                               " failed this exact way more than once."
+                               " Repeating it will fail again. Change"
+                               " the call, or change technique — a"
+                               " different tool, a smaller claim, or a"
+                               " different encoding of the same one."))
+                 result)
+        branch (if-let [a (:artifact result)]
+                 (cond-> (state/add-artifact branch (assoc a :turn turn))
+                   ;; A banked sketch is the way out of the explore prologue:
+                   ;; from the turn it lands, verification is open (vf-b25).
+                   (= :sketch (:claim-status a))
+                   (state/enter-build turn)
+                   ;; And anything banked at all ends a reframe: the withheld
+                   ;; approach could not have produced it (vf-9wx).
+                   (:reframe-entered-turn branch)
+                   (state/clear-reframe))
+                 branch)]
+    ;; A confirmation used to mark the green point the safe-state rung falls
+    ;; back to. With no engine session there is nothing to snapshot; the
+    ;; coding analogue (a store checkpoint) re-arms this rung when the
+    ;; mutation protocol lands.
+    {:branch branch :result result :tool tool}))
+
+(defn journal-step!
+  "The durable record of the turn: the turn row, any artifact (and its entry
+  into the shared pool when it qualifies), any failure, any thesis. Side
+  effects only; returns nil."
+  [{:keys [conn run-id] :as ctx} branch turn {:keys [parsed result tool said response]}]
+  (journal/record-turn! conn run-id
+                        {:branch-id (:id branch) :turn turn
+                         :tool-name tool :args (:args parsed)
+                         :result (truncate (:result result))
+                         :category (name (:category result))
+                         :policy-refusal? (:policy-refusal? result)
+                         :auto-repaired (:auto-repaired? parsed)
+                         :assistant-text said
+                         :reasoning-text (:reasoning response)
+                         :usage (:usage response)})
+  (when-let [a (:artifact result)]
+    (journal/record-artifact! conn run-id
+                              (assoc a :branch-id (:id branch) :turn turn))
+    ;; Only confirmed, on-topic artifacts enter the shared pool — see
+    ;; shareable?. The flag is the diversity trade-off's off switch.
+    (when (shareable? branch a (get-in ctx [:config :run :share-artifacts?]))
+      (artifacts/record! conn run-id
+                         {:branch-id (:id branch) :turn turn
+                          :kind (:kind a) :tier (:tier a)
+                          :claim (:claim a) :code (:code a)})))
+  (when-let [f (:failure result)]
+    (failures/record! conn run-id
+                      (assoc f :branch-id (:id branch) :turn turn
+                             :tool-name tool)))
+  (when-let [t (:thesis result)]
+    (runs/set-thesis! conn run-id (:id branch) t))
+  nil)
+
+(defn steer-step
+  "Predictions settle, then the single boundary: at most one steer, chosen in
+  priority, plus the context block. Returns the branch ready for its next
+  turn (or carrying the final answer when the turn shipped)."
+  [{:keys [conn run-id max-turns] :as ctx} before branch turn {:keys [parsed result]}]
+  (let [tool (:name parsed)
+        branch (settle-predictions! conn branch turn [tool] before branch)]
+    (if (:done? result)
+      (state/add-message branch "user" (truncate (:result result)))
+      ;; No green snapshots are taken without an engine session, so
+      ;; safe-state-due? stays false and the safe-state gate stays dormant
+      ;; until the store-checkpoint version arrives.
+      (let [coverage nil
+            decision (arbiter/decide
+                      {:branch branch
+                       :max-turns max-turns
+                       ;; How wide the beam already is, so the reproduction
+                       ;; rung knows whether the run can afford offspring.
+                       :branch-count (or (:branch-count ctx) 1)
+                       :done-block (:done-block result)
+                       :directive (or (:pending-directive branch)
+                                      (:directive ctx))
+                       :safe-state-coverage coverage})
+            {ctx-block :block branch :branch}
+            (context-block conn run-id branch
+                           (get-in parsed [:args :claim])
+                           (get-in ctx [:config :run :share-artifacts?]))
+            body (str (truncate (:result result))
+                      (when ctx-block (str "\n\n" ctx-block))
+                      (when decision (str "\n\n---\n\n" (:message decision))))
+            ;; Recorded exactly once. The row id is what a later turn settles,
+            ;; so writing it twice would leave one firing permanently open.
+            firing-id (when decision
+                        (journal/record-gate!
+                         conn run-id
+                         {:branch-id (:id branch) :turn turn
+                          :gate (:gate decision)
+                          :priority (:priority decision)
+                          :message (:message decision)
+                          :prediction (:prediction decision)
+                          :window (:window decision)}))]
+        (when decision
+          (log/debug "branch" (:id branch) "turn" turn
+                     "gate" (:gate decision)
+                     "passed over" (:passed-over decision)))
+        (cond-> (-> branch
+                    (dissoc :pending-directive)
+                    (state/add-message "user" body))
+          decision (update :gate-history (fnil conj [])
+                           {:gate (:gate decision) :turn turn})
+          decision (update :open-predictions (fnil conj [])
+                           {:id firing-id
+                            :gate (:gate decision)
+                            :prediction (:prediction decision)
+                            :window (:window decision)
+                            :turn turn})
+          ;; Consumed by the NEXT call-model and cleared there, so a steer
+          ;; forecloses prose on exactly the turn it steers and no later one.
+          decision (assoc :prefill (arbiter/prefill-for decision))
+          ;; Record which budget notices have been delivered, or the gate
+          ;; cannot tell "happened" from "happened and I already reacted".
+          (= :turn-budget (:gate decision))
+          (assoc :notified-fractions
+                 (gates/crossed-fractions branch max-turns))
+          ;; The stuck gate is the only one that changes branch state rather
+          ;; than only speaking (vf-49o). A gate is data and cannot mutate the
+          ;; branch, so its effect is applied here.
+          (= :stuck (:gate decision))
+          (state/begin-reframe turn
+                               (:last-failed-claim branch)
+                               (:last-failed-tool branch)))))))
+
 (defn run-turn
-  "Advance one branch by one turn. Returns the updated branch."
-  [{:keys [conn run-id max-turns] :as ctx} branch turn]
+  "Advance one branch by one turn. Returns the updated branch.
+
+  A composition of the named steps above, in the load-bearing order the ns
+  docstring states. The loop manifest composes the same steps as cells, so
+  the beam (which calls this directly, see karamazov-ioo.20) and the
+  manifest-driven driver share one implementation of every step."
+  [ctx branch turn]
   (let [before branch
-        ;; The release valve for the explore prologue (vf-b25): a branch that
-        ;; cannot get a skeleton to elaborate must not be locked out of
-        ;; verification for the whole run, so at the cap the prologue is
-        ;; declared over and the branch told why. The message lands before
-        ;; the model call so the next response actually sees it.
-        branch (cond-> branch
-                 (state/explore-cap-expired? branch
-                                             (gates/threshold :explore-cap) turn)
-                 (-> (state/enter-build turn)
-                     (state/add-message
-                      "user"
-                      ;; "prologue" only for a branch that has never left
-                      ;; explore. Once a reframe can send one back (vf-9wx)
-                      ;; the same message on a re-entry would be describing
-                      ;; something that is not happening.
-                      (str "[harness] "
-                           (if (:reframe-entered-turn branch)
-                             "Your re-planning budget is spent: "
-                             "The explore prologue is over: ")
-                           (gates/threshold :explore-cap)
-                           " turns without a sketch on record. You are in the"
-                           " BUILD phase — Lean verification is available and"
-                           " `sketch` is not. The way forward is to prove your"
-                           " claims directly."))))
+        branch (phase-valve branch turn)
         {:keys [ok response error]} (call-model ctx branch)]
     (if-not ok
-      ;; A provider failure is not the branch's fault and must not count
-      ;; against it as a verification failure.
-      (do (log/warn "branch" (:id branch) "turn" turn "model call failed:" error)
-          (journal/record-turn! conn run-id
-                                {:branch-id (:id branch) :turn turn
-                                 :tool-name "__provider_error__" :result error
-                                 :category "neutral"})
-          (state/add-message branch "user"
-                             (str "[harness] The provider call failed: " error
-                                  " Try again.")))
-      (let [content (:content response)
-            ;; The prefill the request ended with, if any. Without it the
-            ;; response starts mid-fence and parses as a no-call — the very
-            ;; failure the prefill exists to prevent.
-            prefill (:prefill branch)
-            parsed (fence/parse-tool-call content {:prefill prefill})
-            signals (fence/signals response parsed)
-            ;; What the assistant actually said, opener included. Storing the
-            ;; bare completion would leave a turn beginning mid-fence in the
-            ;; transcript, misrepresenting the format back to the model on
-            ;; every later turn.
-            said (fence/reattach content prefill)
-            branch (-> branch
-                       ;; Cleared here, not where it was set: one steer
-                       ;; forecloses prose on one turn. Leaving it would make
-                       ;; every later turn start inside a fence.
-                       (dissoc :prefill)
-                       (state/add-message "assistant" said)
-                       (state/record-mechanics signals))]
+      (provider-error-step ctx branch turn error)
+      (let [{:keys [branch parsed signals said]} (absorb-response branch response)]
         (if (or (nil? parsed) (= "__parse_error__" (:name parsed)))
-          ;; No usable call. Say exactly what was wrong; a bare "try again"
-          ;; produces another identical attempt.
-          (let [msg (cond
-                      (:truncated signals)
-                      (str "[harness] Your response hit the token limit before you"
-                           " emitted a tool call. Think less and call a tool.")
-                      (nil? parsed)
-                      (str "[harness] No ```tool-call block in your response."
-                           " Every turn must end with exactly one.")
-                      :else
-                      (str "[harness] Your tool-call block did not parse: "
-                           (:parse-error parsed)))]
-            ;; The response matters most on THIS path. A turn that produced no
-            ;; usable call records nothing else about what the model did, and
-            ;; without the text there is no way to tell a model that rambled
-            ;; from one that emitted the wrong fence from one that answered in
-            ;; prose. Nine of twenty turns in a Lean run landed here and the
-            ;; question was unanswerable.
-            ;; `mechanics`, not `failure`. The branch produced no claim, so
-            ;; there is nothing here to hold against its line of inquiry —
-            ;; the same reasoning as the provider-error path above. gen-20 B2
-            ;; was culled at turn 6 for four malformed fences, having called
-            ;; only `thesis` and `lean_search`, and the cull reason blamed the
-            ;; critic for scoring a line the critic had never seen. The count
-            ;; is still kept and still bounds the branch; see record-outcome.
-            (journal/record-turn! conn run-id
-                                  {:branch-id (:id branch) :turn turn
-                                   :tool-name (or (:name parsed) "__no_call__")
-                                   :result msg :category "mechanics"
-                                   :parse-error (:parse-error parsed)
-                                   :auto-repaired (:auto-repaired? parsed)
-                                   :assistant-text said
-                                   :reasoning-text (:reasoning response)
-                                   ;; A turn that produced no usable call still
-                                   ;; cost tokens, and those are the ones worth
-                                   ;; counting — a branch looping on malformed
-                                   ;; fences is spend with nothing to show.
-                                   :usage (:usage response)})
-            (-> branch
-                (state/record-outcome {:category :mechanics :progress? false})
-                (state/add-message "user" msg)
-                ;; And make the next request end mid-fence, so prose is not an
-                ;; available reply. Telling the model to emit a fence is the
-                ;; suggesting form; this is the withholding form, which is the
-                ;; one that has ever worked — see arbiter/prefill-for.
-                ;;
-                ;; gen-22 B1 was sent the message above twenty-four times in
-                ;; forty-four turns and answered in prose every time, once at
-                ;; 109,360 characters against a 32,768-token cap. A branch
-                ;; that cannot reach a tool is not thinking; it is idling at
-                ;; full spend.
-                ;;
-                ;; Bare, with no tool named: a gate that knows which tool it
-                ;; wants supplies the name itself, but here nothing is being
-                ;; steered — the branch had a plan and failed to act on it,
-                ;; and picking its next call for it would replace a mechanics
-                ;; failure with the harness doing the reasoning.
-                (assoc :prefill "```tool-call\n")))
-
-          ;; A real tool call.
-          (let [tool (:name parsed)
-                ;; Phase policy is consulted before dispatch: a refused call
-                ;; never reaches an engine, and the refusal is journalled like
-                ;; any other turn (vf-b25, vf-eaw). One place owns the
-                ;; refusals — see tools/phase-refusal.
-                refusal (tools/phase-refusal
-                         (assoc ctx :branch branch :turn turn
-                                :tool-name tool :args (:args parsed)))
-                result (or refusal
-                           (tools/run-tool (assoc ctx :branch branch :turn turn
-                                                  :tool-name tool :args (:args parsed))))
-                branch (-> (:branch result)
-                           ;; Any attempt at an engine clears the search
-                           ;; counter, including one that fails — trying is
-                           ;; what the refusal asks for, not succeeding. One
-                           ;; place rather than inside each verify tool.
-                           (cond-> (contains? state/verification-tools tool)
-                             (dissoc :searches-since-attempt))
-                           ;; The tool and the claim ride along so the branch
-                           ;; can remember what it was grinding when it failed
-                           ;; — which is what the stuck gate withholds, and
-                           ;; how it decides whether a Lean sketch is a move
-                           ;; this branch can make (vf-9wx). proof_step carries
-                           ;; no claim of its own; the one it is working sits
-                           ;; on the branch.
-                           (state/record-outcome
-                            (assoc result :tool tool
-                                   :claim (or (get-in parsed [:args :claim])
-                                              (when (#{"proof_start" "proof_step"} tool)
-                                                (get-in branch [:proof :claim])))))
-                           (state/add-turn {:turn turn :tool tool
-                                            :category (:category result)
-                                            ;; Kept for failures AND malformed
-                                            ;; calls, only so repeating-failure?
-                                            ;; can see a loop. Not a second copy
-                                            ;; of the journal: the turns table
-                                            ;; holds the authoritative result.
-                                            ;; Mechanics included because a
-                                            ;; branch re-issuing an identical
-                                            ;; bad call is looping just as hard
-                                            ;; as one re-issuing a failing
-                                            ;; verification (gen-31 B3).
-                                            :error (when (#{:failure :mechanics}
-                                                          (:category result))
-                                                     (str (:result result)))}))
-                ;; 29 of gen-20's 57 failures were four identical (tool,
-                ;; message) pairs, and the harness answered the fifth exactly
-                ;; as it answered the first. Say something different instead —
-                ;; the branch is going to spend the next turn regardless.
-                result (if (state/repeating-failure? branch tool (str (:result result)))
-                         (update result :result
-                                 #(str % "\n\n[harness] This exact call has now"
-                                       " failed this exact way more than once."
-                                       " Repeating it will fail again. Change"
-                                       " the call, or change technique — a"
-                                       " different tool, a smaller claim, or a"
-                                       " different encoding of the same one."))
-                         result)
-                branch (if-let [a (:artifact result)]
-                         (cond-> (state/add-artifact branch (assoc a :turn turn))
-                           ;; A banked sketch is the way out of the explore
-                           ;; prologue: from the turn it lands, verification
-                           ;; is open (vf-b25).
-                           (= :sketch (:claim-status a))
-                           (state/enter-build turn)
-                           ;; And anything banked at all ends a reframe: the
-                           ;; withheld approach could not have produced it, so
-                           ;; the branch has done what was asked (vf-9wx).
-                           (:reframe-entered-turn branch)
-                           (state/clear-reframe))
-                         branch)
-                ;; A confirmation used to mark the green point the safe-state
-                ;; rung falls back to, snapshotting the engine session's replay
-                ;; log. With no engine session there is nothing to snapshot;
-                ;; the coding analogue (a store checkpoint) re-arms this rung
-                ;; when the mutation protocol lands.
-                ]
-            (journal/record-turn! conn run-id
-                                   {:branch-id (:id branch) :turn turn
-                                    :tool-name tool :args (:args parsed)
-                                    :result (truncate (:result result))
-                                    :category (name (:category result))
-                                    :policy-refusal? (:policy-refusal? result)
-                                    :auto-repaired (:auto-repaired? parsed)
-                                   :assistant-text said
-                                   :reasoning-text (:reasoning response)
-                                   :usage (:usage response)})
-            (when-let [a (:artifact result)]
-              (journal/record-artifact! conn run-id
-                                        (assoc a :branch-id (:id branch) :turn turn))
-              ;; Only engine-confirmed, on-topic artifacts enter the shared
-              ;; pool — see shareable?. The flag is the diversity trade-off's
-              ;; off switch.
-              (when (shareable? branch a (get-in ctx [:config :run :share-artifacts?]))
-                (artifacts/record! conn run-id
-                                   {:branch-id (:id branch) :turn turn
-                                    :kind (:kind a) :tier (:tier a)
-                                    :claim (:claim a) :code (:code a)})))
-            (when-let [f (:failure result)]
-              (failures/record! conn run-id
-                                (assoc f :branch-id (:id branch) :turn turn
-                                       :tool-name tool)))
-            (when-let [t (:thesis result)]
-              (runs/set-thesis! conn run-id (:id branch) t))
-
-            (let [branch (settle-predictions! conn branch turn [tool] before branch)]
-              (if (:done? result)
-                (state/add-message branch "user" (truncate (:result result)))
-                ;; The single boundary. At most one steer, chosen in priority.
-                ;; No green snapshots are taken without an engine session, so
-                ;; safe-state-due? stays false and the safe-state gate stays
-                ;; dormant until the store-checkpoint version arrives.
-                (let [coverage nil
-                      decision (arbiter/decide
-                                {:branch branch
-                                 :max-turns max-turns
-                                 ;; How wide the beam already is, so the
-                                 ;; reproduction rung knows whether the run
-                                 ;; can afford offspring.
-                                 :branch-count (or (:branch-count ctx) 1)
-                                 :done-block (:done-block result)
-                                 :directive (or (:pending-directive branch)
-                                                (:directive ctx))
-                                 :safe-state-coverage coverage})
-                      {ctx-block :block branch :branch}
-                      (context-block conn run-id branch
-                                     (get-in parsed [:args :claim])
-                                     (get-in ctx [:config :run :share-artifacts?]))
-                      body (str (truncate (:result result))
-                                (when ctx-block (str "\n\n" ctx-block))
-                                (when decision (str "\n\n---\n\n" (:message decision))))
-                      ;; Recorded exactly once. The row id is what a later turn
-                      ;; settles, so writing it twice would leave one firing
-                      ;; permanently open and inflate the tally.
-                      firing-id (when decision
-                                  (journal/record-gate!
-                                   conn run-id
-                                   {:branch-id (:id branch) :turn turn
-                                    :gate (:gate decision)
-                                    :priority (:priority decision)
-                                    :message (:message decision)
-                                    :prediction (:prediction decision)
-                                    :window (:window decision)}))]
-                  (when decision
-                    (log/debug "branch" (:id branch) "turn" turn
-                               "gate" (:gate decision)
-                               "passed over" (:passed-over decision)))
-                  (cond-> (-> branch
-                              (dissoc :pending-directive)
-                              (state/add-message "user" body))
-                    decision (update :gate-history (fnil conj [])
-                                     {:gate (:gate decision) :turn turn})
-                    decision (update :open-predictions (fnil conj [])
-                                     {:id firing-id
-                                      :gate (:gate decision)
-                                      :prediction (:prediction decision)
-                                      :window (:window decision)
-                                      :turn turn})
-                    ;; Consumed by the NEXT call-model and cleared there, so a
-                    ;; steer forecloses prose on exactly the turn it steers and
-                    ;; no later one.
-                    decision (assoc :prefill (arbiter/prefill-for decision))
-                    ;; Record which budget notices have been delivered, or the
-                    ;; gate cannot tell "happened" from "happened and I already
-                    ;; reacted" and re-fires every turn past the threshold.
-                    (= :turn-budget (:gate decision))
-                    (assoc :notified-fractions
-                           (gates/crossed-fractions branch max-turns))
-                    ;; The stuck gate is the only one that changes branch state
-                    ;; rather than only speaking (vf-49o). A gate is data and
-                    ;; cannot mutate the branch, so its effect is applied here,
-                    ;; beside the turn-budget bookkeeping. From this turn the
-                    ;; approach that kept failing is refused on every engine,
-                    ;; and the failures that led here stop counting toward the
-                    ;; cull for :reframe-grace turns (vf-31m) — the beam culls
-                    ;; only after every branch has advanced, so the reprieve is
-                    ;; in place before retention is decided on this same turn.
-                    (= :stuck (:gate decision))
-                    (state/begin-reframe turn
-                                         (:last-failed-claim branch)
-                                         (:last-failed-tool branch))))))))))))
-
-;; --- the run ----------------------------------------------------------------
-
-(defn run!
-  "Run one branch to completion. Returns {:status :answer :branch :run-id}."
-  [{:keys [conn config llm-adapter llm-config problem max-turns]}]
-  (let [max-turns (or max-turns (get-in config [:run :max-turns]) 40)
-        run-id (runs/start-run! conn {:problem problem
-                                      :provider (:provider llm-config)
-                                      :model (:model llm-config)
-                                      :max-turns max-turns
-                                      :beam-width 1
-                                      :prompt-digest (prompt-digest)})
-        branch (state/new-branch {:id "B1" :problem problem
-                                  :messages (initial-messages problem)})
-        ctx {:conn conn :run-id run-id :config config
-             :llm-adapter llm-adapter :llm-config llm-config
-             :max-turns max-turns}]
-    (runs/open-branch! conn run-id {:branch-id "B1"})
-    (try
-      (loop [b branch, turn 1]
-        (cond
-          (not (state/active? b))
-          (let [status (if (:final-answer b) :completed :abandoned)]
-            (runs/close-branch! conn run-id "B1" (:status b) (:inactive-reason b))
-            (runs/finish-run! conn run-id status (:final-answer b))
-            {:status status :answer (:final-answer b) :branch b :run-id run-id})
-
-          (> turn max-turns)
-          (let [residual (state/residual b)]
-            (runs/close-branch! conn run-id "B1" :exhausted
-                                (str "turn cap of " max-turns " reached"))
-            (journal/note! conn run-id :residual {:branch-id "B1" :data residual})
-            (runs/finish-run! conn run-id :failed nil)
-            {:status :exhausted :branch b :run-id run-id :residual residual})
-
-          :else
-          (recur (run-turn ctx b turn) (inc turn)))))))
+          (no-call-step ctx branch turn {:parsed parsed :signals signals
+                                         :said said :response response})
+          (let [{:keys [branch result tool]} (tool-step ctx branch turn parsed)]
+            (journal-step! ctx branch turn {:parsed parsed :result result
+                                            :tool tool :said said
+                                            :response response})
+            (steer-step ctx before branch turn {:parsed parsed :result result})))))))

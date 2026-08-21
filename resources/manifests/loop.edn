@@ -1,0 +1,53 @@
+;; The agentic loop as data. This file seeds version 1 of the "loop" workflow
+;; in the db; after that, the db rows are authoritative and this file is only
+;; the factory default. Cells are registered in samizdat.agent.cells; this
+;; definition carries the routing — which is exactly the part an agent can
+;; safely rewrite, behind compile-time validation.
+;;
+;; Dispatch predicates are EDN forms evaluated at compile time. Keep them
+;; trivial readers of explicit keys: the cell computes the decision INTO the
+;; data map, the predicate only reads it, so the routing logic stays visible
+;; here where it can be edited.
+{:cells {:start          :loop/assemble
+         :infer          :llm/infer
+         :parse          :llm/parse
+         :provider-error :loop/provider-error
+         :no-call        :loop/no-call
+         :dispatch       :tool/dispatch
+         :journal        :journal/record
+         :arbiter        :gate/arbiter
+         :route          :loop/route
+         :finish         :loop/finish}
+
+ :edges {:start          :infer
+         :infer          :parse
+         :parse          {:provider-error :provider-error
+                          :no-call        :no-call
+                          :tool           :dispatch}
+         :provider-error :route
+         :no-call        :route
+         :dispatch       :journal
+         :journal        :arbiter
+         :arbiter        :route
+         ;; The back edge: one turn ends where the next begins.
+         :route          {:continue  :start
+                          :done      :finish
+                          :abandoned :finish
+                          :exhausted :finish}
+         :finish         :end}
+
+ :dispatches {:parse [[:provider-error (fn [d] (not (:ok (:call d))))]
+                      [:no-call (fn [d] (let [p (:parsed d)]
+                                          (or (nil? p)
+                                              (= "__parse_error__" (:name p)))))]
+                      [:tool (fn [d] true)]]
+              :route [[:continue  (fn [d] (= :continue (:verdict d)))]
+                      [:done      (fn [d] (= :done (:verdict d)))]
+                      [:abandoned (fn [d] (= :abandoned (:verdict d)))]
+                      [:exhausted (fn [d] (= :exhausted (:verdict d)))]]}
+
+ ;; The invariants an edit may not remove: a dispatched tool call is always
+ ;; journalled, and a journalled turn always faces the arbiter. Violations
+ ;; fail at compile time, before a soak ever runs.
+ :constraints [{:type :must-follow :if :dispatch :then :journal}
+               {:type :must-follow :if :journal :then :arbiter}]}

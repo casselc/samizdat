@@ -260,6 +260,19 @@
    "CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status)"
    "CREATE INDEX IF NOT EXISTS idx_tasks_parent ON tasks(parent_id)"])
 
+(def ^:private v7
+  ;; Workflow definitions: the agentic loop as durable, versioned data. Every
+  ;; save is a new version — never an UPDATE — so a bad edit is rolled back by
+  ;; pointing at the previous row and the whole edit history stays readable.
+  ;; Runs journal which (name, version) drove them.
+  ["CREATE TABLE IF NOT EXISTS workflows (
+      name       TEXT NOT NULL,
+      version    INTEGER NOT NULL,
+      edn        TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      PRIMARY KEY (name, version)
+    )"])
+
 (def migrations
   "Ordered. Index 0 is migration 1; PRAGMA user_version holds the count applied."
-  [v1 v2 v3 v4 v5 v6])
+  [v1 v2 v3 v4 v5 v6 v7])
