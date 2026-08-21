@@ -60,6 +60,7 @@
             [samizdat.workflow-test]
             [samizdat.security.secrets-test]
             [samizdat.config-test]
+            [samizdat.files-test]
             [samizdat.security.policy-test]
             [samizdat.llm-test]
             [samizdat.prompt-test]
@@ -122,6 +123,7 @@
     samizdat.workflow-test
     samizdat.security.secrets-test
     samizdat.config-test
+    samizdat.files-test
     samizdat.security.policy-test
     samizdat.prompt-test
     samizdat.server-test

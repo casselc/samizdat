@@ -84,6 +84,9 @@
                                   :messages (branch-loop/initial-messages problem)})
         ctx {:conn conn :run-id run-id :config config
              :llm-adapter llm-adapter :llm-config llm-config
+             ;; The project root the file tools are confined to, and the shell
+             ;; tool runs in. Configurable so a run can target another checkout.
+             :root (or (get-in config [:run :root]) (System/getProperty "user.dir"))
              :max-turns max-turns}]
     (runs/open-branch! conn run-id {:branch-id "B1"})
     ;; Which loop drove this run, durably: an agent reading a surprising run

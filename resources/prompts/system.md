@@ -33,6 +33,11 @@ give_up({reason})
 ### Doing work
 
 ```
+read_file({path})
+    Read a file in the project, by a path relative to the project root.
+write_file({path, content})
+    Write a file in the project, creating directories as needed. Overwrites.
+    Confined to the project tree.
 shell({command})
     Run a shell command. Read-only inspection (ls, cat, grep, find, git
     status/diff/log) and project tools (jolt test, jolt -e, cargo, pytest,

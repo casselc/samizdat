@@ -33,6 +33,7 @@
   judge-backed review/audit gates) left with the proof harness; what remains
   is the general core the coding tool set builds on."
   (:require [clojure.string :as str]
+            [samizdat.agent.files :as files]
             [samizdat.agent.state :as state]
             [samizdat.llm.message :as message]
             [samizdat.security.policy :as policy]
@@ -431,6 +432,14 @@
                         " dead end.")))
             :progress? true
             :thesis thesis)))))
+
+;; --- the files ---------------------------------------------------------------
+
+(defmethod run-tool "read_file" [ctx]
+  (files/read-file ctx))
+
+(defmethod run-tool "write_file" [ctx]
+  (files/write-file ctx))
 
 ;; --- the shell ---------------------------------------------------------------
 
