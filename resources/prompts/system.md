@@ -85,6 +85,12 @@ grep({pattern})
     Search the project's Clojure source for a regex; returns matching lines as
     path:line: text. Faster than reading whole files to find where something
     is defined or used.
+lsp({op, file, line, col})
+    Code navigation over the project via clojure-lsp (read-only). Ops:
+    definition|references|hover need file (project-relative), line, col;
+    diagnostics needs only file. line/col are 0-based ints. definition
+    returns 'path:line:col'; references one per line; hover the symbol's
+    info; diagnostics 'line:col severity: message' per problem.
 write_file({path, content})
     Write a whole file in the project, creating directories as needed.
     Overwrites. Use this for NEW files; to change an existing file, prefer
