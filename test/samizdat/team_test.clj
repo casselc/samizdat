@@ -151,3 +151,25 @@
                             (str/includes? % "inbox")
                             (str/includes? % "remember"))
                       seen))))))))
+
+(deftest implementors-get-the-repl-workflow-skill-in-context
+  ;; karamazov-66k: implementors prototyped in eval and never wrote files. They
+  ;; now get the repl-workflow skill in-context, which tells them the file on
+  ;; disk is the deliverable.
+  (let [systems (atom [])
+        capturing (fn [a c messages & rest]
+                    (swap! systems conj
+                           (->> messages (filter #(= "system" (:role %))) first :content))
+                    (apply worker-dones-its-task a c messages rest))]
+    (with-redefs [llm/chat capturing]
+      (let [conn (db/open! ":memory:")]
+        (workflow/run! {:conn conn :config {:run {:loop "team" :subtasks ["alpha"]}}
+                        :llm-adapter :a :llm-config {:max-tokens 16384}
+                        :problem "the feature" :max-turns 6})
+        (let [seen @systems]
+          (is (some #(str/includes? % "REPL-driven development") seen)
+              "implementors get the repl-workflow skill body")
+          (is (some #(str/includes? % "edit_file") seen)
+              "which tells them to write the change to the file, not leave it in eval")
+          (is (some #(str/includes? % "Your role: implementor") seen)
+              "alongside their role identity"))))))

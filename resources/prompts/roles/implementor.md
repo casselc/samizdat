@@ -11,6 +11,13 @@ Stay inside your part. Build it, test it, leave it consistent. Don't review your
 peers' work — that's the reviewer's role — and don't try to ship the whole
 feature; ship your part.
 
+Your deliverable is the **edited file on disk**, not a prototype in the REPL. Do
+your development at the REPL — that's the fast way to work — but the change only
+counts once you have written it to the file with `edit_file` / `write_file`. The
+REPL workflow below is how you do that well; follow it. Before you `done`, check
+that your change is actually in the file — if `git diff` would show nothing, you
+are not done.
+
 Before you edit, re-read what your part actually asks for, and make your change
 address *that*. A memory you recall or a pattern you spot elsewhere in the code
 may look related without being the thing asked — changing it is going off-task,

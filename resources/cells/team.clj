@@ -18,6 +18,7 @@
             [mycelium.core :as myc]
             [samizdat.agent.loop :as turn]
             [samizdat.agent.planner :as planner]
+            [samizdat.agent.skills :as skills]
             [samizdat.agent.state :as state]
             [samizdat.llm.client :as llm]
             [samizdat.store.journal :as journal]
@@ -47,15 +48,18 @@
        (or (wf/prompt-text "team-worker") "")))
 
 (defn- worker-prompt
-  "The prompt suffix for implementor worker `idx`: its implementor role identity
-  (so it knows it builds one part, a reviewer will read its work), plus a peer
-  roster + coordination guide when it is one of several (>1 task). A solo worker
-  still gets the role identity."
+  "The prompt suffix for implementor worker `idx`: its implementor role identity,
+  the repl-workflow skill (implementors get it in-context — REPL development is
+  their core method, and it is where they must be told the file on disk is the
+  deliverable, not the eval), plus a peer roster + coordination guide when it is
+  one of several (>1 task). A solo worker still gets the role identity + skill."
   [idx tasks]
-  (let [role (wf/prompt-text "roles/implementor")]
-    (if (> (count tasks) 1)
-      (str/join "\n\n" (remove str/blank? [role (roster idx tasks)]))
-      role)))
+  (let [role (wf/prompt-text "roles/implementor")
+        repl (skills/load-skill "repl-workflow")
+        base [role repl]]
+    (str/join "\n\n"
+              (remove str/blank?
+                      (if (> (count tasks) 1) (conj base (roster idx tasks)) base)))))
 
 (defn- run-worker
   "Run one worker sub-loop as branch `bid` on the shared run: `prob` is the
