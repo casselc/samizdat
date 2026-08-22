@@ -16,7 +16,8 @@
 
 (def ^:private usage
   (str "`remember` stores a fact for later runs: {content, kind?}. "
-       "`recall` searches what was stored: {query}."))
+       "`recall` has two modes: {query} searches what was stored; "
+       "{id} returns one memory's full text by its k- id."))
 
 (defn- memory-line [m]
   (str (:id m) " [" (:kind m) "] " (:content m)))
@@ -29,10 +30,14 @@
       (base/ok branch (str "Remembered " id ": " (base/arg ctx :content))))))
 
 (defmethod base/run-tool "recall" [{:keys [branch conn] :as ctx}]
-  (if-let [miss (base/missing ctx :query)]
-    (base/malformed branch (str miss "\n\n" usage))
-    (let [rows (knowledge/recall conn (base/arg ctx :query))]
-      (base/ok branch
-               (if (seq rows)
-                 (str/join "\n" (map memory-line rows))
-                 (str "No memories match \"" (base/arg ctx :query) "\"."))))))
+  (if-let [id (base/arg ctx :id)]
+    (if-let [row (knowledge/get-by-id conn id)]
+      (base/ok branch (memory-line row))
+      (base/fail branch (str "No memory with id " id ".")))
+    (if-let [miss (base/missing ctx :query)]
+      (base/malformed branch (str miss "\n\n" usage))
+      (let [rows (knowledge/recall conn (base/arg ctx :query))]
+        (base/ok branch
+                 (if (seq rows)
+                   (str/join "\n" (map memory-line rows))
+                   (str "No memories match \"" (base/arg ctx :query) "\".")))))))

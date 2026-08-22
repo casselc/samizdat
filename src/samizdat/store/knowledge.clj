@@ -73,3 +73,53 @@
   [conn id]
   (db/with-writer
     (db/execute! conn ["DELETE FROM knowledge WHERE id = ?" id])))
+
+(defn get-by-id
+  "The single knowledge row for id, or nil when there is no such memory."
+  [conn id]
+  (first (db/fetch conn ["SELECT * FROM knowledge WHERE id = ? LIMIT 1" id])))
+
+(def ^:private preamble
+  "Memories you kept earlier (still active; fetch the full text with the recall tool by id):")
+
+(defn- preview
+  "Content flattened to one line and cut at n chars, ellipsized only
+  when something was actually cut."
+  [content n]
+  (let [flat (str/trim (str/replace (str content) #"\s+" " "))]
+    (if (> (count flat) n)
+      (str (subs flat 0 n) "...")
+      flat)))
+
+(defn- index-line
+  "id, kind in brackets, preview — everything needed to decide whether
+  to dereference this id, and nothing more."
+  [{:keys [id kind content]}]
+  (str id " [" (or kind "note") "] " (preview content 70)))
+
+(defn- fit-lines
+  "Keep as many whole lines as fit beside the preamble under cap. A line
+  that would overflow the budget is dropped entire, never cut mid-line,
+  so the index is bounded by construction."
+  [preamble cap lines]
+  (loop [kept [] [l & more] lines]
+    (let [candidate (str/join "\n" (cond-> (cons preamble kept) l (conj l)))]
+      (cond
+        (nil? l) kept
+        (<= (count candidate) cap) (recur (conj kept l) more)
+        :else kept))))
+
+(defn breadcrumb-index
+  "A bounded index of kept memories as a string, or nil when there are
+  none. One line per memory — id, kind, ~70-char preview — so the index
+  is cheap enough to sit in every turn's context while full text is
+  fetched on demand by id (stub-and-expand). A non-blank query ranks the
+  rows via recall; a blank query falls back to the most recent. The
+  whole string is hard-capped so it never becomes a content dump."
+  ([conn query] (breadcrumb-index conn query {}))
+  ([conn query {:keys [rows cap] :or {rows 8 cap 700}}]
+   (let [picked (if (str/blank? query)
+                  (recent conn rows)
+                  (recall conn query rows))]
+     (when (seq picked)
+       (str/join "\n" (cons preamble (fit-lines preamble cap (map index-line picked))))))))

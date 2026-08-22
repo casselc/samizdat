@@ -33,6 +33,7 @@
             [samizdat.store.failures :as failures]
             [samizdat.store.interventions :as interventions]
             [samizdat.store.journal :as journal]
+            [samizdat.store.knowledge :as knowledge]
             [samizdat.store.runs :as runs]))
 
 (def max-result-chars 4000)
@@ -143,6 +144,11 @@
                                  ;; trust the absence of a line.
                                  (artifacts/render-ledger
                                   (journal/ledger conn run-id))
+                                 ;; Breadcrumb index: kept memories surfaced as
+                                 ;; ids + previews only, relevance-ranked by the
+                                 ;; branch's last-claim, recent when blank. nil
+                                 ;; on an empty store, so keep identity drops it.
+                                 (knowledge/breadcrumb-index conn last-claim)
                                  (failures/render fhits)
                                  (artifacts/render ahits)])]
       {:block (when (seq blocks) (str/join "\n\n" blocks))

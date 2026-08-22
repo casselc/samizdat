@@ -1,5 +1,6 @@
 (ns samizdat.knowledge-test
   (:require [clojure.test :refer [deftest is testing use-fixtures]]
+            [clojure.string :as str]
             [samizdat.store.db :as db]
             [samizdat.store.knowledge :as knowledge]))
 
@@ -32,4 +33,32 @@
 (deftest kind-defaults-to-note
   (knowledge/remember! @conn {:content "kindless"})
   (is (= ["note"] (distinct (mapv :kind (knowledge/recall @conn "kindless"))))))
+
+(deftest get-by-id-returns-row-and-nil-for-miss
+  (let [id (knowledge/remember! @conn {:content "exact row payload"})
+        row (knowledge/get-by-id @conn id)]
+    (is (map? row))
+    (is (= id (:id row)))
+    (is (= "exact row payload" (:content row))))
+  (is (nil? (knowledge/get-by-id @conn "k-nope"))))
+
+(deftest breadcrumb-index-bounded-and-has-ids
+  (let [long (str "HEAD " (apply str (repeat 200 "x")) " TAIL-END-MARKER")
+        id (knowledge/remember! @conn {:content long :kind "note"})
+        idx (knowledge/breadcrumb-index @conn "")]
+    (is (string? idx))
+    (is (str/includes? idx id))
+    (is (<= (count idx) 700))
+    (is (str/includes? idx "HEAD"))
+    (is (not (str/includes? idx "TAIL-END-MARKER")))))
+
+(deftest breadcrumb-index-nil-on-empty-db
+  (is (nil? (knowledge/breadcrumb-index @conn ""))))
+
+(deftest breadcrumb-index-relevance-ranked
+  (knowledge/remember! @conn {:content "beta unrelated"})
+  (knowledge/remember! @conn {:content "alpha needle here"})
+  (let [idx (knowledge/breadcrumb-index @conn "needle")]
+    (is (string? idx))
+    (is (str/includes? idx "alpha"))))
 

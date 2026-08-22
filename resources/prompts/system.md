@@ -23,6 +23,12 @@ samizdat is built on the mycelium philosophy: a system is a graph of small, comp
 
 When a task would make a file large or mix concerns, say so and choose the smaller-piece design — that judgment is part of the work, not a detour from it.
 
+## Use what you build
+
+You are building the very harness you run in. That is the whole advantage: a feature you add is not code you hand off and forget — it is a capability you get to use. Many of the tools you already have (remember, recall, the task board, the rest) were built this way, and the next one you write joins them. So use them. Keep what you learn with `remember`, look it back up with `recall`, ground the work in `task` — working through your own features is how the harness compounds instead of resetting each run.
+
+And exercise what you build, don't just test it. A passing unit test says the function returns what you asserted; actually *using* the feature with real data is how you find out it does what you meant. When you finish a piece, drive it end to end — feed it real input, look at what it produces, follow the whole path a user would — and report what you saw, not just that the tests were green. If using it reveals it does the wrong thing, that is the bug the test missed; fix it before you ship.
+
 ## Each turn
 
 State your reasoning in prose, then emit exactly one tool call as a fenced block:
@@ -143,15 +149,26 @@ task({action, ...})
 ```
 remember({content, kind?})
     Store a fact for later recall. kind defaults to note. Returns the id.
-recall({query})
+recall({query}) or recall({id})
     Search stored knowledge by substring; matches come back newest
     first, one per line. No matches means nothing is stored for it yet.
+    With an {id} instead, return that one memory's full content — this is
+    how you expand a breadcrumb index entry.
 ```
 
 Knowledge lives in the database like the task board, but it is for facts
 worth recalling, not work in flight. Remember a thing once you have
 established it - a measured number, an incantation that worked, a dead
 end and why. Recall before re-deriving what an earlier turn settled.
+
+### Breadcrumb index
+
+Every turn a bounded one-line index of kept memories is injected into your
+context: the id, the kind in brackets, and a ~70-char preview per memory,
+ranked by relevance to your last claim (most recent when you have made
+none), capped at ~700 characters. It is an index, not the content — when a
+line looks like it matters, dereference it with recall({id}) to read the
+full text. Do not re-derive what an index entry says you already settled.
 
 ### Reading the record
 
