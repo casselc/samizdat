@@ -14,6 +14,7 @@
   (:require [clojure.data.json :as json]
             [clojure.string :as str]
             [mycelium.cell :as cell]
+            [samizdat.agent.gitdiff :as gitdiff]
             [samizdat.agent.judge :as judge]
             [samizdat.agent.loop :as turn]
             [samizdat.agent.state :as state]
@@ -38,30 +39,41 @@
         re-activates the branch, injects one [critic] note, and re-enters the
         loop. Spent budget or a judge error ships (fail-open)."
    :effects [:net :db]}
-  (fn [{:keys [conn run-id llm-adapter llm-config]} {:keys [branch turn] :as data}]
+  (fn [{:keys [conn run-id root git-baseline llm-adapter llm-config]}
+       {:keys [branch turn] :as data}]
     (let [attempts (or (:critic/attempts data) 0)]
       (if (>= attempts max-critic-attempts)
         (ship data)
         (let [rows (map parse-args (journal/turns conn run-id))
               evidence (judge/evidence rows)
+              diff (gitdiff/diff root git-baseline)
               transcript (->> (:messages branch) (map :content) (str/join "\n"))
               prompt (judge/critic-prompt {:rules (turn/system-prompt)
                                            :transcript transcript
                                            :evidence evidence
+                                           :diff diff
                                            :answer (:final-answer branch)})
               reply (try (:content (llm/chat llm-adapter llm-config
                                              [{:role "user" :content prompt}]))
                          (catch Throwable _ nil))
-              verdict (if reply (judge/parse-verdict reply) :complete)]
+              verdict (if reply (judge/parse-verdict reply) :complete)
+              ;; A COMPLETE verdict still blocks if the diff review turned up a
+              ;; critical or high-severity defect.
+              blocking (when reply (judge/blocking-findings reply))]
           (journal/note! conn run-id :critic
                          {:data {:branch-id (:id branch) :turn turn
-                                 :verdict verdict :attempt (inc attempts)}})
-          (if (= :complete verdict)
+                                 :verdict verdict :blocked (boolean blocking)
+                                 :attempt (inc attempts)}})
+          (if (and (= :complete verdict) (not blocking))
             (ship data)
             ;; Block: undo the done and re-enter, doing the same per-turn
             ;; bookkeeping :loop/route does on a :continue (route did none —
             ;; it routed us here on :done).
-            (let [msg (judge/critique-message verdict (judge/findings reply))
+            (let [msg (if (= :complete verdict)
+                        (str "[critic] The diff review found defects to fix"
+                             " before shipping.\n\n" blocking
+                             "\n\nAddress these, then finish again.")
+                        (judge/critique-message verdict (judge/findings reply)))
                   branch' (-> branch
                               (assoc :status :active :final-answer nil)
                               (state/add-message "user" msg))]

@@ -71,6 +71,7 @@
             [samizdat.workflow-test]
             [samizdat.manifest-test]
             [samizdat.judge-test]
+            [samizdat.gitdiff-test]
             [samizdat.skills-test]
             [samizdat.security.secrets-test]
             [samizdat.config-test]
@@ -148,6 +149,7 @@
     samizdat.workflow-test
     samizdat.manifest-test
     samizdat.judge-test
+    samizdat.gitdiff-test
     samizdat.skills-test
     samizdat.security.secrets-test
     samizdat.config-test

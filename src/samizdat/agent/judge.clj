@@ -91,33 +91,50 @@
            (str "\ncommands run:\n  " (str/join "\n  " cmds))))))
 
 (def preamble
-  "The judge's standing instructions. Calibrated, not trigger-happy."
+  "The judge's standing instructions. Calibrated, not trigger-happy. A unified
+  judge: it decides completeness AND reviews the run's own diff for defects."
   (str "You are a reviewer deciding whether an agent's work on a task is "
        "actually complete and correct. You are given the agent's own rules, a "
-       "transcript of what it did, a deterministic evidence block, and the "
-       "answer it wants to ship.\n\n"
+       "transcript of what it did, a deterministic evidence block, the diff of "
+       "what it changed, and the answer it wants to ship. Do two things: judge "
+       "COMPLETENESS, and REVIEW THE DIFF for defects.\n\n"
        "Rules:\n"
        "- Respect the agent's own instructions. Never demand something they "
        "forbid (e.g. pushing or committing if they say not to).\n"
-       "- Block only on a concrete, in-scope gap you can point at. Check the "
-       "answer's claims against the EVIDENCE block and flag any the run did "
-       "not actually do.\n"
+       "- Block only on a concrete, in-scope gap or a real defect you can point "
+       "at. Check the answer's claims against the EVIDENCE block and flag any "
+       "the run did not actually do.\n"
+       "- Review the DIFF for bugs, not style: a wrong result, a broken edge "
+       "case, a resource leak, a security hole. Tag each finding with a "
+       "severity: [critical], [high], [medium], or [low].\n"
        "- A run that ends by asking the user a question is a correct stop, not "
        "incompleteness.\n"
        "- When unsure, PASS or ABSTAIN. A false block wastes a whole turn.\n\n"
        "Answer with a first line exactly `VERDICT: COMPLETE`, "
        "`VERDICT: INCOMPLETE`, or `VERDICT: ABSTAIN`, then optionally a "
-       "`FINDINGS:` section naming what is missing or wrong."))
+       "`FINDINGS:` section, one finding per line, each prefixed with its "
+       "severity tag."))
 
 (defn critic-prompt
   "The judge's user message: the agent's rules, the evidence, the transcript,
-  and the answer under review."
-  [{:keys [rules transcript evidence answer]}]
+  the diff of what the run changed, and the answer under review."
+  [{:keys [rules transcript evidence answer diff]}]
   (str "## The agent's rules\n\n" (one-line rules 6000)
        "\n\n## Evidence (deterministic facts about the run)\n\n" evidence
+       (when (seq (str diff))
+         (str "\n\n## Diff of what this run changed\n\n```diff\n"
+              (str diff) "\n```"))
        "\n\n## Transcript\n\n" (one-line transcript 12000)
        "\n\n## The answer it wants to ship\n\n" (str answer)
        "\n\nIs this task complete and correct? " preamble))
+
+(defn blocking-findings
+  "The findings a review blocks on — those tagged [critical] or [high]. Returns
+  the whole findings text when any are, else nil. Medium/low findings are
+  advisory: worth passing back, not worth undoing a done for."
+  [reply]
+  (when-let [f (findings reply)]
+    (when (re-find #"(?i)\[(critical|high)\]" f) f)))
 
 (defn critique-message
   "The single consolidated note injected back into the branch when the judge

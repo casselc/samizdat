@@ -19,7 +19,8 @@
 (ns samizdat.judge-test
   "The finalization critic: the pure judge core, and the block-then-ship loop
   behavior on the `critic` manifest."
-  (:require [clojure.string :as str]
+  (:require [clojure.data.json]
+            [clojure.string :as str]
             [clojure.test :refer [deftest testing is]]
             [samizdat.agent.judge :as judge]
             [samizdat.llm.client :as llm]
@@ -87,3 +88,38 @@
                             :llm-adapter :a :llm-config {:max-tokens 16384}
                             :problem "p" :max-turns 20})]
       (is (= :completed (:status r)) "bounded: it ships after the attempt cap"))))
+
+(deftest diff-review-blocks-on-severity
+  (testing "a critical or high finding blocks; a low one does not"
+    (is (judge/blocking-findings "VERDICT: COMPLETE\nFINDINGS:\n[critical] leaks a key"))
+    (is (judge/blocking-findings "VERDICT: COMPLETE\nFINDINGS:\n[high] off-by-one"))
+    (is (nil? (judge/blocking-findings "VERDICT: COMPLETE\nFINDINGS:\n[low] rename")))
+    (is (nil? (judge/blocking-findings "VERDICT: COMPLETE")))))
+
+(defn- verdict-with-findings-chat
+  "A model that dones, and whose judge returns the given raw replies in order."
+  [replies]
+  (let [calls (atom 0)]
+    (fn [_ _ messages & _]
+      (if (str/includes? (str/join " " (map :content messages)) "reviewer deciding")
+        (let [n (swap! calls inc)]
+          {:content (nth replies (min (dec n) (dec (count replies))) "VERDICT: COMPLETE")
+           :finish-reason "stop"})
+        {:content "```tool-call\n{\"name\": \"done\", \"args\": {\"answer\": \"x\"}}\n```"
+         :finish-reason "stop"}))))
+
+(deftest a-complete-verdict-with-a-critical-finding-still-blocks
+  ;; The diff-review half of the unified judge: COMPLETE but the diff has a
+  ;; critical defect -> undo the done and send it back; a clean pass ships.
+  (with-redefs [llm/chat (verdict-with-findings-chat
+                          ["VERDICT: COMPLETE\nFINDINGS:\n[critical] deletes user data"
+                           "VERDICT: COMPLETE"])]
+    (let [conn (db/open! ":memory:")
+          r (workflow/run! {:conn conn :config {:run {:loop "critic"}}
+                            :llm-adapter :a :llm-config {:max-tokens 16384}
+                            :problem "p" :max-turns 8})]
+      (is (= :completed (:status r)))
+      (is (some #(= true (get-in % [:data :blocked]))
+                (map #(update % :data (fn [d] (clojure.data.json/read-str (str d) :key-fn keyword)))
+                     (db/fetch conn ["SELECT data FROM events WHERE kind='critic'"])))
+          "at least one critic firing recorded a block on the diff"))))

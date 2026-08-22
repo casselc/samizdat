@@ -37,6 +37,7 @@
             [mycelium.cell :as cell]
             [mycelium.workflow :as wf]
             [samizdat.cells :as cells]
+            [samizdat.agent.gitdiff :as gitdiff]
             [samizdat.agent.loop :as branch-loop]
             [samizdat.repl :as repl]
             [samizdat.agent.state :as state]
@@ -122,11 +123,17 @@
                                       :prompt-digest (branch-loop/prompt-digest)})
         branch (state/new-branch {:id "B1" :problem problem
                                   :messages (branch-loop/initial-messages problem)})
+        ;; The project root the file tools are confined to, and the shell tool
+        ;; runs in. Configurable so a run can target another checkout.
+        root (or (get-in config [:run :root]) (System/getProperty "user.dir"))
         ctx {:conn conn :run-id run-id :config config
              :llm-adapter llm-adapter :llm-config llm-config
-             ;; The project root the file tools are confined to, and the shell
-             ;; tool runs in. Configurable so a run can target another checkout.
-             :root (or (get-in config [:run :root]) (System/getProperty "user.dir"))
+             :root root
+             ;; A run-start git baseline so a finalization critic can review
+             ;; exactly what this run changed. Only captured for a non-default
+             ;; manifest — the factory loop has no critic to read it, and
+             ;; skipping it keeps the common path off git entirely.
+             :git-baseline (when (not= loop-nm loop-name) (gitdiff/baseline root))
              ;; A per-run eval session, so defs the agent makes with `eval`
              ;; persist across its turns (define, then use) — REPL-first
              ;; development against the live image.
