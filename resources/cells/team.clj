@@ -17,7 +17,9 @@
             [mycelium.cell :as cell]
             [mycelium.core :as myc]
             [samizdat.agent.loop :as turn]
+            [samizdat.agent.planner :as planner]
             [samizdat.agent.state :as state]
+            [samizdat.llm.client :as llm]
             [samizdat.store.journal :as journal]
             [samizdat.store.runs :as runs]
             [samizdat.workflow :as wf]))
@@ -51,6 +53,30 @@
   [idx tasks]
   (when (> (count tasks) 1)
     (roster idx tasks)))
+
+(cell/defcell :team/plan
+  {:doc "Split the manager branch's problem into independent sub-tasks for the
+        team to fan out over. If sub-tasks were already provided (config
+        :run :subtasks), pass through — an explicit split wins. Otherwise one
+        LLM call proposes at most :max-subtasks parts; fail-soft to a single
+        worker on the whole problem when the call fails or yields no list."
+   :effects [:net]}
+  (fn [{:keys [conn run-id llm-adapter llm-config config] :as ctx}
+       {:keys [branch subtasks] :as data}]
+    (if (seq subtasks)
+      data
+      (let [max-parts (or (get-in config [:run :max-subtasks])
+                          planner/default-max-parts)
+            reply (try (:content (llm/chat llm-adapter llm-config
+                                           [{:role "user"
+                                             :content (planner/plan-prompt
+                                                       (:problem branch) max-parts)}]))
+                       (catch Throwable _ nil))
+            parts (planner/parse-plan reply max-parts)
+            tasks (or parts [(:problem branch)])]
+        (journal/note! conn run-id :plan
+                       {:data {:planned (count tasks) :split (boolean parts)}})
+        (assoc data :subtasks tasks)))))
 
 (cell/defcell :team/fan-out
   {:doc "Run a worker sub-loop per sub-task, in parallel, each its own branch on

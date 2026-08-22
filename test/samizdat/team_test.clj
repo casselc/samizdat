@@ -46,6 +46,54 @@
       (is (= :completed (:status r)))
       (is (str/includes? (:answer r) "1 worker")))))
 
+(defn- planner-then-workers
+  "One redef that plays two roles: the planner (returns a two-part split) on the
+  plan call, and a worker that dones its own sub-task on the worker calls."
+  [_ _ messages & _]
+  (let [content (str/join " " (map :content messages))]
+    (if (str/includes? content "splitting a coding task")
+      {:content "- part one\n- part two" :finish-reason "stop"}
+      (let [prob (str/trim (or (second (re-find #"## Problem\s+(.+)" content)) "task"))]
+        {:content (str "```tool-call\n{\"name\":\"done\",\"args\":{\"answer\":\"handled "
+                       prob "\"}}\n```")
+         :finish-reason "stop"}))))
+
+(deftest team-plans-its-own-split-when-no-subtasks-are-given
+  (with-redefs [llm/chat planner-then-workers]
+    (let [conn (db/open! ":memory:")
+          r (workflow/run! {:conn conn
+                            :config {:run {:loop "team"}} ; no :subtasks — the planner splits
+                            :llm-adapter :a :llm-config {:max-tokens 16384}
+                            :problem "build the thing" :max-turns 6})]
+      (is (= :completed (:status r)))
+      (testing "the planner's two parts each got their own worker branch"
+        (is (= #{"W0" "W1"}
+               (set (map :branch_id
+                         (db/fetch conn ["SELECT DISTINCT branch_id FROM turns"]))))))
+      (testing "the manager joins both planned parts"
+        (is (str/includes? (:answer r) "part one"))
+        (is (str/includes? (:answer r) "part two"))
+        (is (str/includes? (:answer r) "2 workers"))))))
+
+(deftest explicit-subtasks-skip-the-planner
+  ;; If config gives subtasks, :team/plan is a no-op — the planner LLM call must
+  ;; never fire. A mock that throws on the planner prompt proves it.
+  (let [planner-called (atom false)]
+    (with-redefs [llm/chat (fn [a c messages & rest]
+                             (when (str/includes? (str/join " " (map :content messages))
+                                                  "splitting a coding task")
+                               (reset! planner-called true))
+                             (apply worker-dones-its-task a c messages rest))]
+      (let [conn (db/open! ":memory:")
+            r (workflow/run! {:conn conn
+                              :config {:run {:loop "team" :subtasks ["alpha" "beta"]}}
+                              :llm-adapter :a :llm-config {:max-tokens 16384}
+                              :problem "the feature" :max-turns 6})]
+        (is (= :completed (:status r)))
+        (is (false? @planner-called) "planner must not run when subtasks are explicit")
+        (is (str/includes? (:answer r) "alpha"))
+        (is (str/includes? (:answer r) "beta"))))))
+
 (deftest each-team-worker-gets-a-peer-roster-and-coordination-guide
   (let [systems (atom [])
         capturing (fn [a c messages & rest]
