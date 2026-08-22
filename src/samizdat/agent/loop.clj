@@ -37,6 +37,7 @@
             [samizdat.agent.tools :as tools]
             [samizdat.llm.client :as llm]
             [samizdat.llm.fence :as fence]
+            [samizdat.agent.skills :as skills]
             [samizdat.llm.message :as message]
             [samizdat.store.artifacts :as artifacts]
             [samizdat.store.failures :as failures]
@@ -64,7 +65,11 @@
   (-> (slurp (io/resource "prompts/system.md"))
       ;; The SMT template catalogue left with the proof engines; the seam
       ;; stays until the coding prompt replaces this file outright.
-      (str/replace "{{templates}}" "")))
+      (str/replace "{{templates}}" "")
+      ;; The skill catalogue is always in the prompt but cheap — names and
+      ;; trigger descriptions only, never bodies — so the model knows what it
+      ;; can `skill load` and WHEN, without spending a turn to discover them.
+      (str/replace "{{skills}}" (skills/render-catalog))))
 
 (defn judge-exemptions
   "The DO-NOT-FLAG list shipped to the audit and review judges. A var rather

@@ -35,41 +35,79 @@
            (filter #(str/ends-with? (.getName ^java.io.File %) ".md"))
            (sort-by #(.getName ^java.io.File %))))))
 
+(defn parse-frontmatter
+  "Split a skill file into {:meta {..} :body ..}. A leading `---` fenced block
+  is parsed as simple `key: value` lines (name, description); the rest is the
+  body. No frontmatter -> empty meta and the whole file as body."
+  [content]
+  (let [content (str content)]
+    (if-let [m (re-find #"(?s)\A---\s*\n(.*?)\n---\s*\n?(.*)\z" content)]
+      (let [meta (into {}
+                       (keep (fn [line]
+                               (when-let [[_ k v] (re-find #"^\s*([A-Za-z_-]+)\s*:\s*(.+?)\s*$" line)]
+                                 [(keyword (str/lower-case k)) v]))
+                             (str/split-lines (nth m 1))))]
+        {:meta meta :body (str/trim (nth m 2))})
+      {:meta {} :body (str/trim content)})))
+
 (defn- describe
-  "A skill's one-line catalogue description: the first non-blank line that is
-  not a markdown heading, else the H1 text, else the name."
-  [content name]
-  (let [lines (remove str/blank? (str/split-lines content))]
-    (or (some #(when-not (str/starts-with? (str/trim %) "#") (str/trim %)) lines)
-        (some->> lines (some #(when (str/starts-with? (str/trim %) "#") %))
-                 (re-find #"#+\s*(.+)") second)
-        name)))
+  "A skill's one-line catalogue description — its trigger. The frontmatter
+  `description` (write it as \"Use when …\"), else the first non-heading line,
+  else nil so the skill drops from the catalogue but stays loadable."
+  [fm name]
+  (or (not-empty (str/trim (str (get-in fm [:meta :description]))))
+      (some #(when-not (or (str/blank? %) (str/starts-with? (str/trim %) "#"))
+               (str/trim %))
+            (str/split-lines (:body fm)))))
 
 (defn discover
-  "skill-name -> {:path :description}. A skill named in a later dir overrides an
-  earlier one, so .samizdat/skills wins over resources/skills."
+  "skill-name -> {:path :description :body}. A skill in a later dir overrides an
+  earlier one, so .samizdat/skills wins over resources/skills. Malformed files
+  are skipped, never fatal."
   ([] (discover default-dirs))
   ([dirs]
    (reduce
     (fn [acc dir]
       (reduce (fn [m ^java.io.File f]
-                (let [name (str/replace (.getName f) #"\.md$" "")]
-                  (assoc m name {:path (.getPath f)
-                                 :description (describe (slurp f) name)})))
+                (try
+                  (let [nm (str/replace (.getName f) #"\.md$" "")
+                        fm (parse-frontmatter (slurp f))
+                        nm (or (not-empty (str (get-in fm [:meta :name]))) nm)]
+                    (assoc m nm {:path (.getPath f)
+                                 :description (describe fm nm)
+                                 :body (:body fm)}))
+                  (catch Throwable _ m)))
               acc (md-files dir)))
     {} dirs)))
 
 (defn catalog
-  "The bounded list the agent sees: [{:name :description} ...], sorted."
+  "The always-on catalogue the agent sees: [{:name :description} ...], sorted.
+  A skill with no description is omitted (it can still be loaded by name), so
+  the visible list stays high-signal."
   ([] (catalog default-dirs))
   ([dirs]
    (->> (discover dirs)
-        (map (fn [[name {:keys [description]}]] {:name name :description description}))
+        (keep (fn [[nm {:keys [description]}]]
+                (when description {:name nm :description description})))
         (sort-by :name)
         vec)))
 
+(defn render-catalog
+  "The cheap, always-injected system-prompt block: names + trigger descriptions
+  only, never bodies. Empty string when there are no skills."
+  ([] (render-catalog default-dirs))
+  ([dirs]
+   (let [cat (catalog dirs)]
+     (if (empty? cat)
+       ""
+       (str "Skills are guidance you load only when a task matches. Load one"
+            " with `skill load {name}` when its description fits what you are"
+            " about to do:\n"
+            (str/join "\n" (for [{:keys [name description]} cat]
+                             (str "- **" name "** — " description))))))))
+
 (defn load-skill
-  "The full content of a named skill, or nil when there is no such skill."
+  "The full body of a named skill (frontmatter stripped), or nil for a miss."
   ([name] (load-skill default-dirs name))
   ([dirs name]
-   (some-> (get-in (discover dirs) [name :path]) slurp)))
+   (get-in (discover dirs) [name :body])))

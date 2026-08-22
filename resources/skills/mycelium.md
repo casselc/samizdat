@@ -1,3 +1,8 @@
+---
+name: mycelium
+description: Use when you are about to edit a cell, write a manifest, or change how the loop works — how to structure cells and workflows (effects, edges, dispatch) and the safe reload_cells/manifest/introspect flow.
+---
+
 # Structuring the loop: cells and manifests (mycelium)
 
 Load this before you edit a cell or a manifest. Your agentic loop is a
