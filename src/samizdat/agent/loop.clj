@@ -34,6 +34,7 @@
             [samizdat.store.interventions :as interventions]
             [samizdat.store.journal :as journal]
             [samizdat.store.knowledge :as knowledge]
+            [samizdat.store.messages :as messages]
             [samizdat.store.runs :as runs]))
 
 (def max-result-chars 4000)
@@ -149,6 +150,11 @@
                                  ;; branch's last-claim, recent when blank. nil
                                  ;; on an empty store, so keep identity drops it.
                                  (knowledge/breadcrumb-index conn last-claim)
+                                 ;; Unread mail from other branches on this run,
+                                 ;; a bounded preview; nil when the inbox is
+                                 ;; empty. Surfacing does not consume — the
+                                 ;; message tool's inbox action marks read.
+                                 (messages/render-inbox conn run-id (:id branch))
                                  (failures/render fhits)
                                  (artifacts/render ahits)])]
       {:block (when (seq blocks) (str/join "\n\n" blocks))

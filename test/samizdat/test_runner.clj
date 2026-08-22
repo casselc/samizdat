@@ -58,6 +58,7 @@
             [samizdat.agent-test]
             [samizdat.tasks-test]
             [samizdat.knowledge-test]
+            [samizdat.messages-test]
             [samizdat.workflow-test]
             [samizdat.security.secrets-test]
             [samizdat.config-test]
@@ -130,6 +131,7 @@
     samizdat.agent-test
     samizdat.tasks-test
     samizdat.knowledge-test
+    samizdat.messages-test
     samizdat.workflow-test
     samizdat.security.secrets-test
     samizdat.config-test

@@ -300,6 +300,24 @@
       created_at TEXT NOT NULL
     )"])
 
+(def ^:private v10
+  ;; Agent mailbox: durable messages between branches working one feature.
+  ;; to_branch NULL means broadcast to the whole run. read_at NULL marks the
+  ;; message unread — surfacing it in context does not consume it; the inbox
+  ;; tool is what stamps read_at. Inbox queries filter on run_id + read_at,
+  ;; so the natural index covers them.
+  ["CREATE TABLE IF NOT EXISTS messages (
+      id          TEXT PRIMARY KEY,
+      run_id      TEXT NOT NULL,
+      from_branch TEXT NOT NULL,
+      to_branch   TEXT,
+      body        TEXT NOT NULL,
+      created_at  TEXT NOT NULL,
+      read_at     TEXT
+    )"
+
+   "CREATE INDEX IF NOT EXISTS idx_messages_run ON messages(run_id, read_at)"])
+
 (def migrations
   "Ordered. Index 0 is migration 1; PRAGMA user_version holds the count applied."
-  [v1 v2 v3 v4 v5 v6 v7 v8 v9])
+  [v1 v2 v3 v4 v5 v6 v7 v8 v9 v10])

@@ -164,6 +164,14 @@ recall({query}) or recall({id})
     first, one per line. No matches means nothing is stored for it yet.
     With an {id} instead, return that one memory's full content — this is
     how you expand a breadcrumb index entry.
+message({action, ...})
+    A durable mailbox for branches working the same run. Actions:
+      send {body, to?}   Leave a message. With to (a branch id) it is
+                         addressed to that branch; without, it broadcasts to
+                         every other branch on the run.
+      inbox              Your unread messages (addressed to you or broadcast,
+                         never your own), then marks them read. Unread ones
+                         also surface in your context each turn.
 ```
 
 Knowledge lives in the database like the task board, but it is for facts
