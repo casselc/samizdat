@@ -52,8 +52,14 @@ complete({prefix})
 read_file({path})
     Read a file in the project, by a path relative to the project root.
 write_file({path, content})
-    Write a file in the project, creating directories as needed. Overwrites.
-    Confined to the project tree.
+    Write a whole file in the project, creating directories as needed.
+    Overwrites. Use this for NEW files; to change an existing file, prefer
+    edit_file so you don't have to reproduce the whole thing.
+edit_file({path, old_text, new_text, replace_all?})
+    Replace old_text with new_text in a file. old_text must match exactly
+    (whitespace tolerated per line). If it appears more than once, you get the
+    line numbers back — add surrounding context to narrow it, or pass
+    replace_all: true. This is how to change existing code.
 shell({command})
     Run a shell command. Read-only inspection (ls, cat, grep, find, git
     status/diff/log) and project tools (jolt test, jolt -e, cargo, pytest,

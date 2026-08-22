@@ -61,6 +61,7 @@
             [samizdat.security.secrets-test]
             [samizdat.config-test]
             [samizdat.files-test]
+            [samizdat.edit-test]
             [samizdat.control-test]
             [samizdat.util-test]
             [samizdat.lisp-test]
@@ -128,6 +129,7 @@
     samizdat.security.secrets-test
     samizdat.config-test
     samizdat.files-test
+    samizdat.edit-test
     samizdat.control-test
     samizdat.util-test
     samizdat.lisp-test

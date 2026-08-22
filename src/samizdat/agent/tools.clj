@@ -487,6 +487,9 @@
 (defmethod run-tool "write_file" [ctx]
   (files/write-file ctx))
 
+(defmethod run-tool "edit_file" [ctx]
+  (files/edit-file ctx))
+
 ;; --- the shell ---------------------------------------------------------------
 
 (defmethod run-tool "shell" [{:keys [branch] :as ctx}]
