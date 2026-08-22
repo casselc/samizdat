@@ -4,18 +4,22 @@
 ;; splits the problem into at most :run :max-subtasks parts with one LLM call.
 ;; :team/fan-out (cells/team.clj) then runs one worker sub-loop per part in
 ;; parallel, each its own branch on the shared run so they coordinate through
-;; the mailbox, then joins their answers into the manager branch. A problem the
-;; planner (or you) leaves as one part degenerates to a single worker.
+;; the mailbox. :team/supervise re-tasks any part that did not land (gave up,
+;; hit the turn cap, crashed) with one more run, then the answers join into the
+;; manager branch. A problem the planner (or you) leaves as one part degenerates
+;; to a single worker.
 ;;
 ;; This is the first, dataflow, slice of the multi-agent work (hc7): workers
 ;; run to completion and coordinate between-turn via the mailbox. Live per-turn
 ;; steering (the actor model) is a later step.
-{:cells {:start  :loop/assemble
-         :plan   :team/plan
-         :team   :team/fan-out
-         :finish :loop/finish}
+{:cells {:start      :loop/assemble
+         :plan       :team/plan
+         :team       :team/fan-out
+         :supervise  :team/supervise
+         :finish     :loop/finish}
 
- :edges {:start  :plan
-         :plan   :team
-         :team   :finish
-         :finish :end}}
+ :edges {:start      :plan
+         :plan       :team
+         :team       :supervise
+         :supervise  :finish
+         :finish     :end}}

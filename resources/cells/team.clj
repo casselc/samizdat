@@ -54,6 +54,31 @@
   (when (> (count tasks) 1)
     (roster idx tasks)))
 
+(defn- run-worker
+  "Run one worker sub-loop on sub-task `st` as branch `bid` on the shared run,
+  with peer roster `suffix`. Returns a result map. A throw becomes an :error
+  result rather than taking the whole fan-out down — one worker's crash is not
+  the team's."
+  [{:keys [conn run-id] :as ctx} worker bid idx st suffix]
+  (try
+    (runs/open-branch! conn run-id {:branch-id bid})
+    (let [b (state/new-branch {:id bid :problem st
+                               :messages (turn/initial-messages st suffix)})
+          out (myc/run-compiled worker ctx {:branch b :turn 1})]
+      {:worker idx :subtask st :branch bid
+       :status (:verdict out)
+       :answer (get-in out [:branch :final-answer])})
+    (catch Throwable e
+      {:worker idx :subtask st :branch bid :status :error
+       :answer (str "worker failed: " (ex-message e))})))
+
+(defn- ok?
+  "A worker result that landed a shippable answer. Anything else — :abandoned
+  (gave up), :exhausted (turn cap), :error (crash) — is a part the supervisor
+  may re-task."
+  [r]
+  (= :done (:status r)))
+
 (cell/defcell :team/plan
   {:doc "Split the manager branch's problem into independent sub-tasks for the
         team to fan out over. If sub-tasks were already provided (config
@@ -87,28 +112,43 @@
   (fn [{:keys [conn run-id] :as ctx} {:keys [branch subtasks] :as data}]
     (let [tasks (vec (if (seq subtasks) subtasks [(:problem branch)]))
           worker (wf/worker-compiled)
-          run-one (fn [idx st]
-                    (try
-                      (runs/open-branch! conn run-id {:branch-id (str "W" idx)})
-                      (let [b (state/new-branch
-                               {:id (str "W" idx) :problem st
-                                :messages (turn/initial-messages
-                                           st (worker-prompt idx tasks))})
-                            out (myc/run-compiled worker ctx {:branch b :turn 1})]
-                        {:worker idx :subtask st
-                         :status (:verdict out)
-                         :answer (get-in out [:branch :final-answer])})
-                      (catch Throwable e
-                        {:worker idx :subtask st :status :error
-                         :answer (str "worker failed: " (ex-message e))})))
           results (->> (map-indexed vector tasks)
-                       (mapv (fn [[i s]] (future (run-one i s))))
+                       (mapv (fn [[i s]]
+                               (future (run-worker ctx worker (str "W" i) i s
+                                                   (worker-prompt i tasks)))))
                        (mapv deref))]
       (journal/note! conn run-id :team
                      {:data {:workers (count results)
-                             :done (count (filter #(= :done (:status %)) results))}})
+                             :done (count (filter ok? results))}})
       (assoc data
+             :subtasks tasks
              :results (vec results)
              :verdict :done
              :branch (assoc branch :status :done
                             :final-answer (summarize results))))))
+
+(cell/defcell :team/supervise
+  {:doc "Watch the fan-out's results and re-task the parts that did not land: a
+        worker that gave up, hit the turn cap, or crashed gets one more run on a
+        fresh branch (W<idx>r1). The retry replaces the original only if it does
+        better. A bounded re-task, not an open loop — the supervisor's job is to
+        catch a stalled part, not to grind. Re-joins the answers after."
+   :effects [:net :db]}
+  (fn [{:keys [conn run-id] :as ctx} {:keys [branch results subtasks] :as data}]
+    (let [tasks (vec subtasks)
+          worker (wf/worker-compiled)
+          retried (mapv (fn [r]
+                          (if (ok? r)
+                            r
+                            (let [i (:worker r)
+                                  r2 (run-worker ctx worker (str "W" i "r1") i
+                                                 (:subtask r) (worker-prompt i tasks))]
+                              (if (ok? r2) r2 r))))
+                        results)
+          fixed (count (filter (fn [[a b]] (and (not (ok? a)) (ok? b)))
+                               (map vector results retried)))]
+      (journal/note! conn run-id :supervise
+                     {:data {:retried (count (remove ok? results)) :fixed fixed}})
+      (assoc data
+             :results retried
+             :branch (assoc branch :final-answer (summarize retried))))))

@@ -94,6 +94,36 @@
         (is (str/includes? (:answer r) "alpha"))
         (is (str/includes? (:answer r) "beta"))))))
 
+(deftest supervisor-retries-a-worker-that-gave-up
+  (let [seen (atom #{})
+        flaky (fn [_ _ messages & _]
+                (let [content (str/join " " (map :content messages))
+                      prob (str/trim (or (second (re-find #"## Problem\s+(.+)" content)) "task"))]
+                  (if (contains? @seen prob)
+                    ;; second sighting — the retry — succeeds
+                    {:content (str "```tool-call\n{\"name\":\"done\",\"args\":{\"answer\":\"handled "
+                                   prob "\"}}\n```")
+                     :finish-reason "stop"}
+                    ;; first sighting: give up, so the supervisor must re-task it
+                    (do (swap! seen conj prob)
+                        {:content (str "```tool-call\n{\"name\":\"give_up\","
+                                       "\"args\":{\"reason\":\"stuck\"}}\n```")
+                         :finish-reason "stop"}))))]
+    (with-redefs [llm/chat flaky]
+      (let [conn (db/open! ":memory:")
+            r (workflow/run! {:conn conn
+                              :config {:run {:loop "team" :subtasks ["alpha" "beta"]}}
+                              :llm-adapter :a :llm-config {:max-tokens 16384}
+                              :problem "the feature" :max-turns 6})]
+        (is (= :completed (:status r)))
+        (testing "the supervisor re-ran each failed part on its own retry branch"
+          (is (= #{"W0" "W1" "W0r1" "W1r1"}
+                 (set (map :branch_id
+                           (db/fetch conn ["SELECT DISTINCT branch_id FROM turns"]))))))
+        (testing "the retried answers replace the give-ups in the join"
+          (is (str/includes? (:answer r) "handled alpha"))
+          (is (str/includes? (:answer r) "handled beta")))))))
+
 (deftest each-team-worker-gets-a-peer-roster-and-coordination-guide
   (let [systems (atom [])
         capturing (fn [a c messages & rest]
