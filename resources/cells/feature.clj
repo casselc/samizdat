@@ -33,6 +33,21 @@
 
 (defn- revision [data] (or (:feature/revisions data) 0))
 
+(defn- safely
+  "Run a stage body, but never let it take the whole run down. A stage that
+  throws records the error and falls through to `fallback` (a safe default for
+  that stage) with the error accumulated on :feature/errors — so the run reaches
+  the SUPERVISOR, which sees the crash in its telemetry and can plan a fix,
+  rather than the workflow dying structurally. The supervisor cannot supervise a
+  loop that is already dead."
+  [conn run-id stage data body fallback]
+  (try (body)
+       (catch Throwable e
+         (let [msg (str (name stage) ": " (ex-message e))]
+           (journal/note! conn run-id :stage-error {:data {:stage stage :error (ex-message e)}})
+           (-> (fallback data)
+               (update :feature/errors (fnil conj []) msg))))))
+
 (defn- run-role
   "Run a role sub-loop (compiled) on a fresh branch `bid` with problem `prob` and
   role-prompt `suffix`. Returns {:verdict :answer}."
@@ -59,16 +74,20 @@
         :pass on a reviewer error/abstention."
    :effects [:net :db]}
   (fn [{:keys [conn run-id] :as ctx} {:keys [branch] :as data}]
-    (let [prob (str "Review this feature's work.\n\nFeature:\n" (:problem branch)
-                    "\n\nThe implementors reported:\n" (:final-answer branch))
-          {:keys [verdict answer]}
-          (try (run-role ctx (wf/compiled-manifest "reviewer")
-                         (str "R" (revision data)) prob
-                         (wf/prompt-text "roles/reviewer"))
-               (catch Throwable e {:verdict :error :answer (ex-message e)}))
-          decision (review-decision verdict answer)]
-      (journal/note! conn run-id :review {:data {:decision decision :verdict verdict}})
-      (assoc data :review/decision decision :review/findings (str answer)))))
+    (safely conn run-id :review data
+      (fn []
+        (let [prob (str "Review this feature's work.\n\nFeature:\n" (:problem branch)
+                        "\n\nThe implementors reported:\n" (:final-answer branch))
+              {:keys [verdict answer]}
+              (try (run-role ctx (wf/compiled-manifest "reviewer")
+                             (str "R" (revision data)) prob
+                             (wf/prompt-text "roles/reviewer"))
+                   (catch Throwable e {:verdict :error :answer (ex-message e)}))
+              decision (review-decision verdict answer)]
+          (journal/note! conn run-id :review {:data {:decision decision :verdict verdict}})
+          (assoc data :review/decision decision :review/findings (str answer))))
+      ;; fail-open: a broken review does not block shipping
+      (fn [d] (assoc d :review/decision :pass :review/findings "")))))
 
 (defn- parse-args [r]
   (update r :args #(try (json/read-str (str %) :key-fn keyword)
@@ -82,28 +101,32 @@
    :effects [:net :db]}
   (fn [{:keys [conn run-id root git-baseline llm-adapter llm-config]}
        {:keys [branch] :as data}]
-    (let [answer (:final-answer branch)
-          rows (map parse-args (journal/turns conn run-id))
-          det (judge/deterministic-block answer rows)
-          decision
-          (if det
-            :revise
-            (let [diff (gitdiff/diff root git-baseline)
-                  evidence (judge/evidence rows)
-                  prompt (judge/critic-prompt {:rules (turn/system-prompt)
-                                               :transcript (str answer)
-                                               :evidence evidence
-                                               :diff diff
-                                               :answer answer})
-                  reply (try (:content (llm/chat llm-adapter llm-config
-                                                 [{:role "user" :content prompt}]))
-                             (catch Throwable _ nil))
-                  verdict (if reply (judge/parse-verdict reply) :complete)
-                  blocking (when reply (judge/blocking-findings reply))]
-              (if (and (= :complete verdict) (not blocking)) :ship :revise)))]
-      (journal/note! conn run-id :critique
-                     {:data {:decision decision :deterministic (boolean det)}})
-      (assoc data :critic/decision decision :critique/findings (or det "")))))
+    (safely conn run-id :critique data
+      (fn []
+        (let [answer (:final-answer branch)
+              rows (map parse-args (journal/turns conn run-id))
+              det (judge/deterministic-block answer rows)
+              decision
+              (if det
+                :revise
+                (let [diff (gitdiff/diff root git-baseline)
+                      evidence (judge/evidence rows)
+                      prompt (judge/critic-prompt {:rules (turn/system-prompt)
+                                                   :transcript (str answer)
+                                                   :evidence evidence
+                                                   :diff diff
+                                                   :answer answer})
+                      reply (try (:content (llm/chat llm-adapter llm-config
+                                                     [{:role "user" :content prompt}]))
+                                 (catch Throwable _ nil))
+                      verdict (if reply (judge/parse-verdict reply) :complete)
+                      blocking (when reply (judge/blocking-findings reply))]
+                  (if (and (= :complete verdict) (not blocking)) :ship :revise)))]
+          (journal/note! conn run-id :critique
+                         {:data {:decision decision :deterministic (boolean det)}})
+          (assoc data :critic/decision decision :critique/findings (or det ""))))
+      ;; fail-open: a broken critic ships rather than wedging the loop
+      (fn [d] (assoc d :critic/decision :ship :critique/findings "")))))
 
 (defn- supervise-directive
   "The within-run directive from the supervisor's verdict + answer: STOP (ship
@@ -128,25 +151,34 @@
         SAFE to :continue so it can never wedge the loop."
    :effects [:net :db]}
   (fn [{:keys [conn run-id] :as ctx} {:keys [results] :as data}]
-    (let [dig (telemetry/digest {:results results
-                                 :review (:review/decision data)
-                                 :critic (:critic/decision data)
-                                 :revision (revision data)}
-                                (journal/turns conn run-id))
-          prob (str "Introspect on this run and decide whether the loop needs an "
-                    "adjustment. If a problem is systemic, tune the harness at "
-                    "the source with your tools.\n\n" dig)
-          {:keys [verdict answer]}
-          (try (run-role ctx (wf/compiled-manifest "supervisor")
-                         (str "S" (revision data)) prob
-                         (wf/prompt-text "roles/supervisor"))
-               (catch Throwable e {:verdict :error :answer (ex-message e)}))
-          directive (supervise-directive verdict answer)]
-      (journal/note! conn run-id :supervise
-                     {:data {:directive directive :verdict verdict}})
-      (cond-> (assoc data :supervisor/notes (str answer))
-        (= directive :revise) (assoc :feature/escalate true)
-        (= directive :stop)   (assoc :feature/stop true)))))
+    (safely conn run-id :supervise data
+      (fn []
+        (let [dig (telemetry/digest {:results results
+                                     :review (:review/decision data)
+                                     :critic (:critic/decision data)
+                                     :revision (revision data)
+                                     ;; stage crashes are the first thing the
+                                     ;; supervisor should see and plan around.
+                                     :errors (:feature/errors data)}
+                                    (journal/turns conn run-id))
+              prob (str "Introspect on this run and decide whether the loop needs "
+                        "an adjustment. A STAGE CRASHED signal is a harness bug the "
+                        "loop just survived — diagnose it and, if you can, fix it at "
+                        "the source with your tools. If a problem is systemic, tune "
+                        "the harness.\n\n" dig)
+              {:keys [verdict answer]}
+              (try (run-role ctx (wf/compiled-manifest "supervisor")
+                             (str "S" (revision data)) prob
+                             (wf/prompt-text "roles/supervisor"))
+                   (catch Throwable e {:verdict :error :answer (ex-message e)}))
+              directive (supervise-directive verdict answer)]
+          (journal/note! conn run-id :supervise
+                         {:data {:directive directive :verdict verdict}})
+          (cond-> (assoc data :supervisor/notes (str answer))
+            (= directive :revise) (assoc :feature/escalate true)
+            (= directive :stop)   (assoc :feature/stop true))))
+      ;; fail-safe: a broken supervisor lets the loop proceed unchanged
+      (fn [d] d))))
 
 (cell/defcell :feature/route
   {:doc "Decide the feature's fate: SHIP if the reviewer passed, the critic

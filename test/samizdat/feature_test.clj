@@ -116,6 +116,27 @@
       (testing "a revise round happened despite the reviewer passing"
         (is (contains? (branch-ids conn) "W0v1"))))))
 
+(deftest a-crashing-stage-does-not-kill-the-run-and-surfaces-to-the-supervisor
+  ;; critique used to throw an unbound-var and take the whole run down before the
+  ;; supervisor stage ran. Now a stage that crashes is recorded, fails soft, and
+  ;; the run reaches the supervisor with the crash in its telemetry to plan on.
+  (let [seen-digest (atom nil)
+        base (roles {:review :pass})]
+    (with-redefs [judge/deterministic-block (fn [& _] (throw (ex-info "boom in the judge" {})))
+                  judge/parse-verdict (constantly :complete)
+                  judge/blocking-findings (constantly nil)
+                  llm/chat (fn [a b messages & r]
+                             (when (str/includes? (str/join " " (map :content messages))
+                                                  "Your role: supervisor")
+                               (reset! seen-digest (str/join " " (map :content messages))))
+                             (apply base a b messages r))]
+      (let [conn (db/open! ":memory:")
+            r (run-feature conn {:config {:run {:loop "feature" :subtasks ["alpha"]}}})]
+        (is (= :completed (:status r)) "the run survived the crashing critique")
+        (is (some? @seen-digest) "it reached the supervisor despite the crash")
+        (is (str/includes? @seen-digest "STAGE CRASHED")
+            "the supervisor was shown the crash to plan around")))))
+
 (deftest supervisor-stop-ends-the-run-even-mid-revise
   ;; The reviewer keeps saying REVISE (would loop to the cap), but the supervisor
   ;; decides STOP — so the run ships round 0's work and ends, no revise round.

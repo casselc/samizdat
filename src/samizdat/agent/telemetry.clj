@@ -32,12 +32,15 @@
 
 (defn signals
   "The suboptimality flags the digest calls out explicitly, so the supervisor
-  does not have to re-derive the obvious: nothing shipped, a thrashing branch,
-  the reviewer bouncing the work, a run deep into its revisions."
-  [{:keys [results review revision]} health]
+  does not have to re-derive the obvious: a stage crashed, nothing shipped, a
+  thrashing branch, the reviewer bouncing the work, a run deep into revisions."
+  [{:keys [results review revision errors]} health]
   (let [total (count results)
         shipped (count (filter #(= :done (:status %)) results))]
     (cond-> []
+      (seq errors)
+      (into (map #(str "STAGE CRASHED — " %) errors))
+
       (and (pos? total) (zero? shipped))
       (conj "NO IMPLEMENTOR SHIPPED — the implement round produced nothing verified")
 
@@ -53,7 +56,7 @@
 (defn digest
   "The run-health block the supervisor reads. `facts` = {:results :review
   :critic :revision}; `rows` = the run's journal turns."
-  [{:keys [results review critic revision] :as facts} rows]
+  [{:keys [results review critic revision errors] :as facts} rows]
   (let [health (branch-health rows)
         total (count results)
         shipped (count (filter #(= :done (:status %)) results))
