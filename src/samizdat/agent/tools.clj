@@ -51,6 +51,7 @@
             [samizdat.agent.tools.journal]
             [samizdat.agent.tools.mutate]
             [samizdat.agent.tools.manifest]
+            [samizdat.agent.tools.skills]
             [samizdat.agent.tools.introspect]
             [samizdat.agent.tools.lsp]))
 

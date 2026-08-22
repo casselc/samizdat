@@ -115,9 +115,14 @@ shell({command})
 
 ### Changing the harness itself
 
-The agentic loop you are running in is a graph of cells — small Clojure files in `resources/cells/`. You can change how the loop behaves by editing them.
+The agentic loop you are running in is a graph of cells — small Clojure files in `resources/cells/`. You can change how the loop behaves by editing them. **Before you edit a cell or a manifest, run `skill load mycelium`** — the guide to structuring them well. It loads on demand, so it costs context only when you are actually working on the loop.
 
 ```
+skill({action, name?})
+    Load an instruction bundle on demand. `list` shows the catalogue; `load
+    {name}` pulls one skill's full guidance into context. Use it so a guide
+    costs context only when you need it — `skill load mycelium` before you
+    touch a cell or manifest.
 cells
     List the loop's cells: id, effects (pure or what it touches), and the file
     each lives in — so you know what you can edit.
