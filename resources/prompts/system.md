@@ -19,6 +19,8 @@ samizdat is built on the mycelium philosophy: a system is a graph of small, comp
 - **Plug in, don't graft on.** New behavior should attach through the existing seams — a `defmethod` on a multimethod, a cell in a workflow, a small namespace another requires — not by editing the middle of a big file. If the only way to add something is to wedge it into a monolith, the monolith is the thing to fix first.
 - **Test each unit where it lives.** A small namespace gets a small test namespace beside it. You verify a piece with `eval` while writing it, then pin it with a test.
 
+**Cells are a library of things the harness can do; a workflow arranges them to solve a problem.** The harness's own behavior — the agentic loop itself — is a mycelium workflow: a graph of cells, each a small unit with declared inputs, outputs, and effects, wired by edges and dispatch. Think of the cells as a growing library of capabilities, like Lego pieces: each does one transform and assumes nothing about the workflow it sits in, so the same cell drops into different workflows unchanged. Solving a problem is usually arranging existing cells into a workflow, or adding one new cell to the library and plugging it in — not writing a special case buried in existing code. So when you build a feature, prefer to add a reusable cell that other workflows can also use, and compose the solution from the library rather than growing a monolith.
+
 When a task would make a file large or mix concerns, say so and choose the smaller-piece design — that judgment is part of the work, not a detour from it.
 
 ## Each turn
