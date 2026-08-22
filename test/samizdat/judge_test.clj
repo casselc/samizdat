@@ -89,6 +89,25 @@
                             :problem "p" :max-turns 20})]
       (is (= :completed (:status r)) "bounded: it ships after the attempt cap"))))
 
+(deftest deterministic-finalization-gates
+  (testing "verifier: edited code but ran no test blocks; running a test clears it"
+    (is (judge/verifier-block [{:tool_name "edit_file" :args {:path "a.clj"}}]))
+    (is (nil? (judge/verifier-block [{:tool_name "edit_file" :args {:path "a.clj"}}
+                                     {:tool_name "shell" :args {:command "jolt -M:test"}}])))
+    (is (nil? (judge/verifier-block [{:tool_name "eval" :args {}}]))
+        "no code edit, nothing to verify")
+    (is (nil? (judge/verifier-block [{:tool_name "write_file" :args {:path "notes.txt"}}]))
+        "editing a non-code file is not a code change"))
+  (testing "claim: an answer that says it tested when nothing ran blocks"
+    (is (judge/claim-block "I ran the tests and they pass" [{:tool_name "eval" :args {}}]))
+    (is (nil? (judge/claim-block "I ran the tests and they pass"
+                                 [{:tool_name "shell" :args {:command "jolt -A:test -e ..."}}])))
+    (is (nil? (judge/claim-block "here is the plan" [{:tool_name "eval" :args {}}]))
+        "no test claim, nothing to check"))
+  (testing "deterministic-block returns the first gate that fires"
+    (is (judge/deterministic-block "done" [{:tool_name "edit_file" :args {:path "a.clj"}}]))
+    (is (nil? (judge/deterministic-block "done" [{:tool_name "eval" :args {}}])))))
+
 (deftest diff-review-blocks-on-severity
   (testing "a critical or high finding blocks; a low one does not"
     (is (judge/blocking-findings "VERDICT: COMPLETE\nFINDINGS:\n[critical] leaks a key"))

@@ -90,6 +90,49 @@
          (when (seq cmds)
            (str "\ncommands run:\n  " (str/join "\n  " cmds))))))
 
+;; --- deterministic finalization gates (run before the LLM judge) -----------
+
+(defn- tool-used? [rows pred]
+  (boolean (some (fn [r] (and (:tool_name r) (pred r))) rows)))
+
+(defn- ran-tests? [rows]
+  (tool-used? rows
+              (fn [r] (and (= "shell" (:tool_name r))
+                           (re-find #"(?i)-M:test|-A:test|run-tests|\bjolt\s+test\b|\bpytest\b|\bcargo\s+test\b|\bnpm\s+test\b"
+                                    (str (get-in r [:args :command])))))))
+
+(defn- edited-code? [rows]
+  (tool-used? rows
+              (fn [r] (and (#{"write_file" "edit_file"} (:tool_name r))
+                           (re-find #"(?i)\.(clj|cljc|cljs|edn|py|ts|js|rs|go)$"
+                                    (str (get-in r [:args :path])))))))
+
+(defn verifier-block
+  "A concrete, LLM-free finalization gate (dirge's verifier rung): the run
+  edited code but never ran a test. Returns a critique message, or nil when
+  there is nothing to say. Deterministic, so it fires before the paid judge."
+  [rows]
+  (when (and (edited-code? rows) (not (ran-tests? rows)))
+    (str "You changed code but never ran a test. Run the suite (`jolt -M:test`)"
+         " or the focused test, confirm it passes, then finish.")))
+
+(defn claim-block
+  "A finalization gate for an unsupported claim: the answer says it tested,
+  ran, or verified something, but the evidence shows no test ran. Returns a
+  message or nil."
+  [answer rows]
+  (when (and (re-find #"(?i)\b(tested|all tests pass|passing|verified|ran the (tests|suite))\b"
+                      (str answer))
+             (not (ran-tests? rows)))
+    (str "Your answer claims the work was tested or verified, but the run shows"
+         " no test was run. Run it and confirm, or drop the claim.")))
+
+(defn deterministic-block
+  "The first deterministic finalization gate that fires, or nil. These are
+  cheap and specific, so they run before the LLM judge and outrank it."
+  [answer rows]
+  (or (verifier-block rows) (claim-block answer rows)))
+
 (def preamble
   "The judge's standing instructions. Calibrated, not trigger-happy. A unified
   judge: it decides completeness AND reviews the run's own diff for defects."
