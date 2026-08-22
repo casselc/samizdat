@@ -1,0 +1,18 @@
+;; A multi-agent TEAM workflow: fan out a worker per sub-task, join the answers.
+;; Select with config :run :loop "team" and pass config :run :subtasks
+;; ["part A" "part B" …]; run! threads the sub-tasks into the data map and
+;; :team/fan-out (cells/team.clj) runs one worker sub-loop per sub-task in
+;; parallel, each its own branch on the shared run so they coordinate through
+;; the mailbox, then joins their answers into the manager branch. With no
+;; sub-tasks it degenerates to a single worker on the whole problem.
+;;
+;; This is the first, dataflow, slice of the multi-agent work (hc7): workers
+;; run to completion and coordinate between-turn via the mailbox. Live per-turn
+;; steering (the actor model) is a later step.
+{:cells {:start  :loop/assemble
+         :team   :team/fan-out
+         :finish :loop/finish}
+
+ :edges {:start  :team
+         :team   :finish
+         :finish :end}}

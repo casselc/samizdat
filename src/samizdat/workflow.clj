@@ -127,6 +127,13 @@
       :definition (read-definition (:edn row))
       :compiled (compile-loop (read-definition (:edn row)))})))
 
+(defn worker-compiled
+  "The worker sub-loop, compiled — for a team cell that runs a worker per
+  sub-task, each on its own branch. Compiled fresh (cells may have changed);
+  the caller runs it N times."
+  []
+  (compile-loop (read-definition (slurp (io/resource (manifest-resource "worker"))))))
+
 (defn workflow-prompt
   "A manifest may declare `:prompt <name>`, naming a prompt resource
   (resources/prompts/<name>.md) that is appended to the base system prompt for
@@ -174,7 +181,13 @@
     ;; back needs to know which version of itself produced it.
     (journal/note! conn run-id :loop-workflow
                    {:data {:name loop-nm :version version}})
-    (let [data (myc/run-compiled compiled ctx {:branch branch :turn 1})]
+    (let [data (myc/run-compiled compiled ctx
+                                 (cond-> {:branch branch :turn 1}
+                                   ;; A team workflow fans out over these — one
+                                   ;; worker per sub-task. The single-branch
+                                   ;; loops ignore the key.
+                                   (seq (get-in config [:run :subtasks]))
+                                   (assoc :subtasks (get-in config [:run :subtasks]))))]
       (when (myc/error? data)
         ;; A structural failure mid-run is a harness bug, not a branch
         ;; outcome; surface it rather than shipping a half-closed run.
