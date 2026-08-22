@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="img/logo.svg" alt="samizdat logo" width="180">
+</p>
+
 # samizdat
 
 A self-hosting agentic harness for Clojure development, written in
