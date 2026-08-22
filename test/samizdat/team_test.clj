@@ -45,3 +45,31 @@
                             :problem "solo" :max-turns 6})]
       (is (= :completed (:status r)))
       (is (str/includes? (:answer r) "1 worker")))))
+
+(deftest each-team-worker-gets-a-peer-roster-and-coordination-guide
+  (let [systems (atom [])
+        capturing (fn [a c messages & rest]
+                    (swap! systems conj
+                           (->> messages (filter #(= "system" (:role %))) first :content))
+                    (apply worker-dones-its-task a c messages rest))]
+    (with-redefs [llm/chat capturing]
+      (let [conn (db/open! ":memory:")]
+        (workflow/run! {:conn conn
+                        :config {:run {:loop "team" :subtasks ["alpha" "beta"]}}
+                        :llm-adapter :a :llm-config {:max-tokens 16384}
+                        :problem "the feature" :max-turns 6})
+        (let [seen @systems]
+          (testing "a worker knows which one it is and sees its peer's part"
+            ;; the worker on alpha is told it is W0 and that W1 has beta
+            (is (some #(and (str/includes? % "You are worker W0")
+                            (str/includes? % "W1: beta"))
+                      seen))
+            ;; and symmetrically the worker on beta sees W0: alpha
+            (is (some #(and (str/includes? % "You are worker W1")
+                            (str/includes? % "W0: alpha"))
+                      seen)))
+          (testing "the coordination guide (mailbox + remember) is injected"
+            (is (some #(and (str/includes? % "message")
+                            (str/includes? % "inbox")
+                            (str/includes? % "remember"))
+                      seen))))))))

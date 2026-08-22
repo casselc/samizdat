@@ -29,6 +29,29 @@
                    (str "- W" worker " [" (name (or status :unknown)) "] " subtask
                         (when answer (str "\n    → " answer)))))))
 
+(defn- roster
+  "The team-context prompt suffix for worker `idx`: which worker it is, its part,
+  and every peer's part (so it knows who to coordinate with), followed by the
+  shared team-worker guide. Only meaningful for a real team — a solo worker gets
+  no suffix (see worker-prompt)."
+  [idx tasks]
+  (str "## Your team\n\n"
+       "You are worker W" idx " of " (count tasks) ". Your part: " (nth tasks idx)
+       "\n\nThe team and their parts:\n"
+       (str/join "\n"
+                 (map-indexed (fn [i t] (str "- W" i (when (= i idx) " (you)") ": " t))
+                              tasks))
+       "\n\n"
+       (or (wf/prompt-text "team-worker") "")))
+
+(defn- worker-prompt
+  "The prompt suffix for worker `idx`: a peer roster + coordination guide for a
+  real team (>1 task), nil for a solo worker (which then runs the plain worker
+  prompt, unchanged from before this slice)."
+  [idx tasks]
+  (when (> (count tasks) 1)
+    (roster idx tasks)))
+
 (cell/defcell :team/fan-out
   {:doc "Run a worker sub-loop per sub-task, in parallel, each its own branch on
         the shared run (so they coordinate through the mailbox). Join their
@@ -41,8 +64,10 @@
           run-one (fn [idx st]
                     (try
                       (runs/open-branch! conn run-id {:branch-id (str "W" idx)})
-                      (let [b (state/new-branch {:id (str "W" idx) :problem st
-                                                 :messages (turn/initial-messages st)})
+                      (let [b (state/new-branch
+                               {:id (str "W" idx) :problem st
+                                :messages (turn/initial-messages
+                                           st (worker-prompt idx tasks))})
                             out (myc/run-compiled worker ctx {:branch b :turn 1})]
                         {:worker idx :subtask st
                          :status (:verdict out)

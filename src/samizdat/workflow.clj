@@ -134,6 +134,13 @@
   []
   (compile-loop (read-definition (slurp (io/resource (manifest-resource "worker"))))))
 
+(defn prompt-text
+  "The text of a named prompt resource (resources/prompts/<name>.md), or nil if
+  there is no such resource. The shared reader behind manifest :prompt injection
+  and the team-worker roster."
+  [name]
+  (some-> (io/resource (str "prompts/" name ".md")) slurp))
+
 (defn workflow-prompt
   "A manifest may declare `:prompt <name>`, naming a prompt resource
   (resources/prompts/<name>.md) that is appended to the base system prompt for
@@ -142,7 +149,7 @@
   runs the base prompt. Returns the text, or nil."
   [definition]
   (when-let [p (:prompt definition)]
-    (some-> (io/resource (str "prompts/" p ".md")) slurp)))
+    (prompt-text p)))
 
 (defn run!
   "Run one branch to completion under the stored loop definition.
