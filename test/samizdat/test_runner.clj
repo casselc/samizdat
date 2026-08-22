@@ -74,6 +74,7 @@
             [samizdat.team-test]
             [samizdat.planner-test]
             [samizdat.feature-test]
+            [samizdat.telemetry-test]
             [samizdat.supervisor-test]
             [samizdat.gitdiff-test]
             [samizdat.skills-test]
@@ -156,6 +157,7 @@
     samizdat.team-test
     samizdat.planner-test
     samizdat.feature-test
+    samizdat.telemetry-test
     samizdat.supervisor-test
     samizdat.gitdiff-test
     samizdat.skills-test

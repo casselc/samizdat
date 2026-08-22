@@ -1,0 +1,49 @@
+;; The SUPERVISOR role loop — the harness's introspection agent. Structurally
+;; the per-turn worker graph (assemble -> infer -> parse -> dispatch -> journal
+;; -> arbiter -> route), because the supervisor works the same way every role
+;; does: a turn at a time until it decides. What makes it the SUPERVISOR is its
+;; role prompt (prompts/roles/supervisor.md, injected by :feature/supervise) and
+;; that it is handed a run-health digest to introspect on rather than a part to
+;; build. It has the FULL tool surface on purpose — it must be able to read the
+;; journal and transcripts to diagnose, and edit manifests / cells / prompts
+;; (the mutation protocol, which validates every change) to tune the harness.
+;;
+;; A separate, independently-versioned manifest so the supervisor role owns and
+;; can tune its own loop (manifest save "supervisor").
+{:cells {:start          :loop/assemble
+         :infer          :llm/infer
+         :parse          :llm/parse
+         :provider-error :loop/provider-error
+         :no-call        :loop/no-call
+         :dispatch       :tool/dispatch
+         :journal        :journal/record
+         :arbiter        :gate/arbiter
+         :route          :loop/route}
+
+ :edges {:start          :infer
+         :infer          :parse
+         :parse          {:provider-error :provider-error
+                          :no-call        :no-call
+                          :tool           :dispatch}
+         :provider-error :route
+         :no-call        :route
+         :dispatch       :journal
+         :journal        :arbiter
+         :arbiter        :route
+         :route          {:continue  :start
+                          :done      :end
+                          :abandoned :end
+                          :exhausted :end}}
+
+ :dispatches {:parse [[:provider-error (fn [d] (not (:ok (:call d))))]
+                      [:no-call (fn [d] (let [p (:parsed d)]
+                                          (or (nil? p)
+                                              (= "__parse_error__" (:name p)))))]
+                      [:tool (fn [d] true)]]
+              :route [[:continue  (fn [d] (= :continue (:verdict d)))]
+                      [:done      (fn [d] (= :done (:verdict d)))]
+                      [:abandoned (fn [d] (= :abandoned (:verdict d)))]
+                      [:exhausted (fn [d] (= :exhausted (:verdict d)))]]}
+
+ :constraints [{:type :must-follow :if :dispatch :then :journal}
+               {:type :must-follow :if :journal :then :arbiter}]}

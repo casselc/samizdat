@@ -25,6 +25,7 @@
             [samizdat.agent.judge :as judge]
             [samizdat.agent.loop :as turn]
             [samizdat.agent.state :as state]
+            [samizdat.agent.telemetry :as telemetry]
             [samizdat.llm.client :as llm]
             [samizdat.store.journal :as journal]
             [samizdat.store.runs :as runs]
@@ -104,24 +105,48 @@
                      {:data {:decision decision :deterministic (boolean det)}})
       (assoc data :critic/decision decision :critique/findings (or det "")))))
 
+(defn- supervise-directive
+  "The within-run directive from the supervisor's verdict + answer: STOP (ship
+  and end), REVISE (force another round), or CONTINUE (default). A supervisor
+  that could not finish or said nothing fails SAFE to :continue — it must not be
+  able to wedge or hijack the loop by crashing."
+  [verdict answer]
+  (if (or (not= :done verdict) (str/blank? (str answer)))
+    :continue
+    (let [first-line (-> (str answer) str/split-lines first str str/upper-case)]
+      (cond (str/includes? first-line "STOP")   :stop
+            (str/includes? first-line "REVISE") :revise
+            :else :continue))))
+
 (cell/defcell :feature/supervise
-  {:doc "The supervisor: watch the role loops and adjust the outer loop. Round
-        one's concrete tweak — if the implement round shipped nothing (no worker
-        reached :done) it forces another round (:feature/escalate) rather than
-        letting a hollow result ship. Records a supervisory note either way.
-        Deeper manifest rewriting via the mutation protocol is a later step."
-   :effects [:db]}
-  (fn [{:keys [conn run-id]} {:keys [results] :as data}]
-    (let [total (count results)
-          shipped (count (filter #(= :done (:status %)) results))
-          no-progress? (and (pos? total) (zero? shipped))]
+  {:doc "The supervisor: the harness's introspection. It runs a supervisor ROLE
+        loop (supervisor.edn) over a run-health digest — it diagnoses what is
+        suboptimal and decides. Two levers: a within-run directive (CONTINUE /
+        REVISE / STOP, read by :feature/route) and, through its own tools, tuning
+        the harness's manifests/prompts/cells for future runs (the mutation
+        protocol validates those). Not a fixed rule — a reasoning agent. Fails
+        SAFE to :continue so it can never wedge the loop."
+   :effects [:net :db]}
+  (fn [{:keys [conn run-id] :as ctx} {:keys [results] :as data}]
+    (let [dig (telemetry/digest {:results results
+                                 :review (:review/decision data)
+                                 :critic (:critic/decision data)
+                                 :revision (revision data)}
+                                (journal/turns conn run-id))
+          prob (str "Introspect on this run and decide whether the loop needs an "
+                    "adjustment. If a problem is systemic, tune the harness at "
+                    "the source with your tools.\n\n" dig)
+          {:keys [verdict answer]}
+          (try (run-role ctx (wf/compiled-manifest "supervisor")
+                         (str "S" (revision data)) prob
+                         (wf/prompt-text "roles/supervisor"))
+               (catch Throwable e {:verdict :error :answer (ex-message e)}))
+          directive (supervise-directive verdict answer)]
       (journal/note! conn run-id :supervise
-                     {:data {:workers total :shipped shipped
-                             :review (:review/decision data)
-                             :critic (:critic/decision data)
-                             :escalate no-progress?}})
-      (cond-> data
-        no-progress? (assoc :feature/escalate true)))))
+                     {:data {:directive directive :verdict verdict}})
+      (cond-> (assoc data :supervisor/notes (str answer))
+        (= directive :revise) (assoc :feature/escalate true)
+        (= directive :stop)   (assoc :feature/stop true)))))
 
 (cell/defcell :feature/route
   {:doc "Decide the feature's fate: SHIP if the reviewer passed, the critic
@@ -136,10 +161,14 @@
           pass? (and (= :pass (:review/decision data))
                      (= :ship (:critic/decision data))
                      (not (:feature/escalate data)))
-          ship? (or pass? (>= rev cap))]
+          ;; The supervisor's STOP ends the run with what it has; otherwise a
+          ;; pass ships, and the revision cap is the backstop against an endless
+          ;; revise loop.
+          ship? (or (:feature/stop data) pass? (>= rev cap))]
       (journal/note! conn run-id :route
                      {:data {:decision (if ship? :ship :revise) :revision rev
-                             :cap cap :forced-ship (and ship? (not pass?))}})
+                             :cap cap :stopped (boolean (:feature/stop data))
+                             :forced-ship (and ship? (not pass?))}})
       (if ship?
         (assoc data :feature/decision :ship)
         (-> data
