@@ -1,0 +1,73 @@
+;; samizdat - a self-hosting agentic harness
+;; Copyright (C) 2026 Dmitri Sotnikov
+;;
+;; This program and the accompanying materials are made available under
+;; the terms of the Eclipse Public License 2.0 which is available at
+;; https://www.eclipse.org/legal/epl-2.0/
+;;
+;; SPDX-License-Identifier: EPL-2.0
+
+(ns samizdat.repl-test
+  "The in-process eval seam: the agent develops REPL-first against the live
+  harness image — eval a form, see the value and any output, inspect a var,
+  complete a name — the way the plan says development should work."
+  (:require [clojure.string :as str]
+            [clojure.test :refer [deftest testing is]]
+            [samizdat.repl :as repl]))
+
+(deftest eval-returns-value-and-output
+  (testing "a form's value is captured, printed readably"
+    (let [r (repl/eval-code "(+ 1 2 3)")]
+      (is (:ok r))
+      (is (= "6" (:value r)))))
+  (testing "stdout is captured alongside the value"
+    (let [r (repl/eval-code "(do (println \"side effect\") :done)")]
+      (is (:ok r))
+      (is (= ":done" (:value r)))
+      (is (str/includes? (:out r) "side effect"))))
+  (testing "an exception is data, not a thrown error"
+    (let [r (repl/eval-code "(/ 1 0)")]
+      (is (not (:ok r)))
+      (is (str/includes? (:error r) "Divide by zero"))))
+  (testing "a read error is reported, not thrown"
+    (let [r (repl/eval-code "(+ 1 2")]
+      (is (not (:ok r)))
+      (is (some? (:error r))))))
+
+(deftest defs-persist-within-a-session
+  ;; REPL-first development: define, then use, across calls in one session.
+  (let [sess (repl/new-session)]
+    (repl/eval-code "(def scratch-x 41)" sess)
+    (is (= "42" (:value (repl/eval-code "(inc scratch-x)" sess))))
+    (testing "a defn is callable on the next eval"
+      (repl/eval-code "(defn scratch-double [n] (* 2 n))" sess)
+      (is (= "20" (:value (repl/eval-code "(scratch-double 10)" sess)))))))
+
+(deftest sessions-are-isolated
+  (let [a (repl/new-session) b (repl/new-session)]
+    (repl/eval-code "(def only-in-a 1)" a)
+    (is (:ok (repl/eval-code "only-in-a" a)))
+    (is (not (:ok (repl/eval-code "only-in-a" b)))
+        "a def in one session is not visible in another")))
+
+(deftest can-reach-the-live-harness-image
+  ;; The homoiconic point: the agent evaluates against the running harness, so
+  ;; it can inspect and exercise samizdat's own code, not a fresh sandbox.
+  (let [r (repl/eval-code "(require '[samizdat.lisp :as l]) (:status (l/balance \"(+ 1 2\"))")]
+    (is (:ok r))
+    (is (= ":repaired" (:value r)))))
+
+(deftest doc-of-a-project-var
+  (testing "arglists and docstring of samizdat's own code"
+    (let [r (repl/doc-sym "samizdat.lisp/balance")]
+      (is (= '([s]) (:arglists r)))
+      (is (str/includes? (:doc r) "delimiter"))))
+  (testing "an unknown symbol is reported, not thrown"
+    (is (:not-found (repl/doc-sym "samizdat.lisp/nope")))))
+
+(deftest complete-a-prefix
+  (testing "public symbols of a namespace matching a prefix"
+    (let [ms (repl/complete "samizdat.lisp/b")]
+      (is (some #{"samizdat.lisp/balance"} ms))))
+  (testing "a bare prefix completes across clojure.core"
+    (is (some #{"reduce"} (repl/complete "redu")))))

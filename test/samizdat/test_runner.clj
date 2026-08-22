@@ -64,6 +64,7 @@
             [samizdat.control-test]
             [samizdat.util-test]
             [samizdat.lisp-test]
+            [samizdat.repl-test]
             [samizdat.security.policy-test]
             [samizdat.llm-test]
             [samizdat.prompt-test]
@@ -130,6 +131,7 @@
     samizdat.control-test
     samizdat.util-test
     samizdat.lisp-test
+    samizdat.repl-test
     samizdat.security.policy-test
     samizdat.prompt-test
     samizdat.server-test

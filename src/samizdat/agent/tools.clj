@@ -36,6 +36,7 @@
             [samizdat.agent.files :as files]
             [samizdat.agent.state :as state]
             [samizdat.llm.message :as message]
+            [samizdat.repl :as repl]
             [samizdat.security.policy :as policy]
             [samizdat.store.journal :as journal]
             [samizdat.store.tasks :as tasks]))
@@ -442,6 +443,41 @@
                         " dead end.")))
             :progress? true
             :thesis thesis)))))
+
+;; --- the REPL ----------------------------------------------------------------
+
+(defmethod run-tool "eval" [{:keys [branch repl-session] :as ctx}]
+  ;; Evaluate Clojure in the live harness image. REPL-first development: the
+  ;; agent tries a form, sees the value and output, and iterates before
+  ;; committing it to a file. :neutral — evaluating establishes nothing on its
+  ;; own; a define-and-test is exploration, and progress is the file it leads
+  ;; to. Defs persist across evals within a run (the session is per-run).
+  (if-let [m (missing ctx :code)]
+    (malformed branch m)
+    (let [r (if repl-session
+              (repl/eval-code (str (arg ctx :code)) repl-session)
+              (repl/eval-code (str (arg ctx :code))))]
+      (if (:ok r)
+        (ok branch (str "=> " (:value r)
+                        (when (seq (:out r)) (str "\n" (:out r)))))
+        (fail branch (str "Eval error: " (:error r)
+                          (when (seq (:out r)) (str "\n" (:out r)))))))))
+
+(defmethod run-tool "doc" [{:keys [branch] :as ctx}]
+  (if-let [m (missing ctx :symbol)]
+    (malformed branch m)
+    (let [d (repl/doc-sym (str (arg ctx :symbol)))]
+      (if (:not-found d)
+        (malformed branch (str "No var " (arg ctx :symbol) " is loaded."))
+        (ok branch (str (:name d) "\n" (pr-str (:arglists d)) "\n\n" (:doc d)))))))
+
+(defmethod run-tool "complete" [{:keys [branch] :as ctx}]
+  (if-let [m (missing ctx :prefix)]
+    (malformed branch m)
+    (let [ms (repl/complete (str (arg ctx :prefix)))]
+      (ok branch (if (seq ms)
+                   (str/join "\n" (take 50 ms))
+                   (str "No symbols match " (arg ctx :prefix) "."))))))
 
 ;; --- the files ---------------------------------------------------------------
 

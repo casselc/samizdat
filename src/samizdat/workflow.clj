@@ -27,6 +27,7 @@
             [mycelium.workflow :as wf]
             [samizdat.agent.cells :as cells]
             [samizdat.agent.loop :as branch-loop]
+            [samizdat.repl :as repl]
             [samizdat.agent.state :as state]
             [samizdat.store.journal :as journal]
             [samizdat.store.runs :as runs]
@@ -87,6 +88,10 @@
              ;; The project root the file tools are confined to, and the shell
              ;; tool runs in. Configurable so a run can target another checkout.
              :root (or (get-in config [:run :root]) (System/getProperty "user.dir"))
+             ;; A per-run eval session, so defs the agent makes with `eval`
+             ;; persist across its turns (define, then use) — REPL-first
+             ;; development against the live image.
+             :repl-session (repl/new-session)
              :max-turns max-turns}]
     (runs/open-branch! conn run-id {:branch-id "B1"})
     ;; Which loop drove this run, durably: an agent reading a surprising run

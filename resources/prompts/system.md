@@ -30,6 +30,22 @@ give_up({reason})
     Stop working this line and say why.
 ```
 
+### Developing at the REPL
+
+```
+eval({code})
+    Evaluate Clojure in the live harness image and see the value and any
+    printed output. This is how to work: try a form, inspect what it returns,
+    and iterate BEFORE writing it to a file. Definitions persist across your
+    evals in this run, so you can define a function, then call it. You can
+    require and exercise the project's own namespaces here too.
+doc({symbol})
+    The arglists and docstring of a var, e.g. doc({symbol: "samizdat.lisp/balance"}).
+complete({prefix})
+    Symbols starting with a prefix — a qualified prefix ("samizdat.lisp/b")
+    completes within that namespace, a bare one ("redu") across the core.
+```
+
 ### Doing work
 
 ```
