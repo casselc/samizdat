@@ -35,6 +35,7 @@
             [clojure.tools.logging :as log]
             [mycelium.core :as myc]
             [mycelium.cell :as cell]
+            [mycelium.compose :as compose]
             [mycelium.workflow :as wf]
             [samizdat.cells :as cells]
             [samizdat.agent.gitdiff :as gitdiff]
@@ -68,6 +69,22 @@
   [edn-text]
   (edn/read-string edn-text))
 
+(defn register-subworkflows!
+  "A manifest can compose sub-loops: `:subworkflows {cell-id manifest-name}`
+  registers each named manifest as a workflow-cell (mycelium.compose) under
+  cell-id, so the parent can run it as one node. Sub-manifests are read from
+  their factory resource — a composed loop is authored, not agent-generated in
+  the db (yet). Runs before the parent compiles, since the parent references
+  these cell ids. A no-op for a flat manifest."
+  [definition]
+  (doseq [[cell-id mname] (:subworkflows definition)]
+    (let [res (manifest-resource mname)]
+      (when-not (io/resource res)
+        (throw (ex-info (str "sub-workflow manifest '" mname "' has no resource "
+                             res) {:manifest mname})))
+      (compose/register-workflow-cell!
+       cell-id (read-definition (slurp (io/resource res))) {}))))
+
 (defn compile-loop
   "Compile a loop definition through mycelium's full static checking:
   structure, dispatch coverage, reachability, and the :constraints that make
@@ -82,6 +99,8 @@
   ;; Idempotent, cheap (one file), and it picks up any edited cell, which is
   ;; the hot-reload the mutation protocol will build on.
   (cells/load-cells!)
+  ;; Register any composed sub-loops as cells before the parent references them.
+  (register-subworkflows! definition)
   (let [compiled (myc/pre-compile definition)]
     (when-let [warnings (:mycelium/compile-warnings (:compiled-fsm compiled))]
       (log/warn "loop definition compiled with warnings:" (pr-str warnings)))

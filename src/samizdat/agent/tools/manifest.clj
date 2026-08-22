@@ -31,17 +31,31 @@
   (:require [clojure.edn :as edn]
             [clojure.java.io :as io]
             [clojure.string :as str]
+            [mycelium.compose :as compose]
             [mycelium.core :as myc]
             [samizdat.agent.tools.base :as base]
             [samizdat.cells :as cells]
             [samizdat.store.workflows :as workflows]))
 
+(defn- register-subworkflows! [definition]
+  ;; Mirrors samizdat.workflow/register-subworkflows! — kept here rather than
+  ;; required, to keep this tool out of the loop-driver's cycle.
+  (doseq [[cell-id mname] (:subworkflows definition)]
+    (let [res (str "manifests/" mname ".edn")]
+      (when-not (io/resource res)
+        (throw (ex-info (str "sub-workflow manifest '" mname "' has no resource")
+                        {:manifest mname})))
+      (compose/register-workflow-cell!
+       cell-id (edn/read-string (slurp (io/resource res))) {}))))
+
 (defn- validate!
-  "Compile the definition the way load-loop! will — cells loaded, then a full
-  static pre-compile. Throws with the compile error when it does not hold."
+  "Compile the definition the way load-loop! will — cells loaded, composed
+  sub-loops registered, then a full static pre-compile. Throws on any error."
   [edn-text]
   (cells/load-cells!)
-  (myc/pre-compile (edn/read-string edn-text))
+  (let [definition (edn/read-string edn-text)]
+    (register-subworkflows! definition)
+    (myc/pre-compile definition))
   true)
 
 (def ^:private usage

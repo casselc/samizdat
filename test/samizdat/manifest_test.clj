@@ -66,6 +66,15 @@
             (is (= :failure (:category r)))
             (is (nil? (workflows/load-latest conn "bad")) "nothing broken was stored")))))))
 
+(deftest a-composed-manifest-registers-and-compiles-its-sub-loops
+  (with-db
+    (fn [conn]
+      (let [loaded (wf/load-loop! conn "orchestrator")]
+        (is (= "orchestrator" (:name loaded)))
+        (is (some? (:compiled loaded)) "the top level compiles once its sub-loops are registered")
+        (is (= {:loop/worker "worker"} (:subworkflows (:definition loaded)))
+            "it declares the worker sub-loop")))))
+
 (deftest list-and-show-round-trip
   (with-db
     (fn [conn]

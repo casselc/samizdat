@@ -108,6 +108,18 @@
         {:content "```tool-call\n{\"name\": \"done\", \"args\": {\"answer\": \"x\"}}\n```"
          :finish-reason "stop"}))))
 
+(deftest the-orchestrator-runs-worker-and-critic-as-nested-sub-loops
+  ;; The hierarchical manifest: the worker loop is a nested workflow-cell, the
+  ;; critic gates finalization at the top level. Same behavior as the flat
+  ;; critic manifest, composed instead of hand-wired.
+  (with-redefs [llm/chat (scripted-chat ["INCOMPLETE" "COMPLETE"])]
+    (let [conn (db/open! ":memory:")
+          r (workflow/run! {:conn conn :config {:run {:loop "orchestrator"}}
+                            :llm-adapter :a :llm-config {:max-tokens 16384}
+                            :problem "p" :max-turns 8})]
+      (is (= :completed (:status r)))
+      (is (= "x" (:answer r)) "worker did the work, critic shipped it"))))
+
 (deftest a-complete-verdict-with-a-critical-finding-still-blocks
   ;; The diff-review half of the unified judge: COMPLETE but the diff has a
   ;; critical defect -> undo the done and send it back; a clean pass ships.
