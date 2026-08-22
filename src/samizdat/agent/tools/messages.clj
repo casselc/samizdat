@@ -1,5 +1,5 @@
 ;; samizdat - a self-hosting agentic harness
-;; License: EPL-2.0
+;; License: GPL-3.0-or-later
 
 (ns samizdat.agent.tools.messages
   "The mailbox tool: message send {to?, body} and message inbox.

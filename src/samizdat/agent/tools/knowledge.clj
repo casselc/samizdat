@@ -1,5 +1,5 @@
 ;; samizdat - a self-hosting agentic harness
-;; License: EPL-2.0
+;; License: GPL-3.0-or-later
 
 (ns samizdat.agent.tools.knowledge
   "Long-term memory tools: remember a fact, recall it by search.

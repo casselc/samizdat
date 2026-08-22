@@ -1,5 +1,5 @@
 ;; samizdat - a self-hosting agentic harness
-;; SPDX-License-Identifier: EPL-2.0
+;; SPDX-License-Identifier: GPL-3.0-or-later
 ;;
 ;; The agentic loop's cells — dynamically loaded from resources, NOT compiled
 ;; into src. Each is a thin cell over a named step in samizdat.agent.loop, so
