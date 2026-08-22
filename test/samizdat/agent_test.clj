@@ -1464,6 +1464,19 @@
                                     {:current-turn 3 :tools-called ["eval"]
                                      :branch-before (branch-with) :branch-after (branch-with)}))))))
 
+(deftest the-studying-gate-catches-inspect-without-shipping
+  (let [studying (branch-with :turns (vec (concat [{:tool "write_file"}]
+                                                  (repeat 10 {:tool "read_file"}))))
+        exploring (branch-with :turns (vec (repeat 12 {:tool "read_file"})))]
+    (testing "fires when a branch that shipped lapses into inspection"
+      (is (some #{:studying} (map :gate (arbiter/eligible {:branch studying :max-turns 40})))))
+    (testing "silent on opening exploration — nothing shipped yet to lapse from"
+      (is (not-any? #{:studying} (map :gate (arbiter/eligible {:branch exploring :max-turns 40})))))
+    (testing "settles the moment the branch ships"
+      (is (= :met (arbiter/settle {:gate :studying :turn 1 :window 3}
+                                  {:current-turn 2 :tools-called ["edit_file"]
+                                   :branch-before (branch-with) :branch-after (branch-with)}))))))
+
 (deftest the-reflexion-log-accumulates-and-the-stuck-gate-surfaces-it
   (testing "reflexion-log appends newest-last, bounded at five"
     (let [b (reduce (fn [b c] (assoc b :abandoned (state/abandoned-log b c)))

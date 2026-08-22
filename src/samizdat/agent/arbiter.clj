@@ -173,6 +173,9 @@
         ;; The nudge is met when the branch actually looked at or changed its
         ;; loop — the only observable a reflection can leave.
         :reflection (called? "introspect" "reload_cells" "cells")
+        ;; Met when the branch stops studying and ships something.
+        :studying (called? "write_file" "edit_file" "shell" "reload_cells"
+                           "done" "give_up")
         false)
       :met
 

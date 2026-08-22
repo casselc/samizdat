@@ -85,6 +85,17 @@
  {:value 2 :kind :re-fire-guard :capability-tunable? true
   :doc "How often the stall nudge may re-fire on one branch."}
 
+ :studying-turns
+ {:value 10 :kind :threshold :capability-tunable? true
+  :doc "Consecutive inspection-only turns (read/grep/eval/…), after the branch
+        has shipped at least once, before the supervisor's studying gate fires.
+        High enough that opening exploration is never nagged; a live run
+        over-studied for twenty (karamazov-j5t)."}
+
+ :max-studying-nudges
+ {:value 3 :kind :re-fire-guard :capability-tunable? true
+  :doc "How often the studying nudge may re-fire on one branch."}
+
  :max-stuck-hints
  {:value 3 :kind :re-fire-guard :capability-tunable? true
   :doc "How often the stuck hint may re-fire on one branch."}

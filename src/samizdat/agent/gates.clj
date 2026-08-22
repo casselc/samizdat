@@ -35,7 +35,8 @@
   (:require [clojure.edn :as edn]
             [clojure.java.io :as io]
             [clojure.string :as str]
-            [samizdat.agent.state :as state]))
+            [samizdat.agent.state :as state]
+            [samizdat.agent.supervisor :as supervisor]))
 
 (defn load-config
   "Gate thresholds from resources/gates.edn. Read through io/resource so the
@@ -330,6 +331,26 @@
                     "\n\nNothing has advanced in " (:turns-since-progress branch)
                     " turns."))
     :prediction (fn [_] "the branch produces a new confirmed artifact or discharges a sub-claim")
+    :window 3}
+
+   {:gate :studying
+    :priority 11
+    :budget :max-studying-nudges
+    :doc "The supervisor's stall: the branch shipped something, then lapsed into
+          inspecting — read/grep/eval turn after turn, all succeeding, changing
+          nothing. The failure gates key on errors (there are none) and the
+          progress gate keys on confirmed artifacts (a coding run makes none),
+          so this is the case both are blind to. It watches the branch's own
+          turn pattern instead — see samizdat.agent.supervisor, which is also
+          what a multi-agent supervisor sub-loop reads. Coding-tunable, since it
+          reads tool mechanics, not verification."
+    :when (fn [{:keys [branch]}]
+            (and (state/active? branch)
+                 (supervisor/over-studying? (:turns branch)
+                                            (threshold :studying-turns))))
+    :message (fn [{:keys [branch]}]
+               (supervisor/stall-nudge (:turns branch) (threshold :studying-turns)))
+    :prediction (fn [_] "the branch commits a change, runs a test, or ships")
     :window 3}
 
    ;; The :tier-escalation gate lived here: artifacts exist but only from the
