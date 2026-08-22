@@ -23,18 +23,38 @@ jobs:
       # Building jolt from source needs Chez and a C toolchain; the release
       # binary is self-contained, so the install script is the cheap path.
       - name: Install jolt
-        # Retried, and the download separated from running it. raw.githubusercontent
-        # rate-limits Actions runners and answers 403 on a commit whose own tests
-        # were fine. Fetching to a file first also means a rate-limit page can
-        # never be fed to bash as if it were the installer.
+        # raw.githubusercontent rate-limits ANONYMOUS Actions runners and answers
+        # 403, which bit us repeatedly. Fetch through the GitHub API with the
+        # runner's own GITHUB_TOKEN first: authenticated requests have a far
+        # higher rate limit and do not 403. Fall back to raw with curl's own
+        # retry. Either way the installer is written to a file first, so a
+        # rate-limit HTML page can never be fed to bash as the installer.
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
-          for i in 1 2 3; do
-            curl -fsSL https://raw.githubusercontent.com/jolt-lang/jolt/main/install \
-              -o /tmp/jolt-install && break
-            echo "attempt $i failed; retrying in $((i * 5))s" >&2
-            sleep $((i * 5))
+          fetch() {
+            # 1) authenticated API (raw content), highest rate limit
+            curl -fsSL --retry 5 --retry-delay 4 --retry-all-errors \
+              -H "Authorization: Bearer $GH_TOKEN" \
+              -H "Accept: application/vnd.github.raw+json" \
+              https://api.github.com/repos/jolt-lang/jolt/contents/install?ref=main \
+              -o /tmp/jolt-install && test -s /tmp/jolt-install && return 0
+            # 2) anonymous raw, with curl retry/backoff
+            curl -fsSL --retry 5 --retry-delay 4 --retry-all-errors \
+              https://raw.githubusercontent.com/jolt-lang/jolt/main/install \
+              -o /tmp/jolt-install && test -s /tmp/jolt-install && return 0
+            return 1
+          }
+          for i in 1 2 3 4 5; do
+            fetch && break
+            echo "installer fetch attempt $i failed; retrying in $((i * 8))s" >&2
+            sleep $((i * 8))
           done
           test -s /tmp/jolt-install || { echo "could not fetch the jolt installer" >&2; exit 1; }
+          # An API/rate-limit response is JSON/HTML, not a shell script; a real
+          # installer starts with a shebang. Guard against running a stray page.
+          head -1 /tmp/jolt-install | grep -q '^#!' \
+            || { echo "fetched file is not a script:" >&2; head -3 /tmp/jolt-install >&2; exit 1; }
           bash /tmp/jolt-install --dir "$HOME/.local/bin"
           echo "$HOME/.local/bin" >> $GITHUB_PATH
 
@@ -62,14 +82,30 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Install jolt
+        # See the fast job for why: authenticated API fetch dodges the anonymous
+        # raw.githubusercontent 403 rate limit, with a raw fallback and retries.
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
-          for i in 1 2 3; do
-            curl -fsSL https://raw.githubusercontent.com/jolt-lang/jolt/main/install \
-              -o /tmp/jolt-install && break
-            echo "attempt $i failed; retrying in $((i * 5))s" >&2
-            sleep $((i * 5))
+          fetch() {
+            curl -fsSL --retry 5 --retry-delay 4 --retry-all-errors \
+              -H "Authorization: Bearer $GH_TOKEN" \
+              -H "Accept: application/vnd.github.raw+json" \
+              https://api.github.com/repos/jolt-lang/jolt/contents/install?ref=main \
+              -o /tmp/jolt-install && test -s /tmp/jolt-install && return 0
+            curl -fsSL --retry 5 --retry-delay 4 --retry-all-errors \
+              https://raw.githubusercontent.com/jolt-lang/jolt/main/install \
+              -o /tmp/jolt-install && test -s /tmp/jolt-install && return 0
+            return 1
+          }
+          for i in 1 2 3 4 5; do
+            fetch && break
+            echo "installer fetch attempt $i failed; retrying in $((i * 8))s" >&2
+            sleep $((i * 8))
           done
           test -s /tmp/jolt-install || { echo "could not fetch the jolt installer" >&2; exit 1; }
+          head -1 /tmp/jolt-install | grep -q '^#!' \
+            || { echo "fetched file is not a script:" >&2; head -3 /tmp/jolt-install >&2; exit 1; }
           bash /tmp/jolt-install --dir "$HOME/.local/bin"
           echo "$HOME/.local/bin" >> $GITHUB_PATH
 
@@ -97,14 +133,30 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Install jolt
+        # See the fast job for why: authenticated API fetch dodges the anonymous
+        # raw.githubusercontent 403 rate limit, with a raw fallback and retries.
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
-          for i in 1 2 3; do
-            curl -fsSL https://raw.githubusercontent.com/jolt-lang/jolt/main/install \
-              -o /tmp/jolt-install && break
-            echo "attempt $i failed; retrying in $((i * 5))s" >&2
-            sleep $((i * 5))
+          fetch() {
+            curl -fsSL --retry 5 --retry-delay 4 --retry-all-errors \
+              -H "Authorization: Bearer $GH_TOKEN" \
+              -H "Accept: application/vnd.github.raw+json" \
+              https://api.github.com/repos/jolt-lang/jolt/contents/install?ref=main \
+              -o /tmp/jolt-install && test -s /tmp/jolt-install && return 0
+            curl -fsSL --retry 5 --retry-delay 4 --retry-all-errors \
+              https://raw.githubusercontent.com/jolt-lang/jolt/main/install \
+              -o /tmp/jolt-install && test -s /tmp/jolt-install && return 0
+            return 1
+          }
+          for i in 1 2 3 4 5; do
+            fetch && break
+            echo "installer fetch attempt $i failed; retrying in $((i * 8))s" >&2
+            sleep $((i * 8))
           done
           test -s /tmp/jolt-install || { echo "could not fetch the jolt installer" >&2; exit 1; }
+          head -1 /tmp/jolt-install | grep -q '^#!' \
+            || { echo "fetched file is not a script:" >&2; head -3 /tmp/jolt-install >&2; exit 1; }
           bash /tmp/jolt-install --dir "$HOME/.local/bin"
           echo "$HOME/.local/bin" >> $GITHUB_PATH
 
