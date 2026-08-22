@@ -573,12 +573,14 @@
                             :turn turn})
           ;; Consumed by the NEXT call-model and cleared there, so a steer
           ;; forecloses prose on exactly the turn it steers and no later one. A
-          ;; gate naming a forceable tool uses native tool_choice (works on
-          ;; providers that ignore prefill, like GLM) INSTEAD of the prefill; a
-          ;; bare or non-forceable steer still prefills the fence.
+          ;; gate naming a forceable tool sets BOTH a prefill and a force-tool
+          ;; spec; the adapter uses the prefill where the provider continues a
+          ;; trailing assistant message (DeepSeek /beta) and falls back to native
+          ;; tool_choice only where it does not (GLM) — tool_choice is rejected
+          ;; by some providers' thinking mode, so it is the fallback, not the
+          ;; default. A bare steer just prefills the fence.
           decision (assoc :force-tool (arbiter/force-tool-for decision)
-                          :prefill (when-not (arbiter/force-tool-for decision)
-                                     (arbiter/prefill-for decision)))
+                          :prefill (arbiter/prefill-for decision))
           ;; Record which budget notices have been delivered, or the gate
           ;; cannot tell "happened" from "happened and I already reacted".
           (= :turn-budget (:gate decision))

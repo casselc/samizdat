@@ -436,7 +436,7 @@
                    :parameters {:type "object"
                                 :properties {:answer {:type "string"}}
                                 :required ["answer"]}}]
-    (testing "chat-body exposes only the forced tool with tool_choice, and drops the prefill"
+    (testing "on GLM (no prefill) it exposes only the forced tool with tool_choice"
       (let [body (adapter/chat-body glm cfg
                                     {:messages [{:role "user" :content "x"}]
                                      :prefill "```tool-call\n{\"name\": \"done\""
@@ -445,6 +445,19 @@
         (is (= {:type "function" :function {:name "done"}} (:tool_choice body)))
         (is (not-any? #(= "assistant" (:role %)) (:messages body))
             "GLM cannot continue a trailing assistant message, so none is sent")))
+    (testing "on DeepSeek /beta (prefill works) it prefixes and does NOT send tool_choice"
+      ;; DeepSeek's thinking mode rejects tool_choice with a 400, so where the
+      ;; prefill can force the call it must be preferred.
+      (let [ds (registry/adapter-for :deepseek)
+            body (adapter/chat-body ds {:base-url "https://api.deepseek.com/beta"
+                                        :model "deepseek-v4-flash" :api-key "k"}
+                                    {:messages [{:role "user" :content "x"}]
+                                     :prefill "```tool-call\n{\"name\": \"done\""
+                                     :force-tool done-spec})]
+        (is (nil? (:tool_choice body)) "no tool_choice where a prefill forces the call")
+        (is (nil? (:tools body)))
+        (is (some #(and (= "assistant" (:role %)) (:prefix %)) (:messages body))
+            "the trailing assistant prefix does the forcing instead")))
     (testing "parse-chat folds a native tool_calls response back into the fence convention"
       (let [reply {:choices [{:message {:tool_calls
                                         [{:function {:name "done"

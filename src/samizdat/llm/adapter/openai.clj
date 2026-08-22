@@ -83,9 +83,9 @@
       {}))
 
   (chat-body [_ config {:keys [messages max-tokens temperature prefill force-tool]}]
+   (let [use-prefill? (and prefill (supports-prefill? provider-id config))]
     (cond-> {:model (:model config)
-             :messages (if (and prefill (not force-tool)
-                                (supports-prefill? provider-id config))
+             :messages (if use-prefill?
                          ;; `:prefix true` is what makes the provider CONTINUE
                          ;; this message rather than reply after it. Without
                          ;; the flag a trailing assistant turn is just history,
@@ -108,14 +108,15 @@
       (some? (:reasoning-effort config))
       (assoc :reasoning_effort (:reasoning-effort config))
 
-      ;; Force a specific finishing tool with native tool_choice — the
-      ;; provider-agnostic way to make the model call `done`/`give_up` (works on
-      ;; GLM, which ignores assistant prefill). opencode does the same. Only the
-      ;; forced tool is exposed, so the model has no other call to make.
-      force-tool
+      ;; Force a specific finishing tool with native tool_choice — the way to
+      ;; make a prefill-less provider (GLM) call `done`/`give_up`. Only as a
+      ;; FALLBACK: where a prefill will force the call it is preferred, because
+      ;; tool_choice is incompatible with some providers' thinking mode (DeepSeek
+      ;; /beta rejects it with a 400). Only the forced tool is exposed.
+      (and force-tool (not use-prefill?))
       (assoc :tools [{:type "function" :function force-tool}]
              :tool_choice {:type "function"
-                           :function {:name (:name force-tool)}})))
+                           :function {:name (:name force-tool)}}))))
 
   (prefill-support? [_ config] (supports-prefill? provider-id config))
 
