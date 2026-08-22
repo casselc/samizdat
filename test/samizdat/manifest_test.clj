@@ -20,6 +20,7 @@
   "Multiple named loop manifests: config selects which drives a run, and the
   manifest tool lists/shows/saves them behind a real compile."
   (:require [clojure.java.io :as io]
+            [clojure.string :as str]
             [clojure.test :refer [deftest testing is]]
             [samizdat.agent.tools.base :as base]
             [samizdat.agent.tools.manifest]
@@ -74,6 +75,17 @@
         (is (some? (:compiled loaded)) "the top level compiles once its sub-loops are registered")
         (is (= {:loop/worker "worker"} (:subworkflows (:definition loaded)))
             "it declares the worker sub-loop")))))
+
+(deftest a-manifest-can-inject-its-own-prompt
+  (with-db
+    (fn [conn]
+      (let [loaded (wf/load-loop! conn "review")]
+        (is (some? (:compiled loaded)) "the review workflow compiles with a :prompt")
+        (is (= "review" (:prompt (:definition loaded))))
+        (is (str/includes? (wf/workflow-prompt (:definition loaded)) "CODE REVIEW")
+            "the manifest's prompt resource is resolved")
+        (is (nil? (wf/workflow-prompt {:cells {}}))
+            "a manifest with no :prompt injects nothing")))))
 
 (deftest list-and-show-round-trip
   (with-db

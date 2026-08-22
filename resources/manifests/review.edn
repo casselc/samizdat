@@ -1,0 +1,47 @@
+;; A review workflow. The cells are the ordinary loop, but :prompt injects
+;; review guidance at the start (resources/prompts/review.md, appended to the
+;; base system prompt), so the same graph does a code review instead of
+;; building a feature — the manifest declares the ROLE. Select with
+;; config :run :loop "review". This is the pattern for task-shaped workflows:
+;; a manifest is a loop plus the prompt that frames what the loop is for.
+{:prompt "review"
+
+ :cells {:start          :loop/assemble
+         :infer          :llm/infer
+         :parse          :llm/parse
+         :provider-error :loop/provider-error
+         :no-call        :loop/no-call
+         :dispatch       :tool/dispatch
+         :journal        :journal/record
+         :arbiter        :gate/arbiter
+         :route          :loop/route
+         :finish         :loop/finish}
+
+ :edges {:start          :infer
+         :infer          :parse
+         :parse          {:provider-error :provider-error
+                          :no-call        :no-call
+                          :tool           :dispatch}
+         :provider-error :route
+         :no-call        :route
+         :dispatch       :journal
+         :journal        :arbiter
+         :arbiter        :route
+         :route          {:continue  :start
+                          :done      :finish
+                          :abandoned :finish
+                          :exhausted :finish}
+         :finish         :end}
+
+ :dispatches {:parse [[:provider-error (fn [d] (not (:ok (:call d))))]
+                      [:no-call (fn [d] (let [p (:parsed d)]
+                                          (or (nil? p)
+                                              (= "__parse_error__" (:name p)))))]
+                      [:tool (fn [d] true)]]
+              :route [[:continue  (fn [d] (= :continue (:verdict d)))]
+                      [:done      (fn [d] (= :done (:verdict d)))]
+                      [:abandoned (fn [d] (= :abandoned (:verdict d)))]
+                      [:exhausted (fn [d] (= :exhausted (:verdict d)))]]}
+
+ :constraints [{:type :must-follow :if :dispatch :then :journal}
+               {:type :must-follow :if :journal :then :arbiter}]}

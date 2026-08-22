@@ -127,13 +127,23 @@
       :definition (read-definition (:edn row))
       :compiled (compile-loop (read-definition (:edn row)))})))
 
+(defn workflow-prompt
+  "A manifest may declare `:prompt <name>`, naming a prompt resource
+  (resources/prompts/<name>.md) that is appended to the base system prompt for
+  that workflow — how a workflow injects its own instructions at the start. A
+  review manifest points at review guidance; the default loop declares none and
+  runs the base prompt. Returns the text, or nil."
+  [definition]
+  (when-let [p (:prompt definition)]
+    (some-> (io/resource (str "prompts/" p ".md")) slurp)))
+
 (defn run!
   "Run one branch to completion under the stored loop definition.
   Returns {:status :answer :branch :run-id (:residual)}."
   [{:keys [conn config llm-adapter llm-config problem max-turns]}]
   (let [max-turns (or max-turns (get-in config [:run :max-turns]) 40)
         loop-nm (active-loop-name config)
-        {:keys [version compiled]} (load-loop! conn loop-nm)
+        {:keys [version compiled definition]} (load-loop! conn loop-nm)
         run-id (runs/start-run! conn {:problem problem
                                       :provider (:provider llm-config)
                                       :model (:model llm-config)
@@ -141,7 +151,8 @@
                                       :beam-width 1
                                       :prompt-digest (branch-loop/prompt-digest)})
         branch (state/new-branch {:id "B1" :problem problem
-                                  :messages (branch-loop/initial-messages problem)})
+                                  :messages (branch-loop/initial-messages
+                                             problem (workflow-prompt definition))})
         ;; The project root the file tools are confined to, and the shell tool
         ;; runs in. Configurable so a run can target another checkout.
         root (or (get-in config [:run :root]) (System/getProperty "user.dir"))

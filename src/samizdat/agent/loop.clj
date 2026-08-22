@@ -104,9 +104,18 @@
       (str (subs s 0 max-result-chars) "\n… [truncated]")
       s)))
 
-(defn initial-messages [problem]
-  [{:role "system" :content (system-prompt)}
-   {:role "user" :content (str "## Problem\n\n" problem "\n\nIssue your first tool call.")}])
+(defn initial-messages
+  "The branch's opening messages. A workflow may hand a `prompt-suffix` — extra
+  system guidance appended for that workflow — which is how a manifest injects
+  its own instructions at the start (a review workflow adds review guidance on
+  top of the base prompt, keeping the whole tool surface). nil/blank leaves the
+  base prompt untouched."
+  ([problem] (initial-messages problem nil))
+  ([problem prompt-suffix]
+   [{:role "system" :content (cond-> (system-prompt)
+                               (not (str/blank? prompt-suffix))
+                               (str "\n\n" prompt-suffix))}
+    {:role "user" :content (str "## Problem\n\n" problem "\n\nIssue your first tool call.")}]))
 
 (defn- context-block
   "What the harness adds to the branch's view before its next turn: the

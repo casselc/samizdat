@@ -80,6 +80,31 @@ Rules that matter:
 - A node named in `:cells` must be reachable and its dispatch must cover every
   edge, or the compile fails — before anything runs.
 
+## A manifest can carry its own prompt
+
+A manifest may declare `:prompt "name"` — a prompt resource
+(`resources/prompts/name.md`) appended to the base system prompt for that
+workflow, so the start injects the workflow's own instructions. This is how a
+workflow gets a ROLE: `manifests/review.edn` is the ordinary loop plus
+`:prompt "review"`, so the same cells do a code review instead of building a
+feature. The base prompt (tools, REPL habit) stays; the manifest adds the task
+framing on top. Select a workflow with config `:run :loop`.
+
+## Hooks are cells
+
+There is no separate plugin-hook system because you do not need one — every
+place another harness exposes a hook is already a cell you can swap per
+manifest:
+
+- prepare-the-next-turn → the `:start` cell (`:loop/assemble`).
+- decide-whether-to-stop → the `:route` cell (`:loop/route`) and its dispatch.
+- inject-a-follow-up-message → any cell that adds to `:branch` messages (the
+  critic does exactly this to send a branch back).
+
+A "plugin" is a cell in `resources/cells/` (or a project's `.samizdat/cells/`)
+plus a manifest that wires it in. Because you control the whole state graph,
+hooking into any point is adding a node and an edge — nothing more.
+
 ## Changing it safely
 
 You have three tools; use them in this order.
