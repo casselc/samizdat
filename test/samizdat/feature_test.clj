@@ -11,6 +11,7 @@
             [clojure.test :refer [deftest testing is use-fixtures]]
             [samizdat.agent.gitdiff :as gitdiff]
             [samizdat.agent.judge :as judge]
+            [samizdat.engine.proc :as proc]
             [samizdat.llm.client :as llm]
             [samizdat.store.db :as db]
             [samizdat.workflow :as workflow]))
@@ -98,14 +99,14 @@
                 llm/chat (roles {:review :revise})]     ; reviewer always bounces
     (let [conn (db/open! ":memory:")
           r (run-feature conn {:config {:run {:loop "feature" :subtasks ["alpha"]
-                                              :max-revisions 2}}})]
-      (testing "an unsatisfiable reviewer keeps the loop solving, then the safety backstop abandons honestly (it never claims a solution it didn't reach)"
+                                              :max-revisions 1 :max-revisions-hard 2}}})]
+      (testing "an unsatisfiable reviewer keeps the loop solving, then the runaway guard abandons honestly (it never claims a solution it didn't reach)"
         (is (= :abandoned (:status r))))
       (testing "each revise round re-implemented on a versioned branch"
         (let [b (branch-ids conn)]
           (is (contains? b "W0"))     ; round 0
           (is (contains? b "W0v1"))   ; revise round 1
-          (is (contains? b "W0v2"))   ; revise round 2, then the backstop trips
+          (is (contains? b "W0v2"))   ; revise round 2, then the runaway guard trips
           (is (not (contains? b "W0v3"))))))))
 
 (deftest supervisor-reasons-over-telemetry-and-forces-a-round
@@ -119,7 +120,7 @@
                 llm/chat (roles {:review :pass :exhaust true})]
     (let [conn (db/open! ":memory:")
           r (run-feature conn {:config {:run {:loop "feature" :subtasks ["alpha"]
-                                              :max-revisions 1}}
+                                              :max-revisions 1 :max-revisions-hard 1}}
                                :max-turns 3})]
       (testing "a revise round happened despite the reviewer passing"
         (is (contains? (branch-ids conn) "W0v1")))
@@ -206,11 +207,11 @@
                 llm/chat (roles {:review :pass})]           ; reviewer would pass, but ground truth overrides
     (let [conn (db/open! ":memory:")
           r (run-feature conn {:config {:run {:loop "feature" :subtasks ["alpha"]
-                                              :max-revisions 2}}})]
+                                              :max-revisions 1 :max-revisions-hard 2}}})]
       (is (not= :completed (:status r)) "an empty diff is never reported completed")
       (testing "it kept solving before giving up (revised, did not abandon on the first empty round)"
         (is (contains? (branch-ids conn) "W0v1")))
-      (is (= :abandoned (:status r)) "only the safety backstop ends it, honestly unsolved"))))
+      (is (= :abandoned (:status r)) "only the runaway guard ends it, honestly unsolved"))))
 
 (deftest a-real-diff-still-ships-as-completed
   (with-redefs [judge/deterministic-block (constantly nil)
@@ -221,3 +222,49 @@
     (let [conn (db/open! ":memory:")
           r (run-feature conn {:config {:run {:loop "feature" :subtasks ["alpha"]}}})]
       (is (= :completed (:status r)) "real changes + a pass ships completed"))))
+
+(deftest soft-cap-notifies-the-supervisor-not-auto-abandon
+  ;; The cap is a SOFT stop: at it the supervisor is notified via telemetry and
+  ;; decides for itself — the loop does not abandon just for reaching it.
+  (let [caps (atom [])
+        base (roles {:review :revise})]     ; keeps bouncing, so the loop revises
+    (with-redefs [judge/deterministic-block (constantly nil)
+                  judge/parse-verdict (constantly :complete)
+                  judge/blocking-findings (constantly nil)
+                  llm/chat (fn [a b messages & r]
+                             (when (str/includes? (str/join " " (map :content messages))
+                                                  "Your role: supervisor")
+                               (swap! caps conj (str/join " " (map :content messages))))
+                             (apply base a b messages r))]
+      (let [conn (db/open! ":memory:")]
+        (run-feature conn {:config {:run {:loop "feature" :subtasks ["alpha"]
+                                          :max-revisions 1 :max-revisions-hard 4}}})
+        (is (some #(str/includes? % "REVISION CAP REACHED") @caps)
+            "at the soft cap the supervisor is told, and asked to decide")
+        (is (contains? (branch-ids conn) "W0v2")
+            "and the loop continued PAST the soft cap of 1 rather than abandoning at it")))))
+
+(deftest tests-gate-must-pass-to-complete
+  (testing "failing tests block completion — gate 2 is real"
+    (with-redefs [judge/deterministic-block (constantly nil)
+                  judge/parse-verdict (constantly :complete)
+                  judge/blocking-findings (constantly nil)
+                  gitdiff/changed-files (constantly ["src/x.clj"])
+                  proc/run (constantly {:exit 1 :out "1 test FAILED"})
+                  llm/chat (roles {:review :pass})]
+      (let [conn (db/open! ":memory:")
+            r (run-feature conn {:config {:run {:loop "feature" :subtasks ["alpha"]
+                                               :verify-cmd "run-tests"
+                                               :max-revisions 1 :max-revisions-hard 1}}})]
+        (is (not= :completed (:status r)) "review passed but the tests fail, so not completed"))))
+  (testing "both gates green completes"
+    (with-redefs [judge/deterministic-block (constantly nil)
+                  judge/parse-verdict (constantly :complete)
+                  judge/blocking-findings (constantly nil)
+                  gitdiff/changed-files (constantly ["src/x.clj"])
+                  proc/run (constantly {:exit 0 :out "ok"})
+                  llm/chat (roles {:review :pass})]
+      (let [conn (db/open! ":memory:")
+            r (run-feature conn {:config {:run {:loop "feature" :subtasks ["alpha"]
+                                               :verify-cmd "run-tests"}}})]
+        (is (= :completed (:status r)) "real diff + review pass + tests pass = completed")))))

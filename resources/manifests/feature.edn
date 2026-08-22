@@ -11,7 +11,10 @@
 ;;   review     the REVIEWER role reads the implementors' combined work and
 ;;              returns PASS / REVISE (feature/review runs reviewer.edn)
 ;;   critique   the CRITIC role gates the result: deterministic checks + judge
-;;              (feature/critique)
+;;              (feature/critique). Together with review this is GATE 1: a diff
+;;              exists and it passed review.
+;;   verify     GATE 2 — run the tests (:run :verify-cmd); they must pass
+;;              (feature/verify). Both gates green = the task is done.
 ;;   supervise  watches the role loops and can adjust the outer loop — e.g. on
 ;;              an implement round that shipped nothing, force another round
 ;;              (feature/supervise)
@@ -30,6 +33,7 @@
          :implement :team/fan-out
          :review    :feature/review
          :critique  :feature/critique
+         :verify    :feature/verify
          :supervise :feature/supervise
          :route     :feature/route
          :finish    :loop/finish}
@@ -38,7 +42,8 @@
          :plan      :implement
          :implement :review
          :review    :critique
-         :critique  :supervise
+         :critique  :verify
+         :verify    :supervise
          :supervise :route
          :route     {:ship   :finish
                      :revise :implement}

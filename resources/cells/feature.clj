@@ -26,6 +26,7 @@
             [samizdat.agent.loop :as turn]
             [samizdat.agent.state :as state]
             [samizdat.agent.telemetry :as telemetry]
+            [samizdat.engine.proc :as proc]
             [samizdat.llm.client :as llm]
             [samizdat.store.journal :as journal]
             [samizdat.store.runs :as runs]
@@ -156,6 +157,42 @@
             (str/includes? first-line "REVISE") :revise
             :else :continue))))
 
+(defn- tail [s n]
+  (->> (str/split-lines (str s)) (remove str/blank?) (take-last n) (str/join "\n")))
+
+(cell/defcell :feature/verify
+  {:doc "Gate 2 — run the tests. The completion criteria are two gates: gate 1 is
+        that a diff exists and the review passes (hollow? + reviewer + critic);
+        gate 2, here, is that the tests actually pass. Runs config :run
+        :verify-cmd in the project root and passes only on exit 0. Short-circuits
+        (does not pay for a test run) when gate 1 already failed — a hollow diff
+        or a revise verdict means the loop is going back anyway. No :verify-cmd
+        configured -> not applicable, passes."
+   :effects [:proc :db]}
+  (fn [{:keys [conn run-id root config] :as ctx} data]
+    (let [cmd (get-in config [:run :verify-cmd])]
+      (cond
+        (hollow? ctx)
+        (assoc data :verify/passed? false :verify/note "not run — no diff to test")
+
+        (or (= :revise (:review/decision data)) (= :revise (:critic/decision data)))
+        (assoc data :verify/passed? false :verify/note "not run — review already sent it back")
+
+        (str/blank? (str cmd))
+        (assoc data :verify/passed? true :verify/note "no :verify-cmd configured")
+
+        :else
+        (let [r (proc/run {:timeout-ms (or (get-in config [:run :verify-timeout-ms]) 600000)}
+                          "sh" "-c" (str "cd " root " && " cmd))
+              passed? (and (not (:timeout r)) (zero? (or (:exit r) 1)))]
+          (journal/note! conn run-id :verify
+                         {:data {:passed passed? :exit (:exit r) :timeout (:timeout r)}})
+          (assoc data :verify/passed? passed?
+                 :verify/note (cond (:timeout r) "tests TIMED OUT"
+                                    passed? "tests passed"
+                                    :else (str "tests FAILED (exit " (:exit r) ")\n"
+                                               (tail (str (:out r) "\n" (:err r)) 25)))))))))
+
 (cell/defcell :feature/supervise
   {:doc "The supervisor: the harness's introspection. It runs a supervisor ROLE
         loop (supervisor.edn) over a run-health digest — it diagnoses what is
@@ -165,19 +202,28 @@
         protocol validates those). Not a fixed rule — a reasoning agent. Fails
         SAFE to :continue so it can never wedge the loop."
    :effects [:net :db]}
-  (fn [{:keys [conn run-id] :as ctx} {:keys [results] :as data}]
+  (fn [{:keys [conn run-id config] :as ctx} {:keys [results] :as data}]
     (safely conn run-id :supervise data
       (fn []
-        (let [dig (telemetry/digest {:results results
+        (let [soft-cap (or (get-in config [:run :max-revisions]) 6)
+              rev (revision data)
+              dig (telemetry/digest {:results results
                                      :review (:review/decision data)
                                      :critic (:critic/decision data)
-                                     :revision (revision data)
+                                     :revision rev
                                      ;; stage crashes are the first thing the
                                      ;; supervisor should see and plan around.
                                      :errors (:feature/errors data)
                                      ;; ground truth: did the working tree
                                      ;; actually change, or was done hollow?
-                                     :hollow? (hollow? ctx)}
+                                     :hollow? (hollow? ctx)
+                                     ;; gate 2 — did the tests pass, and if not why.
+                                     :tests-passed? (:verify/passed? data)
+                                     :verify-note (:verify/note data)
+                                     ;; the soft cap is a notification, not a
+                                     ;; verdict: at it, the supervisor decides.
+                                     :at-cap? (>= rev soft-cap)
+                                     :soft-cap soft-cap}
                                     (journal/turns conn run-id))
               prob (str "Introspect on this run and decide whether the loop needs "
                         "an adjustment. A STAGE CRASHED signal is a harness bug the "
@@ -211,24 +257,31 @@
    :effects [:db]}
   (fn [{:keys [conn run-id config] :as ctx} data]
     (let [rev (revision data)
-          cap (or (get-in config [:run :max-revisions]) 6)
+          soft-cap (or (get-in config [:run :max-revisions]) 6)
+          ;; A hard runaway guard well above the soft cap, so a supervisor that
+          ;; keeps choosing to continue cannot loop forever.
+          hard-cap (or (get-in config [:run :max-revisions-hard]) (* 3 soft-cap))
           hollow (hollow? ctx)
-          ;; Ship only REAL, verified work: the reviewer passed, the critic
-          ;; shipped, the supervisor did not escalate, and the tree changed.
+          ;; BOTH gates green to ship completed. Gate 1: a diff exists and it
+          ;; passed review (reviewer + critic). Gate 2: the tests passed.
           pass? (and (= :pass (:review/decision data))
                      (= :ship (:critic/decision data))
                      (not (:feature/escalate data))
-                     (not hollow))
-          ;; The extreme cases — and only these — abandon.
-          give-up? (:feature/stop data)     ; the supervisor concluded it's unsolvable
-          exhausted? (>= rev cap)           ; runaway backstop
+                     (not hollow)
+                     (:verify/passed? data))
+          ;; Abandon only in the extreme: the supervisor gave up (STOP), or the
+          ;; runaway guard tripped. The SOFT cap does NOT abandon — it only
+          ;; notifies the supervisor (via telemetry) so it decides for itself.
+          give-up? (:feature/stop data)
+          runaway? (>= rev hard-cap)
           decision (cond pass? :ship
-                         (or give-up? exhausted?) :abandon
+                         (or give-up? runaway?) :abandon
                          :else :revise)]
       (journal/note! conn run-id :route
-                     {:data {:decision decision :revision rev :cap cap
-                             :hollow hollow :gave-up (boolean give-up?)
-                             :exhausted exhausted?}})
+                     {:data {:decision decision :revision rev :soft-cap soft-cap
+                             :hard-cap hard-cap :hollow hollow
+                             :tests-passed (:verify/passed? data)
+                             :gave-up (boolean give-up?) :runaway runaway?}})
       (case decision
         :ship
         (assoc data :feature/decision :ship)   ; -> finish, :completed
@@ -242,7 +295,7 @@
                               :inactive-reason
                               (if give-up?
                                 "supervisor could not find a solution"
-                                (str "no verified solution after " rev " revisions"))))
+                                (str "runaway guard tripped after " rev " revisions"))))
 
         :revise
         ;; keep solving — another implement round with the findings as guidance.
@@ -258,6 +311,13 @@
                            (str "Reviewer asked for changes:\n"
                                 (:review/findings data) "\n\n"))
                          (when (seq (:critique/findings data))
-                           (str "Critic flagged:\n" (:critique/findings data))))))
+                           (str "Critic flagged:\n" (:critique/findings data) "\n\n"))
+                         ;; the tests are ground truth — a failure here is the
+                         ;; most actionable guidance the implementors can get.
+                         (when (and (some? (:verify/passed? data))
+                                    (not (:verify/passed? data))
+                                    (not hollow)
+                                    (not= :revise (:review/decision data)))
+                           (str "The tests did not pass:\n" (:verify/note data))))))
             (dissoc :results :review/decision :critic/decision
-                    :review/findings :critique/findings))))))
+                    :review/findings :critique/findings :verify/passed? :verify/note))))))

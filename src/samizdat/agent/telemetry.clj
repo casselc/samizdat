@@ -34,7 +34,8 @@
   "The suboptimality flags the digest calls out explicitly, so the supervisor
   does not have to re-derive the obvious: a stage crashed, nothing shipped, a
   thrashing branch, the reviewer bouncing the work, a run deep into revisions."
-  [{:keys [results review revision errors hollow?]} health]
+  [{:keys [results review revision errors hollow? tests-passed? verify-note
+           at-cap? soft-cap]} health]
   (let [total (count results)
         shipped (count (filter #(= :done (:status %)) results))]
     (cond-> []
@@ -46,6 +47,14 @@
 
       (and (pos? total) (zero? shipped))
       (conj "NO IMPLEMENTOR SHIPPED — the implement round produced nothing verified")
+
+      (and (some? tests-passed?) (not tests-passed?) (not hollow?))
+      (conj (str "TESTS FAILING — " (or verify-note "the tests did not pass")))
+
+      at-cap?
+      (conj (str "REVISION CAP REACHED — " revision " revisions (soft cap " soft-cap
+                 ") with no verified solution. This is a soft stop for YOU to decide: "
+                 "keep solving with a new approach, or STOP if it is a genuine dead end."))
 
       (some (fn [[_ h]] (and (>= (:turns h) 4) (>= (:mechanics-rate h) 0.33))) health)
       (conj "THRASH — a branch spent a third+ of its turns on empty/mis-parsed calls")
