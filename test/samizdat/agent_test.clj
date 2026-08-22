@@ -1464,3 +1464,17 @@
                                     {:current-turn 3 :tools-called ["eval"]
                                      :branch-before (branch-with) :branch-after (branch-with)}))))))
 
+(deftest the-reflexion-log-accumulates-and-the-stuck-gate-surfaces-it
+  (testing "reflexion-log appends newest-last, bounded at five"
+    (let [b (reduce (fn [b c] (assoc b :abandoned (state/abandoned-log b c)))
+                    {} ["a" "b" "c" "d" "e" "f"])]
+      (is (= ["b" "c" "d" "e" "f"] (:abandoned b)) "the oldest drops")))
+  (testing "the stuck gate names the earlier abandoned approaches so a branch diverges"
+    (let [b (branch-with :consecutive-failures 5 :last-failed-claim "z"
+                         :abandoned ["x" "y" "z"])
+          msg ((:message (gates/by-name :stuck)) {:branch b})]
+      (is (re-find #"already tried and abandoned" msg))
+      (is (str/includes? msg "x"))
+      (is (str/includes? msg "y"))
+      (is (str/includes? msg "z") "the withheld claim is still shown too"))))
+

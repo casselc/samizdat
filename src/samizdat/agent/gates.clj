@@ -275,7 +275,15 @@
                            " else is open, including a smaller piece of the same"
                            " goal. The next " (threshold :reframe-grace) " turns are"
                            " yours to change course in; you will not be culled for"
-                           " the failures that led here."))))
+                           " the failures that led here."))
+                    ;; The reflexion log: everything this branch has already
+                    ;; tried and abandoned (the newest is the withheld claim
+                    ;; above), so it diverges instead of circling back to a dead
+                    ;; end it has forgotten.
+                    (when-let [earlier (seq (butlast (:abandoned branch)))]
+                      (str "\n\nApproaches you have already tried and abandoned"
+                           " — do not retry these:\n"
+                           (str/join "\n" (map #(str "- " %) earlier))))))
     :prediction (fn [_] "the branch retracts, decomposes, or changes technique")
     :window 3}
 

@@ -86,6 +86,11 @@
    ;; actually make.
    :last-failed-claim nil
    :last-failed-tool nil
+   ;; Reflexion log (karamazov-ioo.625): every claim the harness has withheld
+   ;; or reframed, newest last, bounded to the last 5. :last-failed-claim is
+   ;; cleared by any success; this is not — a branch that abandoned A, made
+   ;; progress, and is now stuck should still be told A is a dead end.
+   :abandoned []
    ;; The forced reframe: the approach the harness has told this branch to
    ;; abandon, and the turn it said so. While these are set and inside
    ;; :reframe-grace, re-verifying that approach is refused and the branch is
@@ -399,6 +404,18 @@
   (cond-> (enter-reframe branch turn claim)
     (contains? lean-verification-tools failing-tool) (reenter-explore turn)))
 
+(defn abandoned-log
+  "The claims this branch has had withheld and reframed away from, newest
+  last, bounded at 5. This is the reflexion log the stuck gate reads: a branch
+  grinding on its third dead end has usually forgotten the first two, and
+  re-deriving them costs turns the beam could spend elsewhere.
+  See begin-reframe, which appends here as it records :last-failed-claim."
+  [branch claim]
+  (-> (or (:abandoned branch) [])
+      (conj claim)
+      (->> (take-last 5))
+      vec))
+
 (defn explore-cap-expired?
   "Whether the branch has spent more than `cap` turns in the current explore
   entry. The release valve: a branch that cannot get a skeleton to elaborate
@@ -473,7 +490,8 @@
       ;; The tool is still recorded, because that is what chooses the phase.
       (and (= :failure category) (seq (str claim))
            (not (contains? lean-verification-tools tool)))
-      (assoc :last-failed-claim claim)
+      (assoc :last-failed-claim claim
+             :abandoned (vec (take-last 5 (conj (or (:abandoned branch) []) claim))))
       (= :failure category) (assoc :last-failed-tool tool)
       ;; Cleared by a success, so the gate can never withhold something the
       ;; branch has already got past. Without this, a branch that failed on A,

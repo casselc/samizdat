@@ -127,11 +127,33 @@
     (str "Your answer claims the work was tested or verified, but the run shows"
          " no test was run. Run it and confirm, or drop the claim.")))
 
+(defn source-block
+  "A finalization gate for an uncheckable source: the answer attributes a
+  claim to something outside the repo — a URL, or phrasing like 'according
+  to', 'the docs say', 'the spec says', 'the API returns' — but the run used
+  no tool that reaches outside it. samizdat has read_file/grep/lsp for the
+  LOCAL repo and no web or fetch tool, so such a claim could not have been
+  checked. Returns a message or nil. Note the outside-test matches tool
+  names only loosely: the local journal readers (fetch_artifact,
+  fetch_turn) contain neither web- nor http-family words, so they do not
+  count as reaching out."
+  [answer rows]
+  (when (and (re-find #"(?i)(https?://|www\.|according to|the docs say|the spec says|the api returns)"
+                      (str answer))
+             (not (some #(re-find #"(?i)(web|browse|curl|wget|http)"
+                                  (str (:tool_name %)))
+                        rows)))
+    (str "Your answer cites an external source — a URL or a quoted authority —"
+         " that nothing in this run could have checked: the toolset reads the"
+         " local repo (read_file/grep/lsp) and has no web access. Back the"
+         " claim with something the run actually did — a file it read, a"
+         " command it ran — or drop the claim.")))
+
 (defn deterministic-block
   "The first deterministic finalization gate that fires, or nil. These are
   cheap and specific, so they run before the LLM judge and outrank it."
   [answer rows]
-  (or (verifier-block rows) (claim-block answer rows)))
+  (or (verifier-block rows) (claim-block answer rows) (source-block answer rows)))
 
 (def preamble
   "The judge's standing instructions. Calibrated, not trigger-happy. A unified

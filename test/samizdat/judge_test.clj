@@ -104,6 +104,13 @@
                                  [{:tool_name "shell" :args {:command "jolt -A:test -e ..."}}])))
     (is (nil? (judge/claim-block "here is the plan" [{:tool_name "eval" :args {}}]))
         "no test claim, nothing to check"))
+  (testing "source: an answer citing an external source the run could not check blocks"
+    (is (judge/source-block "According to the docs, X is true" [{:tool_name "eval"}]))
+    (is (judge/source-block "see https://example.com/spec" [{:tool_name "grep"}]))
+    (is (nil? (judge/source-block "I built and tested X" [{:tool_name "eval"}]))
+        "no external citation, nothing to check")
+    (is (nil? (judge/source-block "the docs say X" [{:tool_name "web_fetch"}]))
+        "a web-ish tool was used, so the citation could have been checked"))
   (testing "deterministic-block returns the first gate that fires"
     (is (judge/deterministic-block "done" [{:tool_name "edit_file" :args {:path "a.clj"}}]))
     (is (nil? (judge/deterministic-block "done" [{:tool_name "eval" :args {}}])))))
