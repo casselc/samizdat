@@ -607,7 +607,18 @@
       ;; something that will not move before the run ends.
       (is (= :fatal (client/classify a 429 {:error {:message "Insufficient Balance"}})))
       (is (= :fatal (client/classify a 429 {:error {:message "You exceeded your current quota"}})))
+      ;; GLM/Zhipu signal a daily cap as code 1308 + a Chinese message, not in
+      ;; English — the provider we actually run on.
+      (is (= :fatal (client/classify a 429 {:error {:code "1308" :message "达到使用上限"}})))
+      (is (= :fatal (client/classify a 429 {:error {:message "per-day quota reached"}})))
       (is (= :retry (client/classify a 429 {:error {:message "Rate limit reached, slow down"}}))))))
+
+(deftest backoff-carries-jitter
+  ;; The exponential base is jittered up to +25% so a beam that all trips the
+  ;; same 429 does not retry in lockstep and re-collide.
+  (let [waits (repeatedly 40 #(#'client/backoff-ms 1 nil))]
+    (is (every? #(<= 8000 % 10000) waits) "attempt 1 base 8s, +0-25%")
+    (is (> (count (distinct waits)) 1) "actually jittered, not constant")))
 
 (deftest retry-after-headers
   ;; dirge PR 719: waiting exactly as long as the provider asked beats

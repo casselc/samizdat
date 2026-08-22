@@ -54,6 +54,13 @@
 ;; ten minutes should not silently become a ten-minute stall.
 (def max-backoff-ms 60000)
 
+(def max-in-run-retry-wait-ms
+  "The longest a single retry may wait before the call is abandoned. A 429
+  whose reset is farther out than this is a usage cap wearing a rate-limit's
+  status: retrying just re-hits it and burns the run's budget, so past this
+  bound a retryable error is treated as fatal."
+  300000)
+
 ;; --- error classification ---------------------------------------------------
 
 (defn retry-after-ms
@@ -88,10 +95,13 @@
     :else :fatal))
 
 (defn- backoff-ms
-  "2s, 8s, 32s. Overridden by whatever the provider asked for."
+  "2s, 8s, 32s, with up to +25% jitter. Overridden by whatever the provider
+  asked for. The jitter is what keeps a beam of branches that all hit the same
+  429 from retrying in lockstep and re-colliding on the next window."
   [attempt headers]
   (or (retry-after-ms headers)
-      (min max-backoff-ms (long (* 2000 (Math/pow 4 attempt))))))
+      (long (* (+ 1.0 (rand 0.25))
+               (min max-backoff-ms (* 2000 (Math/pow 4 attempt)))))))
 
 ;; --- one call ---------------------------------------------------------------
 
@@ -180,6 +190,20 @@
 
            (or (= :fatal (:outcome result)) (>= attempt retries))
            (throw (ex-info (str (adapter/display-name adapter) " call failed: "
+                                (last errors))
+                           {:provider (adapter/id adapter)
+                            :attempts (inc attempt)
+                            :errors errors}))
+
+           ;; A retryable error whose own reset is beyond the in-run window is
+           ;; a cap in a rate-limit's clothing: waiting it out would blow the
+           ;; run, and retrying sooner just re-hits it. Stop now.
+           (when-let [server-wait (retry-after-ms (:headers result))]
+             (> server-wait max-in-run-retry-wait-ms))
+           (throw (ex-info (str (adapter/display-name adapter)
+                                " asked to wait "
+                                (retry-after-ms (:headers result))
+                                "ms, beyond the retry window — treating as a cap: "
                                 (last errors))
                            {:provider (adapter/id adapter)
                             :attempts (inc attempt)

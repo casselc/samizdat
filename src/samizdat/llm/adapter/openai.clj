@@ -127,7 +127,11 @@
     (let [msg (str (get-in body [:error :message])
                    " " (get-in body [:error :type])
                    " " (get-in body [:error :code]))]
-      (boolean (re-find #"(?i)insufficient|quota|billing|exceeded your current|payment"
+      ;; The English signals cover OpenAI/DeepSeek; GLM/Zhipu report a daily
+      ;; usage cap as error code 1308 with a Chinese "使用上限" message, and
+      ;; some gateways phrase it "per-day" — a 429 on any of these is spent
+      ;; budget, not backpressure, so it must not be retried.
+      (boolean (re-find #"(?i)insufficient|quota|billing|exceeded your current|payment|per-day|daily limit|1308|使用上限|每日"
                         msg)))))
 
 (defn openai-family
