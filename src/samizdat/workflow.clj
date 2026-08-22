@@ -32,12 +32,15 @@
   behavior — only on composition."
   (:require [clojure.edn :as edn]
             [clojure.java.io :as io]
+            [clojure.string :as str]
             [clojure.tools.logging :as log]
             [mycelium.core :as myc]
             [mycelium.cell :as cell]
             [mycelium.compose :as compose]
             [mycelium.workflow :as wf]
             [samizdat.cells :as cells]
+            [samizdat.config :as config]
+            [samizdat.llm.registry :as registry]
             [samizdat.agent.gitdiff :as gitdiff]
             [samizdat.agent.loop :as branch-loop]
             [samizdat.repl :as repl]
@@ -162,6 +165,21 @@
   [definition]
   (when-let [p (:prompt definition)]
     (prompt-text p)))
+
+(defn role-ctx
+  "The ctx a role's sub-loop runs under, with its LLM adapter and config swapped
+  to the model assigned to `role` under config :run :role-models — e.g.
+  {:implementor {:provider \"deepseek\"} :supervisor {:provider \"glm\"}}. A role
+  with no entry keeps the run's default model. `:provider` may be omitted to keep
+  the run's provider and only change the model. This is how a cheap model can
+  implement while a stronger one reviews or supervises."
+  [ctx role]
+  (if-let [spec (get-in (:config ctx) [:run :role-models role])]
+    (let [provider (or (some-> (:provider spec) name str/lower-case keyword)
+                       (:provider (:llm-config ctx)))
+          llm (config/provider-llm provider (dissoc spec :provider))]
+      (assoc ctx :llm-adapter (registry/adapter-for provider) :llm-config llm))
+    ctx))
 
 (defn run!
   "Run one branch to completion under the stored loop definition.

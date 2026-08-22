@@ -79,7 +79,7 @@
         (let [prob (str "Review this feature's work.\n\nFeature:\n" (:problem branch)
                         "\n\nThe implementors reported:\n" (:final-answer branch))
               {:keys [verdict answer]}
-              (try (run-role ctx (wf/compiled-manifest "reviewer")
+              (try (run-role (wf/role-ctx ctx :reviewer) (wf/compiled-manifest "reviewer")
                              (str "R" (revision data)) prob
                              (wf/prompt-text "roles/reviewer"))
                    (catch Throwable e {:verdict :error :answer (ex-message e)}))
@@ -99,11 +99,12 @@
         — but WITHOUT the single-branch critic's branch surgery. Sets
         :critic/decision :ship or :revise. Fail-open (a judge that errors ships)."
    :effects [:net :db]}
-  (fn [{:keys [conn run-id root git-baseline llm-adapter llm-config]}
+  (fn [{:keys [conn run-id root git-baseline] :as ctx}
        {:keys [branch] :as data}]
     (safely conn run-id :critique data
       (fn []
-        (let [answer (:final-answer branch)
+        (let [{:keys [llm-adapter llm-config]} (wf/role-ctx ctx :critic)
+              answer (:final-answer branch)
               rows (map parse-args (journal/turns conn run-id))
               det (judge/deterministic-block answer rows)
               decision
@@ -167,7 +168,7 @@
                         "the source with your tools. If a problem is systemic, tune "
                         "the harness.\n\n" dig)
               {:keys [verdict answer]}
-              (try (run-role ctx (wf/compiled-manifest "supervisor")
+              (try (run-role (wf/role-ctx ctx :supervisor) (wf/compiled-manifest "supervisor")
                              (str "S" (revision data)) prob
                              (wf/prompt-text "roles/supervisor"))
                    (catch Throwable e {:verdict :error :answer (ex-message e)}))

@@ -90,11 +90,12 @@
         LLM call proposes at most :max-subtasks parts; fail-soft to a single
         worker on the whole problem when the call fails or yields no list."
    :effects [:net]}
-  (fn [{:keys [conn run-id llm-adapter llm-config config] :as ctx}
+  (fn [{:keys [conn run-id config] :as ctx}
        {:keys [branch subtasks] :as data}]
     (if (seq subtasks)
       data
-      (let [max-parts (or (get-in config [:run :max-subtasks])
+      (let [{:keys [llm-adapter llm-config]} (wf/role-ctx ctx :planner)
+            max-parts (or (get-in config [:run :max-subtasks])
                           planner/default-max-parts)
             reply (try (:content (llm/chat llm-adapter llm-config
                                            [{:role "user"
@@ -116,6 +117,10 @@
   (fn [{:keys [conn run-id] :as ctx} {:keys [branch subtasks] :as data}]
     (let [tasks (vec (if (seq subtasks) subtasks [(:problem branch)]))
           worker (wf/worker-compiled)
+          ;; Implementors may run on their own assigned model (config :run
+          ;; :role-models :implementor) — a cheap one, say, while the reviewer
+          ;; and supervisor run on a stronger one.
+          ictx (wf/role-ctx ctx :implementor)
           ;; When the feature loop sends a round back, :revise/guidance carries
           ;; the reviewer/critic findings and :feature/revisions bumps, so retry
           ;; branches (W<i>v<rev>) do not collide with the earlier round's.
@@ -128,7 +133,7 @@
           bid-of (fn [i] (str "W" i (when (pos? rev) (str "v" rev))))
           results (->> (map-indexed vector tasks)
                        (mapv (fn [[i s]]
-                               (future (run-worker ctx worker (bid-of i) i s
+                               (future (run-worker ictx worker (bid-of i) i s
                                                    (prob-of s) (worker-prompt i tasks)))))
                        (mapv deref))]
       (journal/note! conn run-id :team
@@ -151,12 +156,13 @@
   (fn [{:keys [conn run-id] :as ctx} {:keys [branch results subtasks] :as data}]
     (let [tasks (vec subtasks)
           worker (wf/worker-compiled)
+          ictx (wf/role-ctx ctx :implementor)
           retried (mapv (fn [r]
                           (if (ok? r)
                             r
                             (let [i (:worker r)
                                   st (:subtask r)
-                                  r2 (run-worker ctx worker (str "W" i "r1") i
+                                  r2 (run-worker ictx worker (str "W" i "r1") i
                                                  st st (worker-prompt i tasks))]
                               (if (ok? r2) r2 r))))
                         results)

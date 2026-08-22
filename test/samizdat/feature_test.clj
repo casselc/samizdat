@@ -150,3 +150,33 @@
       (is (= :completed (:status r)))
       (testing "STOP shipped at once — no versioned revise branch"
         (is (not (contains? (branch-ids conn) "W0v1")))))))
+
+(deftest per-role-models-reach-each-role
+  ;; karamazov-reo: implementor on one model, supervisor on another, reviewer on
+  ;; the run default. The captured :provider per role proves each role's sub-loop
+  ;; ran on its assigned model.
+  (let [seen (atom {})
+        base (roles {:review :pass})]
+    (with-redefs [judge/deterministic-block (constantly nil)
+                  judge/parse-verdict (constantly :complete)
+                  judge/blocking-findings (constantly nil)
+                  llm/chat (fn [adapter cfg messages & r]
+                             (let [c (str/join " " (map :content messages))
+                                   role (cond
+                                          (str/includes? c "Your role: reviewer") :reviewer
+                                          (str/includes? c "Your role: supervisor") :supervisor
+                                          (str/includes? c "Your role: implementor") :implementor
+                                          :else :critic)]
+                               (swap! seen update role (fnil conj #{}) (:provider cfg)))
+                             (apply base adapter cfg messages r))]
+      (let [conn (db/open! ":memory:")]
+        (workflow/run! {:conn conn
+                        :config {:run {:loop "feature" :subtasks ["alpha"]
+                                       :role-models {:implementor {:provider "deepseek"}
+                                                     :supervisor {:provider "glm"}}}}
+                        :llm-adapter :a
+                        :llm-config {:provider :openai :model "gpt-4o" :max-tokens 16384}
+                        :problem "the feature" :max-turns 4})
+        (is (contains? (:implementor @seen) :deepseek) "implementor ran on its assigned model")
+        (is (contains? (:supervisor @seen) :glm) "supervisor ran on its assigned model")
+        (is (contains? (:reviewer @seen) :openai) "the unconfigured reviewer kept the run default")))))

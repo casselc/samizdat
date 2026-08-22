@@ -186,3 +186,21 @@
              (keep (fn [[k v]] (when (:undeclared v) k)) fx)))
     (is (:pure (get fx :parse)) "fence parsing is pure")
     (is (contains? (:effects (get fx :infer)) :net))))
+
+(deftest role-ctx-assigns-a-per-role-model
+  (let [base {:config {:run {:role-models {:supervisor {:provider "glm" :model "glm-5.3"}
+                                           :implementor {:provider :deepseek}}}}
+              :llm-adapter :base-adapter
+              :llm-config {:provider :openai :model "gpt-4o"}}]
+    (testing "a configured role gets its own provider + model + adapter"
+      (let [c (workflow/role-ctx base :supervisor)]
+        (is (= :glm (get-in c [:llm-config :provider])))
+        (is (= "glm-5.3" (get-in c [:llm-config :model])))
+        (is (not= :base-adapter (:llm-adapter c)) "the adapter is swapped too")))
+    (testing "a role configured with only a provider takes that provider's default model"
+      (is (= "deepseek-v4-flash" (get-in (workflow/role-ctx base :implementor)
+                                         [:llm-config :model]))))
+    (testing "an unconfigured role keeps the run's default model and adapter"
+      (let [c (workflow/role-ctx base :reviewer)]
+        (is (= :openai (get-in c [:llm-config :provider])))
+        (is (= :base-adapter (:llm-adapter c)))))))

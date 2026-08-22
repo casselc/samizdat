@@ -17,8 +17,19 @@
 ;; SPDX-License-Identifier: GPL-3.0-or-later
 
 (ns samizdat.config-test
-  (:require [clojure.test :refer [deftest testing is]]
+  (:require [clojure.string :as str]
+            [clojure.test :refer [deftest testing is]]
             [samizdat.config :as config]))
+
+(deftest provider-llm-builds-a-named-provider-config
+  ;; per-role model assignment: build the :llm map for a specific provider,
+  ;; independent of the run's detected default, with overrides winning.
+  (let [c (config/provider-llm :glm {:model "glm-x"})]
+    (is (= :glm (:provider c)))
+    (is (= "glm-x" (:model c)) "the override wins over the table default")
+    (is (str/includes? (:base-url c) "bigmodel") "and it carries GLM's endpoint"))
+  (testing "an unknown provider is an error, not a silent default"
+    (is (thrown? Exception (config/provider-llm :nope {})))))
 
 (deftest glm-uses-the-coding-endpoint
   ;; Aligned with the config dirge drives GLM through: the coding endpoint,

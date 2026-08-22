@@ -196,6 +196,29 @@
       project
       overrides))))
 
+(defn provider-llm
+  "The :llm config for a SPECIFIC provider — its base URL, model, temperature,
+  and API key (from the provider's key-env in the environment) from the built-in
+  providers table, with `overrides` merged last. Independent of which provider
+  the run detected as its default, so a role can be assigned a different model
+  than the rest of the run (per-role model assignment). The shared per-response
+  timeouts still come from HARNESS_* env. Throws on an unknown provider."
+  [provider overrides]
+  (let [defaults (or (providers provider)
+                     (throw (ex-info (str "unknown provider for a role: " provider)
+                                     {:provider provider :known (keys providers)})))]
+    (merge
+     {:provider    provider
+      :base-url    (:base-url defaults)
+      :api-key     (some-> (:key-env defaults) env)
+      :model       (:model defaults)
+      :temperature (provider-temperature provider)
+      :max-tokens  (or (env-long "HARNESS_MAX_TOKENS") 16384)
+      :timeout-ms  (or (env-long "HARNESS_TIMEOUT_MS") 300000)
+      :conn-timeout-ms (or (env-long "HARNESS_CONN_TIMEOUT_MS") 15000)
+      :max-response-ms (or (env-long "HARNESS_MAX_RESPONSE_MS") 600000)}
+     overrides)))
+
 (defn redacted
   "The config with the API key masked, for logging and for /health."
   [config]
