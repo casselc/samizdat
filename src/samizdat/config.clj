@@ -130,7 +130,13 @@
                   ;; deadline fires first it only abandons the branch's turn --
                   ;; the thread stays parked in the read and leaks.
                   :max-response-ms (or (env-long "HARNESS_MAX_RESPONSE_MS") 600000)}
-       :run      {:max-turns  (or (env-long "HARNESS_MAX_TURNS") 80)
+       ;; Generous by default: self-building is the primary use, and a
+       ;; REPL-first feature run spends many turns prototyping before it ships.
+       ;; Compaction keeps context bounded regardless of turn count (older
+       ;; turns become one-line digests), and the turn-budget gate nudges
+       ;; toward shipping as the cap nears. A blocking HTTP caller that wants a
+       ;; tighter bound sets HARNESS_MAX_TURNS.
+       :run      {:max-turns  (or (env-long "HARNESS_MAX_TURNS") 1000)
                   :beam-width (or (env-long "HARNESS_BEAM_WIDTH") 5)
                   ;; Cross-branch sharing of engine-confirmed artifacts. Off by
                   ;; default: shared lemmas may cost the beam its diversity, and

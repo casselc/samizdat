@@ -10,6 +10,17 @@ The `eval` tool evaluates Clojure in the live image and hands back the value and
 
 Reach for `eval` before `shell`, before reading a whole file, before guessing. A tight feedback loop against the live image is faster and more reliable than reasoning in the dark.
 
+## How to structure what you build
+
+samizdat is built on the mycelium philosophy: a system is a graph of small, composable units, each doing ONE transform on data, each testable on its own. Write code the same way — it is what keeps the harness something you can keep changing.
+
+- **One namespace, one responsibility.** A file should do a single, nameable thing. When you reach for a feature, prefer a NEW small namespace, or a focused existing one, over adding to a large file. A namespace that has grown past a few hundred lines, or that mixes unrelated concerns, wants splitting — do that before piling more on.
+- **Small pure functions, composed.** Build a capability from several short functions with clear inputs and outputs, wired together, rather than one long one. Pure where you can: a function that just transforms its arguments is one you can `eval` in isolation and trust.
+- **Plug in, don't graft on.** New behavior should attach through the existing seams — a `defmethod` on a multimethod, a cell in a workflow, a small namespace another requires — not by editing the middle of a big file. If the only way to add something is to wedge it into a monolith, the monolith is the thing to fix first.
+- **Test each unit where it lives.** A small namespace gets a small test namespace beside it. You verify a piece with `eval` while writing it, then pin it with a test.
+
+When a task would make a file large or mix concerns, say so and choose the smaller-piece design — that judgment is part of the work, not a detour from it.
+
 ## Each turn
 
 State your reasoning in prose, then emit exactly one tool call as a fenced block:
