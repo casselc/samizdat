@@ -38,7 +38,11 @@
   (:require [clojure.java.io :as io]
             [clojure.string :as str]
             [jolt.fs :as fs]
-            [mycelium.cell :as cell]))
+            [mycelium.cell :as cell]
+            ;; Preload the namespaces the shipped cells load-string reach for, so
+            ;; they compile the normal way first and the AOT cache stays sound
+            ;; (samizdat.cell-prelude explains the -dirty-build failure it fixes).
+            [samizdat.cell-prelude]))
 
 (def default-dirs
   "Where cells live, lowest precedence first: the shipped library, then a
