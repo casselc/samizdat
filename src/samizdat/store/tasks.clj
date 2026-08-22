@@ -33,9 +33,11 @@
    "cancelled" "cancelled" "canceled" "cancelled" "wontfix" "cancelled"})
 
 (def ^:private priority-aliases
-  {"high" "high" "p0" "high" "p1" "high" "urgent" "high"
-   "normal" "normal" "p2" "normal" "medium" "normal"
-   "low" "low" "p3" "low" "p4" "low" "minor" "low"})
+  ;; Bare 0-4 are accepted alongside p0-p4: a model naturally writes
+  ;; priority 2, not "p2", and the docs say "0-4 or P0-P4".
+  {"high" "high" "p0" "high" "p1" "high" "0" "high" "1" "high" "urgent" "high"
+   "normal" "normal" "p2" "normal" "2" "normal" "medium" "normal"
+   "low" "low" "p3" "low" "p4" "low" "3" "low" "4" "low" "minor" "low"})
 
 (def terminal? #{"done" "cancelled"})
 

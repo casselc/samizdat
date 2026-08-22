@@ -67,8 +67,13 @@
     (doseq [[alias canonical] {"p0" "high" "p1" "high" "urgent" "high"
                                "p2" "normal"
                                "p3" "low" "p4" "low" "minor" "low"
-                               "high" "high" "normal" "normal" "low" "low"}]
-      (let [id (tasks/create! c {:title alias :priority alias})]
+                               "high" "high" "normal" "normal" "low" "low"
+                               ;; bare 0-4, what a model actually writes
+                               "0" "high" "1" "high" "2" "normal"
+                               "3" "low" "4" "low"
+                               ;; and the number as JSON sends it
+                               2 "normal"}]
+      (let [id (tasks/create! c {:title (str alias) :priority alias})]
         (is (= canonical (:priority (tasks/get-task c id)))
             (str alias " should normalize to " canonical))))))
 

@@ -101,7 +101,11 @@
         (base/malformed branch (str "Unknown task action `" action "`. " task-usage)))
       (catch Throwable e
         ;; Unknown statuses, missing parents: the store's validation errors are
-        ;; calls made wrong, and the message already says what was wrong.
+        ;; calls made wrong, and the message already says what was wrong. When
+        ;; the store names the valid values (bad status/priority), pass them on
+        ;; so the retry is informed rather than another guess.
         (base/malformed branch (str "`task " action "` refused: " (ex-message e)
+                               (when-let [valid (:valid (ex-data e))]
+                                 (str " Valid: " (str/join ", " valid)))
                                "\n" task-usage))))))
 
