@@ -1,0 +1,335 @@
+;; samizdat - a self-hosting agentic harness
+;; License: EPL-2.0
+
+(ns samizdat.agent.tools.ship
+  "Shipping tools: thesis, done, give_up, branch_theses — and the
+  claim-evidence gates those methods share (answer-tokens,
+  uncovered-tokens, engages-problem? and friends)."
+  (:require [clojure.string :as str]
+            [samizdat.agent.tools.base :as base]
+            [samizdat.agent.state :as state]
+            [samizdat.store.journal :as journal]))
+
+
+
+;; --- registering intent -----------------------------------------------------
+
+(defmethod base/run-tool "thesis" [{:keys [branch] :as ctx}]
+  (if-let [m (base/missing ctx :goal :technique)]
+    (base/malformed branch m)
+    (let [thesis {:goal (base/arg ctx :goal)
+                  :subClaims (vec (or (base/arg ctx :subClaims) []))
+                  :technique (base/arg ctx :technique)
+                  :set-at-turn (:turn ctx)}]
+      (base/ok (assoc branch :thesis thesis)
+          (str "Thesis registered: " (:goal thesis)
+               "\nTechnique: " (:technique thesis)
+               (when (seq (:subClaims thesis))
+                 (str "\nSub-claims:\n"
+                      (str/join "\n" (map-indexed #(str "  " (inc %1) ". " %2)
+                                                  (:subClaims thesis))))))
+          :progress? true
+          :thesis thesis))))
+
+;; --- the claim-evidence gates -----------------------------------------------
+
+(def ^:private stopwords
+  ;; Grammar plus the vocabulary a model uses to FRAME an answer rather than to
+  ;; assert one. The gate is aimed at specifics — numbers, names, witnesses —
+  ;; because that is where fabrication actually happens; "the answer is" is not
+  ;; a claim about anything. Widening this list weakens the gate, so entries
+  ;; earn their place by being framing rather than content.
+  #{"the" "a" "an" "is" "are" "was" "were" "of" "for" "and" "or" "not" "no"
+    "in" "on" "to" "with" "that" "this" "it" "as" "by" "at" "be" "there"
+    "exists" "all" "any" "we" "have" "has" "can" "so" "if" "then" "thus"
+    "answer" "solution" "solutions" "result" "results" "value" "values"
+    "therefore" "hence" "conclusion" "shows" "show" "proved" "proven"
+    "verified" "confirms" "confirmed" "follows" "given" "which" "where"
+    "does" "do" "did" "follow" "following" "having" "from" "into" "than"
+    "when" "while" "because" "since" "about" "over" "under" "between"
+    "unique" "uniquely" "only" "exactly" "such" "these" "those" "each"
+    "every" "must" "also" "both" "same" "case" "cases" "holds" "true" "false"
+
+    ;; Provenance vocabulary: how the answer was checked, not what it claims.
+    ;; These can never appear in an artifact, because an artifact's claim and
+    ;; code are about the problem and say nothing about the engine that ran
+    ;; them. Leaving them in made the gate refuse answers for asserting the
+    ;; word "mathlib", which pushed the model toward stripping every
+    ;; explanatory sentence to get past it — the opposite of what the harness
+    ;; wants its answers to look like. The proof-engine names stay even
+    ;; though the engines left: they are still provenance if they appear.
+    "lean" "mathlib" "prolog" "clpfd" "swipl" "z3" "smt" "smtlib" "octave"
+    "engine" "engines" "harness" "kernel" "kernel-checked" "machine-checked"
+    "theorem" "theorems" "lemma" "lemmas" "proof" "proofs" "tactic" "tactics"
+    "statement" "statements" "universal" "universally" "induction" "inductive"
+    "base" "step" "successor" "encoding" "encodings" "formalisation"
+    "formalization" "independent" "independently" "cross-check" "cross-checked"
+    ;; Generic mathematical prose. "equals" and "numbers" carry no specific
+    ;; content — the specific part is the number or name they connect.
+    "number" "numbers" "equal" "equals" "integer" "integers" "natural"
+    "naturals" "first" "sums" "pairwise" "distinct" "positive"
+
+    ;; The vocabulary of SCOPING an answer: saying what was and was not
+    ;; settled, and how sure of it you are. What you failed to establish is,
+    ;; by construction, not in your evidence; a gate that reads naming it as
+    ;; asserting it makes honesty impossible (vf-w2k).
+    "stated" "states" "fact" "facts" "establish" "establishes" "established"
+    "evidence" "check" "checks" "checked" "unchecked" "found" "finds"
+    "finding" "findings" "showed" "shown" "showing"
+    "prove" "proves" "proving" "support" "supports"
+    "supported" "settle" "settles" "settled" "unsettled" "unresolved"
+    "resolve" "resolves" "resolved" "ask" "asks" "asked" "question"
+    "questions" "answers" "answered" "unanswered" "claim" "claims"
+    "claimed" "assert" "asserts" "asserted" "conclude" "concludes"
+    "remain" "remains" "remaining"
+    "outstanding" "together" "against" "general" "generally" "partial"
+    "partially" "whenever" "conditional" "conditionally" "arbitrary"
+    "computation" "computations" "computed" "search" "searched" "taken"
+    "what" "branch" "branches" "verify" "verifies" "verification"
+    "establishing" "demonstrate" "demonstrates" "demonstrated"
+    ;; Deictics. A word that points at the document rather than at the
+    ;; substance cannot be an assertion about the substance.
+    "here" "above" "below" "within" "throughout"
+    "reach" "reaches" "reached" "give" "gives" "yield" "yields" "open"})
+
+;; A tool name followed by its version. Stripped BEFORE tokenizing, because the
+;; version is a bare number and numbers are the part of this gate that must not
+;; be relaxed — "Python 3" would otherwise assert the number 3 and get refused
+;; for it. Narrow on purpose: only a number directly after a known tool name.
+(def ^:private tool-version-re
+  #"(?i)\b(lean|mathlib|z3|swipl|swi-prolog|prolog|octave|clojure|jolt|python|node|java|deepseek)[\s-]*[0-9]+(\.[0-9]+)*")
+
+(defn answer-tokens
+  "Substantive tokens from a proposed answer: numbers and words that are not
+  stopwords. Numbers matter most — an answer naming a size, a bound, or a
+  witness has to have that number in the evidence."
+  [text]
+  (->> (str/split (str/lower-case (str/replace (or text "") tool-version-re " "))
+                  #"[^a-z0-9_.-]+")
+       ;; `.` and `-` stay INSIDE the split class so 3.5 and cross-check survive
+       ;; as one token, which means a sentence-final period rides along with the
+       ;; last word. Trim the edges, keep the interior.
+       (map #(str/replace % #"^[.-]+|[.-]+$" ""))
+       (remove str/blank?)
+       (remove stopwords)
+       ;; A hyphenated compound is one token, so `engine-confirmed` survived a
+       ;; list holding every one of its parts. A compound with a substantive
+       ;; half — `optimal-flow` — is not exempt.
+       (remove #(and (str/includes? % "-")
+                     (let [parts (remove str/blank? (str/split % #"-"))]
+                       (and (seq parts)
+                            (every? (fn [p] (or (stopwords p) (< (count p) 4)))
+                                    parts)))))
+       (filter #(or (re-matches #"[0-9]+(\.[0-9]+)?" %) (>= (count %) 4)))
+       distinct))
+
+(def ^:private word-suffixes
+  "Stripped longest-first, one only. Enough to see that `enumeration` and
+  `enumerating` are the same word, which raw substring matching cannot."
+  ["ations" "ation" "ising" "izing" "ings" "ing" "ions" "ion" "ies" "ied"
+   "es" "ed" "s"])
+
+(defn- stem
+  "The token with one morphological suffix removed, or nil.
+
+  Never below five characters, so nothing is shortened into a prefix that
+  matches everything."
+  [w]
+  (some (fn [suf]
+          (when (and (str/ends-with? w suf)
+                     (>= (- (count w) (count suf)) 5))
+            (subs w 0 (- (count w) (count suf)))))
+        word-suffixes))
+
+(defn number-token?
+  "Whether an answer token is a figure rather than a word. The two halves of
+  the coverage check treat them completely differently: a figure blocks a
+  ship, a word advises."
+  [token]
+  (boolean (re-matches #"[0-9]+(\.[0-9]+)?" token)))
+
+(defn- covered?
+  "Whether `token` appears in the evidence.
+
+  Numbers are matched exactly, against the artifacts alone. That is the strict
+  half and it stays strict: an answer naming a size, a bound or a witness that
+  nothing produced is the fabricated report this whole rung exists to catch.
+
+  Words get three chances — the token itself, the token with hyphens
+  normalised, and its stem — because a refusal over `residues` when the
+  evidence says `residue` teaches the model to strip its prose rather than to
+  verify anything."
+  [token artifact-text word-text]
+  (if (number-token? token)
+    (str/includes? artifact-text token)
+    (or (str/includes? word-text token)
+        (and (str/includes? token "-")
+             (or (str/includes? word-text (str/replace token "-" " "))
+                 (str/includes? word-text (str/replace token "-" ""))))
+        (when-let [s (stem token)] (str/includes? word-text s))
+        ;; One derivational step further, for long words only: `computability`
+        ;; against `computable` is the same complaint as `residues` against
+        ;; `residue`, and no suffix list reaches it.
+        (and (>= (count token) 8) (str/includes? word-text (subs token 0 6))))))
+
+(defn uncovered-tokens
+  "Answer tokens no confirmed artifact mentions.
+
+  The claim-evidence gate, deterministic and with no model in the path. An
+  answer asserting a number that appears nowhere in the evidence is a
+  fabricated report."
+  ([answer artifacts] (uncovered-tokens answer artifacts nil))
+  ([answer artifacts word-context]
+   (let [artifact-text (str/lower-case
+                        (str/join " " (for [a artifacts]
+                                        (str (:claim a) " " (:code a) " "
+                                             (pr-str (:witness a))))))
+         ;; Words may also come from `word-context`: the problem statement the
+         ;; harness handed the branch. Numbers get none of this — a figure has
+         ;; to come from an artifact.
+         word-text (str artifact-text " "
+                        (str/lower-case
+                         (if (coll? word-context)
+                           (str/join " " (remove nil? word-context))
+                           (str word-context))))]
+     (remove #(covered? % artifact-text word-text) (answer-tokens answer)))))
+
+(defn engages-problem?
+  "Whether the answer shares any substantive vocabulary with the problem.
+
+  The free rung, and deliberately the weakest one: lexical overlap cannot tell
+  an answer to the question from an answer about the question's machinery.
+  Zero overlap is the only thing it decides, and it decides it with no model
+  in the path.
+
+  A problem with no substantive vocabulary of its own — a stub, a test
+  fixture — means there is nothing to be irrelevant to, and this passes."
+  [problem answer]
+  (let [terms (set (answer-tokens problem))]
+    (or (empty? terms)
+        (boolean (some terms (answer-tokens answer))))))
+
+(defn labelled-line
+  "The text after `LABEL:` on the last line carrying one, or nil."
+  [text label]
+  (last (keep (fn [line]
+                (when-let [m (re-matches
+                              (re-pattern (str "(?i)" label "\\s*:\\s*(.+)"))
+                              (str/trim line))]
+                  (str/trim (second m))))
+              (str/split-lines (str text)))))
+
+;; --- shipping ---------------------------------------------------------------
+
+(defmethod base/run-tool "done" [{:keys [branch] :as ctx}]
+  ;; Slimmed from the proof harness's seven-rung ship gate: the audit, review
+  ;; and LLM-relevance rungs left with the judge machinery. What remains is
+  ;; every rung that runs with no model in the path — an answer must exist,
+  ;; its figures must come from the evidence, and it must engage the problem.
+  ;; The coding loop's ship gate (tests pass, review passed) rebuilds on this
+  ;; seam as data-defined gates.
+  (let [answer (base/arg ctx :answer)
+        confirmed (state/confirmed-artifacts branch)
+        own (concat confirmed (state/empirical-artifacts branch))
+        ;; And what the rest of the run established: a branch is shown the
+        ;; shared-artifact block, so refusing the answer that cites it would
+        ;; punish the branch for reading what the harness handed it (vf-b9c).
+        elsewhere (when (and (:conn ctx) (:run-id ctx))
+                    (journal/corroborating-artifacts
+                     (:conn ctx) (:run-id ctx) (:id branch)))
+        evidence (concat own elsewhere)
+        problem (:problem branch)
+        uncovered (uncovered-tokens answer evidence [problem])
+        uncovered-numbers (filter number-token? uncovered)
+        borrowed (when (seq elsewhere)
+                   (seq (remove (set uncovered)
+                                (uncovered-tokens answer own [problem]))))
+        block (cond
+                (str/blank? (str answer))
+                "Supply an `answer` to ship."
+
+                ;; Only when the run actually produced evidence to check
+                ;; against. The number-coverage rung guards against a
+                ;; FABRICATED verification report — a figure claimed as proven
+                ;; that no artifact supports. A coding run produces no
+                ;; artifacts (its work is proven by tests passing, which the
+                ;; shell tool reports and the journal records, not by confirmed
+                ;; claims), so with empty evidence EVERY figure reads as
+                ;; uncovered and the gate refuses honest answers like "0
+                ;; failures, 3 tests". Surfaced by the first self-modification
+                ;; run, which did the work correctly and could not ship it.
+                (and (seq evidence) (seq uncovered-numbers))
+                (str "Your answer states figures no artifact supports: "
+                     (str/join ", " (map #(str "`" % "`") (take 8 uncovered-numbers)))
+                     ".\nA number in an answer has to come from something"
+                     " confirmed or measured — that is the difference between a"
+                     " report and a fabricated one. Either verify these or"
+                     " remove them from the answer.")
+
+                (and (not (str/blank? (str problem)))
+                     (not (engages-problem? problem answer)))
+                (str "This answer shares no substantive term with the problem"
+                     " statement. Whatever it establishes, it is not an answer to"
+                     " the question that was asked."))]
+    ;; Journalled whether or not anything blocked, so the run record still
+    ;; shows what the lexical check saw even though words no longer decide.
+    (when-let [words (and (:conn ctx) (:run-id ctx)
+                          (seq (remove number-token? uncovered)))]
+      (journal/note! (:conn ctx) (:run-id ctx) :uncovered-words
+                     {:branch-id (:id branch) :turn (:turn ctx)
+                      :data {:words (vec (take 20 words)) :blocked? (some? block)}}))
+    (when (and borrowed (:conn ctx) (:run-id ctx))
+      (journal/note! (:conn ctx) (:run-id ctx) :cross-branch-citation
+                     {:branch-id (:id branch) :turn (:turn ctx)
+                      :data {:tokens (vec (take 20 borrowed))
+                             :sources (vec (distinct (keep :branch_id elsewhere)))}}))
+    (if block
+      (base/fail branch (str "`done` refused.\n\n" block) :done-block block)
+      {:branch (assoc branch :final-answer answer :status :done)
+       :category :success
+       :progress? true
+       :done? true
+       :answer answer
+       :result (str "Answer accepted.\n\n" answer)})))
+
+(defmethod base/run-tool "give_up" [{:keys [branch] :as ctx}]
+  (let [reason (or (base/arg ctx :reason) "no reason given")]
+    {:branch (assoc branch :status :abandoned :inactive-reason reason)
+     :category :neutral :progress? false :gave-up? true
+     :result (str "Gave up: " reason)}))
+
+;; --- forking ----------------------------------------------------------------
+
+(def max-branch-theses 4)
+
+(defmethod base/run-tool "branch_theses" [{:keys [branch] :as ctx}]
+  (let [proposals (base/arg ctx :theses)]
+    (cond
+      (or (not (sequential? proposals)) (empty? proposals))
+      (base/malformed branch (str "`theses` must be a non-empty array of"
+                        " {goal, subClaims, technique} objects."))
+
+      (> (count proposals) max-branch-theses)
+      (base/malformed branch (str "At most " max-branch-theses " theses per call; you proposed "
+                             (count proposals) "."))
+
+      (not (every? #(and (map? %) (string? (:goal %))) proposals))
+      (base/malformed branch "Every thesis must be an object with a `goal` string.")
+
+      :else
+      ;; The first commits THIS branch; the rest become siblings. The scheduler
+      ;; reads :pending-branch-theses after the turn and clears it, so a tool
+      ;; never creates a branch itself — one place owns the branch table.
+      (let [[mine & others] proposals
+            thesis (assoc mine :set-at-turn (:turn ctx))]
+        (base/ok (assoc branch :thesis thesis
+                   :pending-branch-theses (vec others))
+            (str "Committed to: " (:goal thesis)
+                 (when (seq others)
+                   (str "\nRequested " (count others) " sibling branch(es) for: "
+                        (str/join "; " (map :goal others))
+                        "\nThey explore independently and share this branch's"
+                        " failure log, so none of you will repeat another's"
+                        " dead end.")))
+            :progress? true
+            :thesis thesis)))))
