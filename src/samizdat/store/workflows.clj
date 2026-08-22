@@ -59,3 +59,10 @@
   (when-not (load-latest conn name)
     (save! conn name (slurp (io/resource resource-path))))
   (load-latest conn name))
+
+(defn names
+  "Every distinct manifest name in the store, with its latest version and how
+  many versions it has — the catalogue the manifest tool lists."
+  [conn]
+  (db/fetch conn ["SELECT name, MAX(version) AS version, COUNT(*) AS versions
+                   FROM workflows GROUP BY name ORDER BY name"]))

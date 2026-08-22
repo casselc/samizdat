@@ -31,6 +31,7 @@
   samizdat.agent.loop, so this manifest and the beam cannot drift apart on
   behavior — only on composition."
   (:require [clojure.edn :as edn]
+            [clojure.java.io :as io]
             [clojure.tools.logging :as log]
             [mycelium.core :as myc]
             [mycelium.cell :as cell]
@@ -46,6 +47,19 @@
 
 (def loop-name "loop")
 (def loop-resource "manifests/loop.edn")
+
+(defn manifest-resource
+  "The factory resource path a manifest name seeds from, e.g. \"loop\" ->
+  \"manifests/loop.edn\". A manifest with no such resource lives only in the
+  workflows table — one the agent authored at runtime."
+  [name]
+  (str "manifests/" name ".edn"))
+
+(defn active-loop-name
+  "Which manifest a run should drive: the configured name, or the factory
+  default. HARNESS_LOOP or a project's .samizdat/config.edn set :run :loop."
+  [config]
+  (or (get-in config [:run :loop]) loop-name))
 
 (defn read-definition
   "Parse a workflow definition from EDN text. Dispatch predicates stay as
@@ -73,21 +87,33 @@
     compiled))
 
 (defn load-loop!
-  "The current loop: seed the factory default on first use, then load and
-  compile the latest stored version. Returns {:version :definition :compiled}."
-  [conn]
-  (let [row (workflows/seed! conn loop-name loop-resource)
-        definition (read-definition (:edn row))]
-    {:version (:version row)
-     :definition definition
-     :compiled (compile-loop definition)}))
+  "The loop to drive a run: seed its factory resource on first use (if it has
+  one), then load and compile the latest stored version. Named manifests let a
+  sophisticated loop live in the workflows table beside the default; a name
+  with no resource and no stored version is an error. Returns {:name :version
+  :definition :compiled}."
+  ([conn] (load-loop! conn loop-name))
+  ([conn name]
+   (let [res (manifest-resource name)
+         row (if (io/resource res)
+               (workflows/seed! conn name res)
+               (workflows/load-latest conn name))]
+     (when-not row
+       (throw (ex-info (str "no loop manifest named '" name
+                            "' — no resource at " res " and nothing stored")
+                       {:name name})))
+     {:name name
+      :version (:version row)
+      :definition (read-definition (:edn row))
+      :compiled (compile-loop (read-definition (:edn row)))})))
 
 (defn run!
   "Run one branch to completion under the stored loop definition.
   Returns {:status :answer :branch :run-id (:residual)}."
   [{:keys [conn config llm-adapter llm-config problem max-turns]}]
   (let [max-turns (or max-turns (get-in config [:run :max-turns]) 40)
-        {:keys [version compiled]} (load-loop! conn)
+        loop-nm (active-loop-name config)
+        {:keys [version compiled]} (load-loop! conn loop-nm)
         run-id (runs/start-run! conn {:problem problem
                                       :provider (:provider llm-config)
                                       :model (:model llm-config)
@@ -110,7 +136,7 @@
     ;; Which loop drove this run, durably: an agent reading a surprising run
     ;; back needs to know which version of itself produced it.
     (journal/note! conn run-id :loop-workflow
-                   {:data {:name loop-name :version version}})
+                   {:data {:name loop-nm :version version}})
     (let [data (myc/run-compiled compiled ctx {:branch branch :turn 1})]
       (when (myc/error? data)
         ;; A structural failure mid-run is a harness bug, not a branch

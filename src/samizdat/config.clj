@@ -175,6 +175,12 @@
        ;; tighter bound sets HARNESS_MAX_TURNS.
        :run      {:max-turns  (or (env-long "HARNESS_MAX_TURNS") 1000)
                   :beam-width (or (env-long "HARNESS_BEAM_WIDTH") 5)
+                  ;; Which loop manifest drives a run. The workflows table holds
+                  ;; many named, versioned manifests; this picks one by name (its
+                  ;; latest version). nil means the factory "loop". A project can
+                  ;; pin its own via .samizdat/config.edn, and the agent can add
+                  ;; or tune manifests at runtime with the `manifest` tool.
+                  :loop       (env "HARNESS_LOOP")
                   ;; Cross-branch sharing of engine-confirmed artifacts. Off by
                   ;; default: shared lemmas may cost the beam its diversity, and
                   ;; whether they earn it is exactly what sweep-widths measures.

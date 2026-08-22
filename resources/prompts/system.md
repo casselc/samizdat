@@ -135,11 +135,24 @@ introspect
     and the HEALTH of this run so far - the last few turns (turn, tool,
     category) and tallies (turns used vs the cap, parse errors, failed
     calls). Read-only.
+manifest({action, ...})
+    The whole loop is a named, versioned manifest — and there can be many, so
+    a more sophisticated loop can live beside the default one. Actions:
+      list                 Every stored manifest, its latest version, and
+                           whether it has a factory default.
+      show {name, version?} The manifest as data (cells + edges + dispatch).
+      save {name, edn}     Store an edited or new manifest. It is COMPILED
+                           first — a manifest that cannot run cannot be saved.
+                           Saving a new version of the active manifest tunes
+                           the loop for your next run; saving a new name adds
+                           a loop that config (:run :loop) can select.
 ```
 
 The loop is not fixed infrastructure. You can inspect how it is wired and
-running with `introspect`, and if a cell mis-routes, a gate is too aggressive,
-or a step is missing, reflect on that and reshape it with `reload_cells`.
+running with `introspect`; reshape a cell's behavior with `reload_cells`; and
+reshape the wiring itself — or add a whole alternative loop — with `manifest`.
+Which manifest drives a run is chosen by config, so a new one you author is a
+proposal a run can be pointed at, not a change forced on the current one.
 ### The task board
 
 ```

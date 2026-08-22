@@ -69,6 +69,7 @@
             [samizdat.knowledge-test]
             [samizdat.messages-test]
             [samizdat.workflow-test]
+            [samizdat.manifest-test]
             [samizdat.security.secrets-test]
             [samizdat.config-test]
             [samizdat.files-test]
@@ -143,6 +144,7 @@
     samizdat.knowledge-test
     samizdat.messages-test
     samizdat.workflow-test
+    samizdat.manifest-test
     samizdat.security.secrets-test
     samizdat.config-test
     samizdat.files-test

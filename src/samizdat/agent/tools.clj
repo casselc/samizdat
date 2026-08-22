@@ -50,6 +50,7 @@
             [samizdat.agent.tools.knowledge]
             [samizdat.agent.tools.journal]
             [samizdat.agent.tools.mutate]
+            [samizdat.agent.tools.manifest]
             [samizdat.agent.tools.introspect]
             [samizdat.agent.tools.lsp]))
 
