@@ -249,18 +249,22 @@
         work is real and verified, send it back to implement with the findings
         as guidance — the loop is an open-ended problem solver, not a one-shot.
         It SHIPS (completed) only on real, verified work (reviewer pass + critic
-        ship + the working tree actually changed). It ABANDONS only in the
-        extreme: the supervisor gave up (STOP) after failing to find a solution,
-        or the safety backstop (:run :max-revisions, default 6) tripped — a
-        runaway guard, not the normal exit. Abandoning is honest, not a hollow
-        ship: the run reports it did not solve the task."
+        ship + the working tree actually changed). It ABANDONS only when the
+        SUPERVISOR gives up (STOP) after failing to find a solution — the loop is
+        fully supervisor-driven, with no numeric cap that ends it. A run may opt
+        into a hard runaway guard (:run :max-revisions-hard) as an unattended
+        safety net, but by default there is none. Abandoning is honest, not a
+        hollow ship: the run reports it did not solve the task."
    :effects [:db]}
   (fn [{:keys [conn run-id config] :as ctx} data]
     (let [rev (revision data)
           soft-cap (or (get-in config [:run :max-revisions]) 6)
-          ;; A hard runaway guard well above the soft cap, so a supervisor that
-          ;; keeps choosing to continue cannot loop forever.
-          hard-cap (or (get-in config [:run :max-revisions-hard]) (* 3 soft-cap))
+          ;; Fully supervisor-driven by default: there is NO numeric abandon, so
+          ;; the loop keeps solving until the supervisor decides to STOP. A hard
+          ;; runaway guard exists only if a run explicitly opts into one
+          ;; (:run :max-revisions-hard) — a safety net for unattended runs, not
+          ;; the normal terminator.
+          hard-cap (get-in config [:run :max-revisions-hard])
           hollow (hollow? ctx)
           ;; BOTH gates green to ship completed. Gate 1: a diff exists and it
           ;; passed review (reviewer + critic). Gate 2: the tests passed.
@@ -273,7 +277,7 @@
           ;; runaway guard tripped. The SOFT cap does NOT abandon — it only
           ;; notifies the supervisor (via telemetry) so it decides for itself.
           give-up? (:feature/stop data)
-          runaway? (>= rev hard-cap)
+          runaway? (and hard-cap (>= rev hard-cap))
           decision (cond pass? :ship
                          (or give-up? runaway?) :abandon
                          :else :revise)]
