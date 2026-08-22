@@ -238,7 +238,12 @@
                                      ;; continue a trailing assistant message,
                                      ;; so this is a hint, never a requirement.
                                      (:prefill branch)
-                                     (assoc :prefill (:prefill branch))))}
+                                     (assoc :prefill (:prefill branch))
+                                     ;; A gate forcing a specific tool: sent as a
+                                     ;; native tool_choice, honoured on every
+                                     ;; OpenAI-compatible provider (GLM included).
+                                     (:force-tool branch)
+                                     (assoc :force-tool (:force-tool branch))))}
               (catch Throwable e
                 {:ok false :error (ex-message e)}))]
       (if (and (:ok r)
@@ -331,8 +336,9 @@
      :branch (-> branch
                  ;; Cleared here, not where it was set: one steer forecloses
                  ;; prose on one turn. Leaving it would make every later turn
-                 ;; start inside a fence.
-                 (dissoc :prefill)
+                 ;; start inside a fence — or, for force-tool, force the same
+                 ;; terminal call every turn after.
+                 (dissoc :prefill :force-tool)
                  (state/add-message "assistant" said)
                  (state/record-mechanics signals))}))
 
@@ -566,8 +572,13 @@
                             :window (:window decision)
                             :turn turn})
           ;; Consumed by the NEXT call-model and cleared there, so a steer
-          ;; forecloses prose on exactly the turn it steers and no later one.
-          decision (assoc :prefill (arbiter/prefill-for decision))
+          ;; forecloses prose on exactly the turn it steers and no later one. A
+          ;; gate naming a forceable tool uses native tool_choice (works on
+          ;; providers that ignore prefill, like GLM) INSTEAD of the prefill; a
+          ;; bare or non-forceable steer still prefills the fence.
+          decision (assoc :force-tool (arbiter/force-tool-for decision)
+                          :prefill (when-not (arbiter/force-tool-for decision)
+                                     (arbiter/prefill-for decision)))
           ;; Record which budget notices have been delivered, or the gate
           ;; cannot tell "happened" from "happened and I already reacted".
           (= :turn-budget (:gate decision))

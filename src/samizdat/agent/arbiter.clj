@@ -90,6 +90,33 @@
       (str "```tool-call\n{\"name\": \"" t "\"")
       "```tool-call\n")))
 
+(def ^:private forceable
+  "Schemas for the tools a gate may FORCE via native tool_choice. Only the
+  terminal tools — forcing a mid-task tool would be the harness deciding rather
+  than steering. Minimal: enough for the provider to accept the function."
+  {"done" {:name "done"
+           :description "Finish the task and return the final answer."
+           :parameters {:type "object"
+                        :properties {:answer {:type "string"
+                                              :description "The final answer, or the best partial result so far."}}
+                        :required ["answer"]}}
+   "give_up" {:name "give_up"
+              :description "Abandon the task, stating why it cannot be finished."
+              :parameters {:type "object"
+                           :properties {:reason {:type "string"}}
+                           :required ["reason"]}}})
+
+(defn force-tool-for
+  "The native-tool spec to FORCE for a decision naming a forceable tool, or nil.
+
+  The provider-agnostic force (native tool_choice), which supersedes the prefill
+  for tool-naming gates: a prefill only lands where the provider continues a
+  trailing assistant message (DeepSeek /beta), and a gate that must land a done
+  on GLM cannot rely on that. See samizdat.llm.adapter.openai."
+  [decision]
+  (when-let [t (:tool decision)]
+    (get forceable t)))
+
 ;; --- settling predictions ---------------------------------------------------
 
 (defn- progressed? [before after]

@@ -29,8 +29,22 @@
   return `reasoning_content` alongside `content`; others return nothing. The
   field name is configurable and the client folds it into <think> framing so
   the fence parser sees one string either way."
-  (:require [clojure.string :as str]
+  (:require [clojure.data.json :as json]
+            [clojure.string :as str]
             [samizdat.llm.adapter :as adapter]))
+
+(defn- tool-call->fence
+  "A native OpenAI tool_call turned into the harness's text-fence convention, so
+  a forced (tool_choice) response parses through exactly the same path a normal
+  fenced response does. `arguments` is a JSON string; it is parsed and re-embedded
+  as `args` so the downstream fence parser reads one object."
+  [tc]
+  (let [name (get-in tc [:function :name])
+        args (try (json/read-str (str (get-in tc [:function :arguments])))
+                  (catch Throwable _ {}))]
+    (str "```tool-call\n"
+         (json/write-str {:name name :args args})
+         "\n```")))
 
 (defn- supports-prefill?
   "Which members of the family continue a flagged trailing assistant message,
@@ -68,9 +82,10 @@
       {"Authorization" (str "Bearer " k)}
       {}))
 
-  (chat-body [_ config {:keys [messages max-tokens temperature prefill]}]
+  (chat-body [_ config {:keys [messages max-tokens temperature prefill force-tool]}]
     (cond-> {:model (:model config)
-             :messages (if (and prefill (supports-prefill? provider-id config))
+             :messages (if (and prefill (not force-tool)
+                                (supports-prefill? provider-id config))
                          ;; `:prefix true` is what makes the provider CONTINUE
                          ;; this message rather than reply after it. Without
                          ;; the flag a trailing assistant turn is just history,
@@ -91,14 +106,28 @@
       ;; the field rejects the request rather than ignoring it, so unset has
       ;; to mean absent.
       (some? (:reasoning-effort config))
-      (assoc :reasoning_effort (:reasoning-effort config))))
+      (assoc :reasoning_effort (:reasoning-effort config))
+
+      ;; Force a specific finishing tool with native tool_choice — the
+      ;; provider-agnostic way to make the model call `done`/`give_up` (works on
+      ;; GLM, which ignores assistant prefill). opencode does the same. Only the
+      ;; forced tool is exposed, so the model has no other call to make.
+      force-tool
+      (assoc :tools [{:type "function" :function force-tool}]
+             :tool_choice {:type "function"
+                           :function {:name (:name force-tool)}})))
 
   (prefill-support? [_ config] (supports-prefill? provider-id config))
 
   (parse-chat [_ body]
     (when-let [choice (first (:choices body))]
       (let [msg (:message choice)]
-        {:content (:content msg)
+        {;; A forced tool_choice response carries the call in tool_calls, not
+         ;; content — fold it into the fence convention so downstream is blind to
+         ;; how the call was produced.
+         :content (if-let [tc (first (:tool_calls msg))]
+                    (tool-call->fence tc)
+                    (:content msg))
          :reasoning (get msg reasoning-key)
          :finish-reason (or (:finish_reason choice) "stop")
          :usage (when-let [u (:usage body)]

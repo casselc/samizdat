@@ -174,7 +174,14 @@
   (testing "silent on a branch that already shipped"
     (let [b (branch-with :turns (vec (repeat 39 {})) :status :done :final-answer "x")]
       (is (not-any? #{:last-call}
-                    (map :gate (arbiter/eligible {:branch b :max-turns 40})))))))
+                    (map :gate (arbiter/eligible {:branch b :max-turns 40}))))))
+
+  (testing "it forces the done via native tool_choice, not a prefill (karamazov-9se)"
+    (let [d (arbiter/decide {:branch (branch-with :turns (vec (repeat 39 {}))) :max-turns 40})]
+      (is (= "done" (:name (arbiter/force-tool-for d)))
+          "the forced tool is done, sent as a native function")
+      (is (nil? (arbiter/force-tool-for {:gate :wind-down}))
+          "a gate that names no tool forces nothing"))))
 
 (deftest gate-config-is-coherent
   (testing "every gate with a budget names a threshold that exists"

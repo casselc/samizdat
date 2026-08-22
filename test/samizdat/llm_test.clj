@@ -426,6 +426,36 @@
 
 ;; --- adapters ---------------------------------------------------------------
 
+(deftest force-tool-uses-native-tool-choice-not-prefill
+  ;; karamazov-9se: assistant prefill only forces a call where the provider
+  ;; continues a trailing assistant message (DeepSeek /beta); GLM ignores it. A
+  ;; gate that must land a `done` forces it with native tool_choice instead.
+  (let [glm (registry/adapter-for :glm)
+        cfg {:base-url "https://open.bigmodel.cn/api/coding/paas/v4" :model "glm-5.3" :api-key "k"}
+        done-spec {:name "done" :description "Finish."
+                   :parameters {:type "object"
+                                :properties {:answer {:type "string"}}
+                                :required ["answer"]}}]
+    (testing "chat-body exposes only the forced tool with tool_choice, and drops the prefill"
+      (let [body (adapter/chat-body glm cfg
+                                    {:messages [{:role "user" :content "x"}]
+                                     :prefill "```tool-call\n{\"name\": \"done\""
+                                     :force-tool done-spec})]
+        (is (= [{:type "function" :function done-spec}] (:tools body)))
+        (is (= {:type "function" :function {:name "done"}} (:tool_choice body)))
+        (is (not-any? #(= "assistant" (:role %)) (:messages body))
+            "GLM cannot continue a trailing assistant message, so none is sent")))
+    (testing "parse-chat folds a native tool_calls response back into the fence convention"
+      (let [reply {:choices [{:message {:tool_calls
+                                        [{:function {:name "done"
+                                                     :arguments "{\"answer\":\"shipped the partial\"}"}}]}
+                              :finish_reason "tool_calls"}]}
+            p (adapter/parse-chat glm reply)]
+        (is (str/includes? (:content p) "```tool-call"))
+        (is (str/includes? (:content p) "\"name\":\"done\""))
+        (is (str/includes? (:content p) "shipped the partial")
+            "so the loop's fence parser reads it exactly like a normal tool call")))))
+
 (deftest adapters-differ-only-where-they-should
   (let [cfg {:base-url "https://api.example.com/v1" :model "m" :api-key "k"}]
     (testing "the OpenAI family"
