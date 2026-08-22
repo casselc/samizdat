@@ -30,3 +30,63 @@
   ;; default; a provider that doesn't falls back to 0.7.
   (is (= 0.2 (config/provider-temperature :glm)))
   (is (= 0.7 (config/provider-temperature :deepseek))))
+
+(defn- temp-project-root
+  "A temp dir with .samizdat/ created; caller passes config.edn content or nil."
+  [edn-content]
+  (let [root (str (java.nio.file.Files/createTempDirectory
+                   "samizdat-proj-cfg"
+                   (make-array java.nio.file.attribute.FileAttribute 0)))
+        dir (java.io.File. root ".samizdat")]
+    (.mkdirs dir)
+    (when edn-content
+      (spit (java.io.File. dir "config.edn") edn-content))
+    root))
+
+(defn- delete-recursively [^java.io.File f]
+  (when (.isDirectory f) (doseq [c (.listFiles f)] (delete-recursively c)))
+  (.delete f))
+
+(deftest deep-merge-merges-nested-maps-and-later-wins
+  (is (= {:a {:b 2 :c 3} :d 4}
+         (config/deep-merge {:a {:b 1 :c 3}} {:a {:b 2} :d 4})))
+  ;; non-map collisions: the later value simply replaces
+  (is (= {:a 2} (config/deep-merge {:a 1} {:a 2})))
+  (is (= {:a [2]} (config/deep-merge {:a {:b 1}} {:a [2]})))
+  ;; no later layer leaves the base untouched
+  (is (= {:a {:b 1}} (config/deep-merge {:a {:b 1}} {}))))
+
+(deftest project-config-layers-between-defaults-and-overrides
+  (let [root (temp-project-root "{ :http { :port 4242 } :llm { :model \"project-model\" } }")]
+    (try
+      (testing "project-config reads the file"
+        (is (= {:http {:port 4242} :llm {:model "project-model"}}
+               (config/project-config root))))
+      (testing "load-config picks up the project value"
+        (let [cfg (config/load-config {:run {:root root}})]
+          (is (= 4242 (get-in cfg [:http :port])))
+          (is (= "project-model" (get-in cfg [:llm :model])))))
+      (testing "an explicit override still beats the project value"
+        (let [cfg (config/load-config {:run {:root root} :http {:port 5555}})]
+          (is (= 5555 (get-in cfg [:http :port])))
+          ;; untouched keys keep the project value
+          (is (= "project-model" (get-in cfg [:llm :model])))))
+      (finally (delete-recursively (java.io.File. root))))))
+
+(deftest missing-or-broken-project-file-is-ignored
+  (testing "absent file"
+    (let [root (temp-project-root nil)]
+      (try
+        (is (= {} (config/project-config root)))
+        (is (= 3985 (get-in (config/load-config {:run {:root root}}) [:http :port])))
+        (finally (delete-recursively (java.io.File. root))))))
+  (testing "garbage EDN"
+    (let [root (temp-project-root "{:http {:port ")]
+      (try
+        (is (= {} (config/project-config root)))
+        (finally (delete-recursively (java.io.File. root))))))
+  (testing "valid EDN that is not a map"
+    (let [root (temp-project-root "[:not :a :map]")]
+      (try
+        (is (= {} (config/project-config root)))
+        (finally (delete-recursively (java.io.File. root)))))))

@@ -14,7 +14,30 @@
   HARNESS_PROVIDER wins, otherwise the first provider whose API key is present.
   In-process GGUF inference is not carried over — point HARNESS_BASE_URL at any
   OpenAI-compatible endpoint (including llama-server) instead."
-  (:require [clojure.string :as str]))
+  (:require [clojure.edn :as edn]
+            [clojure.string :as str]))
+
+(defn deep-merge
+  "Merge maps left to right, recursing when BOTH values are maps; any other
+  collision is won by the later value. The layering primitive for config:
+  defaults < project .samizdat/config.edn < explicit overrides."
+  [& ms]
+  (apply merge-with (fn [a b] (if (and (map? a) (map? b))
+                               (deep-merge a b)
+                               b))
+         ms))
+
+(defn project-config
+  "The project-local config layer: <root>/.samizdat/config.edn as an EDN map.
+  {} when absent, unreadable, or not a map — a broken project file must never
+  stop the harness. Precedence sits between the built-in defaults and the
+  caller's overrides, so a checkout pins its port/model/db without env or code
+  and an explicit override still wins. Mirrors the project-local CELLS layer
+  (samizdat.cells/default-dirs)."
+  [root]
+  (try (let [v (edn/read-string (slurp (str root "/.samizdat/config.edn")))]
+         (if (map? v) v {}))
+       (catch Exception _ {})))
 
 (def ^:private providers
   {;; /beta rather than /v1, for prefix completion. A gate that names one tool
@@ -87,8 +110,13 @@
          defaults (or (providers provider)
                       (throw (ex-info (str "Unknown HARNESS_PROVIDER: " provider)
                                       {:provider provider
-                                       :known (keys providers)})))]
-     (merge
+                                       :known (keys providers)})))
+         ;; The project layer layers between defaults and overrides. Root: the
+         ;; caller's :run :root if given, else the process working dir.
+         root (or (get-in overrides [:run :root])
+                  (System/getProperty "user.dir"))
+         project (project-config root)]
+     (deep-merge
       ;; 3985 rather than a common port: 3000 is the busiest address on a
       ;; developer machine, and a harness that silently fails to bind (or
       ;; binds where something else already lives) is worse than one on an
@@ -150,6 +178,7 @@
                   ;; keep exploring, and the best is ranked at the end.
                   :stop-on-first-done? (not= "0" (or (env "HARNESS_STOP_ON_FIRST_DONE")
                                                      "1"))}}
+      project
       overrides))))
 
 (defn redacted
