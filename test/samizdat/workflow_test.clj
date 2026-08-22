@@ -13,9 +13,10 @@
   hand-written loop did. Editing the stored definition changes the next run —
   that is the whole point."
   (:require [clojure.data.json :as json]
+            [samizdat.cells :as cells]
             [clojure.edn :as edn]
             [clojure.string :as str]
-            [clojure.test :refer [deftest testing is]]
+            [clojure.test :refer [deftest testing is use-fixtures]]
             [samizdat.agent.state :as state]
             [samizdat.llm.client :as llm]
             [samizdat.store.db :as db]
@@ -24,6 +25,12 @@
             [samizdat.store.workflows :as workflows]
             [samizdat.workflow :as workflow]
             [mycelium.workflow :as wf]))
+
+;; The loop cells now live in resources and load at runtime — nothing
+;; registers them as a namespace side effect anymore. Load them before the
+;; tests that inspect the definition directly (compile-loop loads them itself,
+;; but workflow-effects-are-fully-declared reads them without compiling).
+(use-fixtures :once (fn [f] (cells/load-cells!) (f)))
 
 (defmacro with-db [[binding] & body]
   `(let [~binding (db/open! ":memory:")]

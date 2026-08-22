@@ -93,6 +93,39 @@
   []
   (keys (dissoc (methods cell-spec) :default)))
 
+(defn register-spec!
+  "Register a raw cell spec map under its id, bypassing defcell's validation.
+  Used by registry-restore! to put a snapshot back verbatim."
+  [id spec]
+  (.addMethod cell-spec id (constantly spec)))
+
+(defn remove-cell!
+  "Unregister a single cell by id — the surgical counterpart to
+  clear-registry!, so a loader can drop its own cells without touching cells
+  other code registered in the shared registry."
+  [id]
+  (remove-method cell-spec id)
+  (swap! cell-overrides dissoc id))
+
+(defn registry-snapshot
+  "Capture the whole cell registry — every registered spec plus the override
+  map — so a load can be rolled back to exactly this state (samizdat's cell
+  loader wraps a reload in snapshot/restore, per autolith's transactional
+  registry pattern)."
+  []
+  {:specs (into {} (map (fn [id] [id (cell-spec id)])) (list-cells))
+   :overrides @cell-overrides})
+
+(defn registry-restore!
+  "Restore the registry to a prior snapshot: clear it, re-register every spec,
+  and put the overrides back. Used when a cell reload fails partway, so a bad
+  cell file never leaves the registry half-loaded."
+  [{:keys [specs overrides]}]
+  (clear-registry!)
+  (doseq [[id spec] specs]
+    (register-spec! id spec))
+  (reset! cell-overrides (or overrides {})))
+
 ;; --- purity -------------------------------------------------------------------
 ;; A cell declares either `:pure true` or `:effects [:fs :net ...]` — what it
 ;; touches beyond its data. The declaration is data for three consumers: graph

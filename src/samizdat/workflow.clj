@@ -24,8 +24,9 @@
   (:require [clojure.edn :as edn]
             [clojure.tools.logging :as log]
             [mycelium.core :as myc]
+            [mycelium.cell :as cell]
             [mycelium.workflow :as wf]
-            [samizdat.agent.cells :as cells]
+            [samizdat.cells :as cells]
             [samizdat.agent.loop :as branch-loop]
             [samizdat.repl :as repl]
             [samizdat.agent.state :as state]
@@ -50,10 +51,13 @@
   which is the mutation protocol's first line of defense. Logs, and returns
   compiled with, any :mycelium/compile-warnings (undeclared cell effects)."
   [definition]
-  ;; The cell registry is global mutable state; re-register before every
-  ;; compile so nothing that emptied it (a REPL clear, a test fixture) can
-  ;; make the loop compile against a half-empty registry.
-  (cells/register!)
+  ;; Load the cells from resources before every compile. The cell registry is
+  ;; global mutable state, and a non-empty registry is not proof the LOOP's
+  ;; cells are present (a test or another workflow may have registered
+  ;; different ones) — so this always loads rather than guarding on emptiness.
+  ;; Idempotent, cheap (one file), and it picks up any edited cell, which is
+  ;; the hot-reload the mutation protocol will build on.
+  (cells/load-cells!)
   (let [compiled (myc/pre-compile definition)]
     (when-let [warnings (:mycelium/compile-warnings (:compiled-fsm compiled))]
       (log/warn "loop definition compiled with warnings:" (pr-str warnings)))
