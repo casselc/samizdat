@@ -1,0 +1,48 @@
+;; The REVIEWER role loop. Structurally the per-turn worker graph — assemble,
+;; infer, parse, dispatch, journal, arbiter, route — because a reviewer works
+;; the same way an implementor does: a turn at a time until a terminal verdict,
+;; then control returns to whatever composed it. What makes it the REVIEWER is
+;; its role prompt (prompts/roles/reviewer.md, injected by :feature/review) and
+;; its position in feature.edn (it runs on the implementors' finished work).
+;;
+;; It is a SEPARATE, independently-versioned manifest from `worker` on purpose:
+;; the reviewer role owns this loop and can tune it (manifest save "reviewer")
+;; without touching how implementors work. Today it mirrors `worker`; it is free
+;; to diverge.
+{:cells {:start          :loop/assemble
+         :infer          :llm/infer
+         :parse          :llm/parse
+         :provider-error :loop/provider-error
+         :no-call        :loop/no-call
+         :dispatch       :tool/dispatch
+         :journal        :journal/record
+         :arbiter        :gate/arbiter
+         :route          :loop/route}
+
+ :edges {:start          :infer
+         :infer          :parse
+         :parse          {:provider-error :provider-error
+                          :no-call        :no-call
+                          :tool           :dispatch}
+         :provider-error :route
+         :no-call        :route
+         :dispatch       :journal
+         :journal        :arbiter
+         :arbiter        :route
+         :route          {:continue  :start
+                          :done      :end
+                          :abandoned :end
+                          :exhausted :end}}
+
+ :dispatches {:parse [[:provider-error (fn [d] (not (:ok (:call d))))]
+                      [:no-call (fn [d] (let [p (:parsed d)]
+                                          (or (nil? p)
+                                              (= "__parse_error__" (:name p)))))]
+                      [:tool (fn [d] true)]]
+              :route [[:continue  (fn [d] (= :continue (:verdict d)))]
+                      [:done      (fn [d] (= :done (:verdict d)))]
+                      [:abandoned (fn [d] (= :abandoned (:verdict d)))]
+                      [:exhausted (fn [d] (= :exhausted (:verdict d)))]]}
+
+ :constraints [{:type :must-follow :if :dispatch :then :journal}
+               {:type :must-follow :if :journal :then :arbiter}]}

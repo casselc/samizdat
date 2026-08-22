@@ -127,12 +127,24 @@
       :definition (read-definition (:edn row))
       :compiled (compile-loop (read-definition (:edn row)))})))
 
+(defn compiled-manifest
+  "Compile the named factory manifest to a runnable sub-loop. The seam a role
+  cell uses to run a role's own loop (worker for an implementor, reviewer for a
+  reviewer). Compiled fresh each call, so a cell edit is picked up. Throws if
+  the name has no factory resource."
+  [name]
+  (let [res (manifest-resource name)]
+    (when-not (io/resource res)
+      (throw (ex-info (str "no factory manifest resource for '" name "' at " res)
+                      {:manifest name})))
+    (compile-loop (read-definition (slurp (io/resource res))))))
+
 (defn worker-compiled
   "The worker sub-loop, compiled — for a team cell that runs a worker per
   sub-task, each on its own branch. Compiled fresh (cells may have changed);
   the caller runs it N times."
   []
-  (compile-loop (read-definition (slurp (io/resource (manifest-resource "worker"))))))
+  (compiled-manifest "worker"))
 
 (defn prompt-text
   "The text of a named prompt resource (resources/prompts/<name>.md), or nil if

@@ -47,23 +47,27 @@
        (or (wf/prompt-text "team-worker") "")))
 
 (defn- worker-prompt
-  "The prompt suffix for worker `idx`: a peer roster + coordination guide for a
-  real team (>1 task), nil for a solo worker (which then runs the plain worker
-  prompt, unchanged from before this slice)."
+  "The prompt suffix for implementor worker `idx`: its implementor role identity
+  (so it knows it builds one part, a reviewer will read its work), plus a peer
+  roster + coordination guide when it is one of several (>1 task). A solo worker
+  still gets the role identity."
   [idx tasks]
-  (when (> (count tasks) 1)
-    (roster idx tasks)))
+  (let [role (wf/prompt-text "roles/implementor")]
+    (if (> (count tasks) 1)
+      (str/join "\n\n" (remove str/blank? [role (roster idx tasks)]))
+      role)))
 
 (defn- run-worker
-  "Run one worker sub-loop on sub-task `st` as branch `bid` on the shared run,
-  with peer roster `suffix`. Returns a result map. A throw becomes an :error
-  result rather than taking the whole fan-out down — one worker's crash is not
-  the team's."
-  [{:keys [conn run-id] :as ctx} worker bid idx st suffix]
+  "Run one worker sub-loop as branch `bid` on the shared run: `prob` is the
+  branch's problem (a sub-task, possibly with revise guidance appended), `st` is
+  the bare sub-task kept for the result label, `suffix` the role prompt. A throw
+  becomes an :error result rather than taking the whole fan-out down — one
+  worker's crash is not the team's."
+  [{:keys [conn run-id] :as ctx} worker bid idx st prob suffix]
   (try
     (runs/open-branch! conn run-id {:branch-id bid})
-    (let [b (state/new-branch {:id bid :problem st
-                               :messages (turn/initial-messages st suffix)})
+    (let [b (state/new-branch {:id bid :problem prob
+                               :messages (turn/initial-messages prob suffix)})
           out (myc/run-compiled worker ctx {:branch b :turn 1})]
       {:worker idx :subtask st :branch bid
        :status (:verdict out)
@@ -112,13 +116,23 @@
   (fn [{:keys [conn run-id] :as ctx} {:keys [branch subtasks] :as data}]
     (let [tasks (vec (if (seq subtasks) subtasks [(:problem branch)]))
           worker (wf/worker-compiled)
+          ;; When the feature loop sends a round back, :revise/guidance carries
+          ;; the reviewer/critic findings and :feature/revisions bumps, so retry
+          ;; branches (W<i>v<rev>) do not collide with the earlier round's.
+          guidance (:revise/guidance data)
+          rev (or (:feature/revisions data) 0)
+          prob-of (fn [s] (if (str/blank? (str guidance))
+                            s
+                            (str s "\n\nA prior review sent this back. Address:\n"
+                                 guidance)))
+          bid-of (fn [i] (str "W" i (when (pos? rev) (str "v" rev))))
           results (->> (map-indexed vector tasks)
                        (mapv (fn [[i s]]
-                               (future (run-worker ctx worker (str "W" i) i s
-                                                   (worker-prompt i tasks)))))
+                               (future (run-worker ctx worker (bid-of i) i s
+                                                   (prob-of s) (worker-prompt i tasks)))))
                        (mapv deref))]
       (journal/note! conn run-id :team
-                     {:data {:workers (count results)
+                     {:data {:workers (count results) :revision rev
                              :done (count (filter ok? results))}})
       (assoc data
              :subtasks tasks
@@ -141,8 +155,9 @@
                           (if (ok? r)
                             r
                             (let [i (:worker r)
+                                  st (:subtask r)
                                   r2 (run-worker ctx worker (str "W" i "r1") i
-                                                 (:subtask r) (worker-prompt i tasks))]
+                                                 st st (worker-prompt i tasks))]
                               (if (ok? r2) r2 r))))
                         results)
           fixed (count (filter (fn [[a b]] (and (not (ok? a)) (ok? b)))

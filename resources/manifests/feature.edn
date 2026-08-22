@@ -1,0 +1,45 @@
+;; The FEATURE loop: the high-level manifest. It tracks a feature through its
+;; lifecycle as a state machine and delegates each stage to a ROLE:
+;;
+;;   plan -> implement -> review -> critique -> supervise -> route
+;;                ^__________________________________revise____|
+;;
+;;   plan       decompose the feature into parts (team/plan)
+;;   implement  a FAN-OUT of implementor workers, collaborating on the parts
+;;              (team/fan-out) — the horizontal team lives here, INSIDE the
+;;              feature loop, as one stage
+;;   review     the REVIEWER role reads the implementors' combined work and
+;;              returns PASS / REVISE (feature/review runs reviewer.edn)
+;;   critique   the CRITIC role gates the result: deterministic checks + judge
+;;              (feature/critique)
+;;   supervise  watches the role loops and can adjust the outer loop — e.g. on
+;;              an implement round that shipped nothing, force another round
+;;              (feature/supervise)
+;;   route      ship, or send the work back to implement with the findings as
+;;              guidance, bounded by :run :max-revisions (feature/route)
+;;
+;; The hierarchy is explicit: this manifest is the feature; each role has its
+;; own loop (implementor = worker.edn, reviewer.edn, critic = the judge) and its
+;; own prompt, and owns/tunes its own manifest. Select with config
+;; :run :loop "feature". Pass config :run :subtasks to skip planning.
+{:cells {:start     :loop/assemble
+         :plan      :team/plan
+         :implement :team/fan-out
+         :review    :feature/review
+         :critique  :feature/critique
+         :supervise :feature/supervise
+         :route     :feature/route
+         :finish    :loop/finish}
+
+ :edges {:start     :plan
+         :plan      :implement
+         :implement :review
+         :review    :critique
+         :critique  :supervise
+         :supervise :route
+         :route     {:ship   :finish
+                     :revise :implement}
+         :finish    :end}
+
+ :dispatches {:route [[:ship   (fn [d] (= :ship   (:feature/decision d)))]
+                      [:revise (fn [d] (= :revise (:feature/decision d)))]]}}
