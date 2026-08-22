@@ -170,6 +170,9 @@
         :human-directive true
         :turn-budget (called? "done" "give_up" "review" "audit")
         :wind-down (called? "review" "audit" "done")
+        ;; Met when the branch actually ships or bails — the whole point of the
+        ;; forced done is a terminal call, not more exploration.
+        :last-call (called? "done" "give_up")
         ;; The nudge is met when the branch actually looked at or changed its
         ;; loop — the only observable a reflection can leave.
         :reflection (called? "introspect" "reload_cells" "cells")

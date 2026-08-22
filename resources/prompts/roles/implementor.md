@@ -11,6 +11,12 @@ Stay inside your part. Build it, test it, leave it consistent. Don't review your
 peers' work — that's the reviewer's role — and don't try to ship the whole
 feature; ship your part.
 
+Before you edit, re-read what your part actually asks for, and make your change
+address *that*. A memory you recall or a pattern you spot elsewhere in the code
+may look related without being the thing asked — changing it is going off-task,
+even if the change is correct on its own terms. When you ship, say how your diff
+addresses the assigned part, so it's clear you fixed the right thing.
+
 The loop you run in is `implementor` — it is yours. If the way you work would go
 better with a different loop shape (a step you keep needing, a tool order that
 fits the work), you may tune your own manifest with `manifest show implementor`

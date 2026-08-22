@@ -156,6 +156,26 @@
       (is (= :done-blocked (:gate d)) "the correctness rung wins, not the budget steer")
       (is (some #{:wind-down} (:passed-over d))))))
 
+(deftest last-call-forces-a-ship-attempt-in-the-final-turns
+  ;; karamazov-pab: a live team run had every worker exhaust its cap with no
+  ;; done or give_up — wind-down asked, the model ignored it. This rung forces
+  ;; the attempt in the final turns.
+  (testing "in the last turns it outranks wind-down and forces a done call"
+    (let [b (branch-with :turns (vec (repeat 39 {})))   ; 39/40 — within the last 2
+          d (arbiter/decide {:branch b :max-turns 40})]
+      (is (= :last-call (:gate d)) "the forced ship beats the soft wind-down")
+      (is (some #{:wind-down} (:passed-over d)))
+      (is (= "```tool-call\n{\"name\": \"done\"" (arbiter/prefill-for d))
+          "it prefills a done call, so the model cannot explore its last turns away")))
+  (testing "silent before the window — wind-down still handles the earlier stretch"
+    (let [b (branch-with :turns (vec (repeat 34 {})))]  ; 34/40 — past 0.85, not last-2
+      (is (not-any? #{:last-call}
+                    (map :gate (arbiter/eligible {:branch b :max-turns 40}))))))
+  (testing "silent on a branch that already shipped"
+    (let [b (branch-with :turns (vec (repeat 39 {})) :status :done :final-answer "x")]
+      (is (not-any? #{:last-call}
+                    (map :gate (arbiter/eligible {:branch b :max-turns 40})))))))
+
 (deftest gate-config-is-coherent
   (testing "every gate with a budget names a threshold that exists"
     (doseq [g gates/gates :when (:budget g)]

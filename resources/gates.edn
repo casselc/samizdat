@@ -145,6 +145,21 @@
   :doc "How often the wind-down rung may fire on one branch. Once: the steer
         either lands or it does not."}
 
+ :last-call-window
+ {:value 2 :kind :threshold :capability-tunable? true
+  :doc "How many of a branch's final turns the last-call rung fires in. The
+        wind-down rung asks a branch to ship and is a soft nudge a model can
+        ignore — a live team run (karamazov-pab) had every worker burn its whole
+        cap without one done or give_up. This rung fires in the last turns and
+        FORCES a done attempt (a done-tool prefill, not prose), so a run that
+        will not converge at least ships its best partial rather than exhausting
+        silently. Small: it is the last resort, not a second wind-down."}
+
+ :max-last-call-steers
+ {:value 2 :kind :re-fire-guard :capability-tunable? true
+  :doc "How often the last-call rung may fire on one branch. Matched to the
+        window so it can force a done on each of the final turns."}
+
  :max-safe-state-aborts
  {:value 2 :kind :re-fire-guard :capability-tunable? false
   :doc "How often the safe-state rung may fire on one branch. Not

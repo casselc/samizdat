@@ -116,6 +116,35 @@
     :prediction (fn [_] "the branch retracts, changes technique, or ships what it has")
     :window 3}
 
+   {:gate :last-call
+    ;; 2.5: below safe-state (a branch just told it cannot ship is not forced to
+    ;; ship) and above wind-down, so in the final turns the hard force wins over
+    ;; the soft nudge. Fractional to slot between the two without renumbering the
+    ;; ladder; priorities need only be distinct (gate-config-is-coherent).
+    :priority 2.5
+    :budget :max-last-call-steers
+    :tool "done"
+    :doc "The branch is in its last turns and still has not shipped. wind-down
+          already asked it to; this FORCES the attempt — a done-tool prefill, so
+          the model must continue inside a done call rather than exploring or
+          rambling for its final turns. A live team run (karamazov-pab) had every
+          worker exhaust its cap with no done or give_up; a forced partial that
+          the reviewer/critic can judge beats a silent exhaustion the supervisor
+          has to re-task blind. If the branch truly has nothing, the done-gate
+          refuses it and the done-blocked rung takes over toward giving up."
+    :when (fn [{:keys [branch max-turns]}]
+            (and (state/active? branch)
+                 max-turns
+                 (>= (state/turn-count branch)
+                     (- max-turns (threshold :last-call-window)))))
+    :message (fn [{:keys [branch max-turns]}]
+               (str (prompt "last-call")
+                    "\n\nYou are at turn " (state/turn-count branch)
+                    " of " max-turns " — your last turns. Ship your best partial "
+                    "now with done."))
+    :prediction (fn [_] "the branch ships")
+    :window 2}
+
    {:gate :wind-down
     :priority 3
     :budget :max-wind-down-steers
