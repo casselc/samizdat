@@ -490,6 +490,25 @@
 (defmethod run-tool "edit_file" [ctx]
   (files/edit-file ctx))
 
+(defmethod run-tool "grep" [{:keys [branch root] :as ctx}]
+  ;; Search the project's Clojure sources for a regex. :neutral — searching
+  ;; establishes nothing, like read_file. The search logic (files/grep-project)
+  ;; was written by the agent itself in a supervised self-building run.
+  (if-let [m (missing ctx :pattern)]
+    (malformed branch m)
+    (let [hits (try (files/grep-project (or root ".") (str (arg ctx :pattern)))
+                    (catch Throwable e [::error (ex-message e)]))]
+      (cond
+        (and (vector? hits) (= ::error (first hits)))
+        (malformed branch (str "Bad grep pattern: " (second hits)))
+
+        (empty? hits)
+        (ok branch (str "No matches for " (pr-str (arg ctx :pattern)) "."))
+
+        :else
+        (ok branch (str/join "\n" (for [{:keys [path line text]} (take 200 hits)]
+                                    (str path ":" line ": " (str/trim text)))))))))
+
 ;; --- the shell ---------------------------------------------------------------
 
 (defmethod run-tool "shell" [{:keys [branch] :as ctx}]

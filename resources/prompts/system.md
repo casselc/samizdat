@@ -62,6 +62,10 @@ complete({prefix})
 ```
 read_file({path})
     Read a file in the project, by a path relative to the project root.
+grep({pattern})
+    Search the project's Clojure source for a regex; returns matching lines as
+    path:line: text. Faster than reading whole files to find where something
+    is defined or used.
 write_file({path, content})
     Write a whole file in the project, creating directories as needed.
     Overwrites. Use this for NEW files; to change an existing file, prefer

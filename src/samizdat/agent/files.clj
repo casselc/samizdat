@@ -64,6 +64,25 @@
           (miss branch (str "No file " path " under the project root.")))
         (miss branch (str "Path " path " is outside the project root and cannot be read."))))))
 
+(defn grep-project
+  "Search the project's source files for `pattern` (a regex string); return a
+  seq of {:path :line :text} for each matching line, with paths relative to
+  `root`. Globs the Clojure source extensions rather than walking the tree:
+  glob skips hidden directories, so cache and VCS noise never matches, and the
+  brace pattern covers files sitting directly in the root, which a plain
+  `**/*.clj` misses. Reading establishes nothing: :neutral."
+  [root pattern]
+  (let [root* (str (fs/canonicalize (or root ".")))
+        re (re-pattern pattern)
+        files (mapcat #(fs/glob root* (str "{*." % ",**/*." % "}")) clojure-exts)]
+    (mapcat (fn [p]
+              (let [rel (str (fs/relativize root* (fs/canonicalize (str p))))]
+                (keep-indexed (fn [i line]
+                                (when (re-find re line)
+                                  {:path rel :line (inc i) :text line}))
+                              (str/split (slurp (str p)) #"\n" -1))))
+            files)))
+
 ;; --- surgical edit ----------------------------------------------------------
 ;; Ported from dirge's edit tool (src/agent/tools/edit.rs): exact match first,
 ;; a line-trimmed fallback for the whitespace drift that is ~95% of failed

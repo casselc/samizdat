@@ -62,6 +62,7 @@
             [samizdat.config-test]
             [samizdat.files-test]
             [samizdat.edit-test]
+            [samizdat.grep-test]
             [samizdat.control-test]
             [samizdat.util-test]
             [samizdat.lisp-test]
@@ -130,6 +131,7 @@
     samizdat.config-test
     samizdat.files-test
     samizdat.edit-test
+    samizdat.grep-test
     samizdat.control-test
     samizdat.util-test
     samizdat.lisp-test
