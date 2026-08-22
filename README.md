@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="img/logo.svg" alt="samizdat logo" width="180">
+  <img src="img/logo.svg" alt="samizdat logo" width="300">
 </p>
 
 # samizdat
