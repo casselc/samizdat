@@ -2,8 +2,6 @@
   <img src="img/logo.svg" alt="samizdat logo" width="300">
 </p>
 
-# samizdat
-
 A self-hosting agentic harness for Clojure development, written in
 [Jolt](https://github.com/jolt-lang/jolt) (Clojure on Chez Scheme). The
 defining idea: the harness is a live image, the agent's output space is the
