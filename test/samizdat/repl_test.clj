@@ -80,3 +80,24 @@
       (is (some #{"samizdat.lisp/balance"} ms))))
   (testing "a bare prefix completes across clojure.core"
     (is (some #{"reduce"} (repl/complete "redu")))))
+
+(deftest eval-is-bounded-so-a-runaway-cannot-hang-the-harness
+  ;; An agent's infinite loop or heavy computation used to peg a core and hang
+  ;; the harness — eval ran unbounded on a thread the harness waits on. It is
+  ;; now bounded; a form that overruns the deadline times out.
+  (testing "a form past the deadline times out instead of hanging"
+    (let [s (repl/new-session)
+          r (repl/eval-code "(Thread/sleep 100000)" s 200)]
+      (is (false? (:ok r)))
+      (is (= "timeout" (:error-type r)))
+      (is (str/includes? (:error r) "timed out"))))
+  (testing "a normal form still returns its value"
+    (let [s (repl/new-session)
+          r (repl/eval-code "(+ 1 2)" s)]
+      (is (:ok r))
+      (is (= "3" (:value r)))))
+  (testing "the agent can raise the timeout for a form that genuinely needs it"
+    (let [s (repl/new-session)
+          r (repl/eval-code "(do (Thread/sleep 150) :slow-but-ok)" s 3000)]
+      (is (:ok r))
+      (is (= ":slow-but-ok" (:value r))))))

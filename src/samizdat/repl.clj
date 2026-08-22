@@ -48,29 +48,57 @@
 
 (def ^:private default-session (delay (new-session)))
 
+(def default-eval-timeout-ms
+  "Wall-clock bound on one `eval`, unless the caller asks for more. The agent
+  runs code in the same image the harness runs in, on a thread the harness waits
+  on — an infinite loop or a runaway computation (a live one pinned a core with
+  no bound) would otherwise hang the whole harness. The agent can pass a larger
+  timeout when a call genuinely needs it."
+  10000)
+
 (defn eval-code
   "Evaluate `code` (a string of one or more Clojure forms) in the session's
   namespace, in the live harness image. Returns:
     {:ok true  :value \"<pr-str of the last form's value>\" :out \"<stdout>\"}
     {:ok false :error \"<message>\" :out \"<stdout>\" :error-type \"<class>\"}
   Reads and evaluates form by form so a leading `(require …)` takes effect
-  before the forms that depend on it, matching REPL semantics."
-  ([code] (eval-code code @default-session))
-  ([code session]
-   (let [ns* (the-ns session)
-         out (java.io.StringWriter.)]
-     (try
-       (let [value (binding [*ns* ns* *out* out]
-                     ;; Read every form from the string, evaluating each in
-                     ;; turn; the last form's value is the result.
-                     (let [forms (read-string (str "[" code "\n]"))]
-                       (reduce (fn [_ form] (eval form)) nil forms)))]
-         {:ok true :value (pr-str value) :out (str out)})
-       (catch Throwable e
-         {:ok false
-          :error (or (ex-message e) (str e))
-          :error-type (str (type e))
-          :out (str out)})))))
+  before the forms that depend on it, matching REPL semantics.
+
+  Bounded by `timeout-ms` (default `default-eval-timeout-ms`): the code runs on
+  a separate thread the caller waits on with a deadline, so a runaway eval times
+  out with :error-type \"timeout\" instead of hanging the harness. The abandoned
+  computation is best-effort cancelled; a tight CPU loop may not honour it, but
+  control returns to the harness regardless."
+  ([code] (eval-code code @default-session nil))
+  ([code session] (eval-code code session nil))
+  ([code session timeout-ms]
+   (let [ns* (the-ns (or session @default-session))
+         out (java.io.StringWriter.)
+         timeout (or timeout-ms default-eval-timeout-ms)
+         ;; Run on its own thread and wait with a deadline. The eval catches its
+         ;; own throwable and returns a result map, so deref yields a map or the
+         ;; ::timeout sentinel — never a re-thrown exception.
+         fut (future
+               (try
+                 (let [value (binding [*ns* ns* *out* out]
+                               (let [forms (read-string (str "[" code "\n]"))]
+                                 (reduce (fn [_ form] (eval form)) nil forms)))]
+                   {:ok true :value (pr-str value) :out (str out)})
+                 (catch Throwable e
+                   {:ok false
+                    :error (or (ex-message e) (str e))
+                    :error-type (str (type e))
+                    :out (str out)})))
+         result (deref fut timeout ::timeout)]
+     (if (= result ::timeout)
+       (do (future-cancel fut)
+           {:ok false
+            :error (str "eval timed out after " timeout "ms — the code ran too long "
+                        "(an infinite loop or a heavy computation?). If it genuinely "
+                        "needs more time, pass a larger :timeout-ms.")
+            :error-type "timeout"
+            :out (str out)})
+       result))))
 
 (defn- resolve-sym
   "Resolve a fully-qualified or core symbol string to its var, or nil."

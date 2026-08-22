@@ -34,9 +34,8 @@
   ;; to. Defs persist across evals within a run (the session is per-run).
   (if-let [m (base/missing ctx :code)]
     (base/malformed branch m)
-    (let [r (if repl-session
-              (repl/eval-code (str (base/arg ctx :code)) repl-session)
-              (repl/eval-code (str (base/arg ctx :code))))]
+    (let [timeout (some-> (base/arg ctx :timeout-ms) str str/trim not-empty parse-long)
+          r (repl/eval-code (str (base/arg ctx :code)) repl-session timeout)]
       (if (:ok r)
         (base/ok branch (str "=> " (:value r)
                         (when (seq (:out r)) (str "\n" (:out r)))))

@@ -66,12 +66,14 @@ give_up({reason})
 ### Developing at the REPL
 
 ```
-eval({code})
+eval({code, timeout_ms?})
     Evaluate Clojure in the live harness image and see the value and any
     printed output. This is how to work: try a form, inspect what it returns,
     and iterate BEFORE writing it to a file. Definitions persist across your
     evals in this run, so you can define a function, then call it. You can
     require and exercise the project's own namespaces here too.
+    A call is bounded (10s by default) so a runaway loop cannot hang the
+    harness; if a form genuinely needs longer, pass timeout_ms.
 doc({symbol})
     The arglists and docstring of a var, e.g. doc({symbol: "samizdat.lisp/balance"}).
 complete({prefix})
