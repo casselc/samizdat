@@ -37,6 +37,7 @@
             [samizdat.agent.tools.shell]
             [samizdat.agent.tools.ship :as ship]
             [samizdat.agent.tools.tasks]
+            [samizdat.agent.tools.knowledge]
             [samizdat.agent.tools.journal]
             [samizdat.agent.tools.mutate]))
 

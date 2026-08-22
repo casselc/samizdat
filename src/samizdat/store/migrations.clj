@@ -287,6 +287,19 @@
     )"
    "CREATE INDEX IF NOT EXISTS idx_grants_run ON grants(run_id)"])
 
+(def ^:private v9
+  ;; Long-term knowledge: facts a run commits to durable rows and recalls by
+  ;; search later. Unlike turns/artifacts (the run's own record of what it
+  ;; did), a knowledge row is a claim extracted as worth keeping — content is
+  ;; the searchable text, kind separates notes from other kinds later. Recall
+  ;; is a LIKE scan, so content is the index and needs no extra one.
+  ["CREATE TABLE IF NOT EXISTS knowledge (
+      id         TEXT PRIMARY KEY,
+      content    TEXT NOT NULL,
+      kind       TEXT NOT NULL DEFAULT 'note',
+      created_at TEXT NOT NULL
+    )"])
+
 (def migrations
   "Ordered. Index 0 is migration 1; PRAGMA user_version holds the count applied."
-  [v1 v2 v3 v4 v5 v6 v7 v8])
+  [v1 v2 v3 v4 v5 v6 v7 v8 v9])

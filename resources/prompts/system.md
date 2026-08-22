@@ -138,6 +138,21 @@ task({action, ...})
     restarts and is shared with every agent on this run.
 ```
 
+### Long-term knowledge
+
+```
+remember({content, kind?})
+    Store a fact for later recall. kind defaults to note. Returns the id.
+recall({query})
+    Search stored knowledge by substring; matches come back newest
+    first, one per line. No matches means nothing is stored for it yet.
+```
+
+Knowledge lives in the database like the task board, but it is for facts
+worth recalling, not work in flight. Remember a thing once you have
+established it - a measured number, an incantation that worked, a dead
+end and why. Recall before re-deriving what an earlier turn settled.
+
 ### Reading the record
 
 ```
