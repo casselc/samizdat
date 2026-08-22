@@ -8,11 +8,20 @@
   content heuristics (tested in judge-test), so they exercise the WIRING —
   ship, the reviewer's revise bounce, and the supervisor's escalation."
   (:require [clojure.string :as str]
-            [clojure.test :refer [deftest testing is]]
+            [clojure.test :refer [deftest testing is use-fixtures]]
+            [samizdat.agent.gitdiff :as gitdiff]
             [samizdat.agent.judge :as judge]
             [samizdat.llm.client :as llm]
             [samizdat.store.db :as db]
             [samizdat.workflow :as workflow]))
+
+;; Ground truth (step 3): a done with no diff is not a completed feature. By
+;; default these tests simulate a run that DID change files, so the wiring tests
+;; below exercise the ship/revise paths; the hollow-path tests redef this to [].
+(use-fixtures :each
+  (fn [t]
+    (with-redefs [gitdiff/changed-files (constantly ["src/example.clj"])]
+      (t))))
 
 (defn- done-call [answer]
   {:content (str "```tool-call\n{\"name\":\"done\",\"args\":{\"answer\":\""
@@ -90,13 +99,13 @@
     (let [conn (db/open! ":memory:")
           r (run-feature conn {:config {:run {:loop "feature" :subtasks ["alpha"]
                                               :max-revisions 2}}})]
-      (testing "it ships anyway once the revision cap is hit"
-        (is (= :completed (:status r))))
+      (testing "an unsatisfiable reviewer keeps the loop solving, then the safety backstop abandons honestly (it never claims a solution it didn't reach)"
+        (is (= :abandoned (:status r))))
       (testing "each revise round re-implemented on a versioned branch"
         (let [b (branch-ids conn)]
           (is (contains? b "W0"))     ; round 0
           (is (contains? b "W0v1"))   ; revise round 1
-          (is (contains? b "W0v2"))   ; revise round 2, then ship at cap
+          (is (contains? b "W0v2"))   ; revise round 2, then the backstop trips
           (is (not (contains? b "W0v3"))))))))
 
 (deftest supervisor-reasons-over-telemetry-and-forces-a-round
@@ -112,9 +121,10 @@
           r (run-feature conn {:config {:run {:loop "feature" :subtasks ["alpha"]
                                               :max-revisions 1}}
                                :max-turns 3})]
-      (is (= :completed (:status r)))
       (testing "a revise round happened despite the reviewer passing"
-        (is (contains? (branch-ids conn) "W0v1"))))))
+        (is (contains? (branch-ids conn) "W0v1")))
+      (testing "and since the implementors never shipped, it ends unsolved, not falsely completed"
+        (is (= :abandoned (:status r)))))))
 
 (deftest a-crashing-stage-does-not-kill-the-run-and-surfaces-to-the-supervisor
   ;; critique used to throw an unbound-var and take the whole run down before the
@@ -137,9 +147,10 @@
         (is (str/includes? @seen-digest "STAGE CRASHED")
             "the supervisor was shown the crash to plan around")))))
 
-(deftest supervisor-stop-ends-the-run-even-mid-revise
-  ;; The reviewer keeps saying REVISE (would loop to the cap), but the supervisor
-  ;; decides STOP — so the run ships round 0's work and ends, no revise round.
+(deftest supervisor-stop-means-give-up-and-abandons-unsolved
+  ;; STOP is the supervisor's last resort — it concluded the loop can't solve the
+  ;; task. The run ends UNSOLVED (abandoned), it does NOT ship the work as done,
+  ;; and it stops iterating at once (no further revise round).
   (with-redefs [judge/deterministic-block (constantly nil)
                 judge/parse-verdict (constantly :complete)
                 judge/blocking-findings (constantly nil)
@@ -147,8 +158,9 @@
     (let [conn (db/open! ":memory:")
           r (run-feature conn {:config {:run {:loop "feature" :subtasks ["alpha"]
                                               :max-revisions 3}}})]
-      (is (= :completed (:status r)))
-      (testing "STOP shipped at once — no versioned revise branch"
+      (is (= :abandoned (:status r)) "STOP ends unsolved, not shipped")
+      (is (nil? (:answer r)) "no answer is presented for an unsolved task")
+      (testing "it gave up at once — no versioned revise branch"
         (is (not (contains? (branch-ids conn) "W0v1")))))))
 
 (deftest per-role-models-reach-each-role
@@ -180,3 +192,32 @@
         (is (contains? (:implementor @seen) :deepseek) "implementor ran on its assigned model")
         (is (contains? (:supervisor @seen) :glm) "supervisor ran on its assigned model")
         (is (contains? (:reviewer @seen) :openai) "the unconfigured reviewer kept the run default")))))
+
+(deftest hollow-work-is-never-shipped-completed-it-keeps-solving
+  ;; step 3: the DeepSeek dogfood shipped an empty diff as "completed" (reviewer
+  ;; passed, supervisor STOP). Ground truth: a done that changed no files is not
+  ;; a solution. The loop does NOT ship it — it keeps solving (revising with a
+  ;; "you changed no files" nudge). Here the workers never edit anything, so it
+  ;; eventually hits the safety backstop and abandons honestly — never completed.
+  (with-redefs [judge/deterministic-block (constantly nil)
+                judge/parse-verdict (constantly :complete)
+                judge/blocking-findings (constantly nil)
+                gitdiff/changed-files (constantly [])       ; nothing ever changes
+                llm/chat (roles {:review :pass})]           ; reviewer would pass, but ground truth overrides
+    (let [conn (db/open! ":memory:")
+          r (run-feature conn {:config {:run {:loop "feature" :subtasks ["alpha"]
+                                              :max-revisions 2}}})]
+      (is (not= :completed (:status r)) "an empty diff is never reported completed")
+      (testing "it kept solving before giving up (revised, did not abandon on the first empty round)"
+        (is (contains? (branch-ids conn) "W0v1")))
+      (is (= :abandoned (:status r)) "only the safety backstop ends it, honestly unsolved"))))
+
+(deftest a-real-diff-still-ships-as-completed
+  (with-redefs [judge/deterministic-block (constantly nil)
+                judge/parse-verdict (constantly :complete)
+                judge/blocking-findings (constantly nil)
+                gitdiff/changed-files (constantly ["src/store/knowledge.clj"])
+                llm/chat (roles {:review :pass})]
+    (let [conn (db/open! ":memory:")
+          r (run-feature conn {:config {:run {:loop "feature" :subtasks ["alpha"]}}})]
+      (is (= :completed (:status r)) "real changes + a pass ships completed"))))

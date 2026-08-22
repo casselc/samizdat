@@ -34,12 +34,15 @@
   "The suboptimality flags the digest calls out explicitly, so the supervisor
   does not have to re-derive the obvious: a stage crashed, nothing shipped, a
   thrashing branch, the reviewer bouncing the work, a run deep into revisions."
-  [{:keys [results review revision errors]} health]
+  [{:keys [results review revision errors hollow?]} health]
   (let [total (count results)
         shipped (count (filter #(= :done (:status %)) results))]
     (cond-> []
       (seq errors)
       (into (map #(str "STAGE CRASHED — " %) errors))
+
+      hollow?
+      (conj "NO FILES CHANGED — done was called but the working tree is unchanged; nothing was actually built")
 
       (and (pos? total) (zero? shipped))
       (conj "NO IMPLEMENTOR SHIPPED — the implement round produced nothing verified")

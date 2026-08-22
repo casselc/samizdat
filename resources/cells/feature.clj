@@ -33,6 +33,15 @@
 
 (defn- revision [data] (or (:feature/revisions data) 0))
 
+(defn- hollow?
+  "Ground truth: true when the run KNOWS it changed no files — a done with an
+  empty working tree is not a feature, however confidently the workers announced
+  it. When git is unavailable the answer is unknown, and we do not block what we
+  cannot verify (false)."
+  [{:keys [root git-baseline]}]
+  (let [files (gitdiff/changed-files root git-baseline)]
+    (boolean (and files (empty? files)))))
+
 (defn- safely
   "Run a stage body, but never let it take the whole run down. A stage that
   throws records the error and falls through to `fallback` (a safe default for
@@ -106,7 +115,12 @@
         (let [{:keys [llm-adapter llm-config]} (wf/role-ctx ctx :critic)
               answer (:final-answer branch)
               rows (map parse-args (journal/turns conn run-id))
-              det (judge/deterministic-block answer rows)
+              ;; Ground truth first: a done with no diff is not a completed
+              ;; feature, whatever the workers claimed. This bounces before the
+              ;; LLM judge is even paid for.
+              det (or (when (hollow? ctx)
+                        "no files were changed — the implementors called done but the working tree is unchanged, so nothing was actually built")
+                      (judge/deterministic-block answer rows))
               decision
               (if det
                 :revise
@@ -160,7 +174,10 @@
                                      :revision (revision data)
                                      ;; stage crashes are the first thing the
                                      ;; supervisor should see and plan around.
-                                     :errors (:feature/errors data)}
+                                     :errors (:feature/errors data)
+                                     ;; ground truth: did the working tree
+                                     ;; actually change, or was done hollow?
+                                     :hollow? (hollow? ctx)}
                                     (journal/turns conn run-id))
               prob (str "Introspect on this run and decide whether the loop needs "
                         "an adjustment. A STAGE CRASHED signal is a harness bug the "
@@ -182,35 +199,62 @@
       (fn [d] d))))
 
 (cell/defcell :feature/route
-  {:doc "Decide the feature's fate: SHIP if the reviewer passed, the critic
-        shipped, and the supervisor did not escalate; else send the work back to
-        implement with the findings as guidance — bounded by :run :max-revisions
-        (default 2), after which it ships what it has. Threads :revise/guidance
-        and a fresh revision number to the next implement round."
+  {:doc "Decide the feature's fate. The default is to KEEP SOLVING: unless the
+        work is real and verified, send it back to implement with the findings
+        as guidance — the loop is an open-ended problem solver, not a one-shot.
+        It SHIPS (completed) only on real, verified work (reviewer pass + critic
+        ship + the working tree actually changed). It ABANDONS only in the
+        extreme: the supervisor gave up (STOP) after failing to find a solution,
+        or the safety backstop (:run :max-revisions, default 6) tripped — a
+        runaway guard, not the normal exit. Abandoning is honest, not a hollow
+        ship: the run reports it did not solve the task."
    :effects [:db]}
-  (fn [{:keys [conn run-id config]} data]
+  (fn [{:keys [conn run-id config] :as ctx} data]
     (let [rev (revision data)
-          cap (or (get-in config [:run :max-revisions]) 2)
+          cap (or (get-in config [:run :max-revisions]) 6)
+          hollow (hollow? ctx)
+          ;; Ship only REAL, verified work: the reviewer passed, the critic
+          ;; shipped, the supervisor did not escalate, and the tree changed.
           pass? (and (= :pass (:review/decision data))
                      (= :ship (:critic/decision data))
-                     (not (:feature/escalate data)))
-          ;; The supervisor's STOP ends the run with what it has; otherwise a
-          ;; pass ships, and the revision cap is the backstop against an endless
-          ;; revise loop.
-          ship? (or (:feature/stop data) pass? (>= rev cap))]
+                     (not (:feature/escalate data))
+                     (not hollow))
+          ;; The extreme cases — and only these — abandon.
+          give-up? (:feature/stop data)     ; the supervisor concluded it's unsolvable
+          exhausted? (>= rev cap)           ; runaway backstop
+          decision (cond pass? :ship
+                         (or give-up? exhausted?) :abandon
+                         :else :revise)]
       (journal/note! conn run-id :route
-                     {:data {:decision (if ship? :ship :revise) :revision rev
-                             :cap cap :stopped (boolean (:feature/stop data))
-                             :forced-ship (and ship? (not pass?))}})
-      (if ship?
-        (assoc data :feature/decision :ship)
+                     {:data {:decision decision :revision rev :cap cap
+                             :hollow hollow :gave-up (boolean give-up?)
+                             :exhausted exhausted?}})
+      (case decision
+        :ship
+        (assoc data :feature/decision :ship)   ; -> finish, :completed
+
+        :abandon
+        ;; Honest end, not a hollow completed. Any partial work stays on disk for
+        ;; a human or the next run to pick up; the run just does not claim done.
+        (assoc data :feature/decision :ship :verdict :abandoned
+               :branch (assoc (:branch data)
+                              :status :abandoned :final-answer nil
+                              :inactive-reason
+                              (if give-up?
+                                "supervisor could not find a solution"
+                                (str "no verified solution after " rev " revisions"))))
+
+        :revise
+        ;; keep solving — another implement round with the findings as guidance.
         (-> data
             (assoc :feature/decision :revise
                    :feature/revisions (inc rev)
                    :feature/escalate false
                    :revise/guidance
                    (str/trim
-                    (str (when (= :revise (:review/decision data))
+                    (str (when hollow
+                           "The implementors called done but changed no files — actually edit the code this round.\n\n")
+                         (when (= :revise (:review/decision data))
                            (str "Reviewer asked for changes:\n"
                                 (:review/findings data) "\n\n"))
                          (when (seq (:critique/findings data))

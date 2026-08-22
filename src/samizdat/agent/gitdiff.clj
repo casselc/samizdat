@@ -30,6 +30,18 @@
     (or (some-> (git root "stash" "create") str/trim not-empty)
         "HEAD")))
 
+(defn changed-files
+  "The paths the run changed since `baseline` (git diff --name-only). nil when
+  git or the repo is unavailable — 'cannot tell', distinct from [] which means
+  'genuinely nothing changed'. Ground truth for whether a run that claims done
+  actually produced anything."
+  [root baseline]
+  (when (and root baseline)
+    (some->> (git root "diff" "--name-only" baseline)
+             str/split-lines
+             (remove str/blank?)
+             vec)))
+
 (defn diff
   "The unified diff of the run's changes since `baseline`, bounded to keep it
   out of a runaway prompt. Empty string when there is nothing to show."
