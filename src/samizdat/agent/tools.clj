@@ -37,7 +37,8 @@
             [samizdat.agent.tools.shell]
             [samizdat.agent.tools.ship :as ship]
             [samizdat.agent.tools.tasks]
-            [samizdat.agent.tools.journal]))
+            [samizdat.agent.tools.journal]
+            [samizdat.agent.tools.mutate]))
 
 ;; Re-exports: loop.clj and the tests reach the tool surface through this
 ;; namespace and keep working unchanged.

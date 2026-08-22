@@ -101,6 +101,23 @@ shell({command})
     in your context or the output.
 ```
 
+### Changing the harness itself
+
+The agentic loop you are running in is a graph of cells — small Clojure files in `resources/cells/`. You can change how the loop behaves by editing them.
+
+```
+cells
+    List the loop's cells: id, effects (pure or what it touches), and the file
+    each lives in — so you know what you can edit.
+reload_cells
+    After you edit a cell file, call this to apply the change safely. It
+    checkpoints, reloads, validates the loop still compiles, and dry-runs
+    (soaks) the edited cell. If all pass, the change is live on your next turn.
+    If anything fails, your edit is rolled back and the file restored, and you
+    are told why — fix it and call reload_cells again. A bad edit cannot brick
+    the loop.
+```
+
 ### The task board
 
 ```

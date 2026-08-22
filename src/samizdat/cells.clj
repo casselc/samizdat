@@ -41,7 +41,17 @@
 ;; the mutation protocol and for `dev`/debugging. {cell-id {:source path}}.
 (defonce ^:private loaded-cells (atom {}))
 
+;; The on-disk content of each file at the last SUCCESSFUL load — the known-good
+;; snapshot the mutation protocol rolls a bad edit back to. {path content}.
+(defonce ^:private loaded-content (atom {}))
+
 (defn loaded [] @loaded-cells)
+
+(defn loaded-file-content
+  "The content of every cell file as it was at the last successful load — the
+  last-good disk state, for the mutation protocol to restore on a rollback."
+  []
+  @loaded-content)
 
 (defn- cell-files
   "The .clj files under `dir`, sorted, or nil when the dir is absent."
@@ -102,6 +112,10 @@
          (doseq [id (remove (set (keys loaded)) (keys @loaded-cells))]
            (cell/remove-cell! id))
          (reset! loaded-cells loaded)
+         ;; Remember the good on-disk content, so the mutation protocol can
+         ;; roll a later bad edit back to exactly this. Only reached on
+         ;; success, so it never records a half-loaded state.
+         (reset! loaded-content (into {} (map (juxt identity slurp)) files))
          loaded)
        (catch Throwable e
          (cell/registry-restore! snapshot)
