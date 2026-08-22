@@ -161,6 +161,9 @@
         :human-directive true
         :turn-budget (called? "done" "give_up" "review" "audit")
         :wind-down (called? "review" "audit" "done")
+        ;; The nudge is met when the branch actually looked at or changed its
+        ;; loop — the only observable a reflection can leave.
+        :reflection (called? "introspect" "reload_cells" "cells")
         false)
       :met
 

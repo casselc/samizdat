@@ -339,7 +339,29 @@
                     " of " max-turns " turns. Land what you can verify rather"
                     " than opening a new line of attack."))
     :prediction (fn [_] "the branch converges rather than starting something new")
-    :window 3}])
+    :window 3}
+
+   {:gate :reflection
+    :priority 13
+    :budget nil
+    :doc "A quiet-turn nudge to reflect on the loop itself. Lowest priority, so
+          it is passed over whenever any real steer holds and surfaces only on a
+          turn where nothing else does. The loop is a mycelium workflow the
+          branch can see (introspect) and reshape (reload_cells); a run that
+          never reconsiders its own machinery keeps whatever friction it started
+          with. Fires on a cadence, not a condition, which is why it sits below
+          every gate that fires because something is wrong."
+    :when (fn [{:keys [branch]}]
+            (let [n (state/turn-count branch)]
+              (and (state/active? branch) (pos? n) (zero? (mod n 15)))))
+    :message (fn [_]
+               (str "**Step back and look at your loop.** You are running inside"
+                    " a mycelium workflow of cells. See how it is wired and how"
+                    " this run is going with `introspect`; if a cell mis-routes,"
+                    " a gate nags too hard, or a step is missing, reshape it with"
+                    " `reload_cells`. Then carry on."))
+    :prediction (fn [_] "the branch inspects or reshapes its loop")
+    :window 1}])
 
 (def by-name (into {} (map (juxt :gate identity)) gates))
 

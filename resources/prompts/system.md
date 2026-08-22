@@ -122,8 +122,18 @@ reload_cells
     If anything fails, your edit is rolled back and the file restored, and you
     are told why — fix it and call reload_cells again. A bad edit cannot brick
     the loop.
+introspect
+    See the loop you are running in. Renders two things: the WIRING - every
+    node in the loop manifest with its cell, the cell's effects, and its
+    outgoing edge or dispatch, so you can see the whole path a turn takes -
+    and the HEALTH of this run so far - the last few turns (turn, tool,
+    category) and tallies (turns used vs the cap, parse errors, failed
+    calls). Read-only.
 ```
 
+The loop is not fixed infrastructure. You can inspect how it is wired and
+running with `introspect`, and if a cell mis-routes, a gate is too aggressive,
+or a step is missing, reflect on that and reshape it with `reload_cells`.
 ### The task board
 
 ```

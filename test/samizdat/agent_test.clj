@@ -1427,3 +1427,31 @@
       (is (re-find #"(?i)4 .*fence|4 .*malformed" (:inactive-reason dead))
           "the two kinds are counted separately, so the record stays true"))))
 
+(deftest reflection-nudge-fires-on-cadence-and-settles
+  ;; The periodic self-reflection rung: lowest priority, fires on a cadence
+  ;; rather than because something is wrong, and settles on the branch actually
+  ;; inspecting or reshaping its loop.
+  (let [refl (gates/by-name :reflection)]
+    (testing "it is the lowest-priority gate"
+      (is (= 13 (:priority refl)))
+      (is (= 13 (apply max (map :priority gates/gates)))
+          "nothing sits below reflection, so a real steer always outranks it"))
+    (testing "fires on a turn that is a multiple of 15, while active"
+      (is ((:when refl) {:branch (branch-with :turns (vec (repeat 15 {})))}))
+      (is ((:when refl) {:branch (branch-with :turns (vec (repeat 30 {})))})))
+    (testing "silent off-cadence and at turn 0"
+      (is (not ((:when refl) {:branch (branch-with :turns (vec (repeat 14 {})))})))
+      (is (not ((:when refl) {:branch (branch-with :turns [])}))))
+    (testing "passed over when a human directive also holds"
+      (let [chosen (arbiter/decide {:branch (branch-with :turns (vec (repeat 15 {})))
+                                    :max-turns 40 :directive {:payload "do X"}})]
+        (is (= :human-directive (:gate chosen)))
+        (is (some #{:reflection} (:passed-over chosen)))))
+    (testing "settles :met when the branch inspected or reshaped its loop"
+      (is (= :met (arbiter/settle {:gate :reflection :turn 1 :window 1}
+                                  {:current-turn 2 :tools-called ["introspect"]
+                                   :branch-before (branch-with) :branch-after (branch-with)})))
+      (is (= :unmet (arbiter/settle {:gate :reflection :turn 1 :window 1}
+                                    {:current-turn 3 :tools-called ["eval"]
+                                     :branch-before (branch-with) :branch-after (branch-with)}))))))
+
