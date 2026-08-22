@@ -1,0 +1,56 @@
+;; The critic loop: the factory loop with a finalization judge on the :done
+;; path. Select it with config :run :loop "critic" (HARNESS_LOOP=critic, or a
+;; project .samizdat/config.edn). Everything is the default loop except that a
+;; branch's :done routes through :gate/critic (cells/critic.clj) before it can
+;; finish: an LLM judge, fed a deterministic evidence block and the agent's own
+;; rules, either ships the answer or sends the branch back with one [critic]
+;; note. Bounded and fail-open, so it can never wedge a run.
+;;
+;; This seeds version 1 of the "critic" workflow; after that the db rows win.
+;; The agent can tune it or fork a new manifest with the `manifest` tool.
+{:cells {:start          :loop/assemble
+         :infer          :llm/infer
+         :parse          :llm/parse
+         :provider-error :loop/provider-error
+         :no-call        :loop/no-call
+         :dispatch       :tool/dispatch
+         :journal        :journal/record
+         :arbiter        :gate/arbiter
+         :route          :loop/route
+         :critic         :gate/critic
+         :finish         :loop/finish}
+
+ :edges {:start          :infer
+         :infer          :parse
+         :parse          {:provider-error :provider-error
+                          :no-call        :no-call
+                          :tool           :dispatch}
+         :provider-error :route
+         :no-call        :route
+         :dispatch       :journal
+         :journal        :arbiter
+         :arbiter        :route
+         ;; A genuine done faces the critic first; everything else is unchanged.
+         :route          {:continue  :start
+                          :done      :critic
+                          :abandoned :finish
+                          :exhausted :finish}
+         ;; The critic either ships the done or sends the branch back to work.
+         :critic         {:ship   :finish
+                          :revise :start}
+         :finish         :end}
+
+ :dispatches {:parse [[:provider-error (fn [d] (not (:ok (:call d))))]
+                      [:no-call (fn [d] (let [p (:parsed d)]
+                                          (or (nil? p)
+                                              (= "__parse_error__" (:name p)))))]
+                      [:tool (fn [d] true)]]
+              :route [[:continue  (fn [d] (= :continue (:verdict d)))]
+                      [:done      (fn [d] (= :done (:verdict d)))]
+                      [:abandoned (fn [d] (= :abandoned (:verdict d)))]
+                      [:exhausted (fn [d] (= :exhausted (:verdict d)))]]
+              :critic [[:ship   (fn [d] (= :ship (:critic/decision d)))]
+                       [:revise (fn [d] (= :revise (:critic/decision d)))]]}
+
+ :constraints [{:type :must-follow :if :dispatch :then :journal}
+               {:type :must-follow :if :journal :then :arbiter}]}
