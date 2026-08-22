@@ -106,14 +106,39 @@
     (catch Throwable e
       {:ok false :error (ex-message e)})))
 
+(def ^:private opener-re #"```tool-call\s*\r?\n|<tool-call>\s*")
+(def ^:private closer-re #"```|</tool[-_]calls?>")
+
 (defn extract-fences
   "Every tool-call fence body in the response, in order.
 
-  Either spelling of the deliberate wrapper, and any pairing of them — see
-  fence-re. A model that writes one is unambiguously calling a tool, and only
-  the punctuation differs."
+  Opener-anchored rather than a single opener…closer regex: that regex pairs
+  an opener with the next ``` — but a second `` ```tool-call `` opener BEGINS
+  with ```` ``` ````, so a reasoning model that emits one call, then reasons,
+  then emits the real call (or is prefilled into an opener and then thinks)
+  had its first opener paired with the second opener's ``` prefix, capturing
+  the reasoning instead of the JSON.
+
+  Each opener yields a body only when a closer is found before the NEXT opener.
+  An opener whose body has no closer (an opener over prose, or a call whose
+  closer the model dropped) contributes nothing here — it falls through to the
+  trailing-call and XML rungs, exactly as before. So the count stays a
+  faithful mechanics signal, the LAST body is the real call, and an unclosed
+  opener is still not a fence."
   [response]
-  (mapv (comp str/trim second) (re-seq fence-re (or response ""))))
+  (let [s (or response "")
+        opens (let [m (re-matcher opener-re s)]
+                (loop [out []] (if (.find m) (recur (conj out [(.start m) (.end m)])) out)))
+        n (count s)]
+    (vec
+     (for [[i [_ body-start]] (map-indexed vector opens)
+           :let [next-open (if (< (inc i) (count opens))
+                             (first (nth opens (inc i)))
+                             n)
+                 m (re-matcher closer-re (subs s body-start next-open))
+                 closer (when (.find m) (+ body-start (.start m)))]
+           :when closer]
+       (str/trim (subs s body-start closer))))))
 
 (defn- json-fence
   "A ```json fence whose body is the documented call shape, or nil.
@@ -236,7 +261,7 @@
     (str prefill response)
     (str response)))
 
-(declare parse-tool-call*)
+(declare parse-tool-call* strip-think)
 
 (defn parse-tool-call
   "Parse a model response into a tool call.
@@ -261,7 +286,20 @@
   blindly would produce two openers whose first fence body is empty."
   ([response] (parse-tool-call response nil))
   ([response {:keys [prefill]}]
-   (parse-tool-call* (if (seq prefill) (reattach response prefill) response))))
+   (parse-tool-call* (strip-think
+                      (if (seq prefill) (reattach response prefill) response)))))
+
+(def ^:private think-re #"(?s)<think>.*?</think>")
+
+(defn- strip-think
+  "Remove <think>…</think> reasoning blocks before parsing. A reasoning model
+  puts its thinking in the content, and after a prefilled `` ```tool-call `` it
+  lands INSIDE the fence — its stray parens and quotes then corrupt the JSON.
+  The reasoning is not part of the call, so it is dropped before the fence is
+  read (the durable transcript still keeps the full text, stripped only on the
+  way to the wire)."
+  [s]
+  (str/replace (str s) think-re ""))
 
 (defn- parse-tool-call* [response]
   (let [fenced (extract-fences response)

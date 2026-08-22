@@ -27,6 +27,30 @@
 
 (defn- fenced [body] (str "prose before\n```tool-call\n" body "\n```\nprose after"))
 
+(deftest prefill-plus-think-plus-real-call-parses
+  ;; The live self-building run (2026-08-21) thrashed on this: after a parse
+  ;; error the loop prefills "```tool-call\n" to force a bare call, but GLM is
+  ;; a reasoning model and continued with a <think> block and prose, then
+  ;; opened a SECOND ```tool-call with the real JSON. The closing-fence regex
+  ;; matched the ``` prefix of the second opener as the first's closer, so the
+  ;; body was the think-block, not the JSON — every recovery attempt lost the
+  ;; real call. The parser must strip the reasoning and anchor on the LAST
+  ;; opener.
+  (let [reattached (str "```tool-call\n"
+                        "<think>The human intervened. Let me start small.</think>\n"
+                        "Understood — one small form first.```tool-call\n"
+                        "{\"name\": \"eval\", \"args\": {\"code\": \"(+ 1 2)\"}}\n"
+                        "```")
+        p (fence/parse-tool-call reattached {})]
+    (is (= "eval" (:name p)))
+    (is (= "(+ 1 2)" (get-in p [:args :code]))))
+  (testing "a think block before a single clean call is stripped"
+    (let [p (fence/parse-tool-call
+             (str "<think>reasoning here with a ) stray paren</think>\n"
+                  "```tool-call\n{\"name\": \"task\", \"args\": {\"action\": \"list\"}}\n```")
+             {})]
+      (is (= "task" (:name p))))))
+
 (deftest a-plural-tool-calls-closer-still-closes-the-fence
   ;; gen-31 B1.2 (2026-08-18), three turns running. It opened with the
   ;; documented ```tool-call fence and closed with </tool-calls> — plural — so
@@ -348,9 +372,13 @@
                     "\n```")
           p (fence/parse-tool-call resp)]
       (is (= "add_rule" (:name p)))
-      (is (= 2 (:fences p)))
       (is (str/includes? (get-in p [:args :code]) "tc(X, Y) :- edge(X, Y)."))
-      (is (true? (:multiple-fences (fence/signals {:finish-reason "stop"} p)))))))
+      ;; The example fence lived inside <think>, which is now stripped before
+      ;; parsing — so this is correctly ONE real fence, not two. The point of
+      ;; the case (don't spend the turn on the quoted-template example) is met
+      ;; even more cleanly: the example never reaches the fence scanner.
+      (is (= 1 (:fences p)))
+      (is (not (:multiple-fences (fence/signals {:finish-reason "stop"} p)))))))
 
 (deftest fence-signals
   (testing "a truncated reply is not the same as a model that skipped the call"
