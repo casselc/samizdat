@@ -10,7 +10,8 @@
 ;;
 ;; Select with config :run :loop "decompose". Assign models per role as usual
 ;; (e.g. a cheap implementor, a stronger architect).
-{:cells {:start  :loop/assemble
+{:description "Decompose-on-stuck: attempt the task directly, and when a unit can't pass its tests, an architect splits it into smaller single-responsibility sub-units, builds and tests those first, then assembles — recursively. Use this when an implementor keeps failing a task in one shot; it breaks the work into pieces a weaker model can actually do."
+ :cells {:start  :loop/assemble
          :solve  :decompose/run
          :finish :loop/finish}
 

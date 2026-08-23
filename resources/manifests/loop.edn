@@ -8,7 +8,8 @@
 ;; trivial readers of explicit keys: the cell computes the decision INTO the
 ;; data map, the predicate only reads it, so the routing logic stays visible
 ;; here where it can be edited.
-{:cells {:start          :loop/assemble
+{:description "The factory loop: a single branch iterating a turn at a time until it ships or gives up. The simplest driver — no fan-out, no critic, no supervisor. The baseline every other workflow specializes."
+ :cells {:start          :loop/assemble
          :infer          :llm/infer
          :parse          :llm/parse
          :provider-error :loop/provider-error

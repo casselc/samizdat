@@ -6,7 +6,8 @@
 ;; (mycelium.compose/workflow->cell) and decides what happens next — e.g. hand a
 ;; :done branch to a critic before finishing. Running it standalone is the same
 ;; as the flat loop up to the point it would finish.
-{:cells {:start          :loop/assemble
+{:description "The worker sub-loop: one branch doing the actual per-turn work, returning its verdict to whatever composed it. Not usually run on its own — it is the implementor unit the team, feature, and decompose loops build on."
+ :cells {:start          :loop/assemble
          :infer          :llm/infer
          :parse          :llm/parse
          :provider-error :loop/provider-error

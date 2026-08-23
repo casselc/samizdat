@@ -12,7 +12,8 @@
 ;; This is the first, dataflow, slice of the multi-agent work (hc7): workers
 ;; run to completion and coordinate between-turn via the mailbox. Live per-turn
 ;; steering (the actor model) is a later step.
-{:cells {:start      :loop/assemble
+{:description "A team: split the problem into parts and fan out one implementor per part in parallel, coordinating through the mailbox, then join and re-task any part that didn't land. Good when a feature has several independent parts."
+ :cells {:start      :loop/assemble
          :plan       :team/plan
          :team       :team/fan-out
          :supervise  :team/supervise

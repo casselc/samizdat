@@ -204,3 +204,17 @@
       (let [c (workflow/role-ctx base :reviewer)]
         (is (= :openai (get-in c [:llm-config :provider])))
         (is (= :base-adapter (:llm-adapter c)))))))
+
+(deftest catalog-lists-every-workflow-with-a-description
+  ;; self-healing: the supervisor can only switch to / tune a workflow it knows
+  ;; exists. The catalog is that discoverable menu.
+  (let [conn (db/open! ":memory:")
+        by-name (into {} (map (juxt :name identity)) (workflow/catalog conn))]
+    (is (contains? by-name "feature"))
+    (is (contains? by-name "team"))
+    (is (contains? by-name "decompose"))
+    (is (contains? by-name "loop"))
+    (is (str/includes? (:description (by-name "decompose")) "Decompose")
+        "each carries its :description")
+    (is (str/includes? (workflow/render-catalog conn) "decompose")
+        "and renders as a text menu for the supervisor")))

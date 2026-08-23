@@ -28,7 +28,8 @@
 ;; own loop (implementor = worker.edn, reviewer.edn, critic = the judge) and its
 ;; own prompt, and owns/tunes its own manifest. Select with config
 ;; :run :loop "feature". Pass config :run :subtasks to skip planning.
-{:cells {:start     :loop/assemble
+{:description "Build a feature end to end, supervised: plan -> a fan-out of implementors -> review -> critique -> run the tests -> a supervisor that watches and steers. The default for a normal feature that one round of implementors can carry."
+ :cells {:start     :loop/assemble
          :plan      :team/plan
          :implement :team/fan-out
          :review    :feature/review

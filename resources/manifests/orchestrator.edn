@@ -11,7 +11,8 @@
 ;; This is the structural basis for multi-agent work: once a worker is a
 ;; composable sub-loop, a top level can run several of them — one per agent,
 ;; each its own loop — coordinating through the shared workspace and mailbox.
-{:subworkflows {:loop/worker "worker"}
+{:description "A hierarchical loop: a worker sub-loop composed with a finalization critic, authored as nested workflows. Same behavior as the flat critic loop, built from composable sub-loops — the pattern the feature loop generalizes."
+ :subworkflows {:loop/worker "worker"}
 
  :cells {:start  :loop/worker
          :critic :gate/critic

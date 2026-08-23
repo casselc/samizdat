@@ -9,7 +9,8 @@
 ;; the reviewer role owns this loop and can tune it (manifest save "reviewer")
 ;; without touching how implementors work. Today it mirrors `worker`; it is free
 ;; to diverge.
-{:cells {:start          :loop/assemble
+{:description "The reviewer role loop: reads the implementors' finished work and returns PASS or REVISE. A component of the feature loop, not usually run standalone."
+ :cells {:start          :loop/assemble
          :infer          :llm/infer
          :parse          :llm/parse
          :provider-error :loop/provider-error

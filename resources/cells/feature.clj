@@ -229,7 +229,16 @@
                         "an adjustment. A STAGE CRASHED signal is a harness bug the "
                         "loop just survived — diagnose it and, if you can, fix it at "
                         "the source with your tools. If a problem is systemic, tune "
-                        "the harness.\n\n" dig)
+                        "the harness.\n\n" dig
+                        "\n\n## Workflows you can switch to, tune, or add to\n"
+                        "When the current approach keeps failing — e.g. the "
+                        "implementors cannot do the task in one shot — a DIFFERENT "
+                        "workflow may fit better. You can point future runs at one of "
+                        "these, tune one, or author a new one with the manifest/cells "
+                        "tools:\n"
+                        ;; auxiliary context — a catalog hiccup must never skip
+                        ;; the supervisor itself.
+                        (try (wf/render-catalog conn) (catch Throwable _ "")))
               {:keys [verdict answer]}
               (try (run-role (wf/role-ctx ctx :supervisor) (wf/compiled-manifest "supervisor")
                              (str "S" (revision data)) prob

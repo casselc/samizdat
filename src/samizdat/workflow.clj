@@ -34,6 +34,7 @@
             [clojure.java.io :as io]
             [clojure.string :as str]
             [clojure.tools.logging :as log]
+            [jolt.fs :as fs]
             [mycelium.core :as myc]
             [mycelium.cell :as cell]
             [mycelium.compose :as compose]
@@ -155,6 +156,43 @@
   and the team-worker roster."
   [name]
   (some-> (io/resource (str "prompts/" name ".md")) slurp))
+
+(defn- manifest-name-from-path [p]
+  (-> (str p) (str/replace #".*/" "") (str/replace #"\.edn$" "")))
+
+(defn catalog
+  "The workflows available to select or adapt: every factory manifest and every
+  stored one, each with its :description. This is the set the supervisor reads to
+  decide whether to switch a run to a different workflow, tweak an existing one,
+  or author a new one — the compiled menu the self-healing loop chooses from.
+  A manifest with no :description still lists, with an empty one."
+  [conn]
+  (let [factory (->> (try (fs/glob "resources/manifests" "*.edn") (catch Throwable _ nil))
+                     (map manifest-name-from-path)
+                     set)
+        stored (->> (try (workflows/names conn) (catch Throwable _ nil))
+                    ;; workflows/names yields rows ({:name :version :versions}),
+                    ;; factory yields name strings — normalise to names.
+                    (map (fn [x] (if (map? x) (:name x) x)))
+                    (remove nil?)
+                    set)]
+    (->> (sort (into factory stored))
+         (keep (fn [nm]
+                 (let [res (manifest-resource nm)
+                       edn (if (io/resource res)
+                             (slurp (io/resource res))
+                             (some-> (workflows/load-latest conn nm) :edn))]
+                   (when edn
+                     (let [d (try (read-definition edn) (catch Throwable _ nil))]
+                       {:name nm :description (str (:description d))})))))
+         vec)))
+
+(defn render-catalog
+  "The workflow catalog as a text menu — one `- name — description` line each —
+  for injecting into the supervisor's context."
+  [conn]
+  (str/join "\n" (for [{:keys [name description]} (catalog conn)]
+                   (str "- " name (when (seq description) (str " — " description))))))
 
 (defn workflow-prompt
   "A manifest may declare `:prompt <name>`, naming a prompt resource

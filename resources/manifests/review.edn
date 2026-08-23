@@ -4,7 +4,8 @@
 ;; building a feature — the manifest declares the ROLE. Select with
 ;; config :run :loop "review". This is the pattern for task-shaped workflows:
 ;; a manifest is a loop plus the prompt that frames what the loop is for.
-{:prompt "review"
+{:description "A review workflow: the base loop with review guidance injected at the start, so the run reviews existing work rather than building new. Use to audit or review a change, not to implement one."
+ :prompt "review"
 
  :cells {:start          :loop/assemble
          :infer          :llm/infer

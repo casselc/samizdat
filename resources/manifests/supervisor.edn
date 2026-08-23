@@ -10,7 +10,8 @@
 ;;
 ;; A separate, independently-versioned manifest so the supervisor role owns and
 ;; can tune its own loop (manifest save "supervisor").
-{:cells {:start          :loop/assemble
+{:description "The supervisor role loop: the harness's introspection agent, handed a run-health digest to diagnose and steer from. A component of the feature loop, not usually run standalone."
+ :cells {:start          :loop/assemble
          :infer          :llm/infer
          :parse          :llm/parse
          :provider-error :loop/provider-error
