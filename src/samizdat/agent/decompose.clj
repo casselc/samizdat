@@ -38,7 +38,7 @@
   the failure, how many tries and how deep — so the choice is grounded in why it
   failed, not a guess about its size."
   [{:keys [problem contract tests]}
-   {:keys [attempts last-answer last-failure depth]}]
+   {:keys [attempts last-answer last-failure depth fresh-failed force-split]}]
   (str
    "You are an architect diagnosing a stuck implementation. A unit of work has "
    "been attempted " (or attempts "several") " times and still cannot pass its "
@@ -48,6 +48,13 @@
    (when (seq (str tests)) (str "\n### Its tests (the spec it must satisfy)\n" tests "\n"))
    (when (seq (str last-answer)) (str "\n### The most recent attempt\n" last-answer "\n"))
    (when (seq (str last-failure)) (str "\n### Why it failed\n" last-failure "\n"))
+   (when (or fresh-failed force-split)
+     (str "\n### A different angle was already tried and also failed\n"
+          "Retrying with a hint did not work. Do NOT ask for another retry — the "
+          "unit must be SPLIT into smaller sub-units now. Even a unit that looks "
+          "like 'one thing' can be broken down (e.g. a focused test that pins the "
+          "contract, plus the smallest change that makes it pass). Choose "
+          "DECOMPOSE and list 2 or more sub-units.\n"))
    "\n## Your choice\n\n"
    "Pick ONE:\n\n"
    "1. DECOMPOSE — the unit is doing MORE THAN ONE distinct thing. List its "
@@ -85,68 +92,110 @@
    :problem description
    :parent (:id parent)})
 
+(defn- can-split?
+  "Whether a unit at this depth may still be decomposed. Below the budget a stuck
+  unit is split smaller; at or past it, splitting would only spawn children the
+  budget forbids, so the unit fails honestly instead."
+  [depth max-d]
+  (< depth max-d))
+
+(defn generic-split
+  "The last-resort split, used when the architect will not (or cannot) give a
+  usable decomposition but the unit is still stuck and we can still go smaller.
+  Almost every stuck unit here is 'make a change and prove it', so split it into
+  the change and the test that pins it. Imperfect, but it keeps the invariant the
+  whole design rests on: a stuck unit is decomposed further, never abandoned
+  while there is still room to split."
+  [node]
+  {:kind :decompose
+   :reason "generic split (architect gave no usable decomposition)"
+   :subtasks [{:name "impl"
+               :description (str "Make the smallest change that satisfies this unit, then stop:\n"
+                                 (:problem node))}
+              {:name "spec"
+               :description (str "Add a focused test that proves the behaviour this unit requires:\n"
+                                 (:problem node))}]})
+
+(declare solve)
+
+(defn- decompose-node
+  "Split `node` per `decision`, solve each sub-unit (recursively, so a stuck
+  sub-unit splits again), then — if they all land — re-attempt the parent as the
+  thin assembly that composes them, judged against the parent's OWN tests."
+  [node depth {:keys [attempt fan] :as ops} decision]
+  (let [children (:subtasks decision)
+        results (fan (mapv (fn [c] #(solve (child-node node c) (inc depth) ops)) children))]
+    (if-not (every? #(= :landed (:status %)) results)
+      {:status :failed :reason "a sub-unit did not land" :node node :children results}
+      (let [asm (attempt (assoc node :assembly true :child-answers (mapv :answer results)))]
+        (if (:passed? asm)
+          {:status :landed :answer (:answer asm) :node node :children results}
+          {:status :failed :reason "assembly did not land" :node node :children results})))))
+
 (defn solve
   "Recursive decompose-on-stuck for one node. Pure control flow over injected
   ops, so the recursion is testable without a model or a worker; cells/decompose
   provides the real ops.
 
   ops:
-    :attempt  (fn [node] -> {:passed? bool :answer .. :failure ..}) — build the
-              unit directly (worker loop) and verify it against its tests.
-    :recover  (fn [node evidence] -> decision|nil) — the architect call on a
-              stuck unit (evidence carries :last-answer :last-failure :depth).
-    :fan      (fn [thunks] -> results) — run sub-unit solves (parallel or not).
+    :attempt   (fn [node] -> {:passed? bool :answer .. :failure ..}) — build the
+               unit directly (worker loop) and verify it against its tests.
+    :recover   (fn [node evidence] -> decision|nil) — the architect call on a
+               stuck unit (evidence carries :last-answer :last-failure :depth,
+               and :fresh-failed/:force-split when a hinted retry already failed).
+    :fan       (fn [thunks] -> results) — run sub-unit solves (parallel or not).
+    :max-depth  optional override of the split-recursion budget (default max-depth).
+
+  The governing rule (karamazov-dvz): a stuck unit is NEVER abandoned while it
+  can still be split. Fresh-approach is a first, cheap try; when it fails the
+  unit is decomposed — forced through the architect, or a generic split as a last
+  resort — recursively, until pieces land or the depth floor is genuinely hit.
 
   Returns {:status :landed|:failed :answer .. :node .. :children [..]}. A landed
   node is a stable subassembly: it passed its own tests, so a parent that
   composes it never re-litigates it."
-  [node depth {:keys [attempt recover fan] :as ops}]
-  (let [r (attempt node)]
-    (cond
-      (:passed? r)
+  [node depth {:keys [attempt recover fan max-depth] :as ops}]
+  (let [max-d (or max-depth samizdat.agent.decompose/max-depth)
+        r (attempt node)]
+    (if (:passed? r)
       {:status :landed :answer (:answer r) :node node}
-
-      ;; No split past the budget — a unit still failing this deep is not a size
-      ;; problem, so it is a hard failure surfaced upward (no silent give-up).
-      (>= depth max-depth)
-      {:status :failed :reason "depth exhausted" :node node :answer (:answer r)}
-
-      :else
-      (let [decision (or (recover node {:last-answer (:answer r) :last-failure (:failure r)
-                                        :depth depth})
-                         ;; A flaky/unparseable architect must not end the
-                         ;; recursion — degrade to one more attempt with a
-                         ;; generic nudge rather than hard-failing the unit.
-                         {:kind :fresh-approach
-                          :hint "Reconsider the approach and try a different, simpler tactic."})]
+      (let [ev {:last-answer (:answer r) :last-failure (:failure r) :depth depth}
+            decision (recover node ev)]
         (case (:kind decision)
+          ;; The architect wants a split. Honour it if the budget allows; at the
+          ;; floor there is no room for children, so it fails honestly.
+          :decompose
+          (if (can-split? depth max-d)
+            (decompose-node node depth ops decision)
+            {:status :failed :reason "depth exhausted" :node node :answer (:answer r)})
+
+          ;; 'One thing, wrong strategy' — try the hint once. If it lands, done.
+          ;; If it still misses, the unit is NOT abandoned: escalate to a split
+          ;; (re-ask the architect, now told the hint failed; a generic split if
+          ;; it still refuses). Only at the depth floor is a failed retry the end.
           :fresh-approach
           (let [r2 (attempt (assoc node :hint (:hint decision)))]
-            (if (:passed? r2)
+            (cond
+              (:passed? r2)
               {:status :landed :answer (:answer r2) :node node}
-              {:status :failed :reason "fresh approach did not land"
-               :node node :answer (:answer r2)}))
 
-          :decompose
-          (let [children (:subtasks decision)
-                results (fan (mapv (fn [c]
-                                     #(solve (child-node node c) (inc depth) ops))
-                                   children))]
-            (if-not (every? #(= :landed (:status %)) results)
-              {:status :failed :reason "a sub-unit did not land"
-               :node node :children results}
-              ;; Assemble: the sub-units landed against their own tests; re-attempt
-              ;; the parent as the thin composition that ties them together, judged
-              ;; only against the parent's OWN, preserved tests.
-              (let [asm (attempt (assoc node :assembly true
-                                        :child-answers (mapv :answer results)))]
-                (if (:passed? asm)
-                  {:status :landed :answer (:answer asm) :node node :children results}
-                  {:status :failed :reason "assembly did not land"
-                   :node node :children results}))))
+              (not (can-split? depth max-d))
+              {:status :failed :reason "depth exhausted; fresh approach did not land"
+               :node node :answer (:answer r2)}
 
-          ;; no usable decision — fail the unit rather than guess
-          {:status :failed :reason "no recovery" :node node :answer (:answer r)})))))
+              :else
+              (let [ev2 (assoc ev :last-answer (:answer r2) :last-failure (:failure r2)
+                               :fresh-failed true :force-split true)
+                    forced (recover node ev2)
+                    split (if (= :decompose (:kind forced)) forced (generic-split node))]
+                (decompose-node node depth ops split))))
+
+          ;; No usable decision. Don't abandon while we can still go smaller —
+          ;; generic split; at the floor, honest failure.
+          (if (can-split? depth max-d)
+            (decompose-node node depth ops (generic-split node))
+            {:status :failed :reason "no recovery at depth floor"
+             :node node :answer (:answer r)}))))))
 
 (defn parse-decision
   "The architect's decision from its reply. Returns

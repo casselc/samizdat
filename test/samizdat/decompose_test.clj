@@ -107,11 +107,79 @@
     (is (= :failed (:status r)))
     (is (str/includes? (:reason r) "depth"))))
 
-(deftest solve-fails-when-a-sub-unit-cannot-land
-  (let [r (dec/solve {:id "root" :problem "p"} 0
-                     {:attempt (constantly {:passed? false :failure "stuck"})
-                      :recover (fn [node _] (when-not (:parent node)   ; child: no recovery -> child fails
-                                              {:kind :decompose :subtasks [{:name "a" :description "x"}]}))
-                      :fan seq-fan})]
+;; --- the fix (karamazov-dvz): a stuck unit is never abandoned while it can
+;; still be split. Fresh-approach is a first, cheap try; when it fails, the unit
+;; is DECOMPOSED (forced), recursively, until pieces land or the floor is hit. ---
+
+(deftest solve-splits-a-leaf-when-fresh-approach-fails
+  ;; the exact bug the user caught: architect calls the leaf "one thing" ->
+  ;; fresh-approach -> the retry fails. The old code abandoned here. It must now
+  ;; escalate to a split of that same leaf.
+  (let [ids (atom [])
+        recover (fn [_node ev]
+                  (if (:fresh-failed ev)
+                    ;; told the fresh angle failed -> split it now
+                    {:kind :decompose :subtasks [{:name "p1" :description "part 1"}
+                                                 {:name "p2" :description "part 2"}]}
+                    {:kind :fresh-approach :hint "try X"}))
+        attempt (fn [node]
+                  (swap! ids conj (:id node))
+                  (cond
+                    (re-find #"/p[12]$" (:id node)) {:passed? true :answer (str "built " (:id node))}
+                    (:assembly node) {:passed? true :answer "assembled"}
+                    :else {:passed? false :failure "one thing but keeps missing"}))
+        r (dec/solve {:id "leaf" :problem "p"} 0
+                     {:attempt attempt :recover recover :fan seq-fan})]
+    (is (= :landed (:status r)) "the leaf lands by splitting after fresh-approach failed")
+    (is (some #{"leaf/p1"} @ids) "the failing leaf was decomposed further")
+    (is (some #{"leaf/p2"} @ids))))
+
+(deftest solve-generic-splits-when-architect-refuses-to-help
+  ;; the architect keeps saying fresh-approach even when told to split (or returns
+  ;; nothing usable). The system must STILL go smaller — a generic split — rather
+  ;; than abandon.
+  (let [ids (atom [])
+        attempt (fn [node]
+                  (swap! ids conj (:id node))
+                  (cond
+                    (:assembly node) {:passed? true :answer "asm"}
+                    (str/includes? (:id node) "/") {:passed? true :answer "sub"} ; any child lands
+                    :else {:passed? false :failure "stuck"}))
+        r (dec/solve {:id "u" :problem "p"} 0
+                     {:attempt attempt :recover (constantly nil) :fan seq-fan})]
+    (is (= :landed (:status r)) "generic split lands the unit even with no architect help")
+    (is (> (count @ids) 1) "it fell back to a generic split instead of abandoning")))
+
+(deftest solve-recurses-splitting-until-pieces-land
+  ;; multi-level: root splits into a,b; b is itself still stuck and splits again
+  ;; into b1,b2 which land. Proves the recursion goes as deep as it needs to.
+  (let [attempt (fn [node]
+                  (let [id (:id node)]
+                    (cond
+                      (:assembly node) {:passed? true :answer (str "asm " id)}
+                      (#{"root/a" "root/b/b1" "root/b/b2"} id) {:passed? true :answer (str "built " id)}
+                      :else {:passed? false :failure "still too big"})))
+        recover (fn [node _]
+                  {:kind :decompose
+                   :subtasks (if (= "root/b" (:id node))
+                               [{:name "b1" :description "x"} {:name "b2" :description "y"}]
+                               [{:name "a" :description "x"} {:name "b" :description "y"}])})
+        r (dec/solve {:id "root" :problem "p"} 0
+                     {:attempt attempt :recover recover :fan seq-fan})]
+    (is (= :landed (:status r)))
+    (let [b (first (filter #(= "root/b" (get-in % [:node :id])) (:children r)))]
+      (is (= :landed (:status b)) "the stuck child landed")
+      (is (= 2 (count (:children b))) "the stuck child was itself decomposed further"))))
+
+(deftest solve-eventually-fails-honestly-when-nothing-lands
+  ;; when even splitting to the floor doesn't land a single piece, the run fails
+  ;; honestly — but only after it exhausted splitting, not on the first miss.
+  ;; :max-depth 1 bounds the recursion for the test.
+  (let [ids (atom [])
+        r (dec/solve {:id "root" :problem "p"} 0
+                     {:attempt (fn [n] (swap! ids conj (:id n)) {:passed? false :failure "stuck"})
+                      :recover (fn [_ _] {:kind :decompose :subtasks [{:name "a" :description "x"}]})
+                      :fan seq-fan
+                      :max-depth 1})]
     (is (= :failed (:status r)))
-    (is (str/includes? (:reason r) "sub-unit"))))
+    (is (> (count @ids) 1) "it split before giving up")))

@@ -58,3 +58,47 @@
           (is (contains? b "DT_part_a"))
           (is (contains? b "DT_part_b"))
           (is (contains? b "DT-a") "the assembly attempt"))))))
+
+(defn- escalating-roles
+  "Architect first calls the stuck unit 'one thing' (fresh-approach); the hinted
+  retry still fails; on the SECOND diagnosis — which carries the 'already tried
+  and also failed' evidence — it splits. Proves the cell wires force-split
+  evidence through so a fresh-approach dead-end escalates to a real split
+  (karamazov-dvz) rather than abandoning."
+  [_ _ messages & _]
+  (let [c (str/join " " (map :content messages))]
+    (cond
+      (and (str/includes? c "architect diagnosing")
+           (str/includes? c "already tried and also failed"))
+      {:content (str "{\"decision\":\"decompose\",\"reason\":\"split it\","
+                     "\"subtasks\":[{\"name\":\"part-a\",\"description\":\"do part a\"},"
+                     "{\"name\":\"part-b\",\"description\":\"do part b\"}]}")
+       :finish-reason "stop"}
+
+      (str/includes? c "architect diagnosing")
+      {:content "{\"decision\":\"fresh_approach\",\"reason\":\"one thing\",\"hint\":\"try a different tactic\"}"
+       :finish-reason "stop"}
+
+      (str/includes? c "ASSEMBLY step") (done-call "assembled the big feature from its parts")
+      (str/includes? c "do part a")     (done-call "handled part a")
+      (str/includes? c "do part b")     (done-call "handled part b")
+
+      :else                       ; the root's direct attempt AND its hinted retry both get stuck
+      {:content "```tool-call\n{\"name\":\"give_up\",\"args\":{\"reason\":\"still stuck\"}}\n```"
+       :finish-reason "stop"})))
+
+(deftest fresh-approach-dead-end-escalates-to-a-real-split
+  (with-redefs [llm/chat escalating-roles
+                gitdiff/baseline (constantly "HEAD")
+                gitdiff/changed-files (constantly ["src/piece.clj"])]
+    (let [conn (db/open! ":memory:")
+          r (workflow/run! {:conn conn :config {:run {:loop "decompose"}}
+                            :llm-adapter :a :llm-config {:max-tokens 16384}
+                            :problem "the big feature" :max-turns 6})]
+      (is (= :completed (:status r)) "the unit lands by splitting after the fresh-approach retry failed")
+      (let [b (set (map :branch_id (db/fetch conn ["SELECT DISTINCT branch_id FROM turns"])))]
+        (is (contains? b "DT") "root direct attempt")
+        (is (contains? b "DT-h") "the fresh-approach hinted retry ran")
+        (is (contains? b "DT_part_a") "then it was split — sub-unit a")
+        (is (contains? b "DT_part_b") "sub-unit b")
+        (is (contains? b "DT-a") "and assembled")))))
