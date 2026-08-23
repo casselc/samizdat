@@ -96,14 +96,16 @@
             [samizdat.security.policy-test]
             [samizdat.llm-test]
             [samizdat.prompt-test]
-            [samizdat.server-test]
+             [samizdat.server-test]
             [samizdat.store-test]
+            [samizdat.evals-test]
             [samizdat.gui-api-test]
-            [samizdat.gui-graph-test]
-            [samizdat.gui-style-test]
-            [samizdat.gui-input-test]
-            [samizdat.gui-mathtext-test]
-            [samizdat.gui-newrun-test]))
+             [samizdat.gui-graph-test]
+             [samizdat.gui-style-test]
+             [samizdat.gui-input-test]
+             [samizdat.gui-mathtext-test]
+             [samizdat.gui-newrun-test]
+             [samizdat.sandbox-test]))
 
 (def namespaces
   '[maestro.core-test
@@ -149,6 +151,7 @@
     mycelium.validation-test
     mycelium.workflow-test
     samizdat.store-test
+    samizdat.evals-test
     samizdat.llm-test
     samizdat.agent-test
     samizdat.tasks-test
@@ -187,7 +190,8 @@
     samizdat.gui-style-test
     samizdat.gui-input-test
     samizdat.gui-mathtext-test
-    samizdat.gui-newrun-test])
+    samizdat.gui-newrun-test
+    samizdat.sandbox-test])
 
 (defn run []
   (apply t/run-tests namespaces))

@@ -93,15 +93,34 @@
     the failures that caused the reframe. Bounded by :reframe-grace, and the
     cull was always the documented backstop.
   - :critic scores and :fork-invited markers are branch memory; a resumed
-    branch is re-scored at its next boundary, and may be re-invited to fork
-    sooner than the cooldown would otherwise allow.
-  - the per-turn :error that repeating-failure? compares is not replayed, so a
-    branch that was looping on one identical failure gets one un-escalated
-    answer after a resume before the harness can see the loop again. The turns
-    table does hold the result text, but it holds the ESCALATED copy, which
-    would not compare equal to the next clean one — replaying it would break
-    the detection it was meant to restore."
+     branch is re-scored at its next boundary, and may be re-invited to fork
+     sooner than the cooldown would otherwise allow.
+   - the per-turn :error that repeating-failure? compares is not replayed, so a
+     branch that was looping on one identical failure gets one un-escalated
+     answer after a resume before the harness can see the loop again. The turns
+     table does hold the result text, but it holds the ESCALATED copy, which
+     would not compare equal to the next clean one — replaying it would break
+     the detection it was meant to restore.
+
+   JS1 resume contract:
+   - When the journal contains a :js1-binding-created event, the resume MUST
+     reconstruct a JS1 binding with the same spec coordinate before continuing.
+   - If SCI (jolt.sandbox) is unavailable at resume time, the resume FAILS
+     CLOSED — it throws rather than silently falling back to live eval in a
+     context that was supposed to be sandboxed.  The model's prior turns ran
+     inside SCI; switching to live eval mid-run would be a trust boundary
+     violation.
+   - The JS1 binding's SCI state (definitions made by prior evals) is NOT
+     replayable — SCI sessions are in-process state, like Lean sessions.
+     Definitions are lost.  This is the accepted JS1 analogue of the Lean
+     gap: the model can re-evaluate its definitions and they will take
+     effect in the fresh SCI context.
+   - The spec coordinate from the journal is verified against the newly
+     constructed binding's coordinate.  A mismatch (different root,
+     capabilities, or bounds) fails closed."
   (:require [clojure.data.json :as json]
+            [clojure.string :as str]
+            [clojure.tools.logging :as log]
             [samizdat.agent.beam :as beam]
             [samizdat.agent.claims :as claims]
             [samizdat.agent.gates :as gates]
@@ -217,31 +236,127 @@
   (when-let [r (runs/get-run conn run-id)]
     (not (contains? #{"completed" "aborted"} (:status r)))))
 
+(defn- journal-preset
+  "The journal stores event data as JSON, so the preset keyword reads back
+   as a STRING: \":project/develop\" under data.json's colon form, or just
+   \"develop\" under jolt's port, which writes keyword values via name and
+   drops the namespace.  Convert both shapes back to the keyword bind!
+   expects — the closed preset catalog lives in the fixed project namespace
+   — or nil so the caller's default applies.  bind! still fails closed on
+   anything that is not a key of that catalog."
+  [v]
+  (cond
+    (nil? v) nil
+    (keyword? v) v
+    (string? v) (let [s (if (str/starts-with? v ":") (subs v 1) v)]
+                  (if (str/includes? s "/")
+                    (keyword s)
+                    (keyword "project" s)))
+    :else v))
+
+(defn- reconstruct-js1-binding!
+  "Fail-closed JS1 binding reconstruction for resume.
+
+   Looks for the :js1-binding-created journal event to recover the
+   original spec coordinate and preset.  Then constructs a NEW binding
+   (the SCI state is lost, like Lean sessions) and verifies the
+   coordinate matches.
+
+   Returns the binding, or throws if:
+   - The journal has a JS1 event but SCI is unavailable
+   - The coordinate does not match the original
+
+   Returns nil when no JS1 event exists (non-JS1 run)."
+  [conn run-id config root]
+  (let [all-events (journal/events-since conn run-id 0)
+        js1-events (filter
+                     #(and (= "js1-binding-created" (:kind %))
+                           (some? (:data %)))
+                     all-events)]
+    (when-let [evt (first js1-events)]
+      ;; The journal says this run was JS1-profiled.  Fail closed.
+      ;; :data is JSON text from the events table; parse it.
+      (let [evt-data (parse-json (:data evt))
+            original-coordinate (get-in evt-data [:spec-coordinate])
+            original-profile (get-in evt-data [:profile])
+            original-preset (journal-preset (get-in evt-data [:preset]))]
+        (try
+          (require 'samizdat.agent.sandbox)
+          (let [provider-fn (resolve 'samizdat.agent.sandbox/provider)
+                bind-fn     (resolve 'samizdat.agent.sandbox/bind!)
+                desc-fn     (resolve 'samizdat.agent.sandbox/describe)
+                prov    (provider-fn {:root root})
+                preset  (or original-preset :project/develop)
+                binding (bind-fn prov (str run-id)
+                                 {:preset preset :root root
+                                  :instance/key :main})
+                desc    (desc-fn binding)
+                new-coord (:samizdat.sandbox/spec-coordinate desc)]
+            ;; A JS1 event that carries no coordinate cannot be verified
+            ;; against the reconstruction — fail closed rather than skip.
+            (when (nil? original-coordinate)
+              (throw (ex-info
+                       "JS1 resume: journal event carries no spec coordinate"
+                       {:run-id run-id
+                        :js1/error :coordinate-missing})))
+            (when (not= original-coordinate new-coord)
+              (throw (ex-info
+                        (str "JS1 resume: spec coordinate mismatch. Original: "
+                             original-coordinate ", reconstructed: " new-coord)
+                        {:run-id run-id
+                         :original-coordinate original-coordinate
+                         :reconstructed-coordinate new-coord
+                         :js1/error :coordinate-mismatch})))
+            (log/info "JS1 binding reconstructed for run" run-id
+                      "spec" new-coord "profile" original-profile)
+            (log/warn "JS1 resume: SCI definitions from prior turns are lost;"
+                      " the model must re-evaluate them")
+            binding)
+          (catch Throwable e
+            (if (:js1/error (ex-data e))
+              (throw e)
+              (throw (ex-info
+                      (str "JS1 resume failed: SCI/sandbox unavailable. "
+                           "The run was JS1-profiled but the sandbox cannot be "
+                           "constructed. Refusing to resume with live eval.")
+                      {:run-id run-id
+                       :original-profile original-profile
+                       :original-coordinate original-coordinate
+                       :js1/error :sandbox-unavailable}
+                                             e)))))))))
+
 (defn resume!
   "Rebuild a run's branches from the journal and continue the beam's round
-  loop at the round after the last recorded turn, under the run's ORIGINAL
-  max-turns.
+   loop at the round after the last recorded turn, under the run's ORIGINAL
+   max-turns.
 
-  `:max-turns` is the one exception to the anchor rule, and it is explicit:
-  when passed AND larger than the recorded budget, the runs row is raised to
-  it and branches closed as `exhausted` reopen — they closed because the
-  budget ran out, not for cause, so more budget un-closes them. Culled,
-  abandoned, and done branches stay closed. The extension is journaled
-  (budget-extended, branch-reopened) and the rows are updated BEFORE the
-  branches are read back, so a crash mid-extension replays correctly. A
-  crash still cannot re-grant budget; only a caller asking for more can.
+   `:max-turns` is the one exception to the anchor rule, and it is explicit:
+   when passed AND larger than the recorded budget, the runs row is raised to
+   it and branches closed as `exhausted` reopen — they closed because the
+   budget ran out, not for cause, so more budget un-closes them. Culled,
+   abandoned, and done branches stay closed. The extension is journaled
+   (budget-extended, branch-reopened) and the rows are updated BEFORE the
+   branches are read back, so a crash mid-extension replays correctly. A
+   crash still cannot re-grant budget; only a caller asking for more can.
 
-  Pending interventions are already in their table; the existing
-  pending-directives drain picks them up at the first resumed boundary — this
-  function does not reimplement that path.
+   Pending interventions are already in their table; the existing
+   pending-directives drain picks them up at the first resumed boundary — this
+   function does not reimplement that path.
 
-  Returns the beam/run-rounds result. Throws when the run is not resumable."
+   JS1 fail-closed: if the journal contains a :js1-binding-created event,
+   the resume reconstructs a JS1 binding and verifies its spec coordinate.
+   If SCI is unavailable, the resume throws rather than falling back to
+   live eval — the model's prior turns ran inside SCI, and switching to
+   live eval would be a trust boundary violation.  SCI definitions are
+   lost (same gap as Lean sessions).
+
+   Returns the beam/run-rounds result. Throws when the run is not resumable."
   [{:keys [conn config llm-adapter llm-config run-id abort max-turns]}]
   (let [run (runs/get-run conn run-id)]
     (when-not (resumable? conn run-id)
       (throw (ex-info (str "run " run-id " is not resumable (status "
                            (:status run) ")")
-                      {:run-id run-id :status (:status run)})))
+                       {:run-id run-id :status (:status run)})))
     ;; The row said 'interrupted' (or 'failed'); it is about to be running
     ;; again, and stalled? only watches runs whose status says so.
     (runs/mark-running! conn run-id)
@@ -257,11 +372,19 @@
           artifacts (group-by :branch_id (journal/artifacts conn run-id))
           firings (group-by :branch_id (journal/gate-firings conn run-id))
           sessions (atom [])
+          ;; JS1 reconstruction: fail-closed if the run was JS1-profiled
+          root (or (get-in config [:run :root]) (System/getProperty "user.dir"))
+          js1 (reconstruct-js1-binding! conn run-id config root)
           ctx {:conn conn :run-id run-id :config config :problem (:problem run)
                :llm-adapter llm-adapter :llm-config llm-config
                :max-turns max-turns :beam? (> width 1) :beam-width width
                :sessions sessions
                :abort abort
+               ;; JS1 profile flags — reconstructed from journal, never
+               ;; from model input.  :repl-session is nil when JS1 is
+               ;; active; the sandbox binding is the eval target.
+               :js1/profile (when js1 "single-player")
+               :js1/binding js1
                ;; One claim registry per run: two branches reaching the same
                ;; claim share one slow verification instead of racing it.
                :claims (claims/new-registry)}

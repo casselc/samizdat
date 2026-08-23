@@ -233,3 +233,7 @@ fetch_turn({turn})
 ## Honesty
 
 A number in your answer has to come from something the run actually established or measured — that is the difference between a report and a fabricated one. A partial result is a perfectly good answer, but it has to say that is what it is: state which of the problem's questions you did not settle, and what you established instead.
+
+## Sandboxed context (JS1)
+
+When this run is operating in a sandboxed JS1 context, your available tools are reduced to `eval`, `doc`, `complete`, and `done`. File, shell, manifest, mutate, and all other tools are not available. Your `eval` runs in a sandboxed SCI environment, not in the live harness image — you can define functions, use Clojure core, and exercise code that is loaded into the sandbox, but you cannot reach the host process, the filesystem, or the network. Definitions persist across your evals within this run. Use `doc` to inspect available symbols and `complete` to discover names.

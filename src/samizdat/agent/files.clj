@@ -40,13 +40,18 @@
 
 (defn- resolve-under-root
   "Canonicalize `path` under `root`; return the resolved absolute path string,
-  or nil when it escapes the root. The canonical root is the boundary — a
-  `..` or an absolute path that lands outside it fails closed."
+   or nil when it escapes the root, is blank, or is invalid. Uses
+   canonicalization to detect symlink escapes: any symlink chain that
+   lands outside root is caught because the canonical target falls
+   outside the boundary. Fails closed on any I/O error."
   [root path]
-  (let [root* (str (fs/canonicalize root))
-        target (str (fs/canonicalize (fs/path root path)))]
-    (when (or (= target root*) (str/starts-with? target (str root* "/")))
-      target)))
+  (when (and (string? path) (not (str/blank? path)))
+    (try
+      (let [root* (str (fs/canonicalize root))
+            target (str (fs/canonicalize (fs/path root path)))]
+        (when (or (= target root*) (str/starts-with? target (str root* "/")))
+          target))
+      (catch Exception _ nil))))
 
 (defn- miss [branch msg]
   {:result msg :category :mechanics :progress? false :branch branch})
@@ -241,4 +246,90 @@
                                " balance: " note " It will not load until you fix it.")))
            :category :success :progress? true :branch branch
            :repaired? (= :repaired status)})
-        (miss branch (str "Path " path " is outside the project root and cannot be written."))))))
+         (miss branch (str "Path " path " is outside the project root and cannot be written."))))))
+
+;; --- sandbox helpers: digest, bounded list/search ---------------------------------
+
+(defn file-digest
+  "SHA-256 hex digest of file at `path`.  Returns a 64-character lowercase
+   hex string, or nil if the file cannot be read.  The hex string is the receipt-
+   domain representation of a content identity — a deterministic fingerprint
+   suitable for anchored-edit base-digest comparison."
+  [path]
+  (try
+    (when (and path (fs/exists? path))
+      (let [^java.security.MessageDigest d
+            (doto (java.security.MessageDigest/getInstance "SHA-256")
+              (.update (fs/read-all-bytes path)))]
+        (format "%064x" (java.math.BigInteger/1 (.digest d)))))
+    (catch Exception _ nil)))
+
+(defn safe-list-dir
+  "List entries under `root` at relative `rel-path`, bounded to `max-entries`.
+   Returns a sorted vector of relative path strings (from root).  Only
+   descend into directories; symlinks are not followed so a symlink that
+   would escape root never causes the walk to leave it.  Returns an empty
+   vector for non-directory or missing paths."
+  ([root rel-path] (safe-list-dir root rel-path 1000))
+  ([root rel-path max-entries]
+   (let [root* (str (fs/canonicalize root))]
+     (if-let [abs (resolve-under-root root* (or rel-path "."))]
+       (if (fs/directory? abs {:nofollow-links true})
+         (let [entries (atom [])
+               limit (atom max-entries)]
+           (fs/walk-file-tree
+             abs
+             {:follow-links false
+              :pre-visit-dir (fn [_ _]
+                               (if (pos? @limit) :continue :terminate))
+              :visit-file (fn [f _]
+                           (if (pos? @limit)
+                             (do (swap! entries conj
+                                    (str (fs/relativize root* (str f))))
+                                 (swap! limit dec)
+                                 :continue)
+                             :terminate))})
+           (sort @entries))
+         [])
+        []))))
+
+(defn safe-search-files
+  "Search for `pattern` (a regex string) in files under `root` at relative
+   `rel-path`, bounded by `max-results` and `max-chars`.  Returns a vector of
+   `[rel-path line-number line-text]` tuples.  Symlinks are not followed.
+   Returns an empty vector for non-directory or missing paths."
+  ([root rel-path pattern] (safe-search-files root rel-path pattern 500 500000))
+  ([root rel-path pattern max-results max-chars]
+   (let [root* (str (fs/canonicalize root))
+         re (re-pattern pattern)]
+     (if-let [abs (resolve-under-root root* (or rel-path "."))]
+       (if (fs/directory? abs {:nofollow-links true})
+         (let [results (atom [])
+               chars-scanned (atom 0)]
+           (fs/walk-file-tree
+             abs
+             {:follow-links false
+              :pre-visit-dir (fn [_ _]
+                              (if (and (< (count @results) max-results)
+                                       (< @chars-scanned max-chars))
+                                :continue
+                                :terminate))
+              :visit-file
+              (fn [f _]
+                (if (and (< (count @results) max-results)
+                         (< @chars-scanned max-chars))
+                  (try
+                    (let [content (slurp (str f))
+                          _ (swap! chars-scanned + (count content))
+                          rel (str (fs/relativize root* (str f)))]
+                      (doseq [[i line] (map-indexed vector
+                                                   (str/split content #"\n" -1))
+                              :while (< (count @results) max-results)
+                              :when (re-find re line)]
+                        (swap! results conj [rel (inc i) line]))
+                      :continue)
+                    (catch Exception _ :continue))
+                  :terminate))})
+            (vec @results))
+         [])
+        []))))

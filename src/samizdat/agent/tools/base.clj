@@ -21,8 +21,63 @@
   "The tool multimethod and what every tool method shares: result helpers,
   missing-argument complaints, the :default method, tool-names, and the
   per-phase refusal the branch loop consults before dispatch. Tool groups
-  require this namespace; nothing here requires a group back."
+  require this namespace; nothing here requires a group back.
+
+  JS1 profile: when the context carries a JS1 binding (the canonical
+  signal — see js1-binding), the phase-refusal gate rejects every tool
+  name not in js1-allowed-tools before dispatch.  The model sees eval,
+  doc, complete, and done; file/shell/manifest/mutate etc. are refused
+  as policy. The live REPL is never reached in a JS1 context — eval
+  routes to the persistent SCI binding instead."
   (:require [clojure.string :as str]))
+
+;; ─── JS1 profile ─────────────────────────────────────────────────────────
+
+(def ^:private js1-allowed-tools
+  "The EXACT set of tool names a JS1-profiled context may dispatch.
+
+  eval, doc, complete — sandboxed REPL via the persistent SCI binding.
+  done — the only controller-event tool the model may emit.
+
+  Everything else (file, shell, manifest, mutate, lsp, ship, knowledge,
+  journal, messages, tasks, skills, introspect) is rejected before
+  dispatch by phase-refusal.  The list is deliberately minimal and
+  closed: adding a name here is a trust decision that grants the model
+  a new capability path inside the sandbox."
+  #{"eval" "doc" "complete" "done"})
+
+(defn js1-binding
+  "The ONE canonical JS1 signal: the controller-minted sandbox binding in
+  the ctx.  Tool restriction (phase-refusal below) and eval routing (the
+  repl tools) both derive their decision from this accessor — never from
+  :js1/profile, which is a display/journal label only.  One signal means
+  the two gates can never disagree about whether a context is sandboxed."
+  [ctx]
+  (:js1/binding ctx))
+
+(defn js1-profile?
+  "True when the context is JS1-constrained.
+
+  The canonical signal is the binding (js1-binding).  A ctx whose
+  :js1/profile flag is set but whose binding is nil is inconsistent —
+  and is still treated as JS1-constrained, so it stays tool-restricted
+  and the repl tools refuse it rather than falling through to live eval.
+  Set only by trusted config or workflow, never by model input."
+  [ctx]
+  (boolean (or (js1-binding ctx) (some? (:js1/profile ctx)))))
+
+(defn js1-allowed?
+  "True when tool-name is in the JS1 allowed vocabulary."
+  [tool-name]
+  (contains? js1-allowed-tools tool-name))
+
+(defn js1-tool-vocabulary
+  "The sorted list of tool names the JS1 profile permits.
+  For diagnostics and prompt rendering only."
+  []
+  (sort js1-allowed-tools))
+
+;; ─── Tool multimethod ─────────────────────────────────────────────────────
 
 (defmulti run-tool
   (fn [ctx] (:tool-name ctx)))
@@ -69,8 +124,8 @@
   requires are exactly what this function is already handed."
   [ctx & ks]
   (let [absent (remove #(let [v (arg ctx %)]
-                          (and (some? v) (not (and (string? v) (str/blank? v)))))
-                       ks)]
+                            (and (some? v) (not (and (string? v) (str/blank? v)))))
+                         ks)]
     (when (seq absent)
       (str "Missing required argument(s): " (str/join ", " (map name absent)) "."
            "\n\nA call to `" (:tool-name ctx) "` looks like:\n"
@@ -90,9 +145,22 @@
   the loop still asks — and the coding loop's phase policy plugs back in here
   when the loop-as-manifest work defines it. Any refusal returned from here
   must carry `:policy-refusal? true` so the cull record can tell a declined
-  call from a malformed fence."
-  [_ctx]
-  nil)
+  call from a malformed fence.
+
+  JS1 gate: when the ctx is JS1-constrained (js1-profile?, derived from
+  the canonical binding signal), the tool name is checked against the
+  closed JS1 vocabulary. A refused tool returns a :policy-refusal? result
+  explaining the JS1 constraint. This is the single enforcement point; no
+  JS1 tool method needs its own guard."
+  [ctx]
+  (when (js1-profile? ctx)
+    (let [tn (:tool-name ctx)]
+      (when-not (js1-allowed? tn)
+        (fail (:branch ctx)
+              (str "Tool `" tn "` is not available in this context."
+                   " JS1 profile permits only: "
+                   (str/join ", " (js1-tool-vocabulary)) ".")
+              :policy-refusal? true)))))
 
 
 ;; --- unknown ----------------------------------------------------------------

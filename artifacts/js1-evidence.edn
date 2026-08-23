@@ -1,0 +1,97 @@
+;; JS1 cutover evidence — decision-first REVISE record
+;;
+;; DECISION: REVISE.  JS1 is not approved to merge.  This record leads with the
+;; decision, lists exactly which gates executed and which PASS criteria remain
+;; unmet, and preserves the standing non-claims verbatim.  Passing gates are not
+;; approval.
+
+{:js1/decision :revise
+
+ :js1/record-date "2026-08-23"
+
+ :js1/baseline
+ {:samizdat {:ref "main" :revision "b93d601" :committed? false
+             :note "ALL JS1 work is uncommitted (working tree only)"}
+  :jolt-upstream {:js0-revision "04dd42db"
+                  :js0-branch "js0-functional-sci-upstream"
+                  :frozen-tag "js0-functional-sci-upstream-freeze"
+                  :upstream-baseline "c4547b5e"
+                  :sci "32d62a51"}
+  :upstream-action {:pr? false :push? false}}
+
+ :js1/executed-gates
+ {:full-suite "946 tests / 2998 assertions"
+  :direct-sandbox "14 / 111 (offline -Scp invocation)"
+  :eval-store "13 / 58 (samizdat.store.evals)"
+  :wiring-require "guarded samizdat.agent.sandbox require; non-JS1 path bears no dependency cost"
+  :model-tool-surface "#{eval doc complete done} (closed set)"
+  :host-capability-authority
+  {:enforcement-point "tools/base.clj phase-refusal — single point, before dispatch"
+   :flag-authority "trusted config/workflow only, never model input"
+   :allowed-tools #{"eval" "doc" "complete" "done"}}
+  :replay
+  {:journal-event ":js1-binding-created"
+   :journal-fields [:profile :binding-id :instance-id :spec-coordinate :preset]
+   :durable-receipts "store/evals: ordered {op args result|error}, consumed in order at replay"}
+  :evaluator-binding-seam
+  {:coordinates [:evaluator-spec :instance :binding]
+   :ctx-key ":js1/binding"
+   :check-order "eval/doc/complete check :js1/binding FIRST"
+   :js1-route "sandbox/evaluate! on the persistent binding"
+   :non-js1-route "repl/eval-code on :repl-session (live JVM, unchanged)"}
+  :upstream-pr-push {:pr? false :push? false}}
+
+ :js1/unmet-pass-criteria
+ ["no real model dogfood task"
+  "no actual process terminate/restart/resume evidence"
+  "no frozen bbagent A3c comparison"
+  "no live controller budget proof"
+  "no cross-platform run"]
+
+ :js1/durable-restart
+ {:claimed? false
+  :reason "only fail-closed resume POLICY is implemented; no actual terminate → restart → resume cycle executed"}
+
+ :js1/files
+ {:modified
+  ["resources/prompts/system.md"
+   "src/samizdat/agent/beam.clj"
+   "src/samizdat/agent/files.clj"
+   "src/samizdat/agent/resume.clj"
+   "src/samizdat/agent/tools.clj"
+   "src/samizdat/agent/tools/base.clj"
+   "src/samizdat/agent/tools/repl.clj"
+   "src/samizdat/store/migrations.clj"
+   "src/samizdat/workflow.clj"
+   "test/samizdat/test_runner.clj"]
+  :new-untracked
+  ["src/samizdat/agent/sandbox.clj"
+   "src/samizdat/store/evals.clj"
+   "test/samizdat/evals_test.clj"
+   "test/samizdat/sandbox_test.clj"
+   "docs/JS1_FINDINGS.md"
+   "artifacts/js1-evidence.edn"]}
+
+ :js1/claimed
+ ["phase-refusal gate rejects tools outside the closed vocabulary before dispatch"
+  "with :js1/binding present, eval/doc/complete route to the sandbox binding and never touch samizdat.repl"
+  "with :js1/binding absent, tools behave exactly as before (bit-for-bit unchanged path)"
+  "resume of a JS1-profiled run fails closed when SCI is unavailable"
+  "the JS1 profile flag is set only from trusted config/workflow code, never from model input"
+  "nREPL, developer REPL, and all non-JS1 workflows are unaffected"]
+
+ :js1/non-claimed
+ ["Evaluator spec/instance/binding IDs in durable eval calls: the existing runs/start-run! API in store/runs.clj does not expose sandbox binding identity. The journal :js1-binding-created event carries the binding/spec/instance IDs for resume, but these are NOT incorporated into the eval turn rows themselves (the turns table schema was not editable). Documented as an integration blocker."
+  "SCI availability on plain JVM: the sandbox requires jolt.sandbox and SCI, which are jolt-only. New-run fallback is logged; resume is fail-closed. Platform constraint, not a code defect."
+  "JS1 doc/complete fidelity: SCI ns-publics and resolve/meta provide a subset of the live REPL's introspection; core var metadata may be stripped by jolt. Metadata-dependent features (arglists from core) may be degraded."
+  "Beam multi-branch JS1 isolation: all branches share the :main instance; per-branch isolation requires a distinct :instance/key, not done automatically."
+  "Performance: no measurement of JS1 eval latency vs. live REPL has been made."]
+
+ :js1/integration-blocker
+ {:description (str "runs/start-run! and the turns table schema carry no sandbox "
+                    "binding metadata (evaluator spec, instance ID, binding ID); "
+                    "the journal event records them for resume but the individual "
+                    "eval turn rows have no column for them")
+  :authority "journal :js1-binding-created event"
+  :remediation "schema migration (excluded by file fence) or join table"
+  :status "not attempted"}}

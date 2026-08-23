@@ -777,12 +777,21 @@
         ;; paths discard one: the tool-level catch, the turn deadline, and a
         ;; turn that throws. See tools/register-session! (vf-cfp).
         engine-sessions (atom [])
+        ;; JS1 binding: propagate from opts when the caller (beam/run!)
+        ;; or the control surface wired one.  The beam runs multiple branches
+        ;; sharing one persistent :main instance — same as workflow/run!.
+        js1-binding (:js1/binding opts)
+        js1-profile (:js1/profile opts)
         ctx {:conn conn :run-id run-id :config config :problem problem
              :llm-adapter llm-adapter :llm-config llm-config
              :max-turns max-turns :beam? (> width 1) :beam-width width
              :sessions sessions
              :engine-sessions engine-sessions
              :abort abort
+             ;; JS1 profile flags — set only by trusted config/control, read
+             ;; by phase-refusal to enforce the minimal tool vocabulary.
+             :js1/profile js1-profile
+             :js1/binding js1-binding
              ;; One claim registry per run: two branches reaching the same
              ;; claim share one slow verification instead of racing it.
              :claims (claims/new-registry)}]
