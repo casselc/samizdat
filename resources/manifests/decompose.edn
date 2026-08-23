@@ -1,0 +1,19 @@
+;; Decompose-on-stuck (karamazov-ioo.15): solve a task by attempting it directly
+;; and, when a unit gets stuck, splitting it into sub-units, solving those first,
+;; then assembling — recursively, bounded by a depth budget.
+;;
+;;   plan-free: no up-front size guess. :decompose/run drives
+;;   samizdat.agent.decompose/solve, which attempts each unit with an implementor
+;;   worker, and on a stuck unit asks an ARCHITECT (config :run :role-models
+;;   :architect) to decompose or hint a fresh approach. A landed unit is a stable
+;;   subassembly (it changed the tree and shipped); its parent composes it.
+;;
+;; Select with config :run :loop "decompose". Assign models per role as usual
+;; (e.g. a cheap implementor, a stronger architect).
+{:cells {:start  :loop/assemble
+         :solve  :decompose/run
+         :finish :loop/finish}
+
+ :edges {:start  :solve
+         :solve  :finish
+         :finish :end}}
