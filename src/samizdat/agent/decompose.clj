@@ -76,6 +76,73 @@
         desc (some-> (or (get m "description") (get m :description)) str str/trim not-empty)]
     (when (and name desc) {:name name :description desc})))
 
+(defn child-node
+  "A sub-unit node from the parent and an architect subtask spec. Its id encodes
+  lineage; its problem is the subtask's one-paragraph contract."
+  [parent {:keys [name description]}]
+  {:id (str (:id parent) "/" name)
+   :name name
+   :problem description
+   :parent (:id parent)})
+
+(defn solve
+  "Recursive decompose-on-stuck for one node. Pure control flow over injected
+  ops, so the recursion is testable without a model or a worker; cells/decompose
+  provides the real ops.
+
+  ops:
+    :attempt  (fn [node] -> {:passed? bool :answer .. :failure ..}) — build the
+              unit directly (worker loop) and verify it against its tests.
+    :recover  (fn [node evidence] -> decision|nil) — the architect call on a
+              stuck unit (evidence carries :last-answer :last-failure :depth).
+    :fan      (fn [thunks] -> results) — run sub-unit solves (parallel or not).
+
+  Returns {:status :landed|:failed :answer .. :node .. :children [..]}. A landed
+  node is a stable subassembly: it passed its own tests, so a parent that
+  composes it never re-litigates it."
+  [node depth {:keys [attempt recover fan] :as ops}]
+  (let [r (attempt node)]
+    (cond
+      (:passed? r)
+      {:status :landed :answer (:answer r) :node node}
+
+      ;; No split past the budget — a unit still failing this deep is not a size
+      ;; problem, so it is a hard failure surfaced upward (no silent give-up).
+      (>= depth max-depth)
+      {:status :failed :reason "depth exhausted" :node node :answer (:answer r)}
+
+      :else
+      (let [decision (recover node {:last-answer (:answer r) :last-failure (:failure r)
+                                    :depth depth})]
+        (case (:kind decision)
+          :fresh-approach
+          (let [r2 (attempt (assoc node :hint (:hint decision)))]
+            (if (:passed? r2)
+              {:status :landed :answer (:answer r2) :node node}
+              {:status :failed :reason "fresh approach did not land"
+               :node node :answer (:answer r2)}))
+
+          :decompose
+          (let [children (:subtasks decision)
+                results (fan (mapv (fn [c]
+                                     #(solve (child-node node c) (inc depth) ops))
+                                   children))]
+            (if-not (every? #(= :landed (:status %)) results)
+              {:status :failed :reason "a sub-unit did not land"
+               :node node :children results}
+              ;; Assemble: the sub-units landed against their own tests; re-attempt
+              ;; the parent as the thin composition that ties them together, judged
+              ;; only against the parent's OWN, preserved tests.
+              (let [asm (attempt (assoc node :assembly true
+                                        :child-answers (mapv :answer results)))]
+                (if (:passed? asm)
+                  {:status :landed :answer (:answer asm) :node node :children results}
+                  {:status :failed :reason "assembly did not land"
+                   :node node :children results}))))
+
+          ;; no usable decision — fail the unit rather than guess
+          {:status :failed :reason "no recovery" :node node :answer (:answer r)})))))
+
 (defn parse-decision
   "The architect's decision from its reply. Returns
     {:kind :decompose :reason .. :subtasks [{:name :description} ...]}
