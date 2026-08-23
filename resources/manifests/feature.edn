@@ -31,7 +31,8 @@
 {:description "Build a feature end to end, supervised: plan -> a fan-out of implementors -> review -> critique -> run the tests -> a supervisor that watches and steers. The default for a normal feature that one round of implementors can carry."
  :cells {:start     :loop/assemble
          :plan      :team/plan
-         :implement :team/fan-out
+         :fanout    :team/fan-out
+         :decompose :decompose/run
          :review    :feature/review
          :critique  :feature/critique
          :verify    :feature/verify
@@ -39,16 +40,24 @@
          :route     :feature/route
          :finish    :loop/finish}
 
+ ;; The IMPLEMENT stage is switchable at runtime: plan dispatches to the fan-out
+ ;; (the default) or the decompose-on-stuck loop, on :implement-strategy — which
+ ;; the supervisor can set mid-run when the implementors keep failing a whole
+ ;; task in one shot. A revise round returns to plan so the (possibly new)
+ ;; strategy is re-dispatched.
  :edges {:start     :plan
-         :plan      :implement
-         :implement :review
+         :plan      {:decompose :decompose :fanout :fanout}
+         :fanout    :review
+         :decompose :review
          :review    :critique
          :critique  :verify
          :verify    :supervise
          :supervise :route
          :route     {:ship   :finish
-                     :revise :implement}
+                     :revise :plan}
          :finish    :end}
 
- :dispatches {:route [[:ship   (fn [d] (= :ship   (:feature/decision d)))]
+ :dispatches {:plan  [[:decompose (fn [d] (= "decompose" (:implement-strategy d)))]
+                      [:fanout    (fn [d] true)]]
+              :route [[:ship   (fn [d] (= :ship   (:feature/decision d)))]
                       [:revise (fn [d] (= :revise (:feature/decision d)))]]}}

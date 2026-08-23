@@ -268,3 +268,42 @@
             r (run-feature conn {:config {:run {:loop "feature" :subtasks ["alpha"]
                                                :verify-cmd "run-tests"}}})]
         (is (= :completed (:status r)) "real diff + review pass + tests pass = completed")))))
+
+(deftest supervisor-can-switch-the-implement-approach-mid-run
+  ;; self-healing: the supervisor decides the fan-out isn't working and switches
+  ;; this run's implement stage to the decompose loop with a SWITCH: line. The
+  ;; next round routes through :decompose/run instead of the fan-out.
+  (let [architect-json (str "{\"decision\":\"decompose\",\"subtasks\":"
+                            "[{\"name\":\"a\",\"description\":\"do a\"}]}")
+        mock (fn [_ _ messages & _]
+               (let [c (str/join " " (map :content messages))]
+                 (cond
+                   (str/includes? c "Your role: reviewer")
+                   (done-call "PASS: the implementors covered the feature; nothing to send back")
+
+                   (str/includes? c "Your role: supervisor")
+                   (if (str/includes? c "revision 0")
+                     (done-call "SWITCH: decompose\nthe fan-out is stuck; try decompose")
+                     (done-call "CONTINUE: the decompose approach is converging, nothing to change"))
+
+                   (str/includes? c "architect diagnosing")
+                   {:content architect-json :finish-reason "stop"}
+
+                   (str/includes? c "## Problem")
+                   (done-call (str "handled " (str/trim (or (second (re-find #"## Problem\s+(.+)" c)) "it"))))
+
+                   :else {:content "COMPLETE" :finish-reason "stop"})))]
+    (with-redefs [judge/deterministic-block (constantly nil)
+                  judge/parse-verdict (constantly :complete)
+                  judge/blocking-findings (constantly nil)
+                  gitdiff/baseline (constantly "HEAD")
+                  gitdiff/changed-files (constantly ["src/x.clj"])
+                  llm/chat mock]
+      (let [conn (db/open! ":memory:")
+            r (run-feature conn {:config {:run {:loop "feature" :subtasks ["alpha"]
+                                               :max-revisions-hard 3}}})
+            branches (branch-ids conn)]
+        (testing "round 0 ran the fan-out"
+          (is (contains? branches "W0")))
+        (testing "after SWITCH: decompose, the next round ran the decompose loop"
+          (is (contains? branches "DT") "the decompose root attempt ran"))))))

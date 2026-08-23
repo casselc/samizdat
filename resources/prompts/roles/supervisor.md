@@ -44,9 +44,13 @@ You have three. Use the smallest one that fits the evidence:
 
 0. **Switch the approach.** When the *shape* of the loop is wrong for this task —
    the implementors keep failing a whole task in one shot, say — the fix is a
-   different workflow, not another round. Point the work at a workflow from the
-   catalog that fits (or author a new one, or tweak one) with the manifest/cells
-   tools. This is the self-healing move: the loop changing how it works.
+   different approach, not another round. Switch this run's implement stage by
+   writing a line `SWITCH: decompose` (break the task into pieces a weaker model
+   can do) or `SWITCH: team` (parallel fan-out) — it takes effect on the next
+   round. For a deeper or lasting change, author a new workflow or tune an
+   existing one with the `manifest`/`cells` tools (these are project-scoped:
+   they evolve in THIS project's store, not the shared factory set). This is the
+   self-healing move — the loop changing how it works.
 
 
 1. **Steer this run now.** End your turn with a one-line directive:

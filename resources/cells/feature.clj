@@ -144,6 +144,18 @@
       ;; fail-open: a broken critic ships rather than wedging the loop
       (fn [d] (assoc d :critic/decision :ship :critique/findings "")))))
 
+(defn- parse-switch
+  "A supervisor may switch this run's implement approach with a `SWITCH: <name>`
+  line — the mid-run self-healing lever. Only the switchable implement strategies
+  are honoured: `decompose` (the decompose-on-stuck loop) or `team`/`fanout` (the
+  default parallel fan-out). Returns the normalized strategy or nil."
+  [answer]
+  (when-let [m (re-find #"(?im)^\s*SWITCH:\s*([A-Za-z-]+)" (str answer))]
+    (let [s (str/lower-case (second m))]
+      (cond (= s "decompose") "decompose"
+            (#{"team" "fanout" "fan-out"} s) "team"
+            :else nil))))
+
 (defn- supervise-directive
   "The within-run directive from the supervisor's verdict + answer: STOP (ship
   and end), REVISE (force another round), or CONTINUE (default). A supervisor
@@ -244,10 +256,15 @@
                              (str "S" (revision data)) prob
                              (wf/prompt-text "roles/supervisor"))
                    (catch Throwable e {:verdict :error :answer (ex-message e)}))
-              directive (supervise-directive verdict answer)]
+              directive (supervise-directive verdict answer)
+              ;; The mid-run self-healing lever: the supervisor can switch this
+              ;; run's implement approach. A switch implies keep-solving with the
+              ;; new strategy, so it forces a revise.
+              switch (parse-switch answer)]
           (journal/note! conn run-id :supervise
-                         {:data {:directive directive :verdict verdict}})
+                         {:data {:directive directive :verdict verdict :switch switch}})
           (cond-> (assoc data :supervisor/notes (str answer))
+            switch                (assoc :implement-strategy switch :feature/escalate true)
             (= directive :revise) (assoc :feature/escalate true)
             (= directive :stop)   (assoc :feature/stop true))))
       ;; fail-safe: a broken supervisor lets the loop proceed unchanged
