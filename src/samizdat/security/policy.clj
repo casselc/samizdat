@@ -21,10 +21,13 @@
 
   Every command a tool would run faces a decision first: allow, ask, or deny.
   The rules are ordered and last-match-wins; a complex command (one carrying a
-  substitution or subshell) can never ride an allow, because its inner command
-  is invisible; a deny is head-anchored through env/wrapper prefixes so
-  `nohup rm -rf /` still hits `rm -rf /**`; and an allow matches the command
-  RAW so a `PATH=/tmp/evil git status` cannot ride a `git *` allow.
+  substitution, subshell, compound operator, or unquoted redirection) can
+  never ride an allow, because the rest of what the shell would run is
+  invisible to the head an allow matched; a deny is head-anchored through
+  env/wrapper prefixes AND evaluated per statement segment, so `nohup rm -rf
+  /` and `ls; sudo rm -rf /` both still hit `rm -rf /**`; and an allow matches
+  the command RAW so a `PATH=/tmp/evil git status` cannot ride a `git *`
+  allow.
 
   Session grants (human-only, from the grants table) are consulted ahead of the
   base rules, so an approved `ask` becomes an allow for the rest of the run —
@@ -68,8 +71,56 @@
 
 (def ^:private complex-markers
   "A command carrying any of these was not decomposed: the shell would run an
-  inner command an allow rule never sees. Treated as ask-regardless."
+  inner command an allow rule never sees. Treated as ask-regardless. (Compound
+  operators and redirection are caught separately, by shell-split, because a
+  regex cannot tell a quoted `;` from an operator.)"
   [#"\$\(" #"`" #"<\(" #">\(" #"\$\[" #"\(\("])
+
+(defn- shell-split
+  "One quote-aware pass over a command string, yielding its shell STRUCTURE:
+  the statement segments (split at unquoted `;`, `|`, `&`, and newline) and
+  whether an unquoted redirection (`<` or `>`) appears anywhere.
+
+  Quote semantics follow bash: single quotes are literal (nothing inside is
+  an operator, not even backslash), double quotes honor backslash escapes, and
+  an unquoted backslash escapes the next character. Operators inside quotes
+  are string literals — `git commit -m \"a; b\"` is one statement.
+
+  Redirection does not split: it does not start a new command, and a deny glob
+  (`.*` spans the rest of the string) already covers the tail of its segment.
+  This is the lexer a#1 (docs/code-review.md) asked for — the old regex-only
+  classification let `echo pwned; rm -rf ~` ride `echo **` because `.*`
+  matches `;` too."
+  [raw]
+  (let [n (count raw)
+        sep? #{\; \| \& \newline}]
+    (loop [i 0, state :code, cur [], segs [], redirect? false]
+      (if (>= i n)
+        {:segments (->> (conj segs (apply str cur))
+                        (map str/trim)
+                        (remove str/blank?)
+                        vec)
+         :redirection? redirect?}
+        (let [c (nth raw i)]
+          (case state
+            :code (cond
+                    (= c \\) (if (< (inc i) n)
+                                (recur (+ i 2) :code (into cur [c (nth raw (inc i))]) segs redirect?)
+                                (recur (inc i) :code (conj cur c) segs redirect?))
+                    (= c \') (recur (inc i) :single (conj cur c) segs redirect?)
+                    (= c \") (recur (inc i) :double (conj cur c) segs redirect?)
+                    (sep? c) (recur (inc i) :code [] (conj segs (apply str cur)) redirect?)
+                    (or (= c \<) (= c \>)) (recur (inc i) :code (conj cur c) segs true)
+                    :else (recur (inc i) :code (conj cur c) segs redirect?))
+            :single (if (= c \')
+                      (recur (inc i) :code (conj cur c) segs redirect?)
+                      (recur (inc i) :single (conj cur c) segs redirect?))
+            :double (cond
+                      (and (= c \\) (< (inc i) n))
+                      (recur (+ i 2) :double (into cur [c (nth raw (inc i))]) segs redirect?)
+
+                      (= c \") (recur (inc i) :code (conj cur c) segs redirect?)
+                      :else (recur (inc i) :double (conj cur c) segs redirect?))))))))
 
 (defn- exec-prefix-stripped
   "The command with leading `VAR=val` assignments and exec wrappers
@@ -98,14 +149,19 @@
   (or (first (str/split (exec-prefix-stripped raw) #"\s+")) ""))
 
 (defn classify
-  "A shell command string into {:raw :head :complex?}. A complex command is one
-  the shell would expand (substitution / subshell / arithmetic), whose inner
-  command an allow rule can never see."
+  "A shell command string into {:raw :head :complex?}. A complex command is
+  one the shell would expand or compound — substitution, subshell, arithmetic,
+  a `;`/`|`/`&`/newline separator, or an unquoted redirection — because in
+  every one of those cases an allow rule matched on the head never saw the
+  rest of what would run."
   [command]
-  (let [raw (str/trim (str command))]
+  (let [raw (str/trim (str command))
+        {:keys [segments redirection?]} (shell-split raw)]
     {:raw raw
      :head (command-head raw)
-     :complex? (boolean (some #(re-find % raw) complex-markers))}))
+     :complex? (boolean (or (some #(re-find % raw) complex-markers)
+                            redirection?
+                            (> (count segments) 1)))}))
 
 ;; --- the rules --------------------------------------------------------------
 
@@ -182,10 +238,17 @@
   [session command]
   (let [{:keys [raw head complex?]} (classify command)
         ;; Allow matching sees the command RAW — a wrapper prefix changes what
-        ;; runs and must not ride an allow. Deny matching additionally sees the
-        ;; exec-prefix-stripped form so a wrapped denied command still denies.
+        ;; runs and must not ride an allow. Deny matching sees EVERY statement
+        ;; segment (each is a command the shell would run on its own) plus its
+        ;; exec-prefix-stripped form, so a denied command hidden after a `;`, a
+        ;; newline, or a pipe still denies — widening here can only over-deny.
         allow-candidates [raw]
-        deny-candidates (distinct [raw (exec-prefix-stripped raw)])
+        deny-candidates (->> (shell-split raw)
+                             :segments
+                             (cons raw)
+                             (mapcat (fn [s] [s (exec-prefix-stripped s)]))
+                             distinct
+                             vec)
         deny-hit (last-match (filter #(= :deny (second %)) base-rules) deny-candidates)
         grant-hit (when (some #(matches? % raw) (:grants session)) :allow)
         base-hit (last-match base-rules allow-candidates)

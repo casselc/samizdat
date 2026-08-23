@@ -111,5 +111,10 @@
          dev   "jolt -A:dev -m samizdat.core"
          smoke {:doc "Phase 0 platform probes: z3, swipl, sqlite, https, server"
                 :main-opts ["-m" "samizdat.smoke"]}
-         test  "jolt -M:test"
+          ;; The ulimit raise on `test` is load-bearing: the suite holds ~260
+          ;; fds at peak and the default 256 soft limit made the last five
+          ;; namespaces error spuriously (socket() failed / sqlite open failed
+          ;; {:rc 14}) — a#3, docs/code-review.md. `;` not `&&` so a hardened
+          ;; environment where 1024 exceeds the hard limit still runs.
+          test  "(ulimit -n 1024 2>/dev/null; jolt -M:test)"
          gui   "jolt -M:gui"}}

@@ -129,11 +129,20 @@
 (defn claim!
   "Assign a backlog task to a run and mark it in_progress. Returns the updated
   task, or nil when another run already holds it — the claim is first-writer-
-  wins, decided by the row, not the caller."
+  wins, decided by the ROW: the UPDATE itself guards on the claim being free,
+  because a read-then-write pair is two lock acquisitions and two beam
+  branches whose reads both saw the unclaimed row could both write (a#4,
+  docs/code-review.md)."
   [conn id run-id]
+  (db/with-writer
+    (db/execute! conn
+                 ["UPDATE tasks SET run_id = ?, status = 'in_progress',
+                                    updated_at = ?, closed_at = NULL
+                   WHERE id = ? AND (run_id IS NULL OR run_id = ?)"
+                  run-id (db/now) id run-id]))
   (let [t (get-task conn id)]
-    (when (and t (or (nil? (:run_id t)) (= run-id (:run_id t))))
-      (update! conn id {:run-id run-id :status "in_progress"}))))
+    (when (and t (= run-id (:run_id t)) (= "in_progress" (:status t)))
+      t)))
 
 (defn close!
   "Mark a task done (or cancelled)."

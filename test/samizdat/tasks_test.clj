@@ -148,6 +148,21 @@
           (is (not-any? #(= other (:run_id %)) board)
               "another run's claimed tasks are not on this run's board"))))))
 
+(deftest a-claim-race-is-decided-by-the-row
+  ;; a#4 (docs/code-review.md): claim! used to read-then-write with no guard
+  ;; on the write, so two branches whose reads both saw the unclaimed row
+  ;; could both "win" — the second silently stealing the task. Simulate the
+  ;; interleaved read: the second claim's get-task returns the stale
+  ;; unclaimed row, and its write must still lose to the first.
+  (with-db [c]
+    (let [id (tasks/create! c {:title "race"})
+          stale (tasks/get-task c id)]
+      (is (= "run-1" (:run_id (tasks/claim! c id "run-1"))))
+      (with-redefs [tasks/get-task (fn [_ _] stale)]
+        (is (nil? (tasks/claim! c id "run-2"))
+            "a stale read must not let the second writer steal the claim"))
+      (is (= "run-1" (:run_id (tasks/get-task c id)))))))
+
 (deftest update-bumps-updated-at
   (with-db [c]
     (let [id (tasks/create! c {:title "t"})]

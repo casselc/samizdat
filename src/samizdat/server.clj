@@ -154,10 +154,11 @@
                 (if-let [b (api-runs/branch-detail (system/conn) id branch)]
                   (json-response b)
                   (json-response 404 {:error {:message "no such branch"}}))))]
-   [:post "/v1/runs/:id/interventions"
-    (fn [req] (json-response (control/intervene! (system/conn)
-                                                 (get-in req [:path-params :id])
-                                                 (body-json req))))]
+    [:post "/v1/runs/:id/interventions"
+     (fn [req] (let [r (control/intervene! (system/conn)
+                                           (get-in req [:path-params :id])
+                                           (body-json req))]
+                 (json-response (or (:status r) 200) (:body r))))]
    [:post "/v1/runs/:id/abort"
     (fn [req] (let [r (control/abort! (system/conn)
                                       (get-in req [:path-params :id]))]

@@ -30,6 +30,7 @@
             [samizdat.agent.beam :as beam]
             [samizdat.agent.resume :as resume]
             [samizdat.llm.registry :as registry]
+            [samizdat.store.grants :as grants]
             [samizdat.store.interventions :as interventions]
             [samizdat.store.runs :as runs]))
 
@@ -181,17 +182,45 @@
       (swap! active assoc run-id {:future fut :abort abort})
       {:body {:run_id run-id :status "resuming"
               :max_turns (:max_turns (runs/get-run conn run-id))}})))
+(defn- grant-pattern
+  "The pattern from a grant payload. Accepts a map (what body-json yields), a
+  bare string, or nil. Blank is not a pattern — an unset form posts empty
+  strings."
+  [payload]
+  (let [p (cond
+            (map? payload) (or (:pattern payload) (get payload "pattern"))
+            (string? payload) payload
+            :else nil)]
+    (when-not (str/blank? (str p)) (str p))))
+
 (defn intervene!
+  "Record a human intervention. Queued kinds (message, cull, fork, …) go on
+  the directive queue and apply at the next branch boundary. The exception is
+  `grant`, which applies ON ARRIVAL: it writes the run-scoped permission grant
+  the shell policy consults on every command, so there is no boundary to wait
+  for. This is the one production write path into the grants table — a human
+  surface, never a tool — and without it every deliberate `ask` (interpreters,
+  git push, curl, installs) blocked a run forever (a#2, docs/code-review.md)."
   [conn run-id body]
-  (let [id (interventions/submit! conn run-id
-                                  {:branch-id (:branch_id body)
-                                   :kind (:kind body)
-                                   :payload (:payload body)
-                                   :issued-by (or (:issued_by body) "human")})]
-    {:id id
-     :status "pending"
-     ;; Said plainly rather than implied, because the difference between
-     ;; accepted and applied is the thing a UI most easily lies about.
-     :note "Queued. It applies at the branch's next turn boundary, not now."}))
+  (if (= "grant" (:kind body))
+    (if-let [pattern (grant-pattern (:payload body))]
+      (do (grants/grant! conn run-id pattern)
+          (log/info "grant" pattern "recorded for run" run-id)
+          {:body {:status "granted" :pattern pattern :run_id run-id
+                  :note "Applied now. Commands matching the pattern are allowed for the rest of this run; a hard deny still wins."}})
+      {:status 400
+       :body {:error {:message "a grant intervention needs payload.pattern — the shell glob to allow"
+                     :run_id run-id}}})
+    (let [id (interventions/submit! conn run-id
+                                    {:branch-id (:branch_id body)
+                                     :kind (:kind body)
+                                     :payload (:payload body)
+                                     :issued-by (or (:issued_by body) "human")})]
+      {:body
+       {:id id
+        :status "pending"
+        ;; Said plainly rather than implied, because the difference between
+        ;; accepted and applied is the thing a UI most easily lies about.
+        :note "Queued. It applies at the branch's next turn boundary, not now."}})))
 
 (defn kinds [] {:kinds interventions/kinds})

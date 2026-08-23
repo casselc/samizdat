@@ -28,8 +28,11 @@
             [samizdat.control :as control]
             [samizdat.agent.loop :as aloop]
             [samizdat.agent.state :as state]
+            [samizdat.api.control :as api-control]
             [samizdat.llm.client :as llm]
+            [samizdat.security.policy :as policy]
             [samizdat.store.db :as db]
+            [samizdat.store.grants :as grants]
             [samizdat.store.interventions :as interventions]
             [samizdat.store.runs :as runs]))
 
@@ -54,6 +57,30 @@
       (is (= 2 (count (control/pending c rid))))
       (is (= ["do the thing" "then the other thing"]
              (mapv :payload (control/pending c rid)))))))
+
+(deftest a-grant-intervention-is-applied-immediately
+  ;; a#2 (docs/code-review.md): grants/grant! had no production caller, so
+  ;; every deliberate :ask blocked a run forever — no endpoint, no tool, no
+  ;; intervention kind wrote a grant. The human intervention surface is the
+  ;; write path, and it applies on arrival rather than queueing for a
+  ;; boundary, because the policy consults the grants table per command.
+  (with-db [c]
+    (let [rid (runs/start-run! c {:problem "p"})]
+      (testing "before the grant, the interpreter asks"
+        (is (= :ask (:effect (policy/decide (grants/for-run c rid) "python3 x.py")))))
+      (testing "a grant intervention writes the grant now"
+        (let [r (api-control/intervene! c rid {:kind "grant"
+                                               :payload {:pattern "python3 *"}})]
+          (is (= "granted" (:status (:body r))))
+          (is (= :allow (:effect (policy/decide (grants/for-run c rid) "python3 x.py"))))))
+      (testing "a grant without a pattern is refused, not queued"
+        (let [r (api-control/intervene! c rid {:kind "grant"})]
+          (is (= 400 (:status r)))
+          (is (str/includes? (str (get-in r [:body :error :message])) "pattern"))))
+      (testing "the queued kinds still queue"
+        (let [r (api-control/intervene! c rid {:kind "message" :payload "hi"})]
+          (is (= "pending" (:status (:body r))))
+          (is (= 1 (count (interventions/pending c rid)))))))))
 
 ;; --- the drain at the boundary ----------------------------------------------
 

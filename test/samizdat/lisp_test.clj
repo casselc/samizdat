@@ -76,3 +76,18 @@
     (is (= :balanced (:status (lisp/balance "(def s \"an open ( paren\")")))))
   (testing "a delimiter in a line comment is ignored"
     (is (= :balanced (:status (lisp/balance "(def x 1) ; ) ] } trailing junk"))))))
+
+(deftest an-unterminated-string-is-its-own-status
+  ;; a#5 (docs/code-review.md): a string whose last quote was ESCAPED used to
+  ;; scan as "closed exactly at EOF", so the file read as balanced and
+  ;; write_file wrote the broken text with no warning.
+  (let [escaped-final-quote (str "\"x " "\\" "\"")   ; "x \"
+        escaped-backslash   (str "(def s \"x " "\\" "\\" "\")")] ; (def s "x \")
+    (testing "a string ending at an escaped quote is unterminated"
+      (is (= :unterminated-string (:balance (lisp/scan escaped-final-quote)))))
+    (testing "inside a form it does not silently repair"
+      (let [r (lisp/balance (str "(def s " escaped-final-quote))]
+        (is (= :unbalanced (:status r)))
+        (is (nil? (:content r)) "no rewrite of text with a broken string")))
+    (testing "an escaped backslash before a real closing quote still closes"
+      (is (= :balanced (:balance (lisp/scan escaped-backslash)))))))

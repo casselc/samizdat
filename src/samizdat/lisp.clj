@@ -48,6 +48,18 @@
       (= (nth s j) \") (inc j)
       :else (recur (inc j)))))
 
+(defn- escaped?
+  "Whether the character at `i` is preceded by an odd run of backslashes —
+  escaped, so not a real delimiter. The run must be counted, not just the one
+  character before: an escaped backslash before a quote leaves the quote real,
+  while an escaped quote leaves no string terminator at all (a#5,
+  docs/code-review.md)."
+  [s i]
+  (loop [j (dec i), run 0]
+    (if (or (neg? j) (not= \\ (nth s j)))
+      (odd? run)
+      (recur (dec j) (inc run)))))
+
 (defn scan
   "Lexer-aware delimiter scan of Clojure source. Returns one of:
     {:balance :balanced}
@@ -72,7 +84,10 @@
             ;; not a delimiter imbalance.
             (= c \") (let [e (string-end s n i)]
                        (if (>= e n)
-                         (if (and (> e 0) (= (nth s (dec n)) \"))
+                         ;; string-end returns n both when the final quote
+                         ;; closes the string at EOF and when it is ESCAPED —
+                         ;; only an unescaped one actually closed it (a#5).
+                         (if (and (> e 0) (= (nth s (dec n)) \") (not (escaped? s (dec n))))
                            (recur n stack)               ; closed exactly at EOF
                            {:balance :unterminated-string :at i})
                          (recur e stack)))
