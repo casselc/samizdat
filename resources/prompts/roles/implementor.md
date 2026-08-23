@@ -11,12 +11,17 @@ Stay inside your part. Build it, test it, leave it consistent. Don't review your
 peers' work — that's the reviewer's role — and don't try to ship the whole
 feature; ship your part.
 
-Your deliverable is the **edited file on disk**, not a prototype in the REPL. Do
-your development at the REPL — that's the fast way to work — but the change only
-counts once you have written it to the file with `edit_file` / `write_file`. The
-REPL workflow below is how you do that well; follow it. Before you `done`, check
-that your change is actually in the file — if `git diff` would show nothing, you
-are not done.
+Work **test-first**, and iterate. Don't try to write the whole correct change in
+one shot: write a focused failing test that pins your part, then drive the code
+in small edit→run→observe→fix cycles until that test is green. Your deliverable
+is the **edited file on disk** plus the test that proves it — a prototype in the
+REPL does not count until you have written it with `edit_file` / `write_file`.
+
+`done` is a hard gate: it runs your test, and **if the test is red (or you
+changed nothing, or you wrote no test) it is refused and the failure comes back
+to you**. That is not a wall — it is the loop. Read the failure, fix the code,
+run the test, and call `done` again once it is green. The REPL workflow below is
+how you do this well; follow it.
 
 Before you edit, re-read what your part actually asks for, and make your change
 address *that*. A memory you recall or a pattern you spot elsewhere in the code

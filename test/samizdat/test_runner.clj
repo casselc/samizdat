@@ -75,6 +75,7 @@
             [samizdat.planner-test]
             [samizdat.decompose-test]
             [samizdat.decompose-run-test]
+            [samizdat.verify-test]
             [samizdat.feature-test]
             [samizdat.telemetry-test]
             [samizdat.supervisor-test]
@@ -160,6 +161,7 @@
     samizdat.planner-test
     samizdat.decompose-test
     samizdat.decompose-run-test
+    samizdat.verify-test
     samizdat.feature-test
     samizdat.telemetry-test
     samizdat.supervisor-test

@@ -36,6 +36,8 @@
             [samizdat.agent.resume :as resume]
             [samizdat.agent.state :as state]
             [samizdat.agent.tools :as tools]
+            [samizdat.agent.verify :as verify]
+            [samizdat.agent.gitdiff :as gitdiff]
             [samizdat.llm.client :as llm]
             [clojure.data.json :as json]
             [samizdat.store.artifacts :as artifacts]
@@ -521,6 +523,45 @@
       (let [r (tools/run-tool {:branch b :conn c :run-id rid
                                :tool-name "fetch_turn" :args {:id "t999"}})]
         (is (= :mechanics (:category r)) "same for a turn that is not there")))))
+
+;; --- the ship gate's test rung: done is not terminal until tests pass --------
+
+(deftest done-is-a-hard-gate-on-a-green-test-run
+  (let [answer "gated the remember tool so a done with an empty diff is refused"
+        ship (fn [ctx] (tools/run-tool (merge {:branch (state/new-branch {:id "B1" :problem "gate the remember tool"})
+                                               :tool-name "done" :turn 3
+                                               :root "/tmp" :git-baseline "HEAD"
+                                               :args {:answer answer}}
+                                              ctx)))]
+    (testing "a red run refuses done and feeds the failure back — the branch stays unshipped"
+      (with-redefs [verify/run-verify (fn [_ _ _] {:green? false :output "FAIL: 1 assertion failed"})
+                    gitdiff/changed-files (fn [_ _] ["src/x.clj" "test/x_test.clj"])]
+        (let [r (ship {:config {:run {:verify-cmd "jolt -M:test"}}})]
+          (is (not (:done? r)) "done was refused")
+          (is (nil? (:final-answer (:branch r))) "nothing shipped")
+          (is (str/includes? (:result r) "not green"))
+          (is (str/includes? (:result r) "assertion failed") "the real failure output is fed back"))))
+
+    (testing "a green run with a test among the changes accepts done"
+      (with-redefs [verify/run-verify (fn [_ _ _] {:green? true :output ""})
+                    gitdiff/changed-files (fn [_ _] ["src/x.clj" "test/x_test.clj"])]
+        (let [r (ship {:config {:run {:verify-cmd "jolt -M:test"}}})]
+          (is (:done? r) "done accepted")
+          (is (= answer (:final-answer (:branch r)))))))
+
+    (testing "TDD: a green run that added no test is refused"
+      (with-redefs [verify/run-verify (fn [_ _ _] {:green? true :output ""})
+                    gitdiff/changed-files (fn [_ _] ["src/x.clj"])]
+        (let [r (ship {:config {:run {:verify-cmd "jolt -M:test"}}})]
+          (is (not (:done? r)))
+          (is (str/includes? (str/lower-case (:result r)) "test")))))
+
+    (testing "no :verify-cmd configured => the test rung does not apply (backward compatible)"
+      (let [called (atom false)]
+        (with-redefs [verify/run-verify (fn [_ _ _] (reset! called true) {:green? false :output "x"})]
+          (let [r (ship {:config {:run {}}})]
+            (is (:done? r) "ships without a verify command, as before")
+            (is (not @called) "and the verify command was never run")))))))
 
 (deftest the-reframe-reprieve-is-a-loan-with-a-clock
   ;; vf-31m. A branch dropped into a reframe carries the failures that caused

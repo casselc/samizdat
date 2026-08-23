@@ -6,8 +6,10 @@
   claim-evidence gates those methods share (answer-tokens,
   uncovered-tokens, engages-problem? and friends)."
   (:require [clojure.string :as str]
+            [samizdat.agent.gitdiff :as gitdiff]
             [samizdat.agent.tools.base :as base]
             [samizdat.agent.state :as state]
+            [samizdat.agent.verify :as verify]
             [samizdat.store.journal :as journal]))
 
 
@@ -270,7 +272,39 @@
                      (not (engages-problem? problem answer)))
                 (str "This answer shares no substantive term with the problem"
                      " statement. Whatever it establishes, it is not an answer to"
-                     " the question that was asked."))]
+                     " the question that was asked."))
+        ;; The test rung — what makes the loop test-driven rather than one-shot.
+        ;; `done` is not terminal until the unit's tests actually pass: run the
+        ;; unit's tests, and a red / hollow / untested result is fed back so the
+        ;; branch keeps iterating. Verification is FOCUSED — it runs only the
+        ;; test namespaces the branch touched, so the loop iterates in seconds
+        ;; against its own new test. On when a :verify-cmd is set or
+        ;; :verify-focused? is true; loops with neither behave exactly as before.
+        verify-cmd (get-in ctx [:config :run :verify-cmd])
+        verify-focused? (get-in ctx [:config :run :verify-focused?] false)
+        require-test? (get-in ctx [:config :run :require-test?] true)
+        verify-on? (and (nil? block)
+                        (or verify-focused? (not (str/blank? (str verify-cmd)))))
+        changed (when verify-on? (gitdiff/changed-files (:root ctx) (:git-baseline ctx)))
+        ;; Prefer the focused command; fall back to the configured one. Run only
+        ;; when the cheap pre-checks (nothing changed / no test yet) haven't
+        ;; already doomed the ship — a wasted suite run is a wasted minute.
+        cmd (when verify-on? (or (and verify-focused? (verify/focused-cmd changed)) verify-cmd))
+        pre-doomed? (or (and (some? changed) (empty? changed))
+                        (and require-test? (some? changed) (seq changed)
+                             (not (some verify/test-file? changed))))
+        vresult (when (and verify-on? cmd (not pre-doomed?))
+                  (verify/run-verify (:root ctx) cmd
+                                     (get-in ctx [:config :run :verify-timeout-ms])))
+        verify-block (verify/verify-block
+                      {:verify-on? verify-on? :result vresult
+                       :changed changed :require-test? require-test?})
+        block (or block verify-block)]
+    (when (and vresult (:conn ctx) (:run-id ctx))
+      (journal/note! (:conn ctx) (:run-id ctx) :ship-verify
+                     {:branch-id (:id branch) :turn (:turn ctx)
+                      :data {:green (:green? vresult) :timeout (:timeout? vresult)
+                             :blocked (some? verify-block)}}))
     ;; Journalled whether or not anything blocked, so the run record still
     ;; shows what the lexical check saw even though words no longer decide.
     (when-let [words (and (:conn ctx) (:run-id ctx)

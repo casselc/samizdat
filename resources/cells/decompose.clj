@@ -60,7 +60,12 @@
       (runs/open-branch! conn run-id {:branch-id bid})
       (let [b (state/new-branch {:id bid :problem prob
                                  :messages (turn/initial-messages prob (attempt-suffix node))})
-            out (myc/run-compiled worker (wf/role-ctx ctx :implementor) {:branch b :turn 1})
+            ;; The attempt's own baseline reaches the worker's ship gate, so the
+            ;; done tool's test rung diffs against exactly what THIS attempt
+            ;; changed (a green suite with no diff of its own is not a ship).
+            out (myc/run-compiled worker
+                                  (assoc (wf/role-ctx ctx :implementor) :git-baseline base)
+                                  {:branch b :turn 1})
             done? (= :done (:verdict out))
             changed (gitdiff/changed-files root base)
             passed? (and done? (or (nil? changed) (seq changed)))]

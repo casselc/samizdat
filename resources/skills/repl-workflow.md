@@ -12,29 +12,39 @@ deliverable is the **edited file on disk**. An eval is scratch: it disappears
 when the run ends, it does not show up in the diff, and a reviewer reading the
 code will not see it. If your change lives only in eval, you have not made it.
 
-## The loop
+## Work test-first — it is how you actually converge
 
-1. **Look.** `read_file` the file and function you need to change. `eval` to
-   inspect the live image — call the function, look at what it returns, check
-   your assumptions against the running system.
-2. **Prototype.** Draft the new version of the function and `eval` it to try it
-   out. Iterate here: this is where the REPL earns its keep — you see the real
-   behaviour in seconds instead of guessing.
-3. **Write it to the file.** Once the prototype works, put it in the file with
-   `edit_file` (a targeted change) or `write_file` (a new or fully-rewritten
-   file). **This step is not optional.** This is the moment the change becomes
-   real. Do it as soon as the prototype is right — do not keep polishing in eval.
-4. **Verify the file.** Re-`eval` `(require 'the.namespace :reload)` and call the
-   function again to confirm the *file* has what you prototyped, then run the
-   tests. Nothing you haven't run counts.
+Do not try to write the whole correct change in one shot and then hope. Pin the
+goal with a test, then drive the code until that test is green. This is the loop
+that lets you succeed one small step at a time instead of guessing:
 
-## The trap to avoid
+1. **Look, briefly.** `read_file` the one function you need to change and `grep`
+   for where it is used. Enough to act — not a tour of the codebase. Reading is
+   not progress; a change on disk is.
+2. **Write a failing test FIRST.** In the test namespace beside the code, add a
+   focused test that states the exact behaviour you must produce — and run it so
+   you *see it fail* for the right reason. Now "done" has a concrete meaning.
+   Prototype tricky pieces in `eval` if you need to, but the test is the target.
+3. **Make it pass, in small steps.** `edit_file` the smallest change you think
+   moves the test toward green, `(require 'the.ns :reload)`, re-run the test,
+   read the result. Wrong? Change ONE thing and run again. Each cycle is
+   seconds. This edit→run→observe→fix loop is the whole job — keep going round it
+   until the test is green.
+4. **Confirm green, then ship.** When your test passes, call `done`.
 
-The failure mode is prototyping in eval, watching it work, and calling `done` —
-with the file never touched. The diff is empty, so nothing was actually built,
-and it bounces straight back to you. eval is where you figure out the change;
-`edit_file`/`write_file` is where you make it. Before you `done`, ask: *is my
-change in the file?* If `git diff` would show nothing, you are not done.
+## The hard gate: you are not done until the test is green
+
+`done` runs your test. **If it is red, `done` is refused and the failure output
+comes straight back to you** — that is your signal to keep iterating, not to stop.
+`done` is also refused if you changed no files, or if you changed code but wrote
+no test to pin it. So there is no shortcut: the only way out is a real change
+with a passing test. That is not an obstacle — it is the loop working. Read the
+returned failure, fix the code, and call `done` again.
+
+The failure mode this prevents: prototyping in `eval`, watching it work, and
+calling `done` with the file never touched (empty diff) or the behaviour never
+tested. eval is where you *figure out* the change; `edit_file`/`write_file` is
+where you *make* it; the test is what proves it.
 
 ## Practical notes
 
