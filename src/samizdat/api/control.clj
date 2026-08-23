@@ -97,8 +97,17 @@
                                     :beam-width beam-width
                                     :seed-run seed-run
                                     :quarantine quarantine
-                                    :abort abort
-                                    :on-start #(deliver promised %)})]
+                                     :abort abort
+                                     ;; Registered inside the run's own
+                                     ;; thread, BEFORE the run can finish:
+                                     ;; assoc'ing from the request thread
+                                     ;; after the future completes strands
+                                     ;; the entry, and the stranded entry
+                                     ;; let abort! rewrite a finished run
+                                     ;; to :aborted (code-review-2026-08 #3).
+                                     :on-start (fn [rid]
+                                                 (swap! active assoc rid {:abort abort})
+                                                 (deliver promised rid))})]
                   (swap! active dissoc (:run-id r))
                   r)
                 (catch Throwable e
@@ -114,12 +123,11 @@
                   {:status :error :error (ex-message e)})))
         run-id (deref promised 30000 nil)]
     (if run-id
-      (do (swap! active assoc run-id {:future fut :abort abort})
-          ;; Wrapped in :body like resume, so one route shape serves both the
-          ;; success and the refusal and neither has to be special-cased.
-          {:body {:run_id run-id :status "running"
-                  :beam_width (or beam-width (get-in config [:run :beam-width]))
-                  :max_turns (or max-turns (get-in config [:run :max-turns]))}})
+      ;; Wrapped in :body like resume, so one route shape serves both the
+      ;; success and the refusal and neither has to be special-cased.
+      {:body {:run_id run-id :status "running"
+              :beam_width (or beam-width (get-in config [:run :beam-width]))
+              :max_turns (or max-turns (get-in config [:run :max-turns]))}}
       ;; 503, not 200: the request was well formed and the server could not
       ;; service it. Answering 200 with an error body made a caller that checks
       ;; the status code read this as a started run, which is why gui.api's
@@ -166,20 +174,24 @@
     (let [llm-config (run-llm-config (:llm config) body)
           adapter (registry/adapter-for (:provider llm-config))
           abort (atom false)
-          max-turns (or (:max_turns body) (:max-turns body))
-          fut (future
-                (try
-                  (let [r (resume/resume! {:conn conn :config config
-                                           :llm-adapter adapter
-                                           :llm-config llm-config
-                                           :run-id run-id :abort abort
-                                           :max-turns max-turns})]
-                    (swap! active dissoc run-id)
-                    r)
-                  (catch Throwable e
-                    (log/error "resume failed:" (ex-message e))
-                    {:status :error :error (ex-message e)})))]
-      (swap! active assoc run-id {:future fut :abort abort})
+          max-turns (or (:max_turns body) (:max-turns body))]
+      (future
+        (try
+          ;; Registered inside the run's thread before any work, for the same
+          ;; reason as start-run! (code-review-2026-08 #3): an assoc on the
+          ;; caller racing a completion dissoc stranded the entry.
+          (swap! active assoc run-id {:abort abort})
+          (let [r (resume/resume! {:conn conn :config config
+                                   :llm-adapter adapter
+                                   :llm-config llm-config
+                                   :run-id run-id :abort abort
+                                   :max-turns max-turns})]
+            (swap! active dissoc run-id)
+            r)
+          (catch Throwable e
+            (log/error "resume failed:" (ex-message e))
+            (swap! active dissoc run-id)
+            {:status :error :error (ex-message e)})))
       {:body {:run_id run-id :status "resuming"
               :max_turns (:max_turns (runs/get-run conn run-id))}})))
 (defn- grant-pattern

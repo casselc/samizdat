@@ -86,7 +86,10 @@
         (let [name (base/arg ctx :name)
               v (some-> (base/arg ctx :version) str str/trim not-empty parse-long)]
           (cond
-            (str/blank? (str name)) (base/missing branch :name)
+            ;; base/missing yields a complaint STRING for malformed to wrap —
+            ;; bare, it dropped :category/:branch from the result map
+            ;; (code-review-2026-08 #1).
+            (str/blank? (str name)) (base/malformed branch (base/missing ctx :name))
             :else
             (if-let [row (if v
                            (workflows/load-version conn name v)
@@ -99,8 +102,8 @@
         (let [name (base/arg ctx :name)
               edn-text (base/arg ctx :edn)]
           (cond
-            (str/blank? (str name)) (base/missing branch :name)
-            (str/blank? (str edn-text)) (base/missing branch :edn)
+            (str/blank? (str name)) (base/malformed branch (base/missing ctx :name))
+            (str/blank? (str edn-text)) (base/malformed branch (base/missing ctx :edn))
             :else
             (do (validate! edn-text)
                 (let [v (workflows/save! conn name edn-text)]

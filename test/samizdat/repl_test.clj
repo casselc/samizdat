@@ -24,6 +24,15 @@
             [clojure.test :refer [deftest testing is]]
             [samizdat.repl :as repl]))
 
+(deftest close-session-removes-the-namespace
+  ;; code-review-2026-08 #6: one namespace per run, never removed — unbounded
+  ;; growth on a long-lived serve process.
+  (let [s (repl/new-session)]
+    (repl/eval-code "(def close-session-leak-check 1)" s)
+    (is (some? (find-ns s)))
+    (repl/close-session s)
+    (is (nil? (find-ns s)))))
+
 (deftest eval-returns-value-and-output
   (testing "a form's value is captured, printed readably"
     (let [r (repl/eval-code "(+ 1 2 3)")]

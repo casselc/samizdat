@@ -97,3 +97,19 @@
       (let [shown (base/run-tool {:branch {:id "B1"} :conn conn :tool-name "manifest"
                                   :args {:action "show" :name "loop"}})]
         (is (re-find #":cells" (:result shown)) "shows the manifest as data")))))
+
+(deftest show-and-save-missing-their-name-are-mechanics-complaints
+  ;; code-review-2026-08 #1, same shape as the skill tool: base/missing was
+  ;; handed `branch` instead of ctx and its string returned raw, dropping
+  ;; :category/:branch from the result map.
+  (with-db
+    (fn [conn]
+      (let [show (base/run-tool {:branch {:id "B1"} :conn conn :tool-name "manifest"
+                                 :args {:action "show"}})
+            save (base/run-tool {:branch {:id "B1"} :conn conn :tool-name "manifest"
+                                 :args {:action "save" :edn "{:cells {}"}})]
+        (is (= :mechanics (:category show)))
+        (is (map? (:branch show)))
+        (is (= :mechanics (:category save)))
+        (is (str/includes? (:result save) "Missing required argument(s): name"))
+        (is (str/includes? (:result save) "\"manifest\"") "the skeleton names the tool")))))

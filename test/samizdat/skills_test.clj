@@ -46,3 +46,15 @@
   (let [miss (base/run-tool {:branch {:id "B1"} :tool-name "skill"
                              :args {:action "load" :name "nope"}})]
     (is (= :mechanics (:category miss)) "an unknown skill is a malformed call")))
+
+(deftest a-load-without-a-name-is-a-mechanics-complaint-with-a-skeleton
+  ;; code-review-2026-08 #1: base/missing was called with `branch` and its
+  ;; complaint string returned RAW as the tool result — no :category, no
+  ;; :branch — so tool-step threaded a nil branch into state/record-outcome,
+  ;; which NPE'd on (update nil :turns-since-progress inc).
+  (let [r (base/run-tool {:branch {:id "B1"} :tool-name "skill"
+                          :args {:action "load"}})]
+    (is (= :mechanics (:category r)) "a missing arg is malformed, not a failure")
+    (is (map? (:branch r)) "the branch rides along")
+    (is (str/includes? (:result r) "Missing required argument(s): name"))
+    (is (str/includes? (:result r) "\"skill\"") "the skeleton names the tool")))

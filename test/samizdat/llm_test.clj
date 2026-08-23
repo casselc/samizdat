@@ -683,8 +683,13 @@
     (is (= 3000 (client/retry-after-ms {"x-ratelimit-reset-requests" "3s"})))
     (is (= 2000 (client/retry-after-ms {"x-ratelimit-reset-tokens" "2"}))))
 
-  (testing "the provider's opinion is bounded by ours"
-    (is (= client/max-backoff-ms (client/retry-after-ms {"retry-after" "3600"}))))
+  (testing "the ask is unclamped — the ceiling lives at the sleep"
+    ;; The clamp used to sit in retry-after-ms, which made the in-run cap
+    ;; check compare a 60s-bounded number against a 300s threshold and so
+    ;; never fire (code-review-2026-08 #2).
+    (is (= 3600000 (client/retry-after-ms {"retry-after" "3600"})))
+    (is (= client/max-backoff-ms (#'client/backoff-ms 0 {"retry-after" "3600"}))
+        "what we actually sleep is still bounded by our ceiling"))
 
   (testing "no header means fall back to the ladder"
     (is (nil? (client/retry-after-ms {})))
@@ -815,6 +820,36 @@
     (is (nil? (fence/parse-tool-call "<invoke name=\"lean_search\">unterminated"))
         "an opener with no closer is not a call")
     (is (nil? (fence/parse-tool-call "<invoke>no name here</invoke>")))))
+
+(deftest retry-after-is-the-providers-ask-unclamped
+  ;; code-review-2026-08 #2: the value was clamped to max-backoff-ms (60s)
+  ;; BEFORE the in-run cap check compared it against max-in-run-retry-wait-ms
+  ;; (300s) — a 60s ceiling under a 300s guard made the "usage cap wearing a
+  ;; rate limit" branch unreachable. The clamp belongs at the sleep, not here.
+  (is (= 3600000 (client/retry-after-ms {"x-ratelimit-reset-tokens" "3600"})))
+  (is (= 301000 (client/retry-after-ms {"retry-after" "301"})))
+  (is (= 0 (client/retry-after-ms {"retry-after" "0"})))
+  (is (nil? (client/retry-after-ms {}))))
+
+(deftest a-reset-beyond-the-retry-window-is-fatal-not-slept
+  ;; The guard in `chat` fires on the UNCLAMPED ask: a 429 whose reset is an
+  ;; hour out is a cap in a rate-limit's clothing, and retrying it just burns
+  ;; the run's budget against a wall that will not move (dirge PR 689).
+  (let [adapter (reify adapter/Adapter
+                  (id [_] :fake)
+                  (display-name [_] "Fake")
+                  (chat-url [_ _] "http://example.invalid/chat")
+                  (auth-headers [_ _] {})
+                  (chat-body [_ _ _] {})
+                  (prefill-support? [_ _] false)
+                  (error-message [_ _] nil)
+                  (usage-cap? [_ _ _] false)
+                  (parse-chat [_ _] {:content "x" :finish-reason "stop"}))]
+    (with-redefs [http/post (fn [& _] {:status 429
+                                        :headers {"x-ratelimit-reset-tokens" "3600"}})]
+      (is (thrown-with-msg? Exception #"cap"
+                            (client/chat adapter {:max-retries 1}
+                                         [{:role "user" :content "go"}]))))))
 
 (deftest the-reasoning-stream-survives-onto-the-response
   ;; turns.reasoning_text was empty for every run ever recorded. Not because

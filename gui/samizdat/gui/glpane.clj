@@ -54,7 +54,12 @@
 
 (def pick-radius 26.0)
 
-(defn hovered [] (:hover @st))
+(defn clear-hover!
+  "Drop the hover mark. connect-to! calls this on a run switch so the status
+  line stops describing a node from the run the UI just left
+  (code-review-2026-08 #5)."
+  []
+  (swap! st dissoc :hover))
 
 ;; --- HiDPI ---------------------------------------------------------------
 ;; GtkGLArea's "resize" reports the FRAMEBUFFER size, in device pixels, while
@@ -130,7 +135,17 @@
   both cases. realize! puts everything back on the way in."
   [area]
   (when-not (contains? @unrealize-wired area)
-    (let [cb (ffi/foreign-callable (fn [_src _data] (unmount!))
+    (let [cb (ffi/foreign-callable (fn [_src _data]
+                                     ;; The address leaves the wired set when
+                                     ;; the widget dies: GLib recycles
+                                     ;; allocation addresses, and a NEW
+                                     ;; GtkGLArea at a recycled address that
+                                     ;; looked "already wired" got no hook —
+                                     ;; its death left :area dangling and
+                                     ;; request-render! poking freed memory
+                                     ;; (code-review-2026-08 #5).
+                                     (swap! unrealize-wired disj area)
+                                     (unmount!))
                                    [:pointer :pointer] :void :collect-safe)]
       (swap! unrealize-callables conj cb)
       (swap! unrealize-wired conj area)

@@ -256,17 +256,23 @@
     ;; back needs to know which version of itself produced it.
     (journal/note! conn run-id :loop-workflow
                    {:data {:name loop-nm :version version}})
-    (let [data (myc/run-compiled compiled ctx
-                                 (cond-> {:branch branch :turn 1}
-                                   ;; A team workflow fans out over these — one
-                                   ;; worker per sub-task. The single-branch
-                                   ;; loops ignore the key.
-                                   (seq (get-in config [:run :subtasks]))
-                                   (assoc :subtasks (get-in config [:run :subtasks]))))]
-      (when (myc/error? data)
-        ;; A structural failure mid-run is a harness bug, not a branch
-        ;; outcome; surface it rather than shipping a half-closed run.
-        (throw (ex-info "loop workflow failed structurally"
-                        {:run-id run-id :error (myc/workflow-error data)})))
-      (-> (select-keys data [:status :answer :branch :residual])
-          (assoc :run-id run-id)))))
+    (try
+      (let [data (myc/run-compiled compiled ctx
+                                   (cond-> {:branch branch :turn 1}
+                                     ;; A team workflow fans out over these — one
+                                     ;; worker per sub-task. The single-branch
+                                     ;; loops ignore the key.
+                                     (seq (get-in config [:run :subtasks]))
+                                     (assoc :subtasks (get-in config [:run :subtasks]))))]
+        (when (myc/error? data)
+          ;; A structural failure mid-run is a harness bug, not a branch
+          ;; outcome; surface it rather than shipping a half-closed run.
+          (throw (ex-info "loop workflow failed structurally"
+                          {:run-id run-id :error (myc/workflow-error data)})))
+        (-> (select-keys data [:status :answer :branch :residual])
+            (assoc :run-id run-id)))
+      (finally
+        ;; The run's eval namespace does not outlive the run
+        ;; (code-review-2026-08 #6): one namespace per run, never removed, was
+        ;; unbounded growth on a serve process.
+        (repl/close-session (:repl-session ctx))))))

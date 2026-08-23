@@ -46,6 +46,16 @@
       (refer-clojure))
     ns-sym))
 
+(defn close-session
+  "Drop a session's namespace. Each run gets a fresh namespace so defs
+  accumulate across its turns; without this a long-lived serve process kept
+  one namespace (plus everything the agent defined in it) per run, forever
+  (code-review-2026-08 #6). Idempotent on an unknown or already-removed name."
+  [session]
+  (when (find-ns session)
+    (remove-ns session))
+  nil)
+
 (def ^:private default-session (delay (new-session)))
 
 (def default-eval-timeout-ms

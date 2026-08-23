@@ -76,8 +76,11 @@
   "How long the provider asked us to wait, from the response headers, or nil.
 
   Handles `retry-after` in seconds and the `x-ratelimit-reset-*` family that
-  several OpenAI-compatible providers send instead. Bounded, because the value
-  is the provider's opinion and the ceiling is ours."
+  several OpenAI-compatible providers send instead. UNCLAMPED: the in-run cap
+  check in `chat` must see the provider's real ask — clamping here hid a usage
+  cap wearing a rate-limit's headers under a 60s ceiling that could never
+  cross the 300s window (code-review-2026-08 #2). The ceiling on what we
+  actually sleep is applied in backoff-ms."
   [headers]
   (let [h (fn [k] (get headers k))
         secs (some-> (or (h "retry-after") (h "Retry-After")) str/trim parse-long)
@@ -87,7 +90,7 @@
                       (str/replace #"[sm]$" "")
                       parse-long)]
     (when-let [s (or secs reset)]
-      (min max-backoff-ms (* 1000 (max 0 s))))))
+      (* 1000 (max 0 s)))))
 
 (defn classify
   "Decide what to do about a non-2xx response.
@@ -108,9 +111,12 @@
   asked for. The jitter is what keeps a beam of branches that all hit the same
   429 from retrying in lockstep and re-colliding on the next window."
   [attempt headers]
-  (or (retry-after-ms headers)
-      (long (* (+ 1.0 (rand 0.25))
-               (min max-backoff-ms (* 2000 (Math/pow 4 attempt)))))))
+  ;; The clamp lives HERE, on what we actually sleep — not on the provider's
+  ;; ask, which the cap check in `chat` needs unclamped (same review).
+  (min max-backoff-ms
+       (or (retry-after-ms headers)
+           (long (* (+ 1.0 (rand 0.25))
+                    (* 2000 (Math/pow 4 attempt)))))))
 
 ;; --- one call ---------------------------------------------------------------
 

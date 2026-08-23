@@ -32,7 +32,11 @@
       "load"
       (let [name (some-> (base/arg ctx :name) str str/trim not-empty)]
         (cond
-          (nil? name) (base/missing branch :name)
+          ;; base/missing takes CTX (it reads :tool-name for the skeleton) and
+          ;; yields a complaint STRING — wrap it in malformed. Returned raw it
+          ;; replaced the whole result map and tool-step threaded a nil branch
+          ;; into state/record-outcome (code-review-2026-08 #1).
+          (nil? name) (base/malformed branch (base/missing ctx :name))
           :else
           (if-let [content (skills/load-skill name)]
             (base/ok branch content)

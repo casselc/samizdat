@@ -25,11 +25,13 @@
   startup analyses the project, so per-request spawning would be far too
   slow.
 
-  The read is deliberately single-threaded: a request sends, then reads
-  frames until it sees its own id, routing any server-pushed notifications
-  as it goes (diagnostics are accumulated per uri; everything else is
-  dropped). Each read is bounded by a future+timeout so a wedged server
-  costs a known amount rather than the run."
+  One dedicated reader thread per client reads every frame and routes it by
+  id: a response delivers the promise its request is parked on, and
+  server-pushed notifications go to the diagnostics store. This is what
+  makes the client safe across concurrent callers — each request reading the
+  shared stream itself let two callers steal each other's frames
+  (code-review-2026-08 #4). Each request is bounded by a timeout so a
+  wedged server costs a known amount rather than the run."
   (:require [clojure.data.json :as json]
             [clojure.java.io :as io]
             [clojure.string :as str]
@@ -37,7 +39,7 @@
             [samizdat.engine.proc :as proc])
   (:import [java.io BufferedInputStream OutputStream]))
 
-;; root -> {:proc :out :in :next-id :opened :diagnostics}
+;; root -> {:proc :out :in :next-id :opened :diagnostics :pending}
 (defonce ^:private clients (atom {}))
 
 (def ^:private read-timeout-ms 20000)
@@ -78,8 +80,31 @@
               (when-not (neg? r) (recur (+ off r))))))
         (json/read-str (String. buf "UTF-8") :key-fn keyword)))))
 
-(defn- read-frame-bounded [client]
-  (deref (future (read-frame client)) read-timeout-ms ::timeout))
+(declare store-diagnostics!)
+
+(defn- start-reader!
+  "The one thread that reads this client's stream, for the client's life.
+
+  Every frame is routed by id: a response delivers the promise its request!
+  is parked on, and anything else (server-pushed notifications) goes to
+  store-diagnostics!. A response whose waiter timed out is simply no longer
+  pending, so it falls through to the notification path and is dropped —
+  nobody else can consume it by mistake.
+
+  EOF or a read error releases every pending waiter with ::closed, so
+  nobody waits out the full timeout on a server that is gone."
+  [{:keys [pending] :as client}]
+  (future
+    (loop []
+      (let [msg (try (read-frame client)
+                     (catch Throwable _ nil))]
+        (if msg
+          (do (if-let [[_ p] (find @pending (:id msg))]
+                (deliver p msg)
+                (store-diagnostics! client msg))
+              (recur))
+          (doseq [[_ p] @pending] (deliver p ::closed))))))
+  nil)
 
 ;; ---- request / notify -----------------------------------------------------
 
@@ -90,24 +115,22 @@
       (swap! (:diagnostics client) assoc uri diags))))
 
 (defn- request!
-  "Send a request and read frames until the matching response arrives,
-  routing notifications seen on the way. Returns the :result (or throws on
-  an :error / timeout)."
+  "Send a request and park on its id until the reader delivers the response
+  (or the timeout / a server close intervenes). Returns the :result, throws
+  on an :error, a timeout, or the server closing."
   [client method params]
-  (let [id (swap! (:next-id client) inc)]
+  (let [id (swap! (:next-id client) inc)
+        p (promise)]
+    (swap! (:pending client) assoc id p)
     (send-frame! client {:jsonrpc "2.0" :id id :method method :params params})
-    (loop [seen 0]
-      (let [msg (read-frame-bounded client)]
-        (cond
-          (= ::timeout msg) (throw (ex-info (str "lsp: no response to " method) {:method method}))
-          (nil? msg) (throw (ex-info (str "lsp: server closed during " method) {:method method}))
-          (= id (:id msg)) (if-let [e (:error msg)]
-                             (throw (ex-info (str "lsp error: " (:message e)) {:error e}))
-                             (:result msg))
-          :else (do (store-diagnostics! client msg)
-                    (if (> seen 200)
-                      (throw (ex-info (str "lsp: flooded before answering " method) {}))
-                      (recur (inc seen)))))))))
+    (let [msg (deref p read-timeout-ms ::timeout)]
+      (swap! (:pending client) dissoc id)
+      (cond
+        (= ::timeout msg) (throw (ex-info (str "lsp: no response to " method) {:method method}))
+        (= ::closed msg) (throw (ex-info (str "lsp: server closed during " method) {:method method}))
+        :else (if-let [e (:error msg)]
+                (throw (ex-info (str "lsp error: " (:message e)) {:error e}))
+                (:result msg))))))
 
 (defn- notify! [client method params]
   (send-frame! client {:jsonrpc "2.0" :method method :params params}))
@@ -127,7 +150,10 @@
                 :in (BufferedInputStream. (.getInputStream osproc))
                 :next-id (atom 0)
                 :opened (atom #{})
-                :diagnostics (atom {})}]
+                :diagnostics (atom {})
+                :pending (atom {})}]
+    ;; The reader must be running before the first request parks on it.
+    (start-reader! client)
     (request! client "initialize"
               {:processId nil :rootUri (uri root) :capabilities {}})
     (notify! client "initialized" {})
@@ -180,13 +206,14 @@
   (at client path line character "textDocument/hover"))
 
 (defn diagnostics
-  "The problems clojure-lsp reports for `path`. didOpen triggers a
-  publishDiagnostics push; wait briefly for it, then return what arrived."
+  "The problems clojure-lsp reports for `path`. didOpen/didChange trigger a
+  publishDiagnostics push; the reader thread stores it per uri, so this only
+  waits briefly for it to arrive, then returns what came."
   [client path]
   (let [u (uri path)]
     (swap! (:diagnostics client) dissoc u)
     (ensure-open! client path)
-    ;; if already open, ask the server to re-analyse by bumping the doc
+    ;; ask the server to (re-)analyse the doc as it stands on disk
     (notify! client "textDocument/didChange"
              {:textDocument {:uri u :version 2}
               :contentChanges [{:text (slurp path)}]})
@@ -195,8 +222,5 @@
         (cond
           (some? d) d
           (>= waited 5000) []
-          :else (do (deref (future nil) 250 nil)
-                    ;; drain any pending pushes
-                    (let [m (read-frame-bounded client)]
-                      (when (and (map? m) (not= ::timeout m)) (store-diagnostics! client m)))
+          :else (do (Thread/sleep 250)
                     (recur (+ waited 250))))))))

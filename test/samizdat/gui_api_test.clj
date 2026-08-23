@@ -121,3 +121,30 @@
       (is (> (:interval-ms s2) (:interval-ms s1)))
       (is (<= (:interval-ms (nth (iterate #(api/poll-step % {:ok false}) s2) 10))
               api/max-backoff-ms)))))
+
+(deftest a-batch-that-lands-after-stop-is-not-delivered
+  ;; code-review-2026-08 #5: an in-flight fetch completing after stop! still
+  ;; delivered its callbacks, folding the OLD run's events into whatever the
+  ;; UI was now showing. The loop rechecks @running between fetch and delivery.
+  (let [delivered (atom 0)
+        gate (promise)]
+    (with-redefs [api/journal-since (fn [& _] @gate)]
+      (let [{:keys [stop!]} (api/start-poller! {:base "x" :run-id "r"
+                                                :on-events (fn [_] (swap! delivered inc))
+                                                :on-status (fn [_])})]
+        (stop!)
+        (deliver gate {:ok true :body {:events [{:id 1}]}})
+        (Thread/sleep 200)
+        (is (zero? @delivered) "a batch that landed after stop! is dropped")))))
+
+(deftest a-throwing-callback-does-not-kill-the-poller
+  ;; Same review: one throw from a callback killed the future silently and the
+  ;; header kept saying "tailing" over a frozen graph. Callbacks are guarded.
+  (let [statuses (atom 0)]
+    (with-redefs [api/journal-since (fn [& _] {:ok true :body {:events [{:id 1}]}})]
+      (let [{:keys [stop!]} (api/start-poller! {:base "x" :run-id "r"
+                                                :on-events (fn [_] (throw (ex-info "boom" {})))
+                                                :on-status (fn [_] (swap! statuses inc))})]
+        (Thread/sleep 300)
+        (stop!)
+        (is (pos? @statuses) "on-status still ran after on-events threw")))))

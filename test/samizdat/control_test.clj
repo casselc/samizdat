@@ -25,6 +25,7 @@
   (:require [clojure.data.json :as json]
             [clojure.string :as str]
             [clojure.test :refer [deftest testing is]]
+            [samizdat.agent.beam :as beam]
             [samizdat.control :as control]
             [samizdat.agent.loop :as aloop]
             [samizdat.agent.state :as state]
@@ -106,3 +107,25 @@
           (testing "the directive is resolved as applied, not left pending"
             (is (empty? (interventions/pending c rid)))
             (is (= "applied" (:status (first (interventions/history c rid)))))))))))
+
+(deftest a-run-that-finishes-in-the-start-window-leaves-no-active-entry
+  ;; code-review-2026-08 #3: the run future's completion dissoc'd `active`
+  ;; before the request thread had assoc'd it, stranding an entry that let
+  ;; abort! rewrite a finished run's status to :aborted. Registration must
+  ;; happen inside the run's own thread (on-start), so it can never land
+  ;; after the completion dissoc.
+  (with-db [c]
+    (with-redefs [beam/run! (fn [{:keys [on-start]}]
+                              (let [rid (str (random-uuid))]
+                                (on-start rid)
+                                {:run-id rid :status :completed}))]
+      (let [r (api-control/start-run! {:conn c :config {:llm {:provider :local}}} {})
+            rid (:run_id (:body r))]
+        (is (= "running" (:status (:body r))))
+        (let [gone? (loop [n 0]
+                      (cond (nil? (get @api-control/active rid)) true
+                            (< n 100) (do (Thread/sleep 10) (recur (inc n)))
+                            :else false))]
+          (is gone? "no stranded active entry after an instant run"))
+        (is (= 409 (:status (api-control/abort! c rid)))
+            "abort on a finished run refuses rather than rewriting status")))))

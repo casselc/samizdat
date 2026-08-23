@@ -57,8 +57,6 @@
                              socket-timeout-ms (assoc :socket-timeout socket-timeout-ms))))
         (catch Throwable e {:ok false :error (ex-message e)}))))
 
-(defn health [base] (GET base "/health"))
-
 (defn list-runs [base] (GET base "/v1/runs"))
 
 (defn models
@@ -67,8 +65,6 @@
   question."
   [base]
   (GET base "/v1/harness/models"))
-
-(defn run-detail [base run-id] (GET base (str "/v1/runs/" run-id)))
 
 (defn journal-since
   "Everything after `cursor`, the polling UI's one read."
@@ -168,18 +164,33 @@
   "Tail `run-id`'s journal on a background thread.
 
   Calls (on-events events) for every non-empty batch and (on-status state)
-  after every step. glimmer marshals ratom writes made off the main thread
-  onto the GTK loop itself, so callbacks may swap! UI state directly.
+  after every step. Callbacks are guarded — one throw used to kill the
+  future silently, leaving the header saying \"tailing\" over a frozen
+  graph (code-review-2026-08 #5). @running is rechecked after the fetch
+  too: a batch landing after stop! belongs to a run the UI has already
+  left, and delivering it folded the old run's events into the new one.
+  glimmer marshals ratom writes made off the main thread onto the GTK
+  loop itself, so callbacks may swap! UI state directly.
   Returns {:stop! (fn [])}; stopping is cooperative at the next wakeup."
   [{:keys [base run-id on-events on-status]}]
-  (let [running (atom true)]
-    (future
-      (loop [state {:cursor 0 :interval-ms base-interval-ms}]
-        (when @running
-          (let [state (poll-step state (journal-since base run-id (:cursor state)))]
-            (when (and on-events (seq (:events state)))
-              (on-events (:events state)))
-            (when on-status (on-status (dissoc state :events)))
-            (Thread/sleep (:interval-ms state))
-            (recur state)))))
-    {:stop! (fn [] (reset! running false))}))
+  (let [running (atom true)
+        guard (fn [f]
+                (when f
+                  (fn [& args]
+                    (try (apply f args)
+                         (catch Throwable e
+                           (println "[gui.api] poller callback failed:"
+                                    (ex-message e)))))))]
+    (let [on-events (guard on-events)
+          on-status (guard on-status)]
+      (future
+        (loop [state {:cursor 0 :interval-ms base-interval-ms}]
+          (when @running
+            (let [state (poll-step state (journal-since base run-id (:cursor state)))]
+              (when (and @running on-events (seq (:events state)))
+                (on-events (:events state)))
+              (when (and @running on-status)
+                (on-status (dissoc state :events)))
+              (Thread/sleep (:interval-ms state))
+              (recur state)))))
+      {:stop! (fn [] (reset! running false))})))

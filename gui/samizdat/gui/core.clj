@@ -74,6 +74,19 @@
 
 (defonce poller (atom nil))
 
+;; connect-to! runs on the GTK thread and from background futures alike
+;; (refresh-runs!, start-new-run!), and its stop-old/reset-new pair on
+;; @poller must not interleave across threads: the orphaned poller that race
+;; leaves behind holds no stop! handle anywhere, and keeps folding the old
+;; run's events into the new one forever (code-review-2026-08 #5).
+(defonce ^:private connect-lock (Object.))
+
+;; One branch-detail fetch at a time. The poll loop refires
+;; refresh-branch-log! on every batch touching the selected branch, so a
+;; fetch slower than the 1.5s interval used to stack another every tick
+;; (same review).
+(defonce ^:private branch-log-busy (atom false))
+
 ;; --- selection and the branch log --------------------------------------------
 
 (defn- selected-branch-id
@@ -96,15 +109,18 @@
   (let [{:keys [base-url run] :as st} @state
         branch (selected-branch-id st)
         sel (:selected st)]
-    (when (and run branch)
+    (when (and run branch (compare-and-set! branch-log-busy false true))
       (future
-        (let [r (api/branch-detail base-url run branch)]
-          (when (= sel (:selected @state))
-            (if (:ok r)
-              (swap! state assoc :branch-log (:body r) :branch-log-error nil)
-              (swap! state assoc :branch-log-error
-                     (or (:error r) (str "HTTP " (:status r)))))))
-        (glpane/request-render!)))))
+        (try
+          (let [r (api/branch-detail base-url run branch)]
+            (when (= sel (:selected @state))
+              (if (:ok r)
+                (swap! state assoc :branch-log (:body r) :branch-log-error nil)
+                (swap! state assoc :branch-log-error
+                       (or (:error r) (str "HTTP " (:status r)))))))
+          (finally
+            (reset! branch-log-busy false)
+            (glpane/request-render!)))))))
 
 (defn- select-node! [id]
   (swap! state assoc :selected id :branch-log nil :branch-log-error nil)
@@ -121,32 +137,40 @@
 
 (defn- connect-to!
   "Tail `run-id`, replacing any current tail. The cursor starts at zero so
-  the fold sees the run from its first event."
+  the fold sees the run from its first event.
+
+  Serialized on connect-lock (see its comment)."
   [run-id]
-  (let [base (:base-url @state)]
-    (when-let [{:keys [stop!]} @poller] (stop!))
-    (swap! state assoc :run run-id :graph (graph/empty-graph) :event-count 0
-           :selected nil :branch-log nil :branch-log-error nil :notice nil)
-    (glpane/request-render!)
-    (when run-id
-      (reset! poller
-              (api/start-poller!
-               {:base base :run-id run-id
-                :on-events
-                (fn [evs]
-                  (swap! state
-                         (fn [s] (-> s
-                                     (update :graph #(reduce graph/apply-event % evs))
-                                     (update :event-count + (count evs)))))
-                  ;; Compare against the selected node's BRANCH: an artifact
-                  ;; node's id is "<branch>@<turn>", which matches no event's
-                  ;; branch_id, so artifact panels never refreshed at all.
-                  (let [b (selected-branch-id @state)]
-                    (when (and b (some #(= b (:branch_id %)) evs))
-                      (refresh-branch-log!)))
-                  (glpane/request-render!))
-                :on-status
-                (fn [s] (swap! state assoc :connected? (:connected? s)))})))))
+  (locking connect-lock
+    (let [base (:base-url @state)]
+      (when-let [{:keys [stop!]} @poller] (stop!))
+      ;; :hover too, and glpane's own mark: a hover from the run just left
+      ;; kept describing a node that no longer existed (code-review-2026-08
+      ;; #5).
+      (swap! state assoc :run run-id :graph (graph/empty-graph) :event-count 0
+             :selected nil :branch-log nil :branch-log-error nil :notice nil
+             :hover nil)
+      (glpane/clear-hover!)
+      (glpane/request-render!)
+      (when run-id
+        (reset! poller
+                (api/start-poller!
+                 {:base base :run-id run-id
+                  :on-events
+                  (fn [evs]
+                    (swap! state
+                           (fn [s] (-> s
+                                       (update :graph #(reduce graph/apply-event % evs))
+                                       (update :event-count + (count evs)))))
+                    ;; Compare against the selected node's BRANCH: an artifact
+                    ;; node's id is "<branch>@<turn>", which matches no event's
+                    ;; branch_id, so artifact panels never refreshed at all.
+                    (let [b (selected-branch-id @state)]
+                      (when (and b (some #(= b (:branch_id %)) evs))
+                        (refresh-branch-log!)))
+                    (glpane/request-render!))
+                  :on-status
+                  (fn [s] (swap! state assoc :connected? (:connected? s)))}))))))
 
 (defn- refresh-runs!
   "Re-fetch the run list; keep the current selection when it still exists,
@@ -163,9 +187,10 @@
           runs (vec (some-> (api/list-runs base) :body :runs))]
       (swap! state assoc :runs runs)
       (let [current (:run @state)]
-        (if (and current (some #(= current (:id %)) runs))
-          (swap! state assoc :run-status
-                 (:status (first (filter #(= current (:id %)) runs))))
+        ;; No :run-status mirror: nothing ever read it, and the poller's
+        ;; :connected? already covers liveness (code-review-2026-08 dead
+        ;; code).
+        (when-not (and current (some #(= current (:id %)) runs))
           (connect-to! (some-> runs first :id)))))))
 
 (defn- cycle-run!
@@ -421,13 +446,7 @@
                       :else "hover a node to identify it; drag to pan")
              :xalign 0.0}]))
 
-(defn- clip
-  "Deliberately does NOT truncate. The inspector exists so a person can
-  read the whole claim, the whole engine answer and the whole encoding;
-  cutting them off defeats the point. The panel scrolls instead. Kept as a
-  function so call sites read as intentional rather than accidental."
-  [s _n]
-  (str s))
+
 
 (defn- thesis-text
   "The branch's plan as it registered it: goal, technique, and the
