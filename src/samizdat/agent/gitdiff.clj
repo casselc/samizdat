@@ -31,16 +31,23 @@
         "HEAD")))
 
 (defn changed-files
-  "The paths the run changed since `baseline` (git diff --name-only). nil when
-  git or the repo is unavailable — 'cannot tell', distinct from [] which means
-  'genuinely nothing changed'. Ground truth for whether a run that claims done
-  actually produced anything."
+  "The paths the run changed since `baseline`: tracked edits (git diff
+  --name-only) UNION new files (git ls-files --others). The union matters —
+  `git diff` is blind to untracked files, so a run that CREATES a namespace (the
+  common case, and the one the prompt actively encourages) would otherwise read
+  as 'changed nothing' and be judged hollow. nil when git or the repo is
+  unavailable — 'cannot tell', distinct from [] which means 'genuinely nothing
+  changed'. Ground truth for whether a run that claims done actually produced
+  anything."
   [root baseline]
   (when (and root baseline)
-    (some->> (git root "diff" "--name-only" baseline)
-             str/split-lines
-             (remove str/blank?)
-             vec)))
+    (let [lines (fn [out] (some->> out str/split-lines (remove str/blank?)))
+          tracked (lines (git root "diff" "--name-only" baseline))
+          untracked (lines (git root "ls-files" "--others" "--exclude-standard"))]
+      ;; nil only when BOTH git calls failed (cannot tell); otherwise the union,
+      ;; which may be empty (genuinely nothing changed).
+      (when (or (some? tracked) (some? untracked))
+        (vec (distinct (concat (or tracked []) (or untracked []))))))))
 
 (defn diff
   "The unified diff of the run's changes since `baseline`, bounded to keep it
