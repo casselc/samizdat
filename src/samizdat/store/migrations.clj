@@ -327,6 +327,70 @@
 
    "CREATE INDEX IF NOT EXISTS idx_messages_run ON messages(run_id, read_at)"])
 
+(def ^:private v11
+  ;; Durable evaluator receipts (the JS1 record of a JS0 evaluation).
+  ;;
+  ;; jolt.sandbox keeps an evaluation's receipts in an in-process atom:
+  ;; ordered {op args result|error} entries, one per observation or
+  ;; actuation, consumed in order at replay. A process that dies between an
+  ;; actuation and the end of its evaluation loses the atom while the world
+  ;; keeps the actuation, and nothing on record even says which window was
+  ;; open. These tables are the durable version of that model.
+  ;;
+  ;; The shape is append-only in the strict sense: nothing here is ever
+  ;; updated or deleted. An evaluation is registered BEFORE it runs (intent:
+  ;; the trusted evaluator identity — spec/instance/binding ids — plus the
+  ;; canonical evaluator/context coordinate and the source), each effect
+  ;; is recorded as an intent row before it executes and an outcome row
+  ;; after, and completion is a row of its own appended afterward. A crashed
+  ;; evaluation's record is then exactly what the process managed to append
+  ;; — a pending eval row, and an intent with no outcome for the effect that
+  ;; was in flight — which is what a caller needs to fail closed: the
+  ;; actuation may or may not have happened, and the record says so honestly
+  ;; instead of reconstructing a story.
+  ;;
+  ;; Terminal status lives in eval_completions rather than as a status
+  ;; column on evals so that "pending" is the ABSENCE of a row: there is no
+  ;; status to set wrong, only a completion that has or has not been
+  ;; appended. The unique indexes make the two invariants structural — one
+  ;; terminal record per evaluation, and at most one intent and one outcome
+  ;; per (eval, seq) — rather than matters of caller discipline.
+  ["CREATE TABLE IF NOT EXISTS evals (
+      id          INTEGER PRIMARY KEY AUTOINCREMENT,
+      spec_id     TEXT NOT NULL,
+      instance_id TEXT NOT NULL,
+      binding_id  TEXT NOT NULL,
+      coordinate  TEXT NOT NULL,
+      source      TEXT NOT NULL,
+      created_at  TEXT NOT NULL
+    )"
+
+   "CREATE TABLE IF NOT EXISTS eval_completions (
+      id         INTEGER PRIMARY KEY AUTOINCREMENT,
+      eval_id    INTEGER NOT NULL REFERENCES evals(id),
+      status     TEXT NOT NULL,
+      result     TEXT,
+      created_at TEXT NOT NULL
+    )"
+
+   "CREATE UNIQUE INDEX IF NOT EXISTS idx_eval_completions_once
+      ON eval_completions(eval_id)"
+
+   "CREATE TABLE IF NOT EXISTS eval_receipts (
+      id         INTEGER PRIMARY KEY AUTOINCREMENT,
+      eval_id    INTEGER NOT NULL REFERENCES evals(id),
+      seq        INTEGER NOT NULL,
+      phase      TEXT NOT NULL,
+      op         TEXT NOT NULL DEFAULT '',
+      args       TEXT,
+      result     TEXT,
+      error      TEXT,
+      created_at TEXT NOT NULL
+    )"
+
+   "CREATE UNIQUE INDEX IF NOT EXISTS idx_eval_receipts_phase
+      ON eval_receipts(eval_id, seq, phase)"])
+
 (def migrations
   "Ordered. Index 0 is migration 1; PRAGMA user_version holds the count applied."
-  [v1 v2 v3 v4 v5 v6 v7 v8 v9 v10])
+  [v1 v2 v3 v4 v5 v6 v7 v8 v9 v10 v11])

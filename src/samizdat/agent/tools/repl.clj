@@ -15,45 +15,189 @@
 ;; along with this program.  If not, see <https://www.gnu.org/licenses/>.
 ;;
 ;; SPDX-License-Identifier: GPL-3.0-or-later
+;;
 
 (ns samizdat.agent.tools.repl
   "The REPL tools: eval, doc, complete.
 
-  Evaluating Clojure in the live image is the primary feedback loop; these
-  three methods only dispatch it. See samizdat.agent.tools.base for the
-  shared result helpers and the run-tool multimethod."
+   In a JS1-profiled context (ctx carries a JS1 binding — the canonical
+   signal shared with the phase-refusal gate), these three tools route
+   through the persistent SCI sandbox binding instead of the live harness
+   image.  The model's `eval` lands in SCI, not in the JVM process, and is
+   durably recorded (intent before each effect, outcome after).
+   `doc` and `complete` are HOST-DERIVED safe capability discovery over
+   the binding's effective authority (samizdat.agent.sandbox/operation-doc
+   and complete-capability): no resolve/find-ns/ns-publics/meta form is
+   ever evaluated inside the sandbox, and untrusted symbol/prefix text is
+   matched as inert data, never spliced into evaluated source.
+
+   When no JS1 binding is present the tools fall through to the existing
+   live-REPL path (samizdat.repl), preserving every non-JS1 workflow.
+
+   The live REPL is NEVER reached in a JS1 context: routing consults the
+   same signal the tool gate consults, and a JS1 context whose binding is
+   missing is refused outright instead of falling through to live eval."
   (:require [clojure.string :as str]
             [samizdat.agent.tools.base :as base]
             [samizdat.repl :as repl]))
 
-(defmethod base/run-tool "eval" [{:keys [branch repl-session] :as ctx}]
-  ;; Evaluate Clojure in the live harness image. REPL-first development: the
-  ;; agent tries a form, sees the value and output, and iterates before
-  ;; committing it to a file. :neutral — evaluating establishes nothing on its
-  ;; own; a define-and-test is exploration, and progress is the file it leads
-  ;; to. Defs persist across evals within a run (the session is per-run).
+;; --- JS1 sandbox path --------------------------------------------------------
+
+(defn- sandbox-var
+  "Resolve a samizdat.agent.sandbox var at call time, so this namespace
+   stays loadable where the sandbox (and its SCI dependency) is absent —
+   non-JS1 workflows pay no dependency cost.  Returns the var, or nil
+   when the sandbox namespace is unavailable."
+  [var-name]
+  (try
+    (requiring-resolve (symbol "samizdat.agent.sandbox" var-name))
+    (catch Throwable _ nil)))
+
+(defn- js1-route
+  "Resolve eval/doc/complete routing from the ONE canonical JS1 signal,
+   the same accessor the phase-refusal gate reads (base/js1-binding).
+
+   Returns the binding for a JS1 context, ::unbound for a JS1 context
+   whose binding is missing — impossible when workflow/resume wired the
+   ctx, and refused rather than routed to the live REPL — or nil for a
+   plain non-JS1 context."
+  [ctx]
+  (cond
+    (some? (base/js1-binding ctx)) (base/js1-binding ctx)
+    (base/js1-profile? ctx) ::unbound
+    :else nil))
+
+(defn- js1-refusal
+  "The fail-closed result for a JS1 context that cannot be routed to its
+   sandbox.  Never a live-eval fallthrough: authority was fixed at bind
+   time, so a missing binding is a wiring fault to surface, not a seam
+   to route around."
+  [branch]
+  (base/fail branch
+             (str "This is a JS1-sandboxed context but its sandbox binding"
+                  " is missing; refusing to evaluate outside the sandbox.")))
+
+(defn- js1-eval-result
+  "Evaluate `code` in the JS1 sandbox binding, appending a durable JS1
+   record via the store adapter (evaluate-recorded!).  Returns the same
+   shape as repl/eval-code: {:ok true/false, :value/:error, :out}.
+
+   The interrupt ceiling is the spec's :timeout-ms, fixed at bind time —
+   a model-supplied timeout is not an option here, exactly as it cannot
+   select any other authority."
+  [conn binding code]
+  (try
+    (let [evaluate! (sandbox-var "evaluate-recorded!")]
+      (if (nil? evaluate!)
+        {:ok false
+         :error "JS1 sandbox is unavailable; refusing live-eval fallback"
+         :error-type "sandbox-unavailable"
+         :out nil}
+        {:ok true :value (pr-str (:value (evaluate! conn binding code))) :out nil}))
+    (catch ExceptionInfo e
+      (let [d (ex-data e)]
+        (if (:samizdat.sandbox/error d)
+          {:ok false
+           :error (ex-message e)
+           :error-type (str (:samizdat.sandbox/error d))
+           :out nil}
+          {:ok false :error (ex-message e)
+           :error-type (str (type e)) :out nil})))
+    (catch Throwable e
+      {:ok false :error (or (ex-message e) (str e))
+       :error-type (str (type e)) :out nil})))
+
+(defn- js1-doc-result
+  "Doc lookup inside the JS1 sandbox: host-derived safe capability
+   discovery ONLY.  Delegates to samizdat.agent.sandbox/operation-doc,
+   which describes authorized projected operations from inert authority
+   data and never evaluates any form inside the sandbox.  Returns the
+   same shape as repl/doc-sym, or {:not-found true}."
+  [binding sym-str]
+  (or (when-let [doc-fn (sandbox-var "operation-doc")]
+        (doc-fn binding sym-str))
+      {:not-found true :symbol (str sym-str)}))
+
+(defn- js1-complete-result
+  "Completion inside the JS1 sandbox: host-derived safe capability
+   discovery ONLY.  Delegates to samizdat.agent.sandbox/complete-capability
+   (inert prefix filtering over effective authority); never evaluates
+   ns-publics or any other form inside the sandbox.  Returns a seq of
+   strings."
+  [binding prefix]
+  (if-let [complete-fn (sandbox-var "complete-capability")]
+    (complete-fn binding (str prefix))
+    []))
+
+;; --- Tool dispatch methods ----------------------------------------------------
+
+(defn- eval-format-result
+  "Format an eval result map for the model. Shared by JS1 and live paths."
+  [branch r]
+  (if (:ok r)
+    (base/ok branch (str "=> " (:value r)
+                     (when (seq (:out r)) (str "\n" (:out r)))))
+    (base/fail branch (str "Eval error: " (:error r)
+                      (when (seq (:out r)) (str "\n" (:out r)))))))
+
+(defmethod base/run-tool "eval" [{:keys [branch] :as ctx}]
   (if-let [m (base/missing ctx :code)]
     (base/malformed branch m)
-    (let [timeout (some-> (base/arg ctx :timeout-ms) str str/trim not-empty parse-long)
-          r (repl/eval-code (str (base/arg ctx :code)) repl-session timeout)]
-      (if (:ok r)
-        (base/ok branch (str "=> " (:value r)
-                        (when (seq (:out r)) (str "\n" (:out r)))))
-        (base/fail branch (str "Eval error: " (:error r)
-                          (when (seq (:out r)) (str "\n" (:out r)))))))))
+    (let [code (str (base/arg ctx :code))
+          route (js1-route ctx)]
+      (cond
+        ;; JS1 path: evaluate in the persistent SCI binding, durably
+        ;; recorded.  The spec's timeout ceiling governs; a model-supplied
+        ;; timeout is not forwarded (authority is fixed at bind time).
+        (some? route) (if (= ::unbound route)
+                        (js1-refusal branch)
+                        (eval-format-result
+                          branch (js1-eval-result (:conn ctx) route code)))
+        ;; Non-JS1 path: live REPL (unchanged)
+        :else (eval-format-result
+                branch (repl/eval-code code (:repl-session ctx)
+                                       (some-> (base/arg ctx :timeout-ms)
+                                               str str/trim not-empty parse-long)))))))
 
 (defmethod base/run-tool "doc" [{:keys [branch] :as ctx}]
   (if-let [m (base/missing ctx :symbol)]
     (base/malformed branch m)
-    (let [d (repl/doc-sym (str (base/arg ctx :symbol)))]
-      (if (:not-found d)
-        (base/malformed branch (str "No var " (base/arg ctx :symbol) " is loaded."))
-        (base/ok branch (str (:name d) "\n" (pr-str (:arglists d)) "\n\n" (:doc d)))))))
+    (let [sym-str (str (base/arg ctx :symbol))
+          route (js1-route ctx)]
+      (cond
+        ;; JS1 path: host-derived safe capability discovery
+        (some? route) (if (= ::unbound route)
+                        (js1-refusal branch)
+                        (let [d (js1-doc-result route sym-str)]
+                          (if (:not-found d)
+                            (base/malformed
+                              branch (str "No var " sym-str " is available in this context."
+                                          " Authorized sandbox operations: "
+                                          (str/join ", " (js1-complete-result route "")) "."))
+                            (base/ok branch (str (:name d) "\n" (pr-str (:arglists d))
+                                                 "\n\n" (:doc d))))))
+        ;; Non-JS1 path: live REPL var resolution (unchanged)
+        :else (let [d (repl/doc-sym sym-str)]
+                (if (:not-found d)
+                  (base/malformed branch (str "No var " sym-str " is loaded."))
+                  (base/ok branch (str (:name d) "\n" (pr-str (:arglists d))
+                                       "\n\n" (:doc d)))))))))
 
 (defmethod base/run-tool "complete" [{:keys [branch] :as ctx}]
   (if-let [m (base/missing ctx :prefix)]
     (base/malformed branch m)
-    (let [ms (repl/complete (str (base/arg ctx :prefix)))]
-      (base/ok branch (if (seq ms)
-                   (str/join "\n" (take 50 ms))
-                   (str "No symbols match " (base/arg ctx :prefix) "."))))))
+    (let [prefix-str (str (base/arg ctx :prefix))
+          route (js1-route ctx)]
+      (cond
+        ;; JS1 path: host-derived safe capability discovery
+        (some? route) (if (= ::unbound route)
+                        (js1-refusal branch)
+                        (let [ms (js1-complete-result route prefix-str)]
+                          (base/ok branch (if (seq ms)
+                                       (str/join "\n" (take 50 ms))
+                                       (str "No symbols match " prefix-str ".")))))
+        ;; Non-JS1 path: live REPL (unchanged)
+        :else (let [ms (repl/complete prefix-str)]
+                (base/ok branch (if (seq ms)
+                             (str/join "\n" (take 50 ms))
+                             (str "No symbols match " prefix-str "."))))))))

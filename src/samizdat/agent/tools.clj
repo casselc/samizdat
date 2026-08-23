@@ -66,5 +66,8 @@
 (def unavailable base/unavailable)
 (def phase-refusal base/phase-refusal)
 (def tool-names base/tool-names)
+(def js1-profile? base/js1-profile?)
+(def js1-allowed? base/js1-allowed?)
+(def js1-tool-vocabulary base/js1-tool-vocabulary)
 (def answer-tokens ship/answer-tokens)
 (def uncovered-tokens ship/uncovered-tokens)

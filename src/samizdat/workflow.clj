@@ -219,6 +219,60 @@
       (assoc ctx :llm-adapter (registry/adapter-for provider) :llm-config llm))
     ctx))
 
+(defn- js1-binding
+  "Create a JS1 sandbox binding for the run, or nil.
+
+   Activated ONLY when config :run :js1/profile is set to a truthy value.
+   The profile string (e.g. \"single-player\") is stored in the ctx as
+   :js1/profile — a display/journal label; the BINDING this function
+   returns is the canonical signal the tool gate and eval routing both
+   read (:js1/binding).
+
+   Trust boundary: the config key is read once here by controller code;
+   the model never sees or sets it.  The preset is hardcoded to
+   :project/develop; the instance key is :main (persistent across turns);
+   the work-id is the run-id, binding one instance per run.
+
+   The sandbox provider, spec, instance, and binding IDs are journaled
+   so a resumed run can verify it reconstructs the same context.
+
+   JS1 is an explicit bounded workflow.  If its SCI dependency is absent,
+   creation FAILS CLOSED — it must never silently select the live REPL."
+  [conn run-id config root]
+  (when (get-in config [:run :js1/profile])
+    (try
+      (require 'samizdat.agent.sandbox)
+      (let [provider-fn (resolve 'samizdat.agent.sandbox/provider)
+            bind-fn     (resolve 'samizdat.agent.sandbox/bind!)
+            desc-fn     (resolve 'samizdat.agent.sandbox/describe)
+            prov (provider-fn {:root root})
+            profile-name (str (get-in config [:run :js1/profile]))
+            binding (bind-fn prov (str run-id)
+                            {:preset :project/develop
+                             :root root
+                             :instance/key :main})
+            desc (desc-fn binding)]
+        ;; Journal the binding identity for resume verification.  The preset
+        ;; keyword is written through data.json, which reads back as a plain
+        ;; string (colon form, or name-only under jolt's port); resume
+        ;; converts it back to the catalog keyword before binding.
+        (journal/note! conn run-id :js1-binding-created
+                       {:data {:profile profile-name
+                               :binding-id (:samizdat.sandbox/binding-id desc)
+                               :instance-id (:samizdat.sandbox/instance-id desc)
+                               :spec-coordinate (:samizdat.sandbox/spec-coordinate desc)
+                               :preset (:samizdat.sandbox/preset desc)}})
+        binding)
+      (catch Throwable e
+        ;; Fail closed either way; a sandbox-domain error (unknown preset,
+        ;; spec conflict, ...) keeps its own diagnostics instead of being
+        ;; relabeled, and only an unavailable sandbox is labeled as such.
+        (if (:samizdat.sandbox/error (ex-data e))
+          (throw e)
+          (throw (ex-info "JS1 sandbox unavailable; refusing live-eval fallback"
+                          {:js1/error :sandbox-unavailable :run-id run-id}
+                          e)))))))
+
 (defn run!
   "Run one branch to completion under the stored loop definition.
   Returns {:status :answer :branch :run-id (:residual)}."
@@ -238,6 +292,9 @@
         ;; The project root the file tools are confined to, and the shell tool
         ;; runs in. Configurable so a run can target another checkout.
         root (or (get-in config [:run :root]) (System/getProperty "user.dir"))
+         ;; JS1 binding: one persistent SCI instance for the whole run when
+         ;; explicitly configured. Its absence is allowed only for non-JS1.
+        js1 (js1-binding conn run-id config root)
         ctx {:conn conn :run-id run-id :config config
              :llm-adapter llm-adapter :llm-config llm-config
              :root root
@@ -247,10 +304,13 @@
              ;; skipping it keeps the common path off git entirely.
              :git-baseline (when (not= loop-nm loop-name) (gitdiff/baseline root))
              ;; A per-run eval session, so defs the agent makes with `eval`
-             ;; persist across its turns (define, then use) — REPL-first
+             ;; persist across their turns (define, then use) — REPL-first
              ;; development against the live image.
-             :repl-session (repl/new-session)
-             :max-turns max-turns}]
+             :repl-session (when-not js1 (repl/new-session))
+             :max-turns max-turns
+             ;; JS1 profile flags — set only here, read by phase-refusal.
+             :js1/profile (when js1 (str (get-in config [:run :js1/profile])))
+             :js1/binding js1}]
     (runs/open-branch! conn run-id {:branch-id "B1"})
     ;; Which loop drove this run, durably: an agent reading a surprising run
     ;; back needs to know which version of itself produced it.
