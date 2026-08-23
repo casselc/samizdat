@@ -73,6 +73,7 @@
             [samizdat.judge-test]
             [samizdat.team-test]
             [samizdat.planner-test]
+            [samizdat.decompose-test]
             [samizdat.feature-test]
             [samizdat.telemetry-test]
             [samizdat.supervisor-test]
@@ -156,6 +157,7 @@
     samizdat.judge-test
     samizdat.team-test
     samizdat.planner-test
+    samizdat.decompose-test
     samizdat.feature-test
     samizdat.telemetry-test
     samizdat.supervisor-test
