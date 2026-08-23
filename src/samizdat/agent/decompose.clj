@@ -112,8 +112,13 @@
       {:status :failed :reason "depth exhausted" :node node :answer (:answer r)}
 
       :else
-      (let [decision (recover node {:last-answer (:answer r) :last-failure (:failure r)
-                                    :depth depth})]
+      (let [decision (or (recover node {:last-answer (:answer r) :last-failure (:failure r)
+                                        :depth depth})
+                         ;; A flaky/unparseable architect must not end the
+                         ;; recursion — degrade to one more attempt with a
+                         ;; generic nudge rather than hard-failing the unit.
+                         {:kind :fresh-approach
+                          :hint "Reconsider the approach and try a different, simpler tactic."})]
         (case (:kind decision)
           :fresh-approach
           (let [r2 (attempt (assoc node :hint (:hint decision)))]

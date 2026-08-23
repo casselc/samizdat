@@ -242,6 +242,13 @@
                         "loop just survived — diagnose it and, if you can, fix it at "
                         "the source with your tools. If a problem is systemic, tune "
                         "the harness.\n\n" dig
+                        (when-let [tried (seq (:feature/tried data))]
+                          (str "\n\n## Approaches already tried (do NOT repeat a losing one)\n"
+                               (str/join "\n"
+                                         (for [{:keys [round strategy outcome]} tried]
+                                           (str "- round " round ": " strategy " → " outcome)))
+                               "\nIf an approach keeps failing, try a DIFFERENT one — SWITCH the "
+                               "implement strategy, tune a prompt, re-decompose — not the same thing again."))
                         "\n\n## Workflows you can switch to, tune, or add to\n"
                         "When the current approach keeps failing — e.g. the "
                         "implementors cannot do the task in one shot — a DIFFERENT "
@@ -333,6 +340,16 @@
             (assoc :feature/decision :revise
                    :feature/revisions (inc rev)
                    :feature/escalate false
+                   ;; the record of what was tried and how it failed, so the
+                   ;; supervisor picks something DIFFERENT next round rather than
+                   ;; repeating a losing approach.
+                   :feature/tried (conj (or (:feature/tried data) [])
+                                        {:round rev
+                                         :strategy (or (:implement-strategy data) "team")
+                                         :outcome (cond hollow "changed no files"
+                                                        (= :revise (:review/decision data)) "review bounced it"
+                                                        (false? (:verify/passed? data)) "tests failed"
+                                                        :else "not verified")})
                    :revise/guidance
                    (str/trim
                     (str (when hollow
