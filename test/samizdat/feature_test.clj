@@ -98,8 +98,10 @@
                 judge/blocking-findings (constantly nil)
                 llm/chat (roles {:review :revise})]     ; reviewer always bounces
     (let [conn (db/open! ":memory:")
+          ;; soft-cap above the hard cap so the strategy-escalation ladder does
+          ;; not fire here — this test is about the fan-out revise mechanics.
           r (run-feature conn {:config {:run {:loop "feature" :subtasks ["alpha"]
-                                              :max-revisions 1 :max-revisions-hard 2}}})]
+                                              :max-revisions 9 :max-revisions-hard 2}}})]
       (testing "an unsatisfiable reviewer keeps the loop solving, then the runaway guard abandons honestly (it never claims a solution it didn't reach)"
         (is (= :abandoned (:status r))))
       (testing "each revise round re-implemented on a versioned branch"
@@ -120,7 +122,7 @@
                 llm/chat (roles {:review :pass :exhaust true})]
     (let [conn (db/open! ":memory:")
           r (run-feature conn {:config {:run {:loop "feature" :subtasks ["alpha"]
-                                              :max-revisions 1 :max-revisions-hard 1}}
+                                              :max-revisions 9 :max-revisions-hard 1}}
                                :max-turns 3})]
       (testing "a revise round happened despite the reviewer passing"
         (is (contains? (branch-ids conn) "W0v1")))
@@ -206,8 +208,10 @@
                 gitdiff/changed-files (constantly [])       ; nothing ever changes
                 llm/chat (roles {:review :pass})]           ; reviewer would pass, but ground truth overrides
     (let [conn (db/open! ":memory:")
+          ;; soft-cap above the hard cap so escalation doesn't fire — this test
+          ;; is about hollow work never shipping, via the fan-out.
           r (run-feature conn {:config {:run {:loop "feature" :subtasks ["alpha"]
-                                              :max-revisions 1 :max-revisions-hard 2}}})]
+                                              :max-revisions 9 :max-revisions-hard 2}}})]
       (is (not= :completed (:status r)) "an empty diff is never reported completed")
       (testing "it kept solving before giving up (revised, did not abandon on the first empty round)"
         (is (contains? (branch-ids conn) "W0v1")))
@@ -241,8 +245,8 @@
                                           :max-revisions 1 :max-revisions-hard 4}}})
         (is (some #(str/includes? % "REVISION CAP REACHED") @caps)
             "at the soft cap the supervisor is told, and asked to decide")
-        (is (contains? (branch-ids conn) "W0v2")
-            "and the loop continued PAST the soft cap of 1 rather than abandoning at it")))))
+        (is (contains? (branch-ids conn) "DT")
+            "and the loop continued PAST the soft cap (escalating to decompose) rather than abandoning at it")))))
 
 (deftest tests-gate-must-pass-to-complete
   (testing "failing tests block completion — gate 2 is real"
@@ -307,3 +311,22 @@
           (is (contains? branches "W0")))
         (testing "after SWITCH: decompose, the next round ran the decompose loop"
           (is (contains? branches "DT") "the decompose root attempt ran"))))))
+
+(deftest a-failing-strategy-auto-escalates-even-without-a-supervisor-switch
+  ;; iteration must not hinge on the LLM supervisor deciding to switch (it may
+  ;; revise passively or exhaust). When a strategy keeps failing its soft-cap
+  ;; rounds, the loop advances the ladder on its own — here team -> decompose.
+  (with-redefs [judge/deterministic-block (constantly nil)
+                judge/parse-verdict (constantly :complete)
+                judge/blocking-findings (constantly nil)
+                gitdiff/baseline (constantly "HEAD")
+                gitdiff/changed-files (constantly [])          ; everything hollow -> keeps failing
+                llm/chat (roles {:review :pass})]              ; supervisor CONTINUEs, never switches
+    (let [conn (db/open! ":memory:")]
+      (run-feature conn {:config {:run {:loop "feature" :subtasks ["alpha"]
+                                        :max-revisions 1 :max-revisions-hard 3}}})
+      (let [branches (branch-ids conn)]
+        (testing "round 0 ran the fan-out"
+          (is (contains? branches "W0")))
+        (testing "the loop auto-advanced to decompose on its own"
+          (is (contains? branches "DT")))))))

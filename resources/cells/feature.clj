@@ -34,6 +34,23 @@
 
 (defn- revision [data] (or (:feature/revisions data) 0))
 
+(def ^:private implement-ladder
+  "The escalation ladder of implement strategies. When one keeps failing its
+  soft-cap rounds and the supervisor has not switched, the loop AUTO-ADVANCES to
+  the next — so iteration through different approaches happens even when the
+  supervisor is passive or can't decide. The supervisor can still switch earlier
+  (or to any rung) with a SWITCH: line; this is the floor, not the ceiling."
+  ["team" "decompose"])
+
+(defn- next-strategy [current]
+  (second (drop-while #(not= % current) implement-ladder)))
+
+(defn- rounds-on-strategy
+  "How many rounds this strategy has been tried (from :feature/tried), counting
+  the round just finished."
+  [data strategy]
+  (inc (count (filter #(= strategy (:strategy %)) (:feature/tried data)))))
+
 (defn- hollow?
   "Ground truth: true when the run KNOWS it changed no files — a done with an
   empty working tree is not a feature, however confidently the workers announced
@@ -313,10 +330,18 @@
           runaway? (and hard-cap (>= rev hard-cap))
           decision (cond pass? :ship
                          (or give-up? runaway?) :abandon
-                         :else :revise)]
+                         :else :revise)
+          ;; Deterministic escalation: if the failing strategy has had its
+          ;; soft-cap rounds and the supervisor didn't switch, advance the ladder
+          ;; so the next round tries a DIFFERENT approach on its own.
+          strategy (or (:implement-strategy data) "team")
+          auto-next (when (and (= decision :revise)
+                               (>= (rounds-on-strategy data strategy) soft-cap))
+                      (next-strategy strategy))]
       (journal/note! conn run-id :route
                      {:data {:decision decision :revision rev :soft-cap soft-cap
-                             :hard-cap hard-cap :hollow hollow
+                             :hard-cap hard-cap :hollow hollow :strategy strategy
+                             :auto-switch auto-next
                              :tests-passed (:verify/passed? data)
                              :gave-up (boolean give-up?) :runaway runaway?}})
       (case decision
@@ -340,6 +365,9 @@
             (assoc :feature/decision :revise
                    :feature/revisions (inc rev)
                    :feature/escalate false
+                   ;; carry the strategy forward, auto-advancing the ladder when
+                   ;; the current one has run its soft-cap rounds.
+                   :implement-strategy (or auto-next strategy)
                    ;; the record of what was tried and how it failed, so the
                    ;; supervisor picks something DIFFERENT next round rather than
                    ;; repeating a losing approach.
