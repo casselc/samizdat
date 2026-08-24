@@ -23,28 +23,58 @@
   branch that never returns its turn, and with five branches in the beam that
   is the whole run. `run` kills the process tree on timeout rather than
   leaving an orphan holding a pipe."
-  (:require [jolt.process :as p]))
+  (:require [jolt.ffi :as ffi]
+            [jolt.process :as p]))
+
+(ffi/defcfn ^:private c-kill "kill" [:int :int] :int)
 
 (def ^:private sigterm-grace-ms
   "How long a process gets to die of SIGTERM before it is sent SIGKILL."
   2000)
 
-(defn- reap!
-  "Kill `proc` and do not return until it is actually gone.
+(defn- descendant-pids
+  "Every live process below `p`, root excluded. jolt's ProcessHandle can
+  ENUMERATE the tree, but its destroy never signals (probed: a plain sleep
+  survives a direct ProcessHandle.destroy), so the killing here is done by
+  pid through kill(2). Must run before the root dies — afterwards the
+  children reparent to init and disappear from descendants()."
+  [^java.lang.Process p]
+  (try
+    (mapv (fn [h] (.pid ^java.lang.ProcessHandle h))
+          (iterator-seq (.iterator (.descendants (.toHandle p)))))
+    (catch Throwable _ [])))
 
-  SIGTERM first, then SIGKILL if it is still alive. `destroy-tree` sends only
-  SIGTERM, and the whole point of a timeout is that the process is already not
-  behaving, so treating its cooperation as optional is the only honest
-  approach. Same principle the rest of the loop follows: a stop path that
-  depends on the component agreeing to stop is not a stop path."
+(defn- kill!
+  "kill(2) on a pid; signal 0 probes existence. Never throws."
+  [pid sig]
+  (try (c-kill pid sig) (catch Throwable _ -1)))
+
+(defn- reap!
+  "Kill `proc`'s whole tree and do not return until the root is gone.
+
+  SIGTERM the tree first, then SIGKILL whatever is still alive — including
+  processes that trapped TERM, which outlived the old root-only escalation as
+  orphans (review3 #8). p/destroy-tree is deliberately NOT used: on jolt it
+  signals through ProcessHandle.destroy, which silently does nothing, so its
+  tree-wide TERM never landed at all.
+
+  Same principle the rest of the loop follows: a stop path that depends on
+  the component agreeing to stop is not a stop path."
   [proc]
-  (let [^java.lang.Process p (:proc proc)]
-    (try (p/destroy-tree proc) (catch Throwable _ nil))
-    (try
-      (when-not (.waitFor p sigterm-grace-ms java.util.concurrent.TimeUnit/MILLISECONDS)
-        (.destroyForcibly p)
-        (.waitFor p sigterm-grace-ms java.util.concurrent.TimeUnit/MILLISECONDS))
-      (catch Throwable _ nil))))
+  (let [^java.lang.Process p (:proc proc)
+        root (try (.pid p) (catch Throwable _ -1))]
+    (doseq [pid (cons root (descendant-pids p))] (kill! pid 15))
+    (when-not (try (.waitFor p sigterm-grace-ms java.util.concurrent.TimeUnit/MILLISECONDS)
+                   (catch Throwable _ false))
+      ;; Still alive. SIGKILL the children BEFORE the root — enumerated now,
+      ;; because once the root dies they reparent to init and vanish from
+      ;; descendants(). Re-enumerated here, not reused: the tree may have
+      ;; spawned between the TERM and the KILL.
+      (doseq [pid (descendant-pids p)] (kill! pid 9))
+      (kill! root 9)
+      (try (.destroyForcibly p) (catch Throwable _ nil))
+      (try (.waitFor p sigterm-grace-ms java.util.concurrent.TimeUnit/MILLISECONDS)
+           (catch Throwable _ nil)))))
 
 (defn run
   "Run `args` with `input` on stdin, capturing stdout and stderr.
