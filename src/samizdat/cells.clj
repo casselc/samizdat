@@ -44,11 +44,24 @@
             ;; (samizdat.cell-prelude explains the -dirty-build failure it fixes).
             [samizdat.cell-prelude]))
 
+(defn resource-dir
+  "Resolve the shipped cells dir from the classpath, so a caller that is not
+  running from the project root still finds resources/cells."
+  []
+  (when-let [url (io/resource "cells")]
+    (.getPath url)))
+
 (def default-dirs
   "Where cells live, lowest precedence first: the shipped library, then a
   project's own overrides. A later dir's cell of the same id wins (it loads
-  last), so a project can replace a shipped cell without touching it."
-  ["resources/cells" ".samizdat/cells"])
+  last), so a project can replace a shipped cell without touching it.
+
+  The shipped entry resolves through the classpath (review3 #11): a built
+  binary started outside the project root must still find the cells it
+  ships — a cwd-relative `resources/cells` there resolves to nothing and
+  the kernel silently registers zero cells. The override dir stays
+  cwd-relative: it belongs to the project being worked on."
+  [(or (resource-dir) "resources/cells") ".samizdat/cells"])
 
 ;; Which cells this loader registered, and from which file — introspection for
 ;; the mutation protocol and for `dev`/debugging. {cell-id {:source path}}.
@@ -141,10 +154,3 @@
   transactional guarantee as load-cells!."
   ([] (load-cells!))
   ([dirs] (load-cells! dirs)))
-
-(defn resource-dir
-  "Resolve the shipped cells dir from the classpath, so a caller that is not
-  running from the project root still finds resources/cells."
-  []
-  (when-let [url (io/resource "cells")]
-    (.getPath url)))

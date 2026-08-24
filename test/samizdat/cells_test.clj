@@ -94,6 +94,16 @@
 
 ;; --- the shipped loop cells load from resources -----------------------------
 
+(deftest the-shipped-cells-dir-follows-the-classpath
+  ;; review3 #11: default-dirs carried the relative "resources/cells", so a
+  ;; built binary started outside the project root found no cells and ran no
+  ;; loop — silently, with zero registrations. The shipped entry must be the
+  ;; classpath answer (which follows the binary), not a cwd-relative guess.
+  (let [rdir (cells/resource-dir)]
+    (is (some? rdir) "the classpath carries resources/cells")
+    (is (= rdir (first cells/default-dirs))
+        "default-dirs' shipped entry is the classpath-resolved dir")))
+
 (deftest the-loop-cells-load-from-resources
   ;; No cell is compiled into src: loading from resources/cells registers the
   ;; whole loop. This is the acceptance — the kernel is cell-agnostic.
