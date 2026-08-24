@@ -763,39 +763,60 @@
 ;; --- safe state -------------------------------------------------------------
 
 (deftest safe-state-coverage-gate
-  ;; DS1's third rung. dirge's version restores from a snapshot store only
-  ;; after proving against git that the store covers every file changed since
-  ;; green, because restoring around an untracked mutation produces a tree that
-  ;; never existed. The analogue is an anonymous Prolog assert: permanent,
-  ;; unnamed, and not undoable.
-  (let [green [{:code "a." :name "r1"} {:code "b." :name "r2"}]]
+  ;; DS1's third rung. dirge's version restored from a snapshot store only
+  ;; after proving against git that the store covered every file changed
+  ;; since green. In this harness the journal IS the replay log — resume
+  ;; rebuilds branches from it — and it is append-only, so the green point
+  ;; is the turn cursor at the confirmation and coverage reduces to the
+  ;; log still reaching that cursor.
+  (testing "no green point means nothing to fall back to"
+    (is (false? (:ok (state/snapshot-covers? (branch-with)))))
+    (is (str/includes? (:reason (state/snapshot-covers? (branch-with)))
+                       "no confirmed result")))
 
-    (testing "no green point means nothing to fall back to"
-      (is (false? (:ok (state/snapshot-covers? (branch-with) green)))))
+  (testing "covered: the turn log still reaches the green point"
+    (let [b (state/mark-green (branch-with :turns (vec (repeat 3 {}))))
+          now (assoc b :turns (vec (repeat 6 {})))]
+      (is (:ok (state/snapshot-covers? now)))
+      (is (= 3 (:rewinding (state/snapshot-covers? now)))
+          "three turns sit between the branch and its confirmed point")))
 
-    (testing "covered when everything since the green point is named"
-      (let [b (state/mark-green (branch-with) green)
-            now (conj green {:code "c." :name "r3"})]
-        (is (:ok (state/snapshot-covers? b now)))
-        (is (= 1 (:rewinding (state/snapshot-covers? b now))))))
+  (testing "DECLINES when the turn log no longer reaches the green point"
+    (let [b (state/mark-green (branch-with :turns (vec (repeat 5 {}))))
+          pruned (assoc b :turns (vec (repeat 2 {})))]
+      (is (false? (:ok (state/snapshot-covers? pruned))))
+      (is (str/includes? (:reason (state/snapshot-covers? pruned))
+                         "no longer reaches"))))
 
-    (testing "DECLINES when an anonymous assert landed since the green point"
-      (let [b (state/mark-green (branch-with) green)
-            now (conj green {:code "c."})]
-        (is (false? (:ok (state/snapshot-covers? b now))))
-        (is (str/includes? (:reason (state/snapshot-covers? b now)) "anonymous"))))
+  (testing "the rung is harder to trip than a cull"
+    (let [b (state/mark-green (branch-with :turns (vec (repeat 2 {}))))]
+      (is (not (state/safe-state-due? (assoc b :consecutive-failures 3) 3)))
+      (is (state/safe-state-due? (assoc b :consecutive-failures 6) 3))))
 
-    (testing "declines when the snapshot is not a prefix of the current log"
-      (let [b (state/mark-green (branch-with) green)]
-        (is (false? (:ok (state/snapshot-covers? b [{:code "z." :name "other"}]))))))
+  (testing "and never trips without a green point at all"
+    (is (not (state/safe-state-due? (branch-with :consecutive-failures 99) 3)))))
 
-    (testing "the rung is harder to trip than a cull"
-      (let [b (state/mark-green (branch-with) green)]
-        (is (not (state/safe-state-due? (assoc b :consecutive-failures 3) 3)))
-        (is (state/safe-state-due? (assoc b :consecutive-failures 6) 3))))
+(deftest confirmation-marks-the-green-point
+  ;; The store-checkpoint version the old stub waited for: the journal is
+  ;; the checkpoint, and a confirmed artifact stamps the cursor into it.
+    (with-redefs [tools/run-tool (fn [{:keys [branch]}]
+                                 {:branch branch
+                                  :result "confirmed"
+                                  :artifact {:claim "c" :claim-status :confirmed}})]
+    (let [branch (assoc (branch-with) :turns (vec (repeat 4 {})))
+          r (aloop/tool-step {} branch 5 {:name "thesis" :args {:claim "c"}})]
+      (is (= 5 (:green-snapshot (:branch r)))
+          "the cursor is the turn count at the confirmation")
+      (is (:ok (state/snapshot-covers? (:branch r))))))
 
-    (testing "and never trips without a green point at all"
-      (is (not (state/safe-state-due? (branch-with :consecutive-failures 99) 3))))))
+  (testing "an unconfirmed artifact does not move the green point"
+    (with-redefs [tools/run-tool (fn [{:keys [branch]}]
+                                   {:branch branch
+                                    :result "measured"
+                                    :artifact {:claim "c" :claim-status :empirical}})]
+      (let [branch (assoc (branch-with) :turns (vec (repeat 4 {})))
+            r (aloop/tool-step {} branch 5 {:name "thesis" :args {:claim "c"}})]
+        (is (nil? (:green-snapshot (:branch r))))))))
 
 ;; --- forking ----------------------------------------------------------------
 
@@ -1128,7 +1149,7 @@
   ;; that cannot produce its text is not a quiet gate, it is a broken one.
   (let [ctx {:branch (branch-with :turns (vec (repeat 5 {}))
                                   :turns-since-progress 4
-                                  :green-at-turn 2)
+                                  :green-snapshot 2)
              :max-turns 40
              :done-block "blocked because ..."
              :directive {:payload "a human said so"}

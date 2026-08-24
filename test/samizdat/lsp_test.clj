@@ -163,3 +163,13 @@
       (Thread/sleep 200)
       (is (nil? (get @reg (:root c)))
           "the dead client is evicted so the next call starts a fresh one"))))
+
+(deftest shutdown-all-empties-the-registry
+  ;; review4: shutdown! existed for single roots but nothing called it —
+  ;; system/stop! now drains every lazily-spawned client through this.
+  (let [reg (deref (var client/clients))]
+    (swap! reg assoc "/tmp/r1" {:opened (atom #{}) :proc {:proc nil}}
+                       "/tmp/r2" {:opened (atom #{}) :proc {:proc nil}})
+    (client/shutdown-all!)
+    (is (empty? @(deref (var client/clients)))
+        "every entry is gone, and the junk fake clients did not throw")))

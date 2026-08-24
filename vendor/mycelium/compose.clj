@@ -102,6 +102,17 @@
   [[:success (fn [data] (nil? (:mycelium/error data)))]
    [:failure (fn [data] (some? (:mycelium/error data)))]])
 
+(defn- aggregate-effects
+  "A composed workflow's own declaration is the union of its cells': pure
+   only when every cell is pure, and a cell that never declared leaves the
+   wrapper undeclared — the wrapper must not paper over a gap it inherited."
+  [workflow]
+  (let [infos (vals (wf/workflow-effects workflow))]
+    (cond
+      (some :undeclared infos) {:undeclared true}
+      (every? :pure infos)     {:pure true}
+      :else {:effects (into #{} (mapcat :effects infos))})))
+
 (defn workflow->cell
   "Wraps a workflow definition as a cell spec.
    The resulting cell runs the child workflow to completion and returns
@@ -139,12 +150,13 @@
                        (if (future? result) @result result))
                      (catch Exception e
                        (assoc data :mycelium/error (ex-message e)))))]
-     {:id                 cell-id
-      :handler            handler
-      :schema             {:input (:input schema-map)
-                           :output (infer-workflow-output-schema
-                                    workflow schema-map opts)}
-      :default-dispatches workflow-cell-dispatches})))
+     (merge (aggregate-effects workflow)
+             {:id                 cell-id
+              :handler            handler
+              :schema             {:input (:input schema-map)
+                                   :output (infer-workflow-output-schema
+                                            workflow schema-map opts)}
+              :default-dispatches workflow-cell-dispatches}))))
 
 (defn register-workflow-cell!
   "Creates a workflow-as-cell and registers it in the cell registry.

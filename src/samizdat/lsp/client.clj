@@ -195,6 +195,14 @@
     (try (.destroyForcibly ^java.lang.Process (:proc (:proc c))) (catch Throwable _ nil))
     (swap! clients dissoc root)))
 
+(defn shutdown-all!
+  "Stop every spawned server. system/stop! calls this so process teardown
+  does not strand clojure-lsp children the tool surface started lazily."
+  []
+  (locking clients
+    (doseq [root (vec (keys @clients))]
+      (shutdown! root))))
+
 ;; ---- document + narrow ops ------------------------------------------------
 
 (defn- ensure-open! [client path]

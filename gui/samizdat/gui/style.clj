@@ -22,9 +22,10 @@
   Pure and GL-free so the headless suite covers it. Two independent signals
   are encoded, because collapsing them loses the one you needed:
 
-    SHAPE and FILL say which engine the branch is working in — square for
-    Prolog, diamond for SMT, triangle for Lean, hexagon for Octave, circle
-    while it is doing harness work (thesis, review, audit).
+    SHAPE and FILL say what kind of work the branch is doing — square when it
+    is making claims (thesis, done), diamond when it edits files or the
+    harness itself, triangle when it reads (read_file, grep, lsp), hexagon
+    when it executes (shell, eval), circle for everything else.
 
     RING says the branch's status — alive, culled, exhausted, shipped.
 
@@ -41,34 +42,36 @@
    :seed      [0.68 0.45 0.88]})
 
 (def tool-color
-  {:prolog [0.35 0.68 0.92]
-   :smt    [0.95 0.72 0.30]
-   :lean   [0.72 0.55 0.95]
-   :octave [0.35 0.85 0.75]
-   :meta   [0.72 0.74 0.80]
-   :seed   [0.68 0.45 0.88]})
+  {:claim [0.35 0.68 0.92]
+    :edit  [0.95 0.72 0.30]
+    :read  [0.72 0.55 0.95]
+    :run   [0.35 0.85 0.75]
+    :meta  [0.72 0.74 0.80]
+    :seed  [0.68 0.45 0.88]})
 
 (def tool-shape
-  {:prolog :square
-   :smt    :diamond
-   :lean   :triangle
-   :octave :hexagon
-   :meta   :circle
-   :seed   :circle})
+  {:claim :square
+    :edit  :diamond
+    :read  :triangle
+    :run   :hexagon
+    :meta  :circle
+    :seed  :circle})
 
 (def edge-color [0.42 0.42 0.48])
 (def select-color [1.0 1.0 1.0])
 
 (defn engine
-  "The engine family a tool name belongs to. Harness-level tools (thesis,
-  review, audit, done) are :meta — the branch is thinking, not proving."
+  "The work family a tool name belongs to — every name here must be a
+  registered run-tool (pinned by the vocabulary test in agent-test). Claim
+  moves are square, edits diamond, reads triangle, execution hexagon;
+  bookkeeping (task, message, memory tools) is :meta."
   [tool]
   (let [t (str tool)]
     (cond
-      (#{"add_rule" "retract_rule" "verify"} t) :prolog
-      (#{"verify_smt" "verify_template"} t) :smt
-      (or (#{"verify_lean" "lean_search"} t) (.startsWith t "proof_")) :lean
-      (#{"octave_eval" "verify_octave" "measure"} t) :octave
+      (#{"thesis" "done" "give_up" "branch_theses" "complete"} t) :claim
+      (#{"edit_file" "write_file" "reload_cells" "cells" "manifest"} t) :edit
+      (#{"read_file" "grep" "lsp" "fetch_artifact" "fetch_turn" "introspect" "doc" "skill"} t) :read
+      (#{"shell" "eval"} t) :run
       :else :meta)))
 
 (def claim-color

@@ -429,21 +429,25 @@
                                " different tool, a smaller claim, or a"
                                " different encoding of the same one."))
                  result)
-        branch (if-let [a (:artifact result)]
-                 (cond-> (state/add-artifact branch (assoc a :turn turn))
-                   ;; A banked sketch is the way out of the explore prologue:
-                   ;; from the turn it lands, verification is open (vf-b25).
-                   (= :sketch (:claim-status a))
-                   (state/enter-build turn)
-                   ;; And anything banked at all ends a reframe: the withheld
-                   ;; approach could not have produced it (vf-9wx).
-                   (:reframe-entered-turn branch)
-                   (state/clear-reframe))
-                 branch)]
-    ;; A confirmation used to mark the green point the safe-state rung falls
-    ;; back to. With no engine session there is nothing to snapshot; the
-    ;; coding analogue (a store checkpoint) re-arms this rung when the
-    ;; mutation protocol lands.
+         branch (if-let [a (:artifact result)]
+                  (cond-> (state/add-artifact branch (assoc a :turn turn))
+                    ;; A banked sketch is the way out of the explore prologue:
+                    ;; from the turn it lands, verification is open (vf-b25).
+                    (= :sketch (:claim-status a))
+                    (state/enter-build turn)
+                    ;; And anything banked at all ends a reframe: the withheld
+                    ;; approach could not have produced it (vf-9wx).
+                    (:reframe-entered-turn branch)
+                    (state/clear-reframe)
+                    ;; An engine confirmation is the green point the
+                    ;; safe-state rung falls back to.
+                    (= :confirmed (:claim-status a))
+                    (state/mark-green))
+                  branch)]
+    ;; A confirmation marks the green point the safe-state rung falls back
+    ;; to. The snapshot is the turn cursor: the journal is the store
+    ;; checkpoint — append-only, and what resume replays from — so the
+    ;; cursor is all the rung needs to name a rewindable state.
     {:branch branch :result result :tool tool}))
 
 (defn journal-step!
@@ -517,10 +521,10 @@
         branch (drain-directives! conn run-id branch turn)]
     (if (:done? result)
       (state/add-message branch "user" (truncate (:result result)))
-      ;; No green snapshots are taken without an engine session, so
-      ;; safe-state-due? stays false and the safe-state gate stays dormant
-      ;; until the store-checkpoint version arrives.
-      (let [coverage nil
+      ;; Coverage answers whether the safe-state rung's fallback is honest:
+      ;; the green cursor still points into a turn log the journal can
+      ;; replay up to.
+      (let [coverage (state/snapshot-covers? branch)
             decision (arbiter/decide
                       {:branch branch
                        :max-turns max-turns

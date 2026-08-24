@@ -195,6 +195,10 @@ recall({query}) or recall({id})
     first, one per line. No matches means nothing is stored for it yet.
     With an {id} instead, return that one memory's full content — this is
     how you expand a breadcrumb index entry.
+forget({id})
+    Delete one memory by id — for when recall surfaces a fact you now
+    know is wrong. Removal is total; re-record the correction with
+    remember afterward.
 message({action, ...})
     A durable mailbox for branches working the same run. Actions:
       send {body, to?}   Leave a message. With to (a branch id) it is

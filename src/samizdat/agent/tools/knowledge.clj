@@ -17,7 +17,8 @@
 (def ^:private usage
   (str "`remember` stores a fact for later runs: {content, kind?}. "
        "`recall` has two modes: {query} searches what was stored; "
-       "{id} returns one memory's full text by its k- id."))
+       "{id} returns one memory's full text by its k- id. "
+       "`forget` deletes one memory: {id}."))
 
 (defn- memory-line [m]
   (str (:id m) " [" (:kind m) "] " (:content m)))
@@ -28,6 +29,13 @@
     (let [id (knowledge/remember! conn {:content (base/arg ctx :content)
                                         :kind (base/arg ctx :kind)})]
       (base/ok branch (str "Remembered " id ": " (base/arg ctx :content))))))
+
+(defmethod base/run-tool "forget" [{:keys [branch conn] :as ctx}]
+  (if-let [miss (base/missing ctx :id)]
+    (base/malformed branch (str miss "\n\n" usage))
+    (if (pos? (knowledge/forget! conn (base/arg ctx :id)))
+      (base/ok branch (str "Forgot " (base/arg ctx :id) "."))
+      (base/fail branch (str "No memory with id " (base/arg ctx :id) ".")))))
 
 (defmethod base/run-tool "recall" [{:keys [branch conn] :as ctx}]
   (if-let [id (base/arg ctx :id)]

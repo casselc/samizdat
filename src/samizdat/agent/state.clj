@@ -655,48 +655,42 @@
 ;; --- safe state -------------------------------------------------------------
 ;;
 ;; DS1's third failure rung, which dirge implemented as a git-backed restore.
-;; The branch analogue is the Prolog session's ordered assert log at the moment
-;; of the last confirmation. Restoring means replaying that log into a fresh
-;; process, which is what `retract` alone cannot give: an anonymous assert has
-;; no name to take back.
+;; The branch analogue is the turn cursor at the moment of the last
+;; confirmation: the journal is the replay log resume already rebuilds
+;; branches from, and it is append-only, so the turns up to the cursor are
+;; by construction a state the branch was in.
 
 (defn mark-green
-  "Record the session state at a confirmation. The snapshot is the replay log,
-  not a copy of the process."
-  [branch snapshot]
-  (assoc branch :green-snapshot snapshot :green-at-turn (count (:turns branch))))
+  "Record the branch state at a confirmation. The snapshot is the turn
+  cursor — an index into the journal's replay log, not a copy of anything."
+  [branch]
+  (assoc branch :green-snapshot (count (:turns branch))))
 
 (defn snapshot-covers?
-  "Whether restoring to the green point would produce a tree that ever existed.
+  "Whether falling back to the green point produces a state that ever existed.
 
   This is the coverage gate, and it is the part that matters. dirge's version
-  declines when a `sed -i` mutated a file outside the snapshot store, because
-  restoring around it yields a state that never was. The analogue here is an
-  ANONYMOUS assert made since the green point: the replay log records it, but
-  it is permanent and unnamed, so a branch that reached its current state
-  partly through untracked mutation cannot be honestly rewound.
+  declined when a `sed -i` mutated a file outside the snapshot store, because
+  restoring around it yielded a state that never was. This surface has no
+  un-journalled mutation path — every effect a branch can produce rides a
+  recorded tool turn — so coverage reduces to the turn log still reaching
+  the green cursor: replaying the first N turns is exactly the branch as it
+  stood at the confirmation.
 
   Declining is the safe answer. A partially-restored session is worse than no
   restore, because it is a state nobody reasoned about."
-  [branch current-log]
-  (let [green (:green-snapshot branch)]
+  [branch]
+  (let [green (:green-snapshot branch)
+        now   (count (:turns branch))]
     (cond
-      (nil? green) {:ok false :reason "no confirmed result to fall back to"}
+      (nil? green)
+      {:ok false :reason "no confirmed result to fall back to"}
 
-      (not= green (take (count green) current-log))
-      {:ok false :reason (str "the session log diverges from the snapshot before"
-                              " the green point, so the snapshot is not a prefix"
-                              " of the current state")}
+      (> green now)
+      {:ok false :reason "the turn log no longer reaches the confirmed point — the journal was pruned or rewritten, and replaying past it would produce a session that never existed"}
 
       :else
-      (let [since (drop (count green) current-log)
-            untracked (remove :name since)]
-        (if (seq untracked)
-          {:ok false
-           :reason (str (count untracked) " anonymous assert(s) since the last"
-                        " confirmation. They are permanent and unnamed, so"
-                        " rewinding would produce a session that never existed.")}
-          {:ok true :rewinding (count since)})))))
+      {:ok true :rewinding (- now green)})))
 
 (defn safe-state-due?
   "Twice the cull threshold's worth of consecutive failures, with a green point

@@ -96,7 +96,7 @@
     :priority 2
     :budget :max-safe-state-aborts
     :doc "DS1's third failure rung. The branch has failed repeatedly since a
-          confirmation, so the rules it added since are the suspect, not the
+          confirmation, so what it changed since is the suspect, not the
           claim. Advisory by default: it names the fallback rather than
           performing it, because a restore that is not fully covered produces a
           session that never existed."
@@ -105,15 +105,16 @@
     :message (fn [{:keys [branch safe-state-coverage]}]
                (str (prompt "safe-state")
                     "\n\nYour last confirmed result was at turn "
-                    (:green-at-turn branch) ". "
+                    (:green-snapshot branch) ". "
                     (if (:ok safe-state-coverage)
-                      (str "Everything added since is named and retractable, so"
-                           " the harness can rewind cleanly on request.")
-                      (str "The harness CANNOT rewind for you: "
+                      (str "Every turn since is journalled, so replaying up to"
+                           " that point is a state the branch actually occupied"
+                           " — you can retrace it by hand turn by turn.")
+                      (str "The turn log no longer reaches that point: "
                            (:reason safe-state-coverage)
-                           " Undo by hand with retract_rule, or start a new"
-                           " named rule set."))))
-    :prediction (fn [_] "the branch retracts, changes technique, or ships what it has")
+                           " Start from what the journal still shows, or ship"
+                           " what you have."))))
+    :prediction (fn [_] "the branch changes technique, or ships what it has")
     :window 3}
 
    {:gate :last-call

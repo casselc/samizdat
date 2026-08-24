@@ -26,7 +26,9 @@
             [clojure.string :as str]
             [clojure.test :refer [deftest testing is]]
             [samizdat.agent.beam :as beam]
+            [samizdat.agent.gates :as gates]
             [samizdat.control :as control]
+            [samizdat.system :as system]
             [samizdat.agent.loop :as aloop]
             [samizdat.agent.state :as state]
             [samizdat.api.control :as api-control]
@@ -192,3 +194,14 @@
         (is (= ["b2-work"] (mapv :result (control/watch c rid)))))
       (testing "an explicit branch still narrows"
         (is (= ["b1-work"] (mapv :result (control/watch c rid 8 "B1"))))))))
+
+(deftest start-reloads-gate-thresholds
+  ;; review4: gates.edn is cached in an atom that survives restart!, so an
+  ;; edited threshold never took effect without a process restart. start!
+  ;; reloads it now — this test only pins the call.
+  (let [called (atom 0)]
+    (with-redefs [gates/reload-config! (fn [] (swap! called inc))]
+      (system/start! (fn [_] {:status 200 :headers {} :body "ok"})
+                     {:db {:path ":memory:"} :http {:port 0}})
+      (system/stop!))
+    (is (= 1 @called) "start! refreshed the cached gate thresholds")))

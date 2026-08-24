@@ -118,5 +118,9 @@
   (when-let [b (runs/get-branch conn run-id branch-id)]
     {:branch (update b :thesis parse-json)
      :turns (journal/branch-turns conn run-id branch-id)
+     ;; Gates that fired but whose predictions never settled — the run's own
+     ;; account of advice that went unheeded, surfaced where the turns it
+     ;; targeted are read.
+     :unsettled-gates (journal/unsettled-gates conn run-id branch-id)
      :artifacts (mapv #(update % :witness parse-json)
                       (journal/artifacts conn run-id branch-id))}))

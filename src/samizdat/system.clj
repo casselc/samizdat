@@ -35,8 +35,10 @@
             [jolt.time]
             [jolt.http.platform :as platform]
             [ring-chez.adapter :as adapter]
+            [samizdat.agent.gates :as gates]
             [samizdat.config :as config]
             [samizdat.llm.registry :as registry]
+            [samizdat.lsp.client :as lsp-client]
             [samizdat.store.db :as db]
             [samizdat.store.runs :as runs]))
 
@@ -75,6 +77,11 @@
    (when (started?)
      (throw (ex-info "system already started; call stop! first" {})))
    (let [cfg (config/load-config overrides)
+         ;; Gate thresholds are cached in an atom that survives stop!/start!,
+         ;; so a restart would keep serving the pre-edit gates.edn. Reload on
+         ;; every start: long-lived interpreted sessions pick up threshold
+         ;; edits without a process restart.
+         _ (gates/reload-config!)
          ;; Process-wide, and set here rather than in core so that every entry
          ;; point gets it: the tests, the benchmark runner and a REPL session
          ;; all bring the system up through start! without going through -main.
@@ -101,6 +108,7 @@
   []
   (when-let [s @system]
     (doseq [[label f] [["http server" #(adapter/stop-server (:server s))]
+                       ["lsp clients" #(lsp-client/shutdown-all!)]
                        ["database" #(db/close (:conn s))]]]
       (try (f) (catch Throwable e (log/warn "stopping" label "failed:" (ex-message e)))))
     (reset! system nil)

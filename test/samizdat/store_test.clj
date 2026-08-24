@@ -906,3 +906,19 @@
       (is (pos? (:n (db/fetch-one c ["SELECT COUNT(*) AS n FROM events
                                       WHERE run_id = ?" recent])))
           "a just-finished run keeps its events for the tail"))))
+
+(deftest branch-detail-surfaces-unsettled-gates
+  ;; review4: unsettled-gates was a store fn no production reader called.
+  ;; The branch panel is its natural consumer — advice that fired and was
+  ;; never heeded belongs next to the turns it targeted.
+  (with-db [c]
+    (let [rid (runs/start-run! c {:problem "p"})]
+      (runs/open-branch! c rid {:branch-id "B1"})
+      (journal/record-gate! c rid {:branch-id "B1" :turn 2 :gate :stuck
+                                   :priority 2 :message "m" :prediction "p"
+                                   :window 3})
+      (let [d (api-runs/branch-detail c rid "B1")]
+        (is (= 1 (count (:unsettled-gates d))))
+        (is (= "stuck" (:gate (first (:unsettled-gates d)))))
+        (is (= #{:branch :turns :unsettled-gates :artifacts}
+               (set (keys d))))))))

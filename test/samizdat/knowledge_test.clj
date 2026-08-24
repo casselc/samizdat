@@ -2,6 +2,7 @@
   (:require [clojure.test :refer [deftest is testing use-fixtures]]
             [clojure.string :as str]
             [samizdat.store.db :as db]
+            [samizdat.agent.tools.base :as base]
             [samizdat.store.knowledge :as knowledge]))
 
 (def conn (atom nil))
@@ -77,3 +78,21 @@
     (is (string? idx))
     (is (str/includes? idx "alpha"))))
 
+(deftest forget-tool-deletes-and-reports
+  ;; review4: the store fn existed but no surface reached it — recall could
+  ;; surface a wrong fact with no way to drop it.
+  (let [id (knowledge/remember! @conn {:content "the earth is flat"})]
+    (let [r (base/run-tool {:branch {:id "B1"} :conn @conn
+                            :tool-name "forget" :args {:id id}})]
+      (is (= :neutral (:category r)) "forgetting is bookkeeping, like remember")
+      (is (str/includes? (:result r) "Forgot")))
+    (is (nil? (knowledge/get-by-id @conn id)) "the memory is gone"))
+  (testing "an unknown id fails honestly"
+    (let [r (base/run-tool {:branch {:id "B1"} :conn @conn
+                            :tool-name "forget" :args {:id "k-none"}})]
+      (is (= :failure (:category r)))
+      (is (str/includes? (:result r) "No memory"))))
+  (testing "a missing id argument is malformed, not a crash"
+    (let [r (base/run-tool {:branch {:id "B1"} :conn @conn
+                            :tool-name "forget" :args {}})]
+      (is (str/includes? (:result r) "Missing")))))

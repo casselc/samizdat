@@ -374,3 +374,43 @@
                                         :output [:map [:y :int]]})]
       ;; Output should use the caller's schema for :success
       (is (= [:map [:y :int]] (get-in (second (get-in spec [:schema :output])) [:success]))))))
+
+;; ===== composed workflows declare aggregated effects =====
+
+(deftest composed-workflow-declares-aggregated-effects-test
+  (letfn [(cell! [id decl]
+            (defmethod cell/cell-spec id [_]
+              (merge {:id id
+                      :handler (fn [_ d] d)
+                      :schema {:input [:map] :output [:map]}}
+                     decl)))
+          (wf2 [a b]
+            {:cells {:start a :next b}
+             :edges {:start {:go :next} :next {:done :end}}
+             :dispatches {:start [[:go (constantly true)]]
+                          :next [[:done (constantly true)]]}})]
+    (testing "all-pure cells make the wrapper pure"
+      (cell! :comp/pure-a {:pure true})
+      (cell! :comp/pure-b {:pure true})
+      (is (= {:pure true}
+             (cell/effects-info
+              (compose/workflow->cell :comp/w-pure (wf2 :comp/pure-a :comp/pure-b) {})))))
+
+    (testing "effectful cells union into the wrapper's declaration"
+      (cell! :comp/eff-a {:effects [:fs]})
+      (cell! :comp/eff-b {:effects [:net :fs]})
+      (is (= {:effects #{:fs :net}}
+             (cell/effects-info
+              (compose/workflow->cell :comp/w-eff (wf2 :comp/eff-a :comp/eff-b) {})))))
+
+    (testing "pure and effectful mix to the union"
+      (cell! :comp/mix-a {:pure true})
+      (is (= {:effects #{:fs}}
+             (cell/effects-info
+              (compose/workflow->cell :comp/w-mix (wf2 :comp/mix-a :comp/eff-a) {})))))
+
+    (testing "an undeclared cell leaves the wrapper undeclared"
+      (cell! :comp/quiet-a nil)
+      (is (= {:undeclared true}
+             (cell/effects-info
+              (compose/workflow->cell :comp/w-quiet (wf2 :comp/quiet-a :comp/eff-a) {})))))))

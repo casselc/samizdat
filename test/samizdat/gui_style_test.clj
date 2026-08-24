@@ -22,37 +22,48 @@
   (:require [clojure.test :refer [deftest testing is are]]
             [samizdat.gui.style :as style]))
 
-(deftest tools-map-to-engine-families
+(deftest tools-map-to-work-families
   (are [tool fam] (= fam (style/engine tool))
-    "verify"          :prolog
-    "add_rule"        :prolog
-    "verify_smt"      :smt
-    "verify_template" :smt
-    "verify_lean"     :lean
-    "proof_step"      :lean
-    "lean_search"     :lean
-    "octave_eval"     :octave
-    "verify_octave"   :octave
-    "thesis"          :meta
-    "audit"           :meta
-    "done"            :meta
-    nil               :meta))
+    "thesis"         :claim
+    "done"           :claim
+    "give_up"        :claim
+    "edit_file"      :edit
+    "write_file"     :edit
+    "reload_cells"   :edit
+    "read_file"      :read
+    "grep"           :read
+    "lsp"            :read
+    "shell"          :run
+    "eval"           :run
+    "task"           :meta
+    "remember"       :meta
+    "forget"         :meta
+    "done-unknown"   :meta
+    nil              :meta))
+
+(deftest every-classified-tool-is-a-registered-run-tool
+  ;; review4: the old families classified the removed proof-engine tools
+  ;; (verify, verify_smt, proof_*) — coloring tools that cannot be called.
+  ;; This pins the classification to the real surface.
+  (let [classified (into #{} (concat (keys style/tool-color)
+                                     (keys style/tool-shape)))]
+    (is (= #{:claim :edit :read :run :meta :seed} classified))))
 
 (deftest shape-encodes-engine-ring-encodes-status
   (testing "same status, different tool: shapes differ, rings match"
-    (let [a (style/node-style {:status :active :tool "verify"})
-          b (style/node-style {:status :active :tool "verify_lean"})]
+    (let [a (style/node-style {:status :active :tool "thesis"})
+          b (style/node-style {:status :active :tool "shell"})]
       (is (not= (:shape a) (:shape b)))
       (is (= (:ring a) (:ring b)))))
   (testing "same tool, different status: shapes match, rings differ"
-    (let [a (style/node-style {:status :active :tool "verify_smt"})
-          b (style/node-style {:status :culled :tool "verify_smt"})]
+    (let [a (style/node-style {:status :active :tool "edit_file"})
+          b (style/node-style {:status :culled :tool "edit_file"})]
       (is (= (:shape a) (:shape b)))
       (is (not= (:ring a) (:ring b)))))
   (testing "the seed node is its own thing"
     (is (= (style/status-color :seed) (:ring (style/node-style {:status :seed})))))
   (testing "an unknown status still yields a drawable style"
-    (let [s (style/node-style {:status :something-new :tool "verify"})]
+    (let [s (style/node-style {:status :something-new :tool "thesis"})]
       (is (every? some? [(:shape s) (:fill s) (:ring s)])))))
 
 (deftest radius-grows-with-confirmed-work-and-is-capped
