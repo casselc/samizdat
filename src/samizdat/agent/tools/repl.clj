@@ -31,12 +31,19 @@
    ever evaluated inside the sandbox, and untrusted symbol/prefix text is
    matched as inert data, never spliced into evaluated source.
 
-   When no JS1 binding is present the tools fall through to the existing
-   live-REPL path (samizdat.repl), preserving every non-JS1 workflow.
+    When no JS1 binding is present the tools fall through to the existing
+    live-REPL path (samizdat.repl), preserving every non-JS1 workflow.
 
-   The live REPL is NEVER reached in a JS1 context: routing consults the
-   same signal the tool gate consults, and a JS1 context whose binding is
-   missing is refused outright instead of falling through to live eval."
+    The live REPL is NEVER reached in a JS1 context: routing consults the
+    same signal the tool gate consults, and a JS1 context whose binding is
+    missing is refused outright instead of falling through to live eval.
+
+    Commit-only rollback: a failed recorded evaluation supersedes the
+    binding in the provider registry, so after any sandbox-domain
+    evaluation error the eval tool re-acquires the current binding and
+    installs it into the ctx's holder (base/update-js1-binding!) — the
+    NEXT eval works.  An observed :stale-binding is retried once on the
+    fresh binding."
   (:require [clojure.string :as str]
             [samizdat.agent.tools.base :as base]
             [samizdat.repl :as repl]))
@@ -69,22 +76,39 @@
 
 (defn- js1-refusal
   "The fail-closed result for a JS1 context that cannot be routed to its
-   sandbox.  Never a live-eval fallthrough: authority was fixed at bind
-   time, so a missing binding is a wiring fault to surface, not a seam
-   to route around."
+  sandbox.  Never a live-eval fallthrough: authority was fixed at bind
+  time, so a missing binding is a wiring fault to surface, not a seam
+  to route around."
   [branch]
   (base/fail branch
              (str "This is a JS1-sandboxed context but its sandbox binding"
                   " is missing; refusing to evaluate outside the sandbox.")))
 
-(defn- js1-eval-result
-  "Evaluate `code` in the JS1 sandbox binding, appending a durable JS1
-   record via the store adapter (evaluate-recorded!).  Returns the same
-   shape as repl/eval-code: {:ok true/false, :value/:error, :out}.
+(defn- js1-reacquire
+  "Re-acquire the CURRENT binding for the held one's work-id from the
+  ctx's provider.  bind! is idempotent per work-id — equal key and spec
+  return the registry's present binding — and a rollback/rebuild is
+  exactly a registry publication of a fresh instance under the same
+  identity, so this is the sanctioned way back to a usable binding.
+  Reconstructs the bind options from the held binding's own spec, so the
+  coordinate matches and the call cannot widen anything.  Returns the
+  fresh binding, or nil when there is no provider or no sandbox."
+  [ctx stale]
+  (when-let [provider (base/js1-provider ctx)]
+    (when-let [bind-fn (sandbox-var "bind!")]
+      (let [spec (:spec stale)
+            opts (-> {:preset (:preset spec)
+                      :root (:root spec)
+                      :instance/key (:instance/key stale)}
+                     (into (:bounds spec))
+                     (assoc :capabilities (set (:capabilities spec))
+                            :timeout-ms (:timeout-ms spec)))]
+        (bind-fn provider (:work-id stale) opts)))))
 
-   The interrupt ceiling is the spec's :timeout-ms, fixed at bind time —
-   a model-supplied timeout is not an option here, exactly as it cannot
-   select any other authority."
+(defn- js1-eval-once
+  "One recorded evaluation attempt against `binding`.  Returns the repl
+  result shape plus, on a sandbox-domain failure, the structured error
+  data so the caller can decide whether the binding was superseded."
   [conn binding code]
   (try
     (let [evaluate! (sandbox-var "evaluate-recorded!")]
@@ -100,12 +124,65 @@
           {:ok false
            :error (ex-message e)
            :error-type (str (:samizdat.sandbox/error d))
+           :sandbox-error (:samizdat.sandbox/error d)
            :out nil}
           {:ok false :error (ex-message e)
            :error-type (str (type e)) :out nil})))
     (catch Throwable e
       {:ok false :error (or (ex-message e) (str e))
        :error-type (str (type e)) :out nil})))
+
+(defn- js1-eval-result
+  "Evaluate `code` in the ctx's JS1 binding, appending a durable JS1
+  record via the store adapter (evaluate-recorded!).  Returns the same
+  shape as repl/eval-code: {:ok true/false, :value/:error, :out}.
+
+  The interrupt ceiling is the spec's :timeout-ms, fixed at bind time —
+  a model-supplied timeout is not an option here, exactly as it cannot
+  select any other authority.
+
+  Commit-only state means a FAILED evaluation rolled the instance back
+  and published a fresh binding into the provider registry: the binding
+  this call held is superseded, and the next evaluate-recorded! on it
+  would be refused as :stale-binding.  So after any FAILED recorded
+  evaluation the tool re-acquires the current binding and installs it
+  into the ctx's holder (update-js1-binding!) — the next eval works.
+  The re-acquire is best-effort: it cannot widen anything (the options
+  come from the held binding's own spec), and a refresh that itself
+  fails must not mask the evaluation's real error.  An observed
+  :stale-binding (a supersession this harness did not witness, e.g. a
+  concurrent rebuild) additionally retries the evaluation ONCE on the
+  fresh binding, because the model asked for an evaluation, not for an
+  error about wiring it cannot see."
+  [ctx code]
+  (let [conn (:conn ctx)
+        binding (base/js1-binding ctx)
+        refresh! (fn [stale]
+                   (try
+                     (when-let [fresh (js1-reacquire ctx stale)]
+                       (base/update-js1-binding! ctx fresh))
+                     (catch Throwable _ nil)))]
+    (loop [binding binding, retried? false]
+      (let [r (js1-eval-once conn binding code)]
+        (cond
+          (:ok r) r
+
+          ;; A supersession this harness did not witness.  Re-acquire and
+          ;; retry once — never twice, an unbounded retry would spend the
+          ;; turn laundering a genuinely broken wiring.
+          (and (= :stale-binding (:sandbox-error r)) (not retried?))
+          (if-let [fresh (js1-reacquire ctx binding)]
+            (do (base/update-js1-binding! ctx fresh)
+                (recur fresh true))
+            r)
+
+          ;; Any other failure ran the commit-only rollback (or never
+          ;; reached the sandbox at all): the held binding may be
+          ;; superseded even though THIS result is a legitimate evaluation
+          ;; error the model must see.  Refresh the holder so the NEXT
+          ;; eval works; report the original error untouched.
+          :else (do (refresh! binding)
+                    r))))))
 
 (defn- js1-doc-result
   "Doc lookup inside the JS1 sandbox: host-derived safe capability
@@ -145,19 +222,19 @@
     (base/malformed branch m)
     (let [code (str (base/arg ctx :code))
           route (js1-route ctx)]
-      (cond
-        ;; JS1 path: evaluate in the persistent SCI binding, durably
-        ;; recorded.  The spec's timeout ceiling governs; a model-supplied
-        ;; timeout is not forwarded (authority is fixed at bind time).
-        (some? route) (if (= ::unbound route)
-                        (js1-refusal branch)
-                        (eval-format-result
-                          branch (js1-eval-result (:conn ctx) route code)))
-        ;; Non-JS1 path: live REPL (unchanged)
-        :else (eval-format-result
-                branch (repl/eval-code code (:repl-session ctx)
-                                       (some-> (base/arg ctx :timeout-ms)
-                                               str str/trim not-empty parse-long)))))))
+       (cond
+         ;; JS1 path: evaluate in the persistent SCI binding, durably
+         ;; recorded.  The spec's timeout ceiling governs; a model-supplied
+         ;; timeout is not forwarded (authority is fixed at bind time).
+         (some? route) (if (= ::unbound route)
+                         (js1-refusal branch)
+                         (eval-format-result
+                           branch (js1-eval-result ctx code)))
+         ;; Non-JS1 path: live REPL (unchanged)
+         :else (eval-format-result
+                 branch (repl/eval-code code (:repl-session ctx)
+                                        (some-> (base/arg ctx :timeout-ms)
+                                                str str/trim not-empty parse-long)))))))
 
 (defmethod base/run-tool "doc" [{:keys [branch] :as ctx}]
   (if-let [m (base/missing ctx :symbol)]

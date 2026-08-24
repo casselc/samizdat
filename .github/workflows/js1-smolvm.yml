@@ -1,0 +1,60 @@
+name: js1-smolvm
+
+# JS1 × SmolVM guest lane (pilot). docs/JS1_SMOLVM_CI.md is the authority.
+#
+# Dispatch semantics: workflow_dispatch ONLY — this lane never runs on push
+# or pull_request, so it can never gate a merge, and .github/workflows/
+# tests.yml is untouched. A red conclusion here means "refused, see the
+# receipt" (e.g. the guest pack is not provisioned on the runner yet); it
+# is a honest signal, not a blocked pipeline.
+on:
+  workflow_dispatch:
+    inputs:
+      reason:
+        description: "Why this dispatch (recorded in the run receipt)"
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+# One VM lane per runner fleet at a time; never cancel a run mid-VM —
+# teardown must complete.
+concurrency:
+  group: js1-smolvm
+  cancel-in-progress: false
+
+jobs:
+  guest-evidence:
+    name: JS1 evidence in a pinned SmolVM guest
+    # Self-hosted runner with Linux, x86_64, and /dev/kvm. The pinned
+    # smolvm 1.7.5 launcher and the built guest pack are runner
+    # provisioning, verified by digest in the producer gate — never
+    # fetched at run time.
+    runs-on: [self-hosted, linux, x64, kvm]
+    timeout-minutes: 45
+    env:
+      # Every explicit work dir of the harness lives here — runner-owned,
+      # never host /tmp. One run id shared by all three stages.
+      JS1_SMOLVM_CI_DIR: ${{ runner.temp }}/js1-smolvm
+      JS1_SMOLVM_RUN_ID: "gha-${{ github.run_id }}-${{ github.run_attempt }}"
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Preflight (platform, KVM, tooling, stale-machine sweep)
+        run: ci/js1-smolvm/preflight.sh
+
+      - name: Producer pin and inventory gates
+        run: ci/js1-smolvm/producer-gate.sh
+
+      - name: Consumer run (network-disabled guest, read-only source)
+        run: ci/js1-smolvm/consumer-run.sh
+
+      - name: Upload receipts and bounded logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: js1-smolvm-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ env.JS1_SMOLVM_CI_DIR }}
+          if-no-files-found: warn
+          retention-days: 14

@@ -36,6 +36,7 @@
             [samizdat.agent.resume :as resume]
             [samizdat.agent.state :as state]
             [samizdat.agent.tools :as tools]
+            [samizdat.agent.tools.base :as tbase]
             [samizdat.agent.verify :as verify]
             [samizdat.agent.gitdiff :as gitdiff]
             [samizdat.llm.client :as llm]
@@ -45,7 +46,8 @@
             [samizdat.store.failures :as failures]
             [samizdat.store.interventions :as interventions]
             [samizdat.store.journal :as journal]
-            [samizdat.store.runs :as runs]))
+            [samizdat.store.runs :as runs]
+            [samizdat.workflow :as wf]))
 
 ;; --- gates and the arbiter --------------------------------------------------
 
@@ -1558,4 +1560,143 @@
       (is (str/includes? msg "x"))
       (is (str/includes? msg "y"))
       (is (str/includes? msg "z") "the withheld claim is still shown too"))))
+;; --- JS1: single-player by construction --------------------------------------;; --- JS1: single-player by construction --------------------------------------
+;;
+;; A JS1 binding is one persistent :main SCI instance with one durable
+;; history per work-id. A width-N beam would evaluate N branches into that
+;; one instance and interleave N histories under one binding id — not a
+;; boundary that can be enforced mid-run, so the shape must be refused
+;; BEFORE the model is ever paid for. These tests pin the refusal at both
+;; drivers and the tool-surface behavior around the binding signal.
 
+(defn- ex-data-of [f]
+  (try (f) nil (catch Throwable e (ex-data e))))
+
+(defn- refusal-code [f]
+  "The {:js1/error ...} code of a closed refusal, or nil if `f` returned."
+  (:js1/error (ex-data-of f)))
+
+(def ^:private sci-present-in-suite?
+  (try (require 'samizdat.agent.sandbox) true
+       (catch Throwable _ false)))
+
+;; The refusal fixtures, named so each assertion line stays shallow enough
+;; to read: what is refused is visible in the name, how is visible in the
+;; defn, and neither buries the other.
+
+(defn- beam-profile-width-3 [c]
+  (beam/run! {:conn c :config {}
+              :llm-adapter :a :llm-config {}
+              :problem "p" :beam-width 3
+              :js1/profile "single-player"}))
+
+(defn- beam-wired-binding-width-2 [c]
+  (beam/run! {:conn c :config {}
+              :llm-adapter :a :llm-config {}
+              :problem "p" :beam-width 2
+              :js1/binding {:binding/id "b"}}))
+
+(defn- beam-config-width-5 [c]
+  (beam/run! {:conn c
+              :config {:run {:js1/profile "single-player"}}
+              :llm-adapter :a :llm-config {}
+              :problem "p" :beam-width 5}))
+
+(defn- workflow-subtasks [c]
+  (wf/run! {:conn c
+            :config {:run {:js1/profile "single-player"
+                           :subtasks ["a" "b"]}}
+            :llm-adapter :a :llm-config {}
+            :problem "p"}))
+
+(defn- workflow-beam-width [c]
+  (wf/run! {:conn c
+            :config {:run {:js1/profile "single-player"
+                           :beam-width 2}}
+            :llm-adapter :a :llm-config {}
+            :problem "p"}))
+
+(deftest js1-refuses-a-multi-branch-beam-before-any-work
+  (with-db [c]
+    (let [runs-before (count (db/fetch c ["SELECT id FROM runs"]))]
+      (testing "an explicit JS1 profile at width 3 is refused before a run row exists"
+        (is (= :multi-branch-not-supported (refusal-code #(beam-profile-width-3 c))))
+        (is (= runs-before (count (db/fetch c ["SELECT id FROM runs"])))
+            "no run row was opened: the refusal precedes the run itself"))
+      (testing "a wired binding is refused the same way"
+        (is (= :multi-branch-not-supported (refusal-code #(beam-wired-binding-width-2 c)))))
+      (testing "the config key alone is enough to refuse"
+        (is (= :multi-branch-not-supported (refusal-code #(beam-config-width-5 c))))))))
+
+(deftest js1-refuses-a-multi-branch-workflow-before-any-work
+  (with-db [c]
+    (let [runs-before (count (db/fetch c ["SELECT id FROM runs"]))]
+      (testing "a subtask fan-out under JS1 is refused"
+        (is (= :multi-branch-not-supported (refusal-code #(workflow-subtasks c))))
+        (is (= runs-before (count (db/fetch c ["SELECT id FROM runs"])))
+            "refused before the loop is compiled or the run row opened"))
+      (testing "an explicit multi-branch beam width is refused too"
+        (is (= :multi-branch-not-supported (refusal-code #(workflow-beam-width c))))))))
+
+(deftest the-js1-binding-signal-reads-through-the-refreshable-holder
+  ;; The holder is how a rollback between turns is absorbed: the eval tool
+  ;; resets it to the registry's current binding. Both wiring shapes must
+  ;; present the same canonical signal to the phase-refusal gate.
+  (let [plain {:js1/binding {:binding/id "plain"}}
+        held (update plain :js1/binding atom)]
+    (is (= {:binding/id "plain"} (tbase/js1-binding plain)))
+    (is (= {:binding/id "plain"} (tbase/js1-binding held))
+        "an atom holder derefs to the same signal")
+    (is (nil? (tbase/js1-binding {})))
+    (testing "update-js1-binding! writes through the holder only"
+      (let [fresh {:binding/id "fresh"}]
+        (is (= fresh (tbase/update-js1-binding! held fresh)))
+        (is (= fresh (tbase/js1-binding held))
+            "the next read sees the rollback's publication")
+        (is (= {:binding/id "plain"} (tbase/js1-binding plain))
+            "a plain map is immutable from a tool's point of view — no lie, just no refresh")))))
+
+(deftest a-js1-context-without-a-binding-refuses-eval
+  ;; The canonical signal is the binding; a ctx flagged JS1 whose binding
+  ;; is nil is refused outright, never routed to the live REPL.
+  (let [r (tools/run-tool {:branch (state/new-branch {:id "B1" :problem "p"})
+                           :tool-name "eval" :args {:code "(+ 1 2)"}
+                           :js1/profile "single-player"})]
+    (is (= :failure (:category r)))
+    (is (str/includes? (:result r) "refusing to evaluate outside the sandbox")
+        "the refusal names the trust boundary, not a missing feature")))
+
+(deftest a-js1-context-restricts-tools-through-either-signal-shape
+  (let [b (state/new-branch {:id "B1" :problem "p"})
+        refuse? (fn [ctx] (tbase/phase-refusal (assoc ctx :branch b)))]
+    (testing "a non-JS1 ctx is not restricted"
+      (is (nil? (refuse? {:tool-name "file"}))))
+    (testing "the holder shape restricts exactly like the plain shape"
+      (is (:policy-refusal? (refuse? {:tool-name "file" :js1/binding (atom {:x 1})})))
+      (is (:policy-refusal? (refuse? {:tool-name "file" :js1/binding {:x 1}}))))
+    (testing "the closed vocabulary holds: eval is permitted, file is not"
+      (is (nil? (refuse? {:tool-name "eval" :js1/binding (atom {:x 1})})))
+      (is (str/includes? (:result (refuse? {:tool-name "shell" :js1/profile "single-player"}))
+                         "JS1 profile permits only")))))
+
+(deftest a-js1-eval-without-a-loadable-sandbox-fails-closed
+  ;; Under the plain suite the sandbox ns cannot load, so a wired binding
+  ;; surfaces the unavailability as an eval error — never a live-eval
+  ;; fallthrough. (With SCI present the fake binding fails :not-a-binding,
+  ;; which is the same refusal one level down; both are asserted.)
+  (let [holder (atom {:binding/id "b" :work-id "w"
+                      :instance/key :main
+                      :spec {:preset :project/develop :root "/tmp"
+                             :capabilities [:project/read] :bounds {}
+                             :timeout-ms 30000}})
+        r (tools/run-tool {:branch (state/new-branch {:id "B1" :problem "p"})
+                           :conn ::no-conn :tool-name "eval"
+                           :args {:code "(+ 1 2)"}
+                           :js1/binding holder})
+        result (str (:result r))]
+    (is (str/includes? result "Eval error:"))
+    (if sci-present-in-suite?
+      (is (str/includes? result "Binding")
+          "with SCI present, a fake binding is refused as not-a-binding")
+      (is (str/includes? result "refusing live-eval fallback")
+          "without SCI the eval error names the trust boundary"))))

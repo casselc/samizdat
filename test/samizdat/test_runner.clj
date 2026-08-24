@@ -65,6 +65,10 @@
             [mycelium.validation-test]
             [mycelium.workflow-test]
             [samizdat.agent-test]
+            [samizdat.resume-test]
+            [samizdat.js1-boundary-test]
+            [samizdat.js1-wrapper-test]
+            [samizdat.js1-harness-test]
             [samizdat.tasks-test]
             [samizdat.knowledge-test]
             [samizdat.messages-test]
@@ -152,9 +156,13 @@
     mycelium.workflow-test
     samizdat.store-test
     samizdat.evals-test
-    samizdat.llm-test
-    samizdat.agent-test
-    samizdat.tasks-test
+     samizdat.llm-test
+     samizdat.agent-test
+      samizdat.resume-test
+      samizdat.js1-boundary-test
+      samizdat.js1-wrapper-test
+      samizdat.js1-harness-test
+      samizdat.tasks-test
     samizdat.knowledge-test
     samizdat.messages-test
     samizdat.workflow-test

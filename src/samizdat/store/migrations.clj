@@ -340,30 +340,43 @@
   ;; The shape is append-only in the strict sense: nothing here is ever
   ;; updated or deleted. An evaluation is registered BEFORE it runs (intent:
   ;; the trusted evaluator identity — spec/instance/binding ids — plus the
-  ;; canonical evaluator/context coordinate and the source), each effect
-  ;; is recorded as an intent row before it executes and an outcome row
-  ;; after, and completion is a row of its own appended afterward. A crashed
-  ;; evaluation's record is then exactly what the process managed to append
-  ;; — a pending eval row, and an intent with no outcome for the effect that
-  ;; was in flight — which is what a caller needs to fail closed: the
-  ;; actuation may or may not have happened, and the record says so honestly
-  ;; instead of reconstructing a story.
+  ;; canonical evaluator/context coordinate, the versioned RuntimeCoordinate
+  ;; naming the Jolt/SCI/protocol stack the receipts are meaningful under,
+  ;; and the source), each effect is recorded as an intent row before it
+  ;; executes and an outcome row after, and completion is a row of its own
+  ;; appended afterward. A crashed evaluation's record is then exactly what
+  ;; the process managed to append — a pending eval row, and an intent with
+  ;; no outcome for the effect that was in flight — which is what a caller
+  ;; needs to fail closed: the actuation may or may not have happened, and
+  ;; the record says so honestly instead of reconstructing a story.
+  ;;
+  ;; binding_seq is the binding's durable total order: evaluations of one
+  ;; binding are numbered 0, 1, 2, ... in registration order at begin! time,
+  ;; so whole-history rebuild replays a binding's committed evaluations in
+  ;; exactly the order they committed, and a gap in the sequence is a torn
+  ;; record to fail closed on rather than a hole to replay across.
   ;;
   ;; Terminal status lives in eval_completions rather than as a status
   ;; column on evals so that "pending" is the ABSENCE of a row: there is no
   ;; status to set wrong, only a completion that has or has not been
-  ;; appended. The unique indexes make the two invariants structural — one
-  ;; terminal record per evaluation, and at most one intent and one outcome
-  ;; per (eval, seq) — rather than matters of caller discipline.
+  ;; appended. The unique indexes make the invariants structural — one
+  ;; terminal record per evaluation, at most one intent and one outcome
+  ;; per (eval, seq), and one row per (binding, binding_seq) — rather than
+  ;; matters of caller discipline.
   ["CREATE TABLE IF NOT EXISTS evals (
       id          INTEGER PRIMARY KEY AUTOINCREMENT,
       spec_id     TEXT NOT NULL,
       instance_id TEXT NOT NULL,
       binding_id  TEXT NOT NULL,
+      binding_seq INTEGER NOT NULL,
       coordinate  TEXT NOT NULL,
+      runtime     TEXT NOT NULL,
       source      TEXT NOT NULL,
       created_at  TEXT NOT NULL
     )"
+
+   "CREATE UNIQUE INDEX IF NOT EXISTS idx_evals_binding_seq
+      ON evals(binding_id, binding_seq)"
 
    "CREATE TABLE IF NOT EXISTS eval_completions (
       id         INTEGER PRIMARY KEY AUTOINCREMENT,

@@ -40,9 +40,10 @@
             [samizdat.agent.claims :as claims]
             [samizdat.agent.critic :as critic]
             [samizdat.agent.gates :as gates]
-            [samizdat.agent.loop :as branch-loop]
-            [samizdat.agent.state :as state]
-            [samizdat.store.artifacts :as artifacts]
+             [samizdat.agent.loop :as branch-loop]
+             [samizdat.agent.state :as state]
+             [samizdat.agent.tools.base :as js1-base]
+             [samizdat.store.artifacts :as artifacts]
             [samizdat.store.failures :as failures]
             [samizdat.store.interventions :as interventions]
             [samizdat.store.journal :as journal]
@@ -754,6 +755,20 @@
         ;; seeds nobody reads would be dead rows.
         config (cond-> config
                  seed-run (assoc-in [:run :share-artifacts?] true))
+        ;; JS1 propagation: a caller (beam/run! wired from the control
+        ;; surface) or the run config may ask for a JS1 sandboxed run.
+        js1-binding (:js1/binding opts)
+        js1-profile (:js1/profile opts)
+        ;; JS1 is single-player: one persistent :main instance and one
+        ;; durable history per work-id.  A width-N beam would evaluate N
+        ;; branches into that one instance and interleave N durable
+        ;; histories under one binding id — not a boundary that can be
+        ;; enforced mid-run.  Refused HERE: before the run row is opened,
+        ;; before on-start fires, before any branch or provider call.
+        _ (js1-base/js1-assert-single-branch!
+           (boolean (or js1-binding js1-profile
+                        (get-in config [:run :js1/profile])))
+           width)
         run-id (runs/start-run! conn {:problem problem
                                       :provider (:provider llm-config)
                                       :model (:model llm-config)
@@ -777,11 +792,6 @@
         ;; paths discard one: the tool-level catch, the turn deadline, and a
         ;; turn that throws. See tools/register-session! (vf-cfp).
         engine-sessions (atom [])
-        ;; JS1 binding: propagate from opts when the caller (beam/run!)
-        ;; or the control surface wired one.  The beam runs multiple branches
-        ;; sharing one persistent :main instance — same as workflow/run!.
-        js1-binding (:js1/binding opts)
-        js1-profile (:js1/profile opts)
         ctx {:conn conn :run-id run-id :config config :problem problem
              :llm-adapter llm-adapter :llm-config llm-config
              :max-turns max-turns :beam? (> width 1) :beam-width width
@@ -790,8 +800,11 @@
              :abort abort
              ;; JS1 profile flags — set only by trusted config/control, read
              ;; by phase-refusal to enforce the minimal tool vocabulary.
+             ;; The binding installs as a refreshable holder so a rollback
+             ;; can be absorbed between turns (tools.base/js1-binding).
              :js1/profile js1-profile
-             :js1/binding js1-binding
+             :js1/binding (when-let [b js1-binding] (atom b))
+             :js1/provider (:js1/provider opts)
              ;; One claim registry per run: two branches reaching the same
              ;; claim share one slow verification instead of racing it.
              :claims (claims/new-registry)}]

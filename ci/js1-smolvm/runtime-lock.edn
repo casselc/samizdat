@@ -1,0 +1,95 @@
+;; JS1 × SmolVM CI harness — runtime lock.
+;;
+;; THE single source of truth for the pinned JS1-in-SmolVM lane. Read two
+;; ways, deliberately: as EDN (test/samizdat/js1_harness_test.clj) and
+;; line-greppable by the POSIX shell gates (ci/js1-smolvm/lib-lock.sh).
+;; Keep exactly one scalar per line so both reads can never drift apart.
+;;
+;; The JS1 runtime pins here MUST equal the pins bin/js1 enforces and the
+;; jolt-crypto pin deps.edn states; producer-gate.sh refuses the lane
+;; otherwise (no restatement drift, no silent compiler/runtime switch).
+;;
+;; Trust anchors: the smolvm BINARY sha256 below (verified against the real
+;; bytes on every run) and — once built — the guest-pack sha256. A descriptor
+;; fetched from beside an archive is never an independent trust anchor; the
+;; producer build records what it actually fetched into pack-manifest.edn.
+{
+ :lock/version 1
+ :lock/name "js1-smolvm-ci"
+
+ ;; Platform gate: the lane refuses anything else (SmolVM Linux/KVM only).
+ :platform/os "linux"
+ :platform/arch "x86_64"
+ :platform/kvm-device "/dev/kvm"
+
+ ;; The pinned JS1 runtime stack (docs/JS1_RUNTIME.md § Pins).
+ :jolt/url "https://github.com/casselc/jolt"
+ :jolt/branch "js0-functional-sci-upstream"
+ :jolt/sha "619ef19685460af847654e22cf6beda904d052fb"
+ :sci/sha "32d62a5136ad3dc148588752f5bcc4cc30b14752"
+ :sci/version "0.13.53"
+ :jolt-crypto/lib "jolt-lang/jolt-crypto"
+ :jolt-crypto/url "https://github.com/jolt-lang/jolt-crypto"
+ :jolt-crypto/sha "1ab72aa5f73be7ec41f01086953ffb43ecd3d84e"
+
+ ;; SmolVM executor. The launcher path is runner-local (env
+ ;; JS1_SMOLVM_LAUNCHER, default $HOME/<:smolvm/launcher-relpath>); version
+ ;; and the smolvm-bin sha256 are the pinned, always-verified properties.
+ :smolvm/version "1.7.5"
+ :smolvm/launcher-relpath ".smolvm/smolvm"
+ :smolvm/bin-relpath "smolvm-bin"
+ :smolvm/bin-sha256 "88288569c4c4128a0c3893e1a23babb2bdaf5a4b37eeb3e4951f9c75da6bafd8"
+
+ ;; Guest pack. :unbuilt means the pack has never been produced under this
+ ;; lock: every consumer gate must REFUSE with the build remedy rather than
+ ;; fabricate a run. When built, set :status :built and pin the pack sha256.
+ :guest-pack/status :unbuilt
+ :guest-pack/sha256 nil
+ :guest-pack/path-relpath ".smolvm/js1-guest.smolmachine"
+
+ ;; Guest shape (inside the VM). The runtime checkout is baked into the pack
+ ;; at /opt/js1-runtime/jolt with .git and the vendor/sci submodule intact —
+ ;; bin/js1's pin verification runs against it in the guest.
+ :guest/runtime-root "/opt/js1-runtime"
+ :guest/jolt-home "/opt/js1-runtime/jolt"
+ :guest/chez "/usr/local/bin/scheme"
+ :guest/home "/root"
+ :guest/mount-source-ro "/opt/samizdat-src"
+ :guest/work-dir "/work"
+ :guest/source-copy "/work/samizdat"
+
+ ;; Machine bounds. Deliberately modest; the boundary suite spawns fresh
+ ;; jolt children, each with its own deadline, inside the guest.
+ :machine/name-prefix "js1ci-"
+ :machine/cpus 2
+ :machine/mem-mib 4096
+
+ ;; Step deadlines (seconds). :deadline/total-seconds is the hard cap for
+ ;; the whole consumer run; per-step caps are independent and whichever
+ ;; fires first wins. Teardown always gets its own budget.
+ :deadline/preflight-seconds 120
+ :deadline/producer-seconds 300
+ :deadline/setup-seconds 420
+ :deadline/check-seconds 180
+ :deadline/smoke-seconds 900
+ :deadline/boundary-seconds 1500
+ :deadline/teardown-seconds 240
+ :deadline/total-seconds 2400
+
+ ;; Log bounds: per-step capture is truncated to head+tail of half this
+ ;; each when exceeded; the truncation banner replaces the middle.
+ :log/max-step-bytes 8388608
+
+ ;; Producer inventory: repo-side files the lane depends on. The producer
+ ;; gate requires every one to exist; the guest pack content itself is
+ ;; pinned by :guest-pack/sha256 once built.
+ :inventory/wrapper "bin/js1"
+ :inventory/preflight "ci/js1-smolvm/preflight.sh"
+ :inventory/producer "ci/js1-smolvm/producer-gate.sh"
+ :inventory/consumer "ci/js1-smolvm/consumer-run.sh"
+ :inventory/guest-setup "ci/js1-smolvm/guest-setup.sh"
+ :inventory/lock "ci/js1-smolvm/runtime-lock.edn"
+ :inventory/recipe "ci/js1-smolvm/guest-recipe.edn"
+ :inventory/fixtures "test/fixtures/js1/fixtures.edn"
+ :inventory/boundary-runner "test/fixtures/js1/boundary_runner.clj"
+ :inventory/workflow ".github/workflows/js1-smolvm.yml"}
