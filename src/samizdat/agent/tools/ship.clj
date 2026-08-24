@@ -10,6 +10,7 @@
             [samizdat.agent.tools.base :as base]
             [samizdat.agent.state :as state]
             [samizdat.agent.verify :as verify]
+            [samizdat.engine.proc :as proc]
             [samizdat.store.journal :as journal]))
 
 
@@ -275,36 +276,78 @@
                      " the question that was asked."))
         ;; The test rung — what makes the loop test-driven rather than one-shot.
         ;; `done` is not terminal until the unit's tests actually pass: run the
-        ;; unit's tests, and a red / hollow / untested result is fed back so the
-        ;; branch keeps iterating. Verification is FOCUSED — it runs only the
-        ;; test namespaces the branch touched, so the loop iterates in seconds
-        ;; against its own new test. On when a :verify-cmd is set or
-        ;; :verify-focused? is true; loops with neither behave exactly as before.
+        ;; unit's tests, and a red / hollow / untested / REFUSED result is fed
+        ;; back so the branch keeps iterating. Verification is FOCUSED — it
+        ;; runs only the test namespaces the branch touched, so the loop
+        ;; iterates in seconds against its own new test — and it is a
+        ;; STRUCTURED request end to end (verify/verify-request -> verify/
+        ;; run-verify -> proc/scope-run): the model's only input is this
+        ;; `done` call, the changed paths it influenced are validated against
+        ;; verify's narrow namespace grammar (unrepresentable paths REFUSE
+        ;; focused verification), the operator's :verify-cmd is the sole
+        ;; fallback and receives no model input, and execution is argv/cwd/
+        ;; scrubbed-allowlist-env/timeout/caps with a process-tree kill
+        ;; guarantee — no shell composes anything. On when a :verify-cmd is
+        ;; set or :verify-focused? is true; loops with neither behave exactly
+        ;; as before.
         verify-cmd (get-in ctx [:config :run :verify-cmd])
         verify-focused? (get-in ctx [:config :run :verify-focused?] false)
         require-test? (get-in ctx [:config :run :require-test?] true)
         verify-on? (and (nil? block)
                         (or verify-focused? (not (str/blank? (str verify-cmd)))))
+        ;; The execution boundary, probed ONCE up front (capability probe,
+        ;; no spawn): without the scoped primitive, gitdiff already answered
+        ;; cannot-tell (its git calls go through the same primitive) and
+        ;; run-verify would report unavailable — but the DECISION and the
+        ;; journal need the fact here, so the trust fallthrough for
+        ;; cannot-tell can never absorb a missing executor. An unavailable
+        ;; gate blocks; it never silently permits a ship.
+        unsupported? (and verify-on? (not (proc/scope-supported?)))
         changed (when verify-on? (gitdiff/changed-files (:root ctx) (:git-baseline ctx)))
-        ;; Prefer the focused command; fall back to the configured one. Run only
-        ;; when the cheap pre-checks (nothing changed / no test yet) haven't
-        ;; already doomed the ship — a wasted suite run is a wasted minute.
-        cmd (when verify-on? (or (and verify-focused? (verify/focused-cmd changed)) verify-cmd))
+        ;; The structured request, derived (never composed): focused over
+        ;; validated namespaces, the operator's configured fallback, a
+        ;; refusal, an :invalid misconfiguration, or nothing to run.
+        vrequest (when verify-on?
+                   (verify/verify-request {:changed changed
+                                           :focused? verify-focused?
+                                           :fallback-cmd verify-cmd}))
+        ;; Run only when the cheap pre-checks (nothing changed / no test yet)
+        ;; haven't already doomed the ship. A :refused or :invalid request
+        ;; still goes through run-verify — which spawns NOTHING for them —
+        ;; so the refusal/misconfiguration lands in the result AND the
+        ;; durable ship-verify journal record, not just the block message.
         pre-doomed? (or (and (some? changed) (empty? changed))
                         (and require-test? (some? changed) (seq changed)
                              (not (some verify/test-file? changed))))
-        vresult (when (and verify-on? cmd (not pre-doomed?))
-                  (verify/run-verify (:root ctx) cmd
+        vresult (when (and verify-on? vrequest (not pre-doomed?))
+                  (verify/run-verify (:root ctx) vrequest
                                      (get-in ctx [:config :run :verify-timeout-ms])))
         verify-block (verify/verify-block
                       {:verify-on? verify-on? :result vresult
+                       :request vrequest :unsupported? unsupported?
                        :changed changed :require-test? require-test?})
-        block (or block verify-block)]
-    (when (and vresult (:conn ctx) (:run-id ctx))
+        block (or block verify-block)
+        ;; The durable verification record: written whenever the rung had
+        ;; something to say — a run happened, a request was REFUSED, the
+        ;; config was invalid, or the runtime cannot verify at all. Every
+        ;; one of those is a ship-verification FACT the run record must
+        ;; keep, and each one blocks the ship it describes.
+        vrecord (when verify-on?
+                  (or vresult (when unsupported? {:unsupported? true})))
+        vdata (when vrecord
+                {:green (:green? vrecord) :timeout (:timeout? vrecord)
+                 :exit (:exit vrecord)
+                 :kind (:kind vrequest)
+                 :refused (when (= :refused (:kind vrequest))
+                            (vec (take 8 (map str (:refused vrequest)))))
+                 :refused? (boolean (:refused? vrecord))
+                 :invalid-config? (boolean (:invalid-config? vrecord))
+                 :unsupported? (boolean (:unsupported? vrecord))
+                 :blocked (some? verify-block)})]
+    (when (and vdata (:conn ctx) (:run-id ctx))
       (journal/note! (:conn ctx) (:run-id ctx) :ship-verify
                      {:branch-id (:id branch) :turn (:turn ctx)
-                      :data {:green (:green? vresult) :timeout (:timeout? vresult)
-                             :blocked (some? verify-block)}}))
+                      :data vdata}))
     ;; Journalled whether or not anything blocked, so the run record still
     ;; shows what the lexical check saw even though words no longer decide.
     (when-let [words (and (:conn ctx) (:run-id ctx)

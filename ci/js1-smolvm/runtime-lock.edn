@@ -24,8 +24,8 @@
 
  ;; The pinned JS1 runtime stack (docs/JS1_RUNTIME.md § Pins).
  :jolt/url "https://github.com/casselc/jolt"
- :jolt/branch "js0-functional-sci-upstream"
- :jolt/sha "619ef19685460af847654e22cf6beda904d052fb"
+ :jolt/branch "js1-runtime-current-upstream"
+ :jolt/sha "279bca18bbf50f37b8574a4e6998dee40313cd26"
  :sci/sha "32d62a5136ad3dc148588752f5bcc4cc30b14752"
  :sci/version "0.13.53"
  :jolt-crypto/lib "jolt-lang/jolt-crypto"

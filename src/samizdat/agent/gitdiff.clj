@@ -8,16 +8,53 @@
   tree at that moment (git stash create), which does not touch the tree — so
   the diff at finalization is exactly what the RUN changed, not whatever was
   already uncommitted. Everything here fails soft: no git, no repo, or any
-  error yields an empty diff, and the critic simply reviews completeness only."
+  error yields an empty diff / nil baseline / cannot-tell, and the critic
+  simply reviews completeness only.
+
+  git runs as STRUCTURED scoped requests (samizdat.engine.proc/scope-run,
+  jolt.host's scoped process primitive): a direct argv with the repo root
+  as the request cwd — no shell, no composed directory prefix — under the
+  explicit scrubbed allowlist environment (nothing inherited from the
+  controller), a hard timeout whose expiry takes the whole git process
+  tree down (TERM wave, grace, KILL wave, /proc-confirmed empty), and
+  byte-capped capture, so even a pathological repository cannot make a
+  diff call unbounded.
+
+  Boundary contract: this namespace's fail-soft answers are 'git cannot
+  tell' answers, and cannot-tell is a TRUST decision that belongs to the
+  consumer. The ship gate therefore probes the execution boundary itself
+  (proc/scope-supported?) before trusting a cannot-tell: on a runtime
+  without the scoped primitive every git call here fails, changed-files
+  reads as cannot-tell, and done would fall through to trust — so the
+  gate blocks as UNAVAILABLE instead. Failing soft here can never fail
+  OPEN there."
   (:require [clojure.string :as str]
             [samizdat.engine.proc :as proc]))
 
 (def max-diff-chars 12000)
 
-(defn- git [root & args]
-  (let [r (apply proc/run {:timeout-ms 15000} "git" "-C" (str root) args)]
-    (when (and (not (:timeout r)) (zero? (or (:exit r) 1)))
-      (:out r))))
+(def ^:private git-timeout-ms 15000)
+(def ^:private git-term-grace-ms 2000)
+(def ^:private git-out-bytes 262144)
+(def ^:private git-err-bytes 65536)
+
+(defn- git
+  "One bounded scoped git invocation in `root` as a direct argv with the
+  scrubbed allowlist environment. Returns the captured stdout on exit 0,
+  nil on anything else — non-zero, timeout, spawn failure — preserving the
+  fail-soft contract the callers' nil-vs-empty logic depends on."
+  [root & args]
+  (try
+    (let [r (proc/scope-run {:cmd (into ["git"] (mapv str args))
+                             :dir (str root)
+                             :env (proc/scrubbed-allowlist-env)
+                             :timeout-ms git-timeout-ms
+                             :term-grace-ms git-term-grace-ms
+                             :out-bytes git-out-bytes
+                             :err-bytes git-err-bytes})]
+      (when (and (not (:timed-out r)) (zero? (or (:exit r) 1)))
+        (:out r)))
+    (catch Throwable _ nil)))
 
 (defn baseline
   "A ref the run's changes are diffed against: a commit object capturing the
@@ -38,7 +75,13 @@
   as 'changed nothing' and be judged hollow. nil when git or the repo is
   unavailable — 'cannot tell', distinct from [] which means 'genuinely nothing
   changed'. Ground truth for whether a run that claims done actually produced
-  anything."
+  anything.
+
+  These paths are attacker-named data (the model writes the files): they feed
+  verification only through samizdat.agent.verify's narrow grammar, which
+  refuses anything unrepresentable — and git's own path quoting
+  (core.quotePath) keeps exotic names visibly exotic rather than smuggling
+  them through as plain text."
   [root baseline]
   (when (and root baseline)
     (let [lines (fn [out] (some->> out str/split-lines (remove str/blank?)))

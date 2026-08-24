@@ -120,6 +120,68 @@
   (testing "clean text is returned unchanged"
     (is (= "nothing to see" (secrets/redact "nothing to see")))))
 
+;; --- redact known-values (the jolt set/dedup bug) ---------------------------
+;;
+;; Every real caller hands redact a SET — known-values and stripped-values
+;; both answer sets — but only vectors were exercised above. jolt's
+;; `distinct` destructures its argument positionally, and positional access
+;; on a raw set answers nil, so (distinct #{v}) evaluated to (nil): the
+;; run's one secret was erased from the redaction set and leaked. Nothing
+;; crashed — the injected nil was blank-dropped in turn — and an opaque
+;; value never reaches the vendor regexes, so it sailed through the
+;; boundary. redact now normalizes through its known-value-seq
+;; (str + blank? + a set + an explicit longest-first sort) and never calls
+;; `distinct`. These pin that fix.
+(deftest redact-known-values-on-jolt
+  (testing "a single-element set is redacted — the exact shape that vanished"
+    (is (= "the token is [REDACTED] ok"
+           (secrets/redact "the token is OPAQUE-BUILD-abc ok"
+                           #{"OPAQUE-BUILD-abc"}))))
+  (testing "every element of a multi-element set survives dedup"
+    (is (= "a [REDACTED] b [REDACTED] c"
+           (secrets/redact "a K1 b K2 c" #{"K1" "K2"}))))
+  (testing "the set known-values actually builds — stripped env + resolved refs"
+    (let [env {"SECRET_API_KEY" "SYNTH-token-9182736" "PATH" "/usr/bin"}
+          known (secrets/known-values env "echo {{env/SECRET_API_KEY}}")]
+      (is (set? known))
+      (is (= "echo [REDACTED] now"
+             (secrets/redact "echo SYNTH-token-9182736 now" known)))))
+  (testing "deterministic across collection types: vector, list and set agree"
+    (let [text "x SECRET-x y SECRET-xyz z"
+          vs ["SECRET-x" "SECRET-xyz" "SECRET-x"]
+          out-vec (secrets/redact text vs)
+          out-set (secrets/redact text (set vs))
+          out-list (secrets/redact text '("SECRET-x" "SECRET-xyz"))]
+      (is (= "x [REDACTED] y [REDACTED] z" out-vec))
+      (is (= out-vec out-set out-list))))
+  (testing "longest-first: a value containing another leaves no residue"
+    ;; If the shorter value ran first, SECRET-xyz would become
+    ;; [REDACTED]yz — a partial leak of the longer secret.
+    (is (not (str/includes?
+              (secrets/redact "hold SECRET-xyz tight" #{"SECRET-x" "SECRET-xyz"})
+              "yz"))))
+  (testing "duplicate entries collapse to one replacement"
+    (is (= "a [REDACTED] b"
+           (secrets/redact "a S1 b" ["S1" "S1" "S1"]))))
+  (testing "blank and nil entries are skipped, adding no stray markers"
+    (is (= "a K9 b" (secrets/redact "a K9 b" ["" " " "\t" nil "OTHER"])))
+    (is (= "a [REDACTED] b" (secrets/redact "a K9 b" ["" nil " " "K9"])))
+    (is (= "a K9 b" (secrets/redact "a K9 b" #{" " nil}))))
+  (testing "nil and empty known-values leave clean text untouched"
+    (is (= "nothing to see" (secrets/redact "nothing to see" nil)))
+    (is (= "nothing to see" (secrets/redact "nothing to see" [])))
+    (is (= "nothing to see" (secrets/redact "nothing to see" #{}))))
+  (testing "known values are matched literally, never as regex syntax"
+    ;; A metacharacter-laden password must redact by substring; if the
+    ;; value ever reached a regex path it would not match (or throw).
+    (is (= "pw is [REDACTED] ok"
+           (secrets/redact "pw is p@ss(w0rd![*+?. $ ok" ["p@ss(w0rd![*+?. $"]))))
+  (testing "vendor-pattern redaction still runs alongside known values"
+    ;; Both the vendor-shaped token and the opaque known value are caught.
+    (is (= "leak [REDACTED] and [REDACTED] too"
+           (secrets/redact "leak sk-abcdefghijklmnopqrstuvwx and OPAQUE-TOKEN-1 too"
+                           #{"OPAQUE-TOKEN-1"})))))
+
 ;; --- symbolic reference resolution ------------------------------------------
 
 (deftest symbolic-refs
@@ -162,3 +224,24 @@
     (testing "the model still directed the call — the symbolic ref is intact upstream"
       (is (str/includes? command "{{env/SECRET_API_KEY}}"))
       (is (not (str/includes? command canary))))))
+
+(deftest spec-a-shapeless-canary-never-reaches-model-space
+  ;; The spec test above plants a vendor-shaped canary (sk-…), which the
+  ;; regex layer catches on its own — so it stayed green through the jolt
+  ;; set bug where set-supplied known values were erased by `distinct`.
+  ;; This canary has NO recognizable shape at all: only the known-value
+  ;; path can stop it, which is exactly the path that leaked.
+  (let [canary "correct-horse-battery-staple-42"
+        env {"SECRET_DB_PASSWORD" canary "PATH" "/usr/bin"}
+        command "echo using {{env/SECRET_DB_PASSWORD}} now"
+        resolved (secrets/resolve-refs command env)
+        child-env (secrets/scrub-env env)
+        known (secrets/known-values env command)
+        tool-result (secrets/redact resolved known)
+        journal-row (secrets/redact resolved known)]
+    (testing "the child env carries no name-sensitive var"
+      (is (not (contains? child-env "SECRET_DB_PASSWORD"))))
+    (testing "the shapeless canary appears in nothing the model or journal reads"
+      (is (not (str/includes? tool-result canary)))
+      (is (not (str/includes? journal-row canary)))
+      (is (str/includes? tool-result "[REDACTED]")))))

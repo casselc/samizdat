@@ -83,15 +83,23 @@
 
 (deftest lock-matches-wrapper-pins
   (testing "the lock restates bin/js1's pins exactly (no drift, no second truth)"
-    (is (= "619ef19685460af847654e22cf6beda904d052fb" (:jolt/sha lock)))
+    (is (= "279bca18bbf50f37b8574a4e6998dee40313cd26" (:jolt/sha lock)))
     (is (= (:jolt/sha lock) (wrapper-var "JOLT_SHA")))
     (is (= (:jolt/branch lock) (wrapper-var "JOLT_BRANCH")))
     (is (= (:jolt/url lock) (wrapper-var "JOLT_URL")))
-    (is (= "js0-functional-sci-upstream" (:jolt/branch lock)))
+    (is (= "js1-runtime-current-upstream" (:jolt/branch lock)))
     (is (= "32d62a5136ad3dc148588752f5bcc4cc30b14752" (:sci/sha lock)))
     (is (= (:sci/sha lock) (wrapper-var "SCI_SHA")))
     (is (= "0.13.53" (:sci/version lock)))
     (is (= (:sci/version lock) (wrapper-var "SCI_VERSION")))))
+
+(deftest docs-name-the-wrapper-pins
+  (testing "docs/JS1_RUNTIME.md § Pins names the pinned runtime (doc drift guard)"
+    (let [doc (slurp-rel "docs/JS1_RUNTIME.md")]
+      (is (str/includes? doc (wrapper-var "JOLT_SHA"))
+          "the docs no longer name bin/js1's JOLT_SHA")
+      (is (str/includes? doc (wrapper-var "JOLT_BRANCH"))
+          "the docs no longer name bin/js1's JOLT_BRANCH"))))
 
 (deftest lock-matches-deps-crypto-pin
   (testing "the lock's jolt-crypto pin equals deps.edn's :git/sha (its single home)"

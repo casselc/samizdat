@@ -52,8 +52,8 @@
  ;; run of `bin/js1 check` re-verifies all of it (that re-verification is
  ;; the consumer evidence, not a build-time shortcut).
  :jolt-runtime {:url "https://github.com/casselc/jolt"
-                :branch "js0-functional-sci-upstream"
-                :sha "619ef19685460af847654e22cf6beda904d052fb"
+                :branch "js1-runtime-current-upstream"
+                :sha "279bca18bbf50f37b8574a4e6998dee40313cd26"
                 :submodule {:path "vendor/sci"
                             :sha "32d62a5136ad3dc148588752f5bcc4cc30b14752"
                             :version-file "resources/SCI_VERSION"

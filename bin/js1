@@ -31,12 +31,30 @@
 set -eu
 
 # ── The pinned JS1 runtime stack (docs/JS1_RUNTIME.md § Pins) ────────────────
-# casselc/jolt @ js0-functional-sci-upstream — "sci: trusted inert
-# language-surface API with versioned coordinate", the jolt.sandbox
-# language-surface/0 and language-coordinate/0 the JS1 doc/complete surface
+# casselc/jolt @ js1-runtime-current-upstream, tip 279bca18, rebased onto
+# current upstream edda7aec. The rebase moved the SCI host-seam
+# follow-ups upstream (private map/newline compat vars, Thread.getId,
+# Numbers arithmetic statics, restored nested interrupt polling, a
+# persistent-SCI evaluation test — PRs #721–#725), so the branch now
+# carries only: the evaluator re-derivation ("feat: rederive JS1
+# evaluator on current upstream", 13e43418), the scoped Linux process
+# termination commit ("feat: add scoped Linux process termination",
+# a5fb8a3b: ProcessBuilder/Process over posix_spawn with waitpid/kill
+# lifecycle), bounded structured output for that scoped run ("feat:
+# bound scoped process output", 1f859e70: :out-bytes/:err-bytes caps
+# with a poll-bounded, fail-closed drain — the trusted controller
+# process-scope primitive JS1 verification consumes), and the tip
+# ("test: wire current SCI evaluator gates", 279bca18: opt-in make lanes
+# js0sandbox/js0authority/scievaluator plus discriminating Numbers
+# statics rows). jolt.sandbox itself is byte-identical to the previous
+# pin — the sandbox surface did NOT change — and keeps the trusted inert
+# language-surface API — jolt.sandbox/language-surface and
+# jolt.sandbox/language-coordinate, language-surface-version 1, the same
+# 156-symbol reviewed vocabulary, and the js0-lang/v1 language / js0:
+# capability-and-receipt coordinate schemes the JS1 doc/complete surface
 # and RuntimeCoordinate are built on.
-JOLT_SHA=619ef19685460af847654e22cf6beda904d052fb
-JOLT_BRANCH=js0-functional-sci-upstream
+JOLT_SHA=279bca18bbf50f37b8574a4e6998dee40313cd26
+JOLT_BRANCH=js1-runtime-current-upstream
 JOLT_URL=https://github.com/casselc/jolt
 # Its vendor/sci submodule: borkdude/sci 0.13.53.  The version is checked
 # against resources/SCI_VERSION because samizdat.agent.sandbox's

@@ -102,11 +102,36 @@
 
 (def ^:private redacted "[REDACTED]")
 
+(defn- known-value-seq
+  "Known values as a canonical, deduplicated seq of non-blank strings,
+  longest first (lexicographic tiebreak) — so what gets replaced never
+  depends on the caller's collection type or iteration order, and a value
+  that contains another cannot consume its prefix first and leave residue.
+
+  jolt port note: this exists because `distinct` is not safe on a set here.
+  jolt's `distinct` destructures its argument positionally, and positional
+  access on a raw SET answers nil — so (distinct #{v}) evaluated to (nil):
+  the one secret a run holds was erased from the redaction set, and the
+  injected nil was blank-dropped in turn, so nothing crashed and the value
+  leaked. Vectors destructure positionally, which is why vector inputs
+  tested clean while real callers — every one hands `redact` a SET
+  (known-values, stripped-values) — leaked. Normalize through str +
+  blank? + a set + an explicit sort instead of `distinct`."
+  [known-values]
+  (->> known-values
+       (map str)
+       (remove str/blank?)
+       (into #{})
+       (sort-by (fn [v] [(- (count v)) v]))))
+
 (defn redact
   "Redact known secrets from an arbitrary model-bound string. URL passwords
   and vendor-prefix tokens by regex; any value in `known-values` by substring
-  (for opaque secrets with no recognizable shape). Returns the string
-  unchanged when nothing matched."
+  (for opaque secrets with no recognizable shape). `known-values` may be nil
+  or any seqable of strings — vector, list, set — and is normalized to a
+  canonical longest-first order, so the result is deterministic regardless of
+  the caller's collection type. Returns the string unchanged when nothing
+  matched."
   ([text] (redact text nil))
   ([text known-values]
    (let [t (str text)
@@ -120,11 +145,11 @@
              (str/replace t vendor-prefix-re redacted)
              t)]
      (reduce (fn [s v]
-               (if (and (seq v) (str/includes? s v))
+               (if (str/includes? s v)
                  (str/replace s v redacted)
                  s))
              t
-             (remove str/blank? (distinct (or known-values [])))))))
+             (known-value-seq known-values)))))
 
 ;; --- scrubbing the child environment ----------------------------------------
 

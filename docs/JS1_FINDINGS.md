@@ -8,21 +8,30 @@ gates are evidence gaps, not a decision to replace it.
 
 ## Baseline
 
-- Samizdat branch: `js1-bounded-samizdat`, rebased on `d083eeb`.
-- Jolt evaluator runtime: `619ef19685460af847654e22cf6beda904d052fb` on
-  `js0-functional-sci-upstream`; the original JS0 freeze remains tagged
-  `js0-functional-sci-upstream-freeze` at `04dd42db`.
+- Samizdat branch: `js1-bounded-samizdat`, recovery base
+  `321661649e174bb748adeb6970dad6c166003343`, rebased on current upstream
+  `dae78547a66c80f31fa7a78d0f9483186a2b0af9`; deterministic closure changes
+  are pending commit.
+- Current Jolt evaluator runtime:
+  `279bca18bbf50f37b8574a4e6998dee40313cd26` on
+  `js1-runtime-current-upstream`, rebased on upstream `edda7aec`.
+- Historical evidence remains distinct: JS0 freeze
+  `js0-functional-sci-upstream-freeze` at `04dd42db`, post-JS0 runtime
+  `619ef196`, and pre-current-upstream checkpoint
+  `js1-runtime-pre-upstream-sci-merge`.
 - SCI: `32d62a5136ad3dc148588752f5bcc4cc30b14752` (`0.13.53`).
 
 ## Executed Gates
 
 | Gate | Result |
 |---|---|
-| Full Samizdat Jolt suite | `1000` tests / `3316` assertions, zero failures/errors |
+| Full Samizdat Jolt suite | `1047` tests / `3658` assertions, zero failures/errors |
 | Direct bounded SCI sandbox | `28` tests / `268` assertions, zero failures/errors |
 | Durable evaluator store | `18` tests / `78` assertions, zero failures/errors |
 | Controlled OS-process recovery harness | `1` test / `30` assertions, zero failures/errors |
 | Static local SmolVM harness | `12` tests / `156` assertions, zero failures/errors |
+| Current Jolt gates | manifest / selfhost / scievaluator / testbin all pass |
+| Trusted verifier hardening | injection / env scrub / redaction / scoped cleanup pass |
 
 ## Now Evidenced
 
@@ -36,6 +45,9 @@ gates are evidence gaps, not a decision to replace it.
   receipt consumption and zero repeated semantic world operations.
 - A controlled real OS-process boundary proves helper reconstruction, no replay
   of an observation/edit, and fail-closed runtime/spec/pending-history cases.
+- Trusted verification uses a structured scoped request with explicit scrubbed
+  environment and bounded streams; output is redacted before model rendering,
+  and unavailable or malformed verification fails closed.
 - JS1 with multi-branch execution is refused; the current policy is one
   logical persistent `:main` evaluator.
 
@@ -44,12 +56,14 @@ gates are evidence gaps, not a decision to replace it.
 - A real-model JS1 red → repair → green dogfood task.
 - Frozen bbagent A3c comparison.
 - Live controller-owned budget proof.
-- SmolVM guest boot and clean-consumer execution. The checked-in local harness
-  is static/producer evidence only until a pinned guest is built and run.
+- SmolVM guest boot and clean-consumer execution (**unexecuted**: the guest
+  pack remains `:unbuilt`). The checked-in local harness is static/producer
+  evidence only until a pinned guest is built and run.
 
 ## Standing Non-Claims
 
 - No self-hosting canary has run; **SELF-HOSTING CANARY: PASS** is not claimed.
+- Jolt's own `selfhost` gate is not the JS1 self-hosting canary.
 - No `project/run`, generic shell, network, Git mutation, multi-agent binding,
   JS2, or controller self-modification was added.
 - SCI is a Jolt runtime dependency; plain-JVM and non-Linux/platform lanes are

@@ -2,19 +2,25 @@
 {:js1/decision :revise
  :js1/record-date "2026-08-24"
  :js1/baseline
- {:samizdat {:branch "js1-bounded-samizdat" :rebased-on "d083eeb"}
-  :jolt {:revision "619ef19685460af847654e22cf6beda904d052fb"
-         :branch "js0-functional-sci-upstream"
-         :js0-freeze "04dd42db"
-         :js0-freeze-tag "js0-functional-sci-upstream-freeze"}
+ {:samizdat {:branch "js1-bounded-samizdat"
+             :recovery-base "321661649e174bb748adeb6970dad6c166003343"
+             :upstream-base "dae78547a66c80f31fa7a78d0f9483186a2b0af9"
+             :closure-changes :pending-commit}
+  :jolt {:revision "279bca18bbf50f37b8574a4e6998dee40313cd26"
+         :branch "js1-runtime-current-upstream"
+         :upstream-base "edda7aec"
+         :historical-js0-freeze "04dd42db"
+         :historical-post-js0-runtime "619ef196"}
   :sci {:revision "32d62a5136ad3dc148588752f5bcc4cc30b14752"
         :version "0.13.53"}}
  :js1/executed-gates
- {:full-suite "1000 tests / 3316 assertions / 0 failures / 0 errors"
+ {:full-suite "1047 tests / 3658 assertions / 0 failures / 0 errors"
   :bounded-sandbox "28 tests / 268 assertions / 0 failures / 0 errors"
   :eval-store "18 tests / 78 assertions / 0 failures / 0 errors"
   :os-process-boundary "1 test / 30 assertions / 0 failures / 0 errors"
-  :static-smolvm-harness "12 tests / 156 assertions / 0 failures / 0 errors"}
+  :static-smolvm-harness "12 tests / 156 assertions / 0 failures / 0 errors"
+  :jolt-current-gates "manifest/selfhost/scievaluator/testbin all pass"
+  :verifier-hardening "injection/env-scrub/redaction/scoped-cleanup pass"}
  :js1/evidenced
  ["versioned runtime/spec/binding/receipt identity"
   "strict operation receipts and bounded rendering of arbitrary SCI final values"
@@ -23,12 +29,13 @@
   "zero real semantic operations during replay"
   "controlled actual OS-process recovery with helper persistence and no repeated observation/edit"
   "fail-closed runtime/spec/pending-history recovery"
-  "single-player JS1 multi-branch refusal"]
+  "single-player JS1 multi-branch refusal"
+  "structured verifier with scrubbed environment, bounded streams, redact-before-render, and fail-closed availability"]
  :js1/remaining-pass-gates
  ["real-model red-repair-green dogfood"
   "frozen bbagent A3c comparison"
   "live controller-owned budget proof"
-  "pinned SmolVM guest boot and clean-consumer execution"]
+  "pinned SmolVM guest boot and clean-consumer execution (unexecuted: guest pack :unbuilt)"]
  :js1/non-claims
  ["no self-hosting canary"
   "no project/run, generic shell, network, Git mutation, JS2, or multi-agent evaluator binding"

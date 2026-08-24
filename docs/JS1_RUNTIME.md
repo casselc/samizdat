@@ -29,17 +29,61 @@ pin records.
 
 | Component | Coordinate |
 |---|---|
-| Samizdat | this repo — current source is `main` @ `818e9ff18428a875006e9ae6e29123fa35fc3f9f` plus the uncommitted JS1 working tree (`bin/js1 check` reports the actual checkout state at run time) |
-| Jolt runtime | `https://github.com/casselc/jolt` branch `js0-functional-sci-upstream` @ **`619ef19685460af847654e22cf6beda904d052fb`** ("sci: trusted inert language-surface API with versioned coordinate") |
+| Samizdat | this repo — current source is branch `js1-bounded-samizdat` @ `321661649e174bb748adeb6970dad6c166003343` plus the uncommitted JS1 working tree (`bin/js1 check` reports the actual checkout state at run time) |
+| Jolt runtime | `https://github.com/casselc/jolt` branch `js1-runtime-current-upstream` @ **`279bca18bbf50f37b8574a4e6998dee40313cd26`** ("test: wire current SCI evaluator gates"; the branch is rebased onto current upstream `edda7aec`, so the pre-rebase SHAs are superseded) |
 | SCI | `borkdude/sci` **0.13.53**, vendored as the Jolt checkout's `vendor/sci` submodule @ **`32d62a5136ad3dc148588752f5bcc4cc30b14752`** |
 | SCI deps | from the submodule's own `deps.edn` at that commit: `borkdude/edamame` 1.5.39, `org.babashka/sci.impl.types` 0.0.3, `borkdude/graal.locking` 0.0.2, and `org.clojure/tools.reader` 1.5.2 transitively via edamame's POM |
 | jolt-crypto | `jolt-lang/jolt-crypto` @ **`1ab72aa5f73be7ec41f01086953ffb43ecd3d84e`** — the digest substrate's MessageDigest shim; pinned once in samizdat's `deps.edn` and read from there by `bin/js1` |
 
-Why this Jolt commit: it is the one that adds `jolt.sandbox`'s
-`language-surface/0` and `language-coordinate/0` — the trusted, inert,
-versioned language surface the JS1 safe doc/complete path and the
-`samizdat.agent.sandbox` RuntimeCoordinate are built on. Earlier commits
-(e.g. the JS0 rederive `04dd42db`) lack that API.
+Why this Jolt commit: it is the tip of the branch that re-derives
+`jolt.sandbox` — the isolated, capability-bounded SCI evaluator — onto
+**current upstream**, now rebased onto `edda7aec`. The rebase landed the
+SCI follow-ups upstream (private `map`/`newline` compatibility vars,
+`Thread.getId`, `clojure.lang.Numbers` arithmetic statics, restored
+nested-interrupt polling, and a persistent-SCI evaluation test — PRs
+#721–#725), so the branch itself carries only: the evaluator
+re-derivation (`13e43418`, "feat: rederive JS1 evaluator on current
+upstream"), two scoped-process commits — `a5fb8a3b`, "feat: add scoped
+Linux process termination" (the JVM `ProcessBuilder`/`Process` surface
+over posix_spawn with waitpid/kill-driven exit/liveness/signalling) and
+`1f859e70`, "feat: bound scoped process output" (separately bounded
+stdout/stderr capture for the scoped run: `:out-bytes`/`:err-bytes`
+independent byte caps, a poll-bounded drain in the same loop that polls
+waitpid, and a fail-closed spawn gate so a capture pipe can never leak a
+wedged run) — and the tip `279bca18`, "test: wire current SCI evaluator
+gates", which wires the evaluator contract into opt-in make lanes
+(`js0sandbox`/`js0authority`/`scievaluator`) and adds discriminating
+`Numbers` checked-promote/unchecked-wrap/equiv rows to the sandbox suite.
+
+`jolt.sandbox` is **byte-identical** to the previous pin across this
+rebase — no sandbox or language surface changed. The scoped-process
+commits are pinned because JS1 verification consumes this bounded,
+scoped process primitive as the trusted controller process-scope
+substrate. The re-derivation preserves the trusted, inert, versioned
+language surface the JS1 safe doc/complete path and the
+`samizdat.agent.sandbox` RuntimeCoordinate are built on:
+
+- **Language coordinate** (unchanged across this lane's pins):
+  `jolt.sandbox/language-coordinate` emits the `js0-lang/v1:` scheme over
+  `jolt.sandbox/language-surface` — `language-surface-version` 1, lang
+  `js0-pure-sci`, the same 156-symbol reviewed vocabulary — so the pinned
+  coordinate is byte-identical:
+  `js0-lang/v1:[:map [[:jolt.sandbox.surface/count 156] … [:jolt.sandbox.surface/version 1]]]`.
+- **Capability/authority coordinate**: `jolt.sandbox/canonical-coordinate`
+  keeps the `js0:` scheme over `effective-authority`, with the closed
+  profile maxima `:agent/minimal`, `:agent/project-read`
+  (`:project/read :project/list :project/search :project/stat`), and
+  `:agent/project-develop` (those four plus `:project/edit`); context
+  creation still enforces requested ⊆ authorized ⊆ profile maximum with a
+  dispatch-time recheck, and `revoke!` remains the revocation
+  linearization point.
+- **Receipt protocol**: unchanged inert receipt domain (`nil`, booleans,
+  strings, exact integers, keywords, symbols, vectors, maps; `:op/id`,
+  `:op/args`, `:op/result`/`:op/error`) and fail-closed replay
+  (exhaustion, operation-mismatch, args-mismatch, unconsumed checks).
+
+Plain upstream commits (before this re-derivation) lack `jolt.sandbox`
+entirely.
 
 The SCI version is cross-checked against
 `vendor/sci/resources/SCI_VERSION` because the RuntimeCoordinate names it
@@ -71,8 +115,8 @@ Network is needed once per machine so jolt can fetch the four Maven jars
 into the shared `~/.m2` repository; everything is offline afterwards.
 
     git clone <samizdat-remote> samizdat && cd samizdat
-    git clone --branch js0-functional-sci-upstream https://github.com/casselc/jolt ../jolt
-    git -C ../jolt checkout 619ef19685460af847654e22cf6beda904d052fb
+    git clone --branch js1-runtime-current-upstream https://github.com/casselc/jolt ../jolt
+    git -C ../jolt checkout 279bca18bbf50f37b8574a4e6998dee40313cd26
     git -C ../jolt submodule update --init vendor/sci
     bin/js1 check
     bin/js1 smoke
@@ -150,14 +194,14 @@ time):
   has no coordinate to resolve; restore the dependency (it is an ordinary
   samizdat dep) — do not paper over it by hand-editing the wrapper.
 
-## Evidence (this workspace, 2026-08-23)
+## Evidence (this workspace, 2026-08-24)
 
     $ bin/js1 check
     js1 runtime stack: OK
       samizdat: /home/chuck/opencode/src/samizdat
-                git 818e9ff18428a875006e9ae6e29123fa35fc3f9f (14 tracked file(s) modified)
+                git 321661649e174bb748adeb6970dad6c166003343 (6 tracked file(s) modified)
       jolt:     /home/chuck/opencode/src/jolt
-                619ef19685460af847654e22cf6beda904d052fb (https://github.com/casselc/jolt branch js0-functional-sci-upstream)
+                279bca18bbf50f37b8574a4e6998dee40313cd26 (https://github.com/casselc/jolt branch js1-runtime-current-upstream)
       sci:      /home/chuck/opencode/src/jolt/vendor/sci
                 32d62a5136ad3dc148588752f5bcc4cc30b14752 (borkdude/sci 0.13.53)
       sci deps: borkdude/edamame 1.5.39, org.babashka/sci.impl.types 0.0.3,
@@ -181,12 +225,16 @@ time):
     Ran 28 tests. 268 assertions passed, 0 failures, 0 errors.
     SANDBOX-TEST OK
 
-The smoke's 28/268 is the same seam evidence the recorded direct
-invocation in `test/samizdat/sandbox_test.clj`'s docstring produces. The
-two root sets are equivalent — the wrapper's adds `vendor/sci/resources`
-(which the submodule's own `deps.edn` declares) and omits the
-source-less `sci.impl.types` extraction; only the composition (jolt's
-resolver, not a hand-written path list) is new.
+The smoke's 28/268 is byte-identical across every pin this lane has
+carried (pre- and post-rebase): `jolt.sandbox` is unchanged by the
+scoped-process commits and the rebase onto `edda7aec`, so the language
+surface and coordinate are preserved and no receipt, snapshot, or
+coordinate expectation moved with the pin. The smoke remains the same seam
+evidence the recorded direct invocation in `test/samizdat/sandbox_test.clj`'s
+docstring produces. The two root sets are equivalent — the wrapper's adds
+`vendor/sci/resources` (which the submodule's own `deps.edn` declares) and
+omits the source-less `sci.impl.types` extraction; only the composition
+(jolt's resolver, not a hand-written path list) is new.
 
 Failure modes exercised against synthetic checkouts: missing
 `JOLT_HOME`, absent sibling, wrong commit, submodule not checked out, and
