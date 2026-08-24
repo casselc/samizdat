@@ -143,14 +143,8 @@
          ;; success, so it never records a half-loaded state.
          (reset! loaded-content (into {} (map (juxt identity slurp)) files))
          loaded)
-       (catch Throwable e
-         (cell/registry-restore! snapshot)
-         (throw (ex-info (str "cell load failed; registry rolled back: "
-                              (ex-message e))
-                         {:dirs dirs} e)))))))
-
-(defn reload!
-  "Reload all cells from disk into the live image — the hot-swap path. Same
-  transactional guarantee as load-cells!."
-  ([] (load-cells!))
-  ([dirs] (load-cells! dirs)))
+          (catch Throwable e
+            (cell/registry-restore! snapshot)
+            (throw (ex-info (str "cell load failed; registry rolled back: "
+                                 (ex-message e))
+                          {:dirs dirs} e)))))))

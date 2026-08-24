@@ -94,11 +94,6 @@
         (ffi/free start)
         (ffi/free end)))))
 
-(defn view-text
-  "The text currently shown by a text view."
-  [view]
-  (buffer-text (gtk-text-view-get-buffer view)))
-
 (defn set-view-text!
   "Replace a view's text, but only when it actually differs — see the ns
   docstring on why an unconditional set is not harmless."

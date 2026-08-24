@@ -211,16 +211,6 @@
     (or (empty? terms)
         (boolean (some terms (answer-tokens answer))))))
 
-(defn labelled-line
-  "The text after `LABEL:` on the last line carrying one, or nil."
-  [text label]
-  (last (keep (fn [line]
-                (when-let [m (re-matches
-                              (re-pattern (str "(?i)" label "\\s*:\\s*(.+)"))
-                              (str/trim line))]
-                  (str/trim (second m))))
-              (str/split-lines (str text)))))
-
 ;; --- shipping ---------------------------------------------------------------
 
 (defmethod base/run-tool "done" [{:keys [branch] :as ctx}]
