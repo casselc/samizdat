@@ -102,22 +102,30 @@
      would not compare equal to the next clean one — replaying it would break
      the detection it was meant to restore.
 
-   JS1 resume contract:
-   - When the journal contains a :js1-binding-created event, the resume MUST
-     reconstruct a JS1 binding with the same spec coordinate before continuing.
-   - If SCI (jolt.sandbox) is unavailable at resume time, the resume FAILS
-     CLOSED — it throws rather than silently falling back to live eval in a
-     context that was supposed to be sandboxed.  The model's prior turns ran
-     inside SCI; switching to live eval mid-run would be a trust boundary
-     violation.
-   - The JS1 binding's SCI state (definitions made by prior evals) is NOT
-     replayable — SCI sessions are in-process state, like Lean sessions.
-     Definitions are lost.  This is the accepted JS1 analogue of the Lean
-     gap: the model can re-evaluate its definitions and they will take
-     effect in the fresh SCI context.
-   - The spec coordinate from the journal is verified against the newly
-     constructed binding's coordinate.  A mismatch (different root,
-     capabilities, or bounds) fails closed."
+    JS1 resume contract:
+    - When the journal contains a :js1-binding-created event, the resume MUST
+      reconstruct a JS1 binding with the same spec coordinate before continuing.
+    - The event carries the EXACT reconstruction information (spec
+      capabilities/bounds/timeout, spec coordinate, binding/instance ids,
+      preset, and the versioned runtime coordinate); every field is verified
+      against the re-minted binding, and any missing field or mismatched
+      value fails closed rather than guessing.
+    - If SCI (jolt.sandbox) is unavailable at resume time, the resume FAILS
+      CLOSED — it throws rather than silently falling back to live eval in a
+      context that was supposed to be sandboxed.  The model's prior turns ran
+      inside SCI; switching to live eval mid-run would be a trust boundary
+      violation.
+    - Whole-history rebuild: the re-minted binding's instance is rebuilt
+      from the binding's ENTIRE durable committed history
+      (sandbox/rebuild-binding!) — every committed evaluation replayed, in
+      the binding's durable total order, into ONE fresh SCI context, with
+      zero real project operations executed (jolt.sandbox :replay mode
+      throughout).  Definitions from prior turns SURVIVE the crash: a
+      terminated process resumes with its helper fns and def'd state intact,
+      reconstructed from receipts rather than re-run against the project.
+      A pending record, a gap in the total order, or any spec/instance/
+      binding/authority/runtime mismatch in the history fails closed —
+      history that cannot be verified is not replayed."
   (:require [clojure.data.json :as json]
             [clojure.string :as str]
             [clojure.tools.logging :as log]
@@ -125,6 +133,7 @@
             [samizdat.agent.gates :as gates]
             [samizdat.agent.loop :as branch-loop]
             [samizdat.agent.state :as state]
+            [samizdat.agent.tools.base :as js1-base]
             [samizdat.store.journal :as journal]
             [samizdat.store.runs :as runs]))
 
@@ -253,76 +262,223 @@
                     (keyword "project" s)))
     :else v))
 
-(defn- reconstruct-js1-binding!
-  "Fail-closed JS1 binding reconstruction for resume.
+(defn- journal-capability
+  "A journaled capability name back to a keyword.  Capabilities are
+   journaled as full name strings (\"project/read\"); tolerate the
+   name-only form jolt's data.json port can produce for keywords
+   (\"read\"), same as journal-preset."
+  [v]
+  (cond
+    (keyword? v) v
+    (string? v) (let [s (if (str/starts-with? v ":") (subs v 1) v)]
+                  (if (str/includes? s "/")
+                    (keyword s)
+                    (keyword "project" s)))
+    :else v))
 
-   Looks for the :js1-binding-created journal event to recover the
-   original spec coordinate and preset.  Then constructs a NEW binding
-   (the SCI state is lost, like Lean sessions) and verifies the
-   coordinate matches.
+(defn- js1-fail!
+  [code msg data]
+  (throw (ex-info msg (assoc data :js1/error code))))
 
-   Returns the binding, or throws if:
-   - The journal has a JS1 event but SCI is unavailable
-   - The coordinate does not match the original
+(defn- work-id-from-binding-id
+  "The work-id encoded in a durable binding id (\"bind:<key>:<work-id>\")."
+  [binding-id]
+  (let [s (str binding-id)]
+    (subs s (inc (str/last-index-of s ":")))))
 
-   Returns nil when no JS1 event exists (non-JS1 run)."
-  [conn run-id config root]
+(defn- normalize-js1-info
+  "Journaled JS1 reconstruction info into canonical shapes, or a
+   :reconstruction-info-missing failure.  Validated BEFORE anything is
+   allocated or required: corrupt journal data is refused on its own,
+   whatever the sandbox's availability."
+  [info]
+  (when-not (map? info)
+    (js1-fail! :reconstruction-info-missing
+               "JS1 resume: journal event data is not a map"
+               {:info (pr-str info)}))
+  (let [missing (into []
+                      (comp
+                        (filter #(let [v (get info %)]
+                                   (or (nil? v) (str/blank? (str v)))))
+                        (map name))
+                      [:spec-coordinate :runtime-coordinate :binding-id
+                       :instance-id :preset :capabilities :bounds :timeout-ms])]
+    (when (seq missing)
+      (js1-fail! :reconstruction-info-missing
+                 (str "JS1 resume: journal event lacks exact reconstruction"
+                      " information: " (str/join ", " missing))
+                 {:missing (vec missing)})))
+  (let [caps (cond
+               (vector? (:capabilities info)) (:capabilities info)
+               (set? (:capabilities info)) (vec (:capabilities info))
+               :else (js1-fail! :reconstruction-info-missing
+                                "JS1 resume: journaled capabilities are not a collection"
+                                {:capabilities (pr-str (:capabilities info))}))
+        bounds (if (map? (:bounds info))
+                 (into {} (map (fn [[k v]] [(keyword (name k)) v]))
+                       (:bounds info))
+                 (js1-fail! :reconstruction-info-missing
+                            "JS1 resume: journaled bounds are not a map"
+                            {:bounds (pr-str (:bounds info))}))
+        timeout (:timeout-ms info)]
+    (when-not (and (integer? timeout) (pos? timeout))
+      (js1-fail! :reconstruction-info-missing
+                 "JS1 resume: journaled timeout-ms is not a positive integer"
+                 {:timeout-ms (pr-str timeout)}))
+    (doseq [[k v] bounds]
+      (when-not (and (integer? v) (pos? v))
+        (js1-fail! :reconstruction-info-missing
+                   (str "JS1 resume: journaled bound " (name k)
+                        " is not a positive integer")
+                   {:bound k :value (pr-str v)})))
+    {:profile (:profile info)
+     :binding-id (str (:binding-id info))
+     :instance-id (str (:instance-id info))
+     :preset (journal-preset (:preset info))
+     :spec-coordinate (str (:spec-coordinate info))
+     :capabilities (vec (sort-by str (mapv journal-capability caps)))
+     :bounds bounds
+     :timeout-ms timeout
+     :runtime-coordinate (str (:runtime-coordinate info))}))
+
+(defn reconstruct-js1-binding!
+  "Fail-closed JS1 binding reconstruction for resume, from the journal's
+   EXACT binding information and the binding's WHOLE durable committed
+   history.
+
+   `conn` is the trusted connection the durable-eval store reads (the
+   run database in production; a controller/harness may bind the
+   sandbox's *eval-store* adapter instead).  `info` is the parsed
+   :js1-binding-created event data.  `root` is the trusted project root
+   the re-minted binding is confined to.
+
+   The ladder, each rung failing closed with {:js1/error ...}:
+
+   1. The journaled info is validated as data (normalize-js1-info) —
+      before SCI is even required, because corrupt journal data must be
+      refused on its own.
+   2. samizdat.agent.sandbox must load.  A run that evaluated inside SCI
+      cannot resume on live eval: that would be a trust boundary
+      violation, not a degradation.
+   3. This process's RuntimeCoordinate must equal the journaled one.
+      Receipts are only meaningful under the runtime that produced them;
+      an upgraded runtime fails closed instead of replaying across the
+      change.
+   4. A new binding is minted from the trusted preset + the EXACT
+      journaled capabilities/bounds/timeout — not from defaults, which a
+      harness upgrade could have moved.
+   5. The new binding's identity and spec are verified field by field
+      against the journal: binding id, instance id, spec coordinate (the
+      self-certifying content address over preset/root/capabilities/
+      bounds/timeout), and the explicit capabilities/bounds/timeout.
+   6. rebuild-binding! replays EVERY committed evaluation of the binding,
+      in the binding's durable total order, into ONE fresh SCI context —
+      zero real project operations, definitions restored from receipts.
+      A pending record (an unsettled effect's actuation state is
+      unknown), a gap in the total order, a spec/instance/binding/
+      authority/runtime mismatch in any record, or a replay whose result
+      does not reproduce the durable completion all fail closed.
+
+   Returns {:binding rebuilt-binding :provider provider :profile name};
+   the SCI state (definitions the model made with eval) is the committed
+   history, replayed — not lost."
+  [conn info root]
+  (let [info (normalize-js1-info info)]
+    (try
+      (require 'samizdat.agent.sandbox)
+      (catch Throwable e
+        (js1-fail! :sandbox-unavailable
+                   (str "JS1 resume failed: SCI/sandbox unavailable. "
+                        "The run was JS1-profiled but the sandbox cannot be "
+                        "constructed. Refusing to resume with live eval.")
+                   {:original (ex-message e)})))
+    (let [provider-fn (resolve 'samizdat.agent.sandbox/provider)
+          bind-fn     (resolve 'samizdat.agent.sandbox/bind!)
+          rt-fn       (resolve 'samizdat.agent.sandbox/runtime-coordinate)
+          rebuild-fn  (resolve 'samizdat.agent.sandbox/rebuild-binding!)]
+      (when (or (nil? provider-fn) (nil? bind-fn) (nil? rt-fn)
+                (nil? rebuild-fn))
+        (js1-fail! :sandbox-unavailable
+                   "JS1 resume failed: the sandbox API is incomplete in this process"
+                   {}))
+      ;; 3. The runtime coordinate gates everything below: receipts are
+      ;; only meaningful under the runtime that produced them.
+      (let [current-runtime (rt-fn)]
+        (when (not= current-runtime (:runtime-coordinate info))
+          (js1-fail! :runtime-mismatch
+                     (str "JS1 resume: runtime coordinate mismatch. The run"
+                          " evaluated under a different runtime stack; its"
+                          " receipts cannot be replayed here.")
+                     {:journaled (:runtime-coordinate info)
+                      :current current-runtime})))
+      ;; 4. Mint from the trusted preset + the exact journaled authority.
+      ;;    A bind! or spec error here (unknown preset, over-request) is a
+      ;;    sandbox-domain failure and keeps its own diagnostics.
+      (let [prov (provider-fn {:root root})
+            work-id (work-id-from-binding-id (:binding-id info))
+            binding (bind-fn prov work-id
+                             (-> {:preset (:preset info)
+                                  :root root
+                                  :instance/key :main}
+                                 (into (:bounds info))
+                                 (assoc :capabilities (set (:capabilities info))
+                                        :timeout-ms (:timeout-ms info))))
+            spec (:spec binding)
+            expect (fn [code what actual expected]
+                     (when (not= actual expected)
+                       (js1-fail! code
+                                  (str "JS1 resume: reconstructed binding "
+                                       what " does not match the journal")
+                                  {:expected expected :actual actual})))
+            _ (expect :binding-id-mismatch "binding id"
+                      (:binding/id binding) (:binding-id info))
+            _ (expect :instance-id-mismatch "instance id"
+                      (:instance/id binding) (:instance-id info))
+            _ (expect :coordinate-mismatch "spec coordinate"
+                      (:spec/coordinate spec) (:spec-coordinate info))
+            _ (expect :capability-mismatch "capabilities"
+                      (vec (:capabilities spec)) (:capabilities info))
+            _ (expect :bounds-mismatch "bounds"
+                      (:bounds spec) (:bounds info))
+            _ (expect :timeout-mismatch "timeout"
+                      (:timeout-ms spec) (:timeout-ms info))
+            ;; 6. Whole-history rebuild: ONE fresh SCI context carrying
+            ;;    every committed definition, or a closed failure.
+            rebuilt (try
+                      (rebuild-fn conn binding)
+                      (catch Throwable e
+                        (let [d (ex-data e)]
+                          (if (:js1/error d)
+                            (throw e)
+                            (throw (ex-info
+                                    (str "JS1 resume: the binding's durable"
+                                         " history failed whole-history"
+                                         " validation: " (ex-message e))
+                                    (-> (or d {})
+                                        (assoc :js1/error :history-invalid)
+                                        (assoc :sandbox-error
+                                               (:samizdat.sandbox/error d)))
+                                    e))))))]
+        (log/info "JS1 binding reconstructed for work" work-id
+                  "spec" (:spec-coordinate info)
+                  "- whole committed history replayed into one SCI context")
+        {:binding rebuilt :provider prov :profile (:profile info)}))))
+
+(defn- reconstruct-run-js1-binding!
+  "The journal-driven wrapper around reconstruct-js1-binding!: finds the
+   run's :js1-binding-created event, parses its data, and delegates.
+   Returns the reconstruction map, or nil for a non-JS1 run (in which
+   case SCI is never required — an unprofiled resume must not depend on
+   it)."
+  [conn run-id root]
   (let [all-events (journal/events-since conn run-id 0)
         js1-events (filter
-                     #(and (= "js1-binding-created" (:kind %))
-                           (some? (:data %)))
-                     all-events)]
+                    #(and (= "js1-binding-created" (:kind %))
+                          (some? (:data %)))
+                    all-events)]
     (when-let [evt (first js1-events)]
-      ;; The journal says this run was JS1-profiled.  Fail closed.
       ;; :data is JSON text from the events table; parse it.
-      (let [evt-data (parse-json (:data evt))
-            original-coordinate (get-in evt-data [:spec-coordinate])
-            original-profile (get-in evt-data [:profile])
-            original-preset (journal-preset (get-in evt-data [:preset]))]
-        (try
-          (require 'samizdat.agent.sandbox)
-          (let [provider-fn (resolve 'samizdat.agent.sandbox/provider)
-                bind-fn     (resolve 'samizdat.agent.sandbox/bind!)
-                desc-fn     (resolve 'samizdat.agent.sandbox/describe)
-                prov    (provider-fn {:root root})
-                preset  (or original-preset :project/develop)
-                binding (bind-fn prov (str run-id)
-                                 {:preset preset :root root
-                                  :instance/key :main})
-                desc    (desc-fn binding)
-                new-coord (:samizdat.sandbox/spec-coordinate desc)]
-            ;; A JS1 event that carries no coordinate cannot be verified
-            ;; against the reconstruction — fail closed rather than skip.
-            (when (nil? original-coordinate)
-              (throw (ex-info
-                       "JS1 resume: journal event carries no spec coordinate"
-                       {:run-id run-id
-                        :js1/error :coordinate-missing})))
-            (when (not= original-coordinate new-coord)
-              (throw (ex-info
-                        (str "JS1 resume: spec coordinate mismatch. Original: "
-                             original-coordinate ", reconstructed: " new-coord)
-                        {:run-id run-id
-                         :original-coordinate original-coordinate
-                         :reconstructed-coordinate new-coord
-                         :js1/error :coordinate-mismatch})))
-            (log/info "JS1 binding reconstructed for run" run-id
-                      "spec" new-coord "profile" original-profile)
-            (log/warn "JS1 resume: SCI definitions from prior turns are lost;"
-                      " the model must re-evaluate them")
-            binding)
-          (catch Throwable e
-            (if (:js1/error (ex-data e))
-              (throw e)
-              (throw (ex-info
-                      (str "JS1 resume failed: SCI/sandbox unavailable. "
-                           "The run was JS1-profiled but the sandbox cannot be "
-                           "constructed. Refusing to resume with live eval.")
-                      {:run-id run-id
-                       :original-profile original-profile
-                       :original-coordinate original-coordinate
-                       :js1/error :sandbox-unavailable}
-                                             e)))))))))
+      (reconstruct-js1-binding! conn (parse-json (:data evt)) root))))
 
 (defn resume!
   "Rebuild a run's branches from the journal and continue the beam's round
@@ -342,20 +498,32 @@
    pending-directives drain picks them up at the first resumed boundary — this
    function does not reimplement that path.
 
-   JS1 fail-closed: if the journal contains a :js1-binding-created event,
-   the resume reconstructs a JS1 binding and verifies its spec coordinate.
-   If SCI is unavailable, the resume throws rather than falling back to
-   live eval — the model's prior turns ran inside SCI, and switching to
-   live eval would be a trust boundary violation.  SCI definitions are
-   lost (same gap as Lean sessions).
+    JS1 fail-closed: if the journal contains a :js1-binding-created event,
+    the resume reconstructs a JS1 binding, verifies every journaled
+    reconstruction field (spec capabilities/bounds/timeout, coordinates,
+    identity), and replays the binding's WHOLE durable committed history
+    into one fresh SCI context — so the model's definitions survive the
+    crash.  If SCI is unavailable, the runtime/spec/identity mismatch, or
+    the durable history is malformed or unsettled, the resume THROWS
+    rather than falling back to live eval — the model's prior turns ran
+    inside SCI, and switching to live eval would be a trust boundary
+    violation.  A JS1 journal event on a multi-branch run is likewise
+    refused before any work: JS1 is single-player by construction.
 
-   Returns the beam/run-rounds result. Throws when the run is not resumable."
+    Returns the beam/run-rounds result. Throws when the run is not resumable."
   [{:keys [conn config llm-adapter llm-config run-id abort max-turns]}]
   (let [run (runs/get-run conn run-id)]
     (when-not (resumable? conn run-id)
       (throw (ex-info (str "run " run-id " is not resumable (status "
                            (:status run) ")")
                        {:run-id run-id :status (:status run)})))
+    ;; JS1 is single-player: a journaled JS1 binding on a width-N run
+    ;; (however it got there) is refused BEFORE the run is marked running
+    ;; again, before branches are rebuilt, before any model work.
+    (when (and (some #(= "js1-binding-created" (:kind %))
+                     (journal/events-since conn run-id 0))
+               (> (or (:beam_width run) 1) 1))
+      (js1-base/js1-assert-single-branch! true (:beam_width run)))
     ;; The row said 'interrupted' (or 'failed'); it is about to be running
     ;; again, and stalled? only watches runs whose status says so.
     (runs/mark-running! conn run-id)
@@ -371,9 +539,12 @@
           artifacts (group-by :branch_id (journal/artifacts conn run-id))
           firings (group-by :branch_id (journal/gate-firings conn run-id))
           sessions (atom [])
-          ;; JS1 reconstruction: fail-closed if the run was JS1-profiled
+          ;; JS1 reconstruction: fail-closed on unavailable SCI, runtime/
+          ;; spec/identity mismatch, or malformed/unsettled history; the
+          ;; whole committed durable history replays into ONE fresh SCI
+          ;; context, so the model's definitions survive the crash.
           root (or (get-in config [:run :root]) (System/getProperty "user.dir"))
-          js1 (reconstruct-js1-binding! conn run-id config root)
+          js1 (reconstruct-run-js1-binding! conn run-id root)
           ctx {:conn conn :run-id run-id :config config :problem (:problem run)
                :llm-adapter llm-adapter :llm-config llm-config
                :max-turns max-turns :beam? (> width 1) :beam-width width
@@ -381,9 +552,12 @@
                :abort abort
                ;; JS1 profile flags — reconstructed from journal, never
                ;; from model input.  :repl-session is nil when JS1 is
-               ;; active; the sandbox binding is the eval target.
-               :js1/profile (when js1 "single-player")
-               :js1/binding js1}
+               ;; active; the sandbox binding is the eval target.  The
+               ;; binding installs as a refreshable holder so a rollback
+               ;; between turns can be absorbed (tools.base/js1-binding).
+               :js1/profile (:profile js1)
+               :js1/binding (when-let [b (:binding js1)] (atom b))
+               :js1/provider (:provider js1)}
           branches (mapv (fn [row]
                            (rebuild-branch run row turns artifacts firings
                                            max-turns))

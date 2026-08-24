@@ -28,7 +28,15 @@
   name not in js1-allowed-tools before dispatch.  The model sees eval,
   doc, complete, and done; file/shell/manifest/mutate etc. are refused
   as policy. The live REPL is never reached in a JS1 context — eval
-  routes to the persistent SCI binding instead."
+  routes to the persistent SCI binding instead.
+
+  The ctx's :js1/binding may be the Binding map itself or an ATOM holding
+  it (js1-binding derefs either).  The atom is the wiring workflow/resume/
+  beam use: a rollback or rebuild supersedes a Binding in the provider
+  registry, and the eval tool refreshes the holder in place (see
+  tools.repl) so the NEXT eval runs on the binding the registry currently
+  publishes — the ctx map a tool receives is immutable, the cell it holds
+  is not."
   (:require [clojure.string :as str]))
 
 ;; ─── JS1 profile ─────────────────────────────────────────────────────────
@@ -51,9 +59,38 @@
   the ctx.  Tool restriction (phase-refusal below) and eval routing (the
   repl tools) both derive their decision from this accessor — never from
   :js1/profile, which is a display/journal label only.  One signal means
-  the two gates can never disagree about whether a context is sandboxed."
+  the two gates can never disagree about whether a context is sandboxed.
+
+  Accepts the binding as a plain map (legacy/test wiring) or as the atom
+  holder the run drivers install: a failed recorded evaluation rolls the
+  instance back, the rollback publishes a fresh binding into the provider
+  registry, and the holder is reset to it — so this always derefs to the
+  binding the registry currently publishes."
   [ctx]
-  (:js1/binding ctx))
+  (let [b (:js1/binding ctx)]
+    (cond
+      (nil? b) nil
+      (map? b) b
+      :else (deref b))))
+
+(defn update-js1-binding!
+  "Install `binding` as the ctx's held JS1 binding.  No-op when the ctx
+  holds a plain map (an immutable ctx cannot be refreshed from inside a
+  tool; a driver that wants refreshable bindings wires the atom holder).
+  Returns `binding` so callers can thread it."
+  [ctx binding]
+  (let [b (:js1/binding ctx)]
+    (when (and b (not (map? b)))
+      (reset! b binding)))
+  binding)
+
+(defn js1-provider
+  "The controller-owned provider the binding was minted from, when the
+  driver wired one.  Re-binding through it is how a superseded binding is
+  re-acquired after a rollback: bind! is idempotent per work-id and returns
+  the registry's CURRENT binding."
+  [ctx]
+  (:js1/provider ctx))
 
 (defn js1-profile?
   "True when the context is JS1-constrained.
@@ -76,6 +113,26 @@
   For diagnostics and prompt rendering only."
   []
   (sort js1-allowed-tools))
+
+(defn js1-assert-single-branch!
+  "Refuse a JS1-profiled run at multi-branch width, BEFORE any model work.
+
+  A JS1 binding is one persistent :main instance per work-id, and the
+  beam's branches would all evaluate into it: one branch's (def x) is
+  another branch's surprise, and a whole-history rebuild replays one
+  binding's record while the other branches wrote interleaved evals into
+  the same instance.  That is not a capability boundary that can be
+  enforced mid-run; it is a shape that must not start.  The guard throws
+  {:js1/error :multi-branch-not-supported} at the drivers' entry points,
+  before a run row is opened, a branch is spawned, or a provider call is
+  made — JS1 is single-player by construction."
+  [js1-active? width]
+  (when (and js1-active? (> (long width) 1))
+    (throw (ex-info (str "JS1 profile cannot run a multi-branch run (width "
+                         width "): a JS1 binding is one single-player SCI"
+                         " instance per work-id")
+                    {:js1/error :multi-branch-not-supported
+                     :beam-width width}))))
 
 ;; ─── Tool multimethod ─────────────────────────────────────────────────────
 

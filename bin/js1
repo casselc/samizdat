@@ -1,0 +1,257 @@
+#!/bin/sh
+# bin/js1 — the supported JS1 (SCI sandbox) invocation for samizdat.
+#
+# jolt.sandbox — the authority model samizdat.agent.sandbox builds on —
+# loads only when the vendored SCI source and its Maven dependencies are on
+# jolt's source roots, and samizdat's deps.edn deliberately does not
+# declare them.  Ordinary, non-JS1 invocations (`jolt serve`,
+# `jolt -M:test`, `jolt -A:dev …`) never touch this file and are unchanged.
+#
+# This script is the single repository-owned place where the JS1 runtime
+# stack is located, pin-checked, and handed to jolt.  It never composes
+# source or Maven paths itself: it passes jolt a generated -Sdeps alias
+# whose only dependencies are the pinned checkout's vendored SCI
+# (:local/root) and the jolt-crypto coordinate already pinned in deps.edn,
+# and JOLT's own resolver composes the source roots and fetches/extracts
+# the Maven jars into the shared local repository.
+# `bin/js1 path` prints that answer for recording; a recorded classpath
+# replays offline via `jolt -Scp "$(bin/js1 path)" …`.
+#
+# Pins, coordinates, failure modes, and run evidence: docs/JS1_RUNTIME.md.
+#
+# Usage:
+#   bin/js1 check    locate + pin-check the runtime stack, print coordinates
+#   bin/js1 path     print the resolver-composed JS1 source roots
+#                    (':'-joined; record them for an offline -Scp replay)
+#   bin/js1 smoke    run the JS1 seam evidence (test/samizdat/sandbox_test.clj)
+#
+# Jolt is located from $JOLT_HOME, else the sibling checkout ../jolt.
+# JOLT_CHEZ is the jolt launcher's own Chez selector and passes through.
+
+set -eu
+
+# ── The pinned JS1 runtime stack (docs/JS1_RUNTIME.md § Pins) ────────────────
+# casselc/jolt @ js0-functional-sci-upstream — "sci: trusted inert
+# language-surface API with versioned coordinate", the jolt.sandbox
+# language-surface/0 and language-coordinate/0 the JS1 doc/complete surface
+# and RuntimeCoordinate are built on.
+JOLT_SHA=619ef19685460af847654e22cf6beda904d052fb
+JOLT_BRANCH=js0-functional-sci-upstream
+JOLT_URL=https://github.com/casselc/jolt
+# Its vendor/sci submodule: borkdude/sci 0.13.53.  The version is checked
+# against resources/SCI_VERSION because samizdat.agent.sandbox's
+# RuntimeCoordinate names it (sci-implementation = "sci-0.13.53").  SCI's
+# deps are resolved from the submodule's own deps.edn at this commit, so
+# they are stated nowhere in this script.
+SCI_SHA=32d62a5136ad3dc148588752f5bcc4cc30b14752
+SCI_VERSION=0.13.53
+# The sandbox's digest substrate (samizdat.agent.files) computes content
+# coordinates through jolt.crypto's MessageDigest shim, so the JS1
+# classpath additionally needs jolt-crypto's source.  Its coordinate is
+# read from samizdat's deps.edn at run time — the smoke must exercise the
+# same jolt-crypto production resolves, and deps.edn is the single place
+# that pin is stated.
+CRYPTO_LIB=jolt-lang/jolt-crypto
+CRYPTO_URL=https://github.com/jolt-lang/jolt-crypto
+
+SAMIZDAT_ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd -P)
+
+fail() {
+  echo "js1: $*" >&2
+  exit 1
+}
+
+provision_instructions() {
+  cat >&2 <<EOF
+
+Provision the pinned runtime and retry:
+  git clone --branch $JOLT_BRANCH $JOLT_URL <dir>
+  git -C <dir> checkout $JOLT_SHA
+  git -C <dir> submodule update --init vendor/sci
+Then set JOLT_HOME=<dir>, or keep the checkout as samizdat's sibling
+($(dirname "$SAMIZDAT_ROOT")/jolt).
+EOF
+}
+
+# ── Locate (JOLT_HOME, then the sibling checkout) ────────────────────────────
+locate_jolt() {
+  if [ -n "${JOLT_HOME:-}" ]; then
+    if [ ! -d "$JOLT_HOME" ]; then
+      echo "js1: JOLT_HOME=$JOLT_HOME is not a directory." >&2
+      provision_instructions
+      exit 1
+    fi
+    JOLT=$(CDPATH= cd -- "$JOLT_HOME" && pwd -P)
+  elif [ -d "$SAMIZDAT_ROOT/../jolt" ]; then
+    JOLT=$(CDPATH= cd -- "$SAMIZDAT_ROOT/../jolt" && pwd -P)
+  else
+    echo "js1: no Jolt checkout found: JOLT_HOME is unset and $SAMIZDAT_ROOT/../jolt does not exist." >&2
+    provision_instructions
+    exit 1
+  fi
+}
+
+# ── Pin-check (fail closed, with remedies) ───────────────────────────────────
+validate_jolt() {
+  if [ ! -x "$JOLT/bin/jolt" ]; then
+    echo "js1: $JOLT has no executable bin/jolt — not a Jolt checkout." >&2
+    provision_instructions
+    exit 1
+  fi
+  [ -d "$JOLT/.git" ] || fail "$JOLT is not a git checkout, so the runtime pin cannot be verified. The JS1 evidence is only meaningful against the exact pinned tree."
+  command -v git >/dev/null 2>&1 || fail "git is required to verify the Jolt pin but is not on PATH."
+
+  actual=$(git -C "$JOLT" rev-parse HEAD 2>/dev/null) || fail "git -C \"$JOLT\" rev-parse HEAD failed — is the checkout corrupt?"
+  if [ "$actual" != "$JOLT_SHA" ]; then
+    cat >&2 <<EOF
+js1: Jolt checkout is not at the pinned JS1 runtime commit.
+  expected: $JOLT_SHA ($JOLT_URL branch $JOLT_BRANCH)
+  actual:   $actual
+jolt.sandbox's trusted language-surface API exists only at the pin; a
+receipt's runtime coordinate is not meaningful under any other tree.
+EOF
+    provision_instructions
+    exit 1
+  fi
+
+  # A dirty tracked tree voids the pin as a description of the bytes jolt
+  # actually loads (dev source mode reads the working tree), so refuse it.
+  # Untracked files (build output) are fine.
+  dirty=$(git -C "$JOLT" status --porcelain --untracked-files=no --ignore-submodules=all)
+  [ -z "$dirty" ] || fail "Jolt checkout has uncommitted tracked changes, so the pin does not describe the runtime:
+$dirty
+  Commit or stash them, or use a clean clone (see above)."
+
+  # The submodule pin the pinned commit records…
+  tree=$(git -C "$JOLT" ls-tree "$JOLT_SHA" -- vendor/sci)
+  case $tree in
+    "160000 commit $SCI_SHA"*) : ;;
+    *) fail "the pinned Jolt commit records an unexpected vendor/sci submodule: '$tree' (expected commit $SCI_SHA). The runtime pin and this script have drifted — see docs/JS1_RUNTIME.md." ;;
+  esac
+  # …and the submodule actually checked out at it.
+  [ -f "$JOLT/vendor/sci/deps.edn" ] || fail "vendor/sci is not checked out. Run:
+  git -C \"$JOLT\" submodule update --init vendor/sci"
+  sci_actual=$(git -C "$JOLT/vendor/sci" rev-parse HEAD 2>/dev/null || echo missing)
+  [ "$sci_actual" = "$SCI_SHA" ] || fail "vendor/sci is checked out at $sci_actual, expected $SCI_SHA. Run:
+  git -C \"$JOLT\" submodule update --init vendor/sci"
+  sci_dirty=$(git -C "$JOLT/vendor/sci" status --porcelain --untracked-files=no)
+  [ -z "$sci_dirty" ] || fail "vendor/sci has uncommitted tracked changes, so the SCI pin does not describe the source jolt loads:
+$sci_dirty"
+  sci_ver=$(cat "$JOLT/vendor/sci/resources/SCI_VERSION" 2>/dev/null || echo unreadable)
+  [ "$sci_ver" = "$SCI_VERSION" ] || fail "vendor/sci/resources/SCI_VERSION reads '$sci_ver', expected '$SCI_VERSION' — samizdat.agent.sandbox's RuntimeCoordinate names sci-$SCI_VERSION, so the vendored tree must be exactly that release."
+}
+
+# ── The single place any SCI root is constructed ─────────────────────────────
+# A generated alias, merged last via -Sdeps.  :replace-paths/:replace-deps
+# keep every other samizdat :deps coordinate (HTTP, store, nREPL, GUI
+# natives) OUT of the JS1 evidence run: the classpath is samizdat src+test,
+# jolt-crypto's source (the digest substrate, pinned by deps.edn), the
+# vendored SCI source, and exactly the Maven jars SCI's own deps.edn
+# declares at the pinned commit — fetched/extracted by jolt itself into
+# the shared ~/.m2 repository on a cold cache, offline thereafter.  (jolt
+# correctly contributes no root for org.babashka/sci.impl.types: that jar
+# ships a .class, no Clojure source.)
+
+# The jolt-crypto pin, read from samizdat's deps.edn (its single home).
+crypto_sha_from_deps() {
+  awk '
+    /jolt-lang\/jolt-crypto/ {inblock=1}
+    inblock && /:git\/sha/ {
+      if (match($0, /"[0-9a-f]{40}"/)) { print substr($0, RSTART + 1, 40); exit }
+    }' "$SAMIZDAT_ROOT/deps.edn"
+}
+
+require_crypto_sha() {
+  crypto_sha=$(crypto_sha_from_deps)
+  [ -n "$crypto_sha" ] || fail "no $CRYPTO_LIB :git/sha found in $SAMIZDAT_ROOT/deps.edn — the JS1 digest substrate needs that dependency pinned."
+  printf '%s' "$crypto_sha"
+}
+
+js1_sdeps() {
+  case $JOLT in
+    *[\\\"]*) fail "cannot embed a quote or backslash from this Jolt path into EDN: $JOLT" ;;
+  esac
+  crypto_sha=$(require_crypto_sha)
+  printf '%s' "{:aliases {:js1-rt {:replace-paths [\"src\" \"test\"] :replace-deps {borkdude/sci {:local/root \"$JOLT/vendor/sci\"} $CRYPTO_LIB {:git/url \"$CRYPTO_URL\" :git/sha \"$crypto_sha\"}}}}}"
+}
+
+# Run jolt with the JS1 alias selected, from the samizdat root so the
+# alias's relative :replace-paths resolve against it (jolt reads the
+# project dir from JOLT_PWD, which the launcher defaults to its cwd).
+jolt_js1() {
+  cd "$SAMIZDAT_ROOT"
+  "$JOLT/bin/jolt" -Srepro -Sdeps "$(js1_sdeps)" -A:js1-rt "$@"
+}
+
+samizdat_provenance() {
+  if [ -d "$SAMIZDAT_ROOT/.git" ]; then
+    s_head=$(git -C "$SAMIZDAT_ROOT" rev-parse HEAD 2>/dev/null || echo unknown)
+    s_dirty=$(git -C "$SAMIZDAT_ROOT" status --porcelain --untracked-files=no | wc -l | tr -d ' ')
+    echo "$s_head ($s_dirty tracked file(s) modified)"
+  else
+    echo "unknown (not a git checkout)"
+  fi
+}
+
+usage() {
+  cat <<EOF
+usage: bin/js1 <command>
+
+  check    locate + pin-check the JS1 runtime stack, print coordinates
+  path     print the resolver-composed JS1 source roots (':'-joined)
+  smoke    run the JS1 seam evidence (test/samizdat/sandbox_test.clj)
+
+Jolt is located from \$JOLT_HOME, else the sibling checkout ../jolt, and
+must be $JOLT_URL branch $JOLT_BRANCH at
+$JOLT_SHA with its vendor/sci submodule at
+$SCI_SHA (borkdude/sci $SCI_VERSION).
+
+See docs/JS1_RUNTIME.md.
+EOF
+}
+
+cmd=${1:-}
+case $cmd in
+  check)
+    locate_jolt
+    validate_jolt
+    crypto_sha=$(require_crypto_sha)
+    cat <<EOF
+js1 runtime stack: OK
+  samizdat: $SAMIZDAT_ROOT
+            git $(samizdat_provenance)
+  jolt:     $JOLT
+            $JOLT_SHA ($JOLT_URL branch $JOLT_BRANCH)
+  sci:      $JOLT/vendor/sci
+            $SCI_SHA (borkdude/sci $SCI_VERSION)
+  sci deps: borkdude/edamame 1.5.39, org.babashka/sci.impl.types 0.0.3,
+            borkdude/graal.locking 0.0.2 (+ org.clojure/tools.reader
+            1.5.2 transitively) — composed by jolt from the submodule's
+            own deps.edn at the pinned commit
+  crypto:   $CRYPTO_LIB @ $crypto_sha (digest substrate;
+            pinned by samizdat's deps.edn)
+EOF
+    ;;
+  path)
+    locate_jolt
+    validate_jolt
+    jolt_js1 -Spath
+    ;;
+  smoke)
+    locate_jolt
+    validate_jolt
+    cd "$SAMIZDAT_ROOT"
+    SAMIZDAT_SANDBOX_TEST_RUN=1
+    export SAMIZDAT_SANDBOX_TEST_RUN
+    exec "$JOLT/bin/jolt" -Srepro -Sdeps "$(js1_sdeps)" -A:js1-rt \
+      run "$SAMIZDAT_ROOT/test/samizdat/sandbox_test.clj"
+    ;;
+  help|-h|--help)
+    usage
+    ;;
+  *)
+    [ -z "$cmd" ] || echo "js1: unknown command: $cmd" >&2
+    usage >&2
+    exit 2
+    ;;
+esac

@@ -1,0 +1,52 @@
+;; JS1 × SmolVM CI lane — fixture contract.
+;;
+;; Fixture DEFINITIONS live in the repo (immutable inputs to the lane);
+;; mutable RESULTS are CI artifacts only. test/samizdat/js1_harness_test.clj
+;; cross-checks this file against the real test sources, so a marker or
+;; phase renamed in the suite but not here fails the ordinary suite.
+{:fixtures/version 1
+
+ ;; bin/js1 check / smoke — the seam evidence lane invokes in the guest.
+ :wrapper {:path "bin/js1"
+           :check-marker "js1 runtime stack: OK"
+           :smoke-marker "SANDBOX-TEST OK"
+           ;; From docs/JS1_RUNTIME.md § Evidence at the pinned stack; the
+           ;; harness asserts the MARKER and records the summary line, it
+           ;; does not pin counts.
+           :evidence {:tests 28 :assertions 268}}
+
+ ;; The durable-restart boundary suite (test/samizdat/js1_boundary_test.clj)
+ ;; driven in the guest through boundary_runner.clj.
+ :boundary {:runner "test/fixtures/js1/boundary_runner.clj"
+            :suite-ns "samizdat.js1-boundary-test"
+            :suite-env "SAMIZDAT_JS1_BOUNDARY_TEST"
+            :phase-env "SAMIZDAT_JS1_BOUNDARY_PHASE"
+            :dir-env "SAMIZDAT_JS1_BOUNDARY_DIR"
+            :jolt-bin-env "SAMIZDAT_JOLT_BIN"
+            ;; The phases the suite-mode deftest spawns, in order.
+            :phases ["record" "resume" "mismatch-spec" "mismatch-runtime"
+                     "unsettled" "tool-refresh"]
+            ;; Child-phase stdout markers the suite asserts on; the lane's
+            ;; evidence value rests on these names staying exact.
+            :phase-markers {"record" ["RECORD-OK"]
+                            "resume" ["RESUME-OK"]
+                            "mismatch-spec" ["CLOSED-OK :coordinate-mismatch"]
+                            "mismatch-runtime" ["CLOSED-OK :runtime-mismatch"]
+                            "unsettled" [":pending-history" ":malformed-history"]
+                            "tool-refresh" ["TOOL-REFRESH-OK"]}
+            ;; The replay non-actuation witness: made.txt must still hold
+            ;; the tampered bytes after every post-record phase.
+            :non-actuation-witness "tampered-after-crash"
+            :summary-marker "0 failures, 0 errors"}
+
+ ;; Guest-side step markers printed by ci/js1-smolvm/guest-setup.sh; the
+ ;; host consumer requires each after a zero exit.
+ :guest-markers {:prepare "GUEST-PREPARE-OK"
+                 :check "GUEST-CHECK-OK"
+                 :smoke "GUEST-SMOKE-OK"
+                 :boundary "GUEST-BOUNDARY-OK"
+                 :manifest-prefix "GUEST-MANIFEST "}
+
+ ;; The consumer's smolvm status ready contract (verified against smolvm
+ ;; 1.7.5's status JSON shape by the ecosystem's live isolation suites).
+ :status-contract {:state "running" :network false :ports 0 :mounts 1}}

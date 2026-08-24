@@ -42,9 +42,10 @@
             [samizdat.cells :as cells]
             [samizdat.config :as config]
             [samizdat.llm.registry :as registry]
-            [samizdat.agent.gitdiff :as gitdiff]
-            [samizdat.agent.loop :as branch-loop]
-            [samizdat.repl :as repl]
+             [samizdat.agent.gitdiff :as gitdiff]
+             [samizdat.agent.loop :as branch-loop]
+             [samizdat.agent.tools.base :as js1-base]
+             [samizdat.repl :as repl]
             [samizdat.agent.state :as state]
             [samizdat.store.journal :as journal]
             [samizdat.store.runs :as runs]
@@ -219,50 +220,75 @@
       (assoc ctx :llm-adapter (registry/adapter-for provider) :llm-config llm))
     ctx))
 
+(defn js1-binding-journal-data
+  "The EXACT binding reconstruction information journaled when a JS1
+   binding is minted, and the only resume's reconstruction is allowed to
+   trust: everything a second process needs to re-mint an identical
+   binding and verify it did — the spec coordinate (which content-addresses
+   preset, root, capabilities, bounds and timeout), the explicit
+   capabilities/bounds/timeout values, the durable binding/instance ids,
+   and the versioned RuntimeCoordinate the receipts are meaningful under.
+   Capabilities are journaled as full name strings (\"project/read\")
+   because keyword serialization through the journal's JSON is ambiguous
+   about namespaces."
+  [profile-name binding runtime-coordinate]
+  (let [spec (:spec binding)]
+    {:profile profile-name
+     :binding-id (:binding/id binding)
+     :instance-id (:instance/id binding)
+     :preset (:preset spec)
+     :spec-coordinate (:spec/coordinate spec)
+     :capabilities (mapv name (:capabilities spec))
+     :bounds (:bounds spec)
+     :timeout-ms (:timeout-ms spec)
+     :runtime-coordinate runtime-coordinate}))
+
 (defn- js1-binding
   "Create a JS1 sandbox binding for the run, or nil.
 
-   Activated ONLY when config :run :js1/profile is set to a truthy value.
-   The profile string (e.g. \"single-player\") is stored in the ctx as
-   :js1/profile — a display/journal label; the BINDING this function
-   returns is the canonical signal the tool gate and eval routing both
-   read (:js1/binding).
+    Activated ONLY when config :run :js1/profile is set to a truthy value.
+    The profile string (e.g. \"single-player\") is stored in the ctx as
+    :js1/profile — a display/journal label; the BINDING this function
+    returns is the canonical signal the tool gate and eval routing both
+    read (:js1/binding).
 
-   Trust boundary: the config key is read once here by controller code;
-   the model never sees or sets it.  The preset is hardcoded to
-   :project/develop; the instance key is :main (persistent across turns);
-   the work-id is the run-id, binding one instance per run.
+    Trust boundary: the config key is read once here by controller code;
+    the model never sees or sets it.  The preset is hardcoded to
+    :project/develop; the instance key is :main (persistent across turns);
+    the work-id is the run-id, binding one instance per run.
 
-   The sandbox provider, spec, instance, and binding IDs are journaled
-   so a resumed run can verify it reconstructs the same context.
+    The journal event carries the exact reconstruction information
+    (js1-binding-journal-data): spec capabilities/bounds/timeout, the spec
+    and runtime coordinates, and the durable binding/instance ids — so a
+    resumed run can re-mint the same binding, verify it, and replay the
+    whole committed durable history into it (see agent.resume).
 
-   JS1 is an explicit bounded workflow.  If its SCI dependency is absent,
-   creation FAILS CLOSED — it must never silently select the live REPL."
+    JS1 is an explicit bounded workflow.  If its SCI dependency is absent,
+    creation FAILS CLOSED — it must never silently select the live REPL."
   [conn run-id config root]
   (when (get-in config [:run :js1/profile])
     (try
       (require 'samizdat.agent.sandbox)
       (let [provider-fn (resolve 'samizdat.agent.sandbox/provider)
             bind-fn     (resolve 'samizdat.agent.sandbox/bind!)
-            desc-fn     (resolve 'samizdat.agent.sandbox/describe)
+            rt-fn       (resolve 'samizdat.agent.sandbox/runtime-coordinate)
             prov (provider-fn {:root root})
             profile-name (str (get-in config [:run :js1/profile]))
             binding (bind-fn prov (str run-id)
-                            {:preset :project/develop
-                             :root root
-                             :instance/key :main})
-            desc (desc-fn binding)]
-        ;; Journal the binding identity for resume verification.  The preset
-        ;; keyword is written through data.json, which reads back as a plain
-        ;; string (colon form, or name-only under jolt's port); resume
-        ;; converts it back to the catalog keyword before binding.
+                             {:preset :project/develop
+                              :root root
+                              :instance/key :main})
+            runtime-coordinate (rt-fn)]
+        ;; Journal the exact binding identity + spec for resume
+        ;; verification.  The preset keyword is written through data.json,
+        ;; which reads back as a plain string (colon form, or name-only
+        ;; under jolt's port); resume converts it back to the catalog
+        ;; keyword before binding.
         (journal/note! conn run-id :js1-binding-created
-                       {:data {:profile profile-name
-                               :binding-id (:samizdat.sandbox/binding-id desc)
-                               :instance-id (:samizdat.sandbox/instance-id desc)
-                               :spec-coordinate (:samizdat.sandbox/spec-coordinate desc)
-                               :preset (:samizdat.sandbox/preset desc)}})
-        binding)
+                       {:data (js1-binding-journal-data profile-name
+                                                        binding
+                                                        runtime-coordinate)})
+        {:binding binding :provider prov :profile profile-name})
       (catch Throwable e
         ;; Fail closed either way; a sandbox-domain error (unknown preset,
         ;; spec conflict, ...) keeps its own diagnostics instead of being
@@ -277,6 +303,16 @@
   "Run one branch to completion under the stored loop definition.
   Returns {:status :answer :branch :run-id (:residual)}."
   [{:keys [conn config llm-adapter llm-config problem max-turns]}]
+  ;; JS1 is single-player by construction: one persistent :main instance,
+  ;; one branch, one durable history.  A team manifest's subtask fan-out
+  ;; (or an explicit multi-branch beam width) would share that instance
+  ;; across branches, so the shape is refused here — before the loop is
+  ;; compiled, before a run row exists, and above all before any model
+  ;; work is paid for.
+  (js1-base/js1-assert-single-branch!
+    (get-in config [:run :js1/profile])
+    (max (or (get-in config [:run :beam-width]) 1)
+         (count (get-in config [:run :subtasks]))))
   (let [max-turns (or max-turns (get-in config [:run :max-turns]) 40)
         loop-nm (active-loop-name config)
         {:keys [version compiled definition]} (load-loop! conn loop-nm)
@@ -309,8 +345,13 @@
              :repl-session (when-not js1 (repl/new-session))
              :max-turns max-turns
              ;; JS1 profile flags — set only here, read by phase-refusal.
-             :js1/profile (when js1 (str (get-in config [:run :js1/profile])))
-             :js1/binding js1}]
+             ;; The binding is installed as a refreshable holder: a failed
+             ;; recorded eval rolls the instance back and supersedes the
+             ;; binding, and the eval tool resets the holder to the
+             ;; registry's current one (tools.base/update-js1-binding!).
+             :js1/profile (:profile js1)
+             :js1/binding (when-let [b (:binding js1)] (atom b))
+             :js1/provider (:provider js1)}]
     (runs/open-branch! conn run-id {:branch-id "B1"})
     ;; Which loop drove this run, durably: an agent reading a surprising run
     ;; back needs to know which version of itself produced it.

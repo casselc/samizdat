@@ -29,7 +29,7 @@
   The lifecycle mirrors how an evaluation actually happens:
 
     (begin! conn {:spec-id s :instance-id i :binding-id b
-                  :coordinate c :source src})        ; before anything runs
+                  :coordinate c :runtime r :source src}) ; before anything runs
     (record-intent! conn id {:op op :args [...]})    ; before each effect
     (record-outcome! conn id n {:result v}|:error)   ; after it
     (complete! conn id {:status :completed :result m}) ; at the end
@@ -41,6 +41,20 @@
   it fails closed when any identity field differs from what the caller holds,
   or when the row is a legacy row that carries no identity at all. The full
   ContextSpec is not duplicated here; only the three ids that name it.
+
+  Two further fields pin the record to the exact runtime and total order:
+
+    :runtime — the versioned RuntimeCoordinate string naming the
+      Jolt/SCI/evaluator-protocol/language-surface/capability-catalog/
+      receipt-protocol stack the evaluation ran under. Receipts are only
+      meaningful under the runtime that produced them, so verification
+      compares it exactly and a process upgraded past a record fails closed
+      instead of replaying across the change. Opaque text here, like
+      :coordinate.
+    :binding_seq — the binding's durable total order, assigned by begin!
+      as one more than the binding's previous maximum. `history` reads a
+      binding's evaluations back in this order, which is the order
+      whole-history rebuild replays them in.
 
   Append-only in the strict sense: no row here is ever updated or deleted.
   Settlement is a second row, so a crashed evaluation's record is exactly
@@ -121,24 +135,38 @@
 (defn begin!
   "Record the intent to evaluate `source` under the canonical
   evaluator/context `coordinate` (the string jolt.sandbox/canonical-coordinate
-  produces), bound to a trusted evaluator identity: the `:spec-id`,
-  `:instance-id`, and `:binding-id` of the ContextSpec/binding that produced
-  the coordinate. All five fields are required and must be non-blank. Returns
-  the evaluation id. The record is pending from this moment: until `complete!`
-  appends a terminal row, `pending` reports it."
-  [conn {:keys [spec-id instance-id binding-id coordinate source]}]
+  produces) and the versioned `runtime` coordinate (the string naming the
+  Jolt/SCI/protocol stack), bound to a trusted evaluator identity: the
+  `:spec-id`, `:instance-id`, and `:binding-id` of the ContextSpec/binding
+  that produced the coordinate. All six fields are required and must be
+  non-blank. Returns the evaluation id.
+
+  The row also claims the binding's next `binding_seq` — 0 for the binding's
+  first evaluation, else one more than its current maximum — so the binding's
+  evaluations form a durable total order in registration order. The
+  (binding_id, binding_seq) unique index makes the order structural: a
+  duplicate is rejected by the database, not by convention. A refused begin
+  is validated before the insert, so it consumes no sequence number.
+
+  The record is pending from this moment: until `complete!` appends a
+  terminal row, `pending` reports it."
+  [conn {:keys [spec-id instance-id binding-id coordinate runtime source]}]
   (doseq [[k v] {:spec-id spec-id
                  :instance-id instance-id
                  :binding-id binding-id
                  :coordinate coordinate
+                 :runtime runtime
                  :source source}]
     (when (str/blank? (str v))
       (throw (ex-info (str "an evaluation needs " (name k)) {k v}))))
   (db/with-writer
-    (db/execute! conn ["INSERT INTO evals (spec_id, instance_id, binding_id, coordinate, source, created_at)
-                        VALUES (?, ?, ?, ?, ?, ?)"
-                       (str spec-id) (str instance-id) (str binding-id)
-                       (str coordinate) (str source) (db/now)])
+    (let [n (:next (db/fetch-one conn ["SELECT COALESCE(MAX(binding_seq) + 1, 0) AS next
+                                        FROM evals WHERE binding_id = ?"
+                                       (str binding-id)]))]
+      (db/execute! conn ["INSERT INTO evals (spec_id, instance_id, binding_id, binding_seq, coordinate, runtime, source, created_at)
+                          VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
+                         (str spec-id) (str instance-id) (str binding-id) n
+                         (str coordinate) (str runtime) (str source) (db/now)]))
     (db/last-insert-id conn)))
 
 (defn record-intent!
@@ -252,13 +280,14 @@
            (-> row
                (update :status keyword)
                (update :result edn->value)))
-         (db/fetch conn ["SELECT e.id, e.spec_id, e.instance_id, e.binding_id,
-                                 e.coordinate, e.source, e.created_at,
-                                 c.status, c.result, c.created_at AS completed_at
-                          FROM evals e
-                          JOIN eval_completions c ON c.eval_id = e.id
-                          ORDER BY e.id LIMIT ?"
-                         (long limit)]))))
+          (db/fetch conn ["SELECT e.id, e.spec_id, e.instance_id, e.binding_id,
+                                  e.binding_seq, e.coordinate, e.runtime, e.source,
+                                  e.created_at,
+                                  c.status, c.result, c.created_at AS completed_at
+                           FROM evals e
+                           JOIN eval_completions c ON c.eval_id = e.id
+                           ORDER BY e.id LIMIT ?"
+                          (long limit)]))))
 
 (defn unsettled-effects
   "The effects of one evaluation recorded as intended and never settled,
@@ -313,16 +342,33 @@
               :receipts (mapv (fn [[_ receipt-rows]] (fold-receipt receipt-rows))
                               (sort-by key (group-by :seq rows)))))))
 
+(defn history
+  "Every evaluation recorded for `binding-id`, in the binding's durable total
+  order (binding_seq ascending) — the sequence whole-history rebuild replays.
+  Each entry is the full `load-eval` projection: the identity fields,
+  :binding_seq, :runtime, :status (:pending included, so an unfinished record
+  is visible for what it is), :result read back as data, and the ordered
+  structured :receipts. Completed, failed, and pending rows all appear; what
+  may be replayed is the caller's semantic decision. Returns [] for a binding
+  with no recorded evaluations."
+  [conn binding-id]
+  (mapv (fn [row] (load-eval conn (:id row)))
+        (db/fetch conn ["SELECT id FROM evals WHERE binding_id = ?
+                         ORDER BY binding_seq"
+                        (str binding-id)])))
+
 (defn verify-binding!
   "Fail closed unless the durable evaluation names exactly the trusted
-   EvaluatorSpec, EvaluatorInstance, EvaluatorBinding, and coordinate supplied
-   by the controller. Legacy/partial records are not resumable."
-  [conn eval-id {:keys [spec-id instance-id binding-id coordinate]}]
+   EvaluatorSpec, EvaluatorInstance, EvaluatorBinding, authority coordinate,
+   and runtime coordinate supplied by the controller. Legacy/partial records
+   are not resumable."
+  [conn eval-id {:keys [spec-id instance-id binding-id coordinate runtime]}]
   (let [row (load-eval conn eval-id)
         expected {:spec_id (str spec-id)
                   :instance_id (str instance-id)
                   :binding_id (str binding-id)
-                  :coordinate (str coordinate)}
+                  :coordinate (str coordinate)
+                  :runtime (str runtime)}
         actual (select-keys row (keys expected))]
     (when-not row
       (throw (ex-info "evaluation record is missing" {:eval-id eval-id})))

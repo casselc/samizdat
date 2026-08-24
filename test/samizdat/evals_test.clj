@@ -35,10 +35,16 @@
   to the store."
   "js0:[:map [[:jolt.sandbox/profile \":agent/project-read\"]]]")
 
+(def ^:private runtime
+  "A RuntimeCoordinate of the shape samizdat.agent.sandbox emits. Opaque to
+  the store."
+  "js1-rt/v1:[:map [[:runtime/jolt \"test\"]]]")
+
 (def ^:private evaluator-identity
   {:spec-id "project/develop"
    :instance-id "inst:main"
-   :binding-id "bind:main:test"})
+   :binding-id "bind:main:test"
+   :runtime runtime})
 
 (defn- begin-eval! [conn opts]
   (evals/begin! conn (merge evaluator-identity opts)))
@@ -67,6 +73,91 @@
     (is (thrown? Exception (begin-eval! c {:coordinate "" :source "(+ 1 2)"})))
     (is (thrown? Exception (begin-eval! c {:coordinate coordinate :source "  "})))
     (is (empty? (evals/pending c)) "a refused intent records nothing")))
+
+(deftest intent-needs-a-runtime-coordinate
+  (with-db [c]
+    (is (thrown? Exception
+                 (evals/begin! c (merge (dissoc evaluator-identity :runtime)
+                                        {:coordinate coordinate :source "x"})))
+        "a missing runtime coordinate is refused")
+    (is (thrown? Exception
+                 (begin-eval! c {:coordinate coordinate :runtime " " :source "x"}))
+        "a blank runtime coordinate is refused")
+    (is (empty? (evals/pending c)) "a refused intent records nothing")))
+
+(deftest begin-assigns-a-durable-total-order-per-binding
+  (with-db [c]
+    (let [a (begin-eval! c {:coordinate coordinate :source "a"})
+          b (begin-eval! c {:coordinate coordinate :source "b"})
+          ;; An interleaved second binding has its own total order.
+          x (evals/begin! c (assoc evaluator-identity
+                                   :binding-id "bind:main:other"
+                                   :coordinate coordinate :source "x"))
+          d (begin-eval! c {:coordinate coordinate :source "d"})]
+      (is (= [0 1 2] (mapv (comp :binding_seq #(evals/load-eval c %)) [a b d]))
+          "one binding's evaluations number 0, 1, 2, ... in registration order")
+      (is (= 0 (:binding_seq (evals/load-eval c x)))
+          "a different binding starts its own order at 0")
+      (is (thrown? Exception (begin-eval! c {:coordinate "" :source "e"})))
+      (is (= 3 (:binding_seq (evals/load-eval
+                              c (begin-eval! c {:coordinate coordinate :source "e"}))))
+          "a refused begin consumes no sequence number"))))
+
+(deftest the-binding-total-order-is-structurally-unique
+  (with-db [c]
+    (begin-eval! c {:coordinate coordinate :source "a"})
+    (is (thrown? Exception
+                 (db/execute! c ["INSERT INTO evals (spec_id, instance_id, binding_id, binding_seq, coordinate, runtime, source, created_at)
+                                  VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
+                                 "s" "i" (:binding-id evaluator-identity) 0
+                                 coordinate runtime "dup" (db/now)]))
+        "a duplicate (binding_id, binding_seq) is rejected by the database, not by convention")))
+
+(deftest verify-binding-checks-the-runtime-coordinate
+  (with-db [c]
+    (let [id (begin-eval! c {:coordinate coordinate :source "x"})]
+      (is (map? (evals/verify-binding! c id (assoc evaluator-identity
+                                                   :coordinate coordinate)))
+          "a full five-field identity match verifies")
+      (is (thrown? Exception
+                   (evals/verify-binding! c id (assoc evaluator-identity
+                                                      :coordinate coordinate
+                                                      :runtime "js1-rt/v1:WRONG")))
+          "a runtime mismatch fails closed")
+      (is (thrown? Exception
+                   (evals/verify-binding! c id (-> evaluator-identity
+                                                   (assoc :coordinate coordinate)
+                                                   (dissoc :runtime))))
+          "a caller without a runtime coordinate fails closed")
+      (is (thrown? Exception
+                   (evals/verify-binding! c id (assoc evaluator-identity
+                                                      :coordinate "js0:WRONG")))
+          "an authority-coordinate mismatch still fails closed"))))
+
+(deftest history-returns-the-bindings-total-order-with-statuses
+  (with-db [c]
+    (let [a (begin-eval! c {:coordinate coordinate :source "a"})
+          b (begin-eval! c {:coordinate coordinate :source "b"})]
+      (evals/record-intent! c a {:op :project/read :args ["f"]})
+      (evals/record-outcome! c a 0 {:result {:content "x"}})
+      (evals/complete! c a {:status :completed :result {:value 1}})
+      ;; b stays pending; an unrelated binding never appears in this history.
+      (evals/begin! c (assoc evaluator-identity
+                             :binding-id "bind:main:other"
+                             :coordinate coordinate :source "z"))
+      (let [h (evals/history c (:binding-id evaluator-identity))]
+        (is (= [a b] (mapv :id h)))
+        (is (= [0 1] (mapv :binding_seq h)))
+        (is (= [:completed :pending] (mapv :status h))
+            "pending rows are visible for what they are")
+        (is (= [runtime runtime] (mapv :runtime h)))
+        (let [r (first (:receipts (first h)))]
+          (is (= :project/read (:op r)))
+          (is (= :done (:phase r)))
+          (is (= {:content "x"} (:result r))
+              "receipts come back as data within the history projection")))
+      (is (= [] (evals/history c "bind:main:never-seen"))
+          "a binding with no record has an empty history"))))
 
 (deftest receipts-round-trip-as-structured-data-in-strict-order
   (with-db [c]

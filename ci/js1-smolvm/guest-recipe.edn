@@ -1,0 +1,111 @@
+;; JS1 SmolVM guest recipe — the pinned, digest-verifiable definition of
+;; the guest pack the consumer lane boots. Built ONCE per lock change by
+;; ci/js1-smolvm/build-guest-pack.sh (producer lane: needs network + KVM);
+;; consumed offline, network-disabled, by consumer-run.sh.
+;;
+;; Verifiability model: every input below is either digest-pinned here or
+;; carries an explicit pin policy; the producer records what it ACTUALLY
+;; fetched/built into pack-manifest.edn beside the pack; the consumer trust
+;; anchor is the pack's own sha256 in runtime-lock.edn. Nothing is trusted
+;; from a descriptor sitting beside an archive.
+{:recipe/version 1
+ :recipe/name "js1-guest"
+
+ ;; ── Base rootfs ────────────────────────────────────────────────────────
+ ;; Alpine minirootfs, x86_64. The sha256 is pinned on first build
+ ;; (pin-on-first-build): the first producer run records the digest of the
+ ;; tarball it fetched into pack-manifest.edn and REFUSES to proceed until
+ ;; the operator pins it here; every later build verifies against the pin.
+ :base {:kind :alpine-minirootfs
+        :version "3.21.3"
+        :arch "x86_64"
+        :url "https://dl-cdn.alpinelinux.org/alpine/v3.21/releases/x86_64/alpine-minirootfs-3.21.3-x86_64.tar.gz"
+        :sha256 nil
+        :pin-policy :pin-on-first-build}
+
+ ;; ── Guest packages ─────────────────────────────────────────────────────
+ ;; Installed with apk at build time (build lane has network; the consumer
+ ;; lane never does). Versions are resolved once, recorded exactly in
+ ;; pack-manifest.edn, and re-pinned there; apk is always invoked with
+ ;; --no-cache. git is the load-bearing one: bin/js1's pin verification
+ ;; shells out to it in the guest.
+ :packages {:install ["git"]
+            :via "apk --no-cache"
+            :pin-policy :exact-version-in-manifest}
+
+ ;; ── Chez Scheme (jolt's own host requirement) ──────────────────────────
+ ;; Threaded Chez 10.4.1 (ta6le), staged from the build host's /usr/local
+ ;; install. The payload digest is a deterministic tar (sorted names, zeroed
+ ;; mtimes/owners) of lib/csv10.4.1 plus the bin/{scheme,petite,chez,
+ ;; scheme-script} symlinks — build-guest-pack.sh reproduces it byte-for-byte
+ ;; and refuses on mismatch.
+ :chez {:version "10.4.1"
+        :machine "ta6le"
+        :threaded true
+        :provenance :build-host-usr-local
+        :payload-sha256 "610b610a7f3131fbd26615bc98a8f4e9fc314282f419331f2138c3f3a7e1021e"
+        :guest-bin "/usr/local/bin/scheme"}
+
+ ;; ── The pinned JS1 runtime checkout, baked in ──────────────────────────
+ ;; git clone + checkout + submodule, pin-verified with git rev-parse, baked
+ ;; at :guest/path WITH .git intact and the tracked tree clean — the guest
+ ;; run of `bin/js1 check` re-verifies all of it (that re-verification is
+ ;; the consumer evidence, not a build-time shortcut).
+ :jolt-runtime {:url "https://github.com/casselc/jolt"
+                :branch "js0-functional-sci-upstream"
+                :sha "619ef19685460af847654e22cf6beda904d052fb"
+                :submodule {:path "vendor/sci"
+                            :sha "32d62a5136ad3dc148588752f5bcc4cc30b14752"
+                            :version-file "resources/SCI_VERSION"
+                            :version "0.13.53"}
+                :guest-path "/opt/js1-runtime/jolt"
+                :tracked-tree :clean}
+
+ ;; ── Warm dependency caches (the consumer lane is network-disabled) ─────
+ ;; Produced by running the PINNED jolt's own resolver at build time:
+ ;; `jolt -P` (full samizdat resolve — the boundary suite's children run
+ ;; `jolt path` against the full deps.edn) and `bin/js1 path` (the JS1
+ ;; seam resolve). Both resolve only what samizdat's deps.edn and the SCI
+ ;; submodule's own deps.edn pin; this recipe restates no transitive
+ ;; coordinates, so the pins cannot drift. The producer records every
+ ;; fetched artifact's sha256 into pack-manifest.edn.
+ :warm-caches {:gitlibs-home "/root/.gitlibs"
+               :m2-home "/root/.m2"
+               :warm-commands ["jolt -P" "bin/js1 path"]
+               :git-deps
+               {;; samizdat deps.edn pins (full-resolve set)
+                "jolt-lang/http-client" "add8184b819b69dcfed1305b9577eb8794f76409"
+                "jolt-lang/db" "c3ed5b333b5feed615d49c118493a00edc537739"
+                "jolt-lang/nrepl" "10bf63fd19f66b39587f4a5756d0644231b2d4c1"
+                "jolt-lang/jolt-crypto" "1ab72aa5f73be7ec41f01086953ffb43ecd3d84e"
+                "org.clojure/data.json" "94463ffb54482427fd9b31f264b06bff6dcfd557"
+                "jolt-lang/logging" "ec6747e55583118d881faf4ab41e68d7e587ce4c"
+                "jolt-lang/time" "bc85090dae95d103ba04f4ea9687945cf46fb19e"
+                ;; transitive via http-client's own deps.edn (recorded, not
+                ;; restated, at build time; listed because it is a gitlib)
+                "org.clj-commons/clj-http-lite" "5bc2a98969b4926d090787baf9297fd73cea42d0"}
+               ;; The four jars on the JS1 sandbox classpath, digest-pinned
+               ;; (verified against this workspace's ~/.m2, 2026-08-23).
+               :sci-jar-sha256
+               {"borkdude/edamame/1.5.39/edamame-1.5.39.jar"
+                "e83ca0f962c580c5c9c8d00967698b3fd0d002247e37e4f46c3383b9c29d8855"
+                "org/babashka/sci.impl.types/0.0.3/sci.impl.types-0.0.3.jar"
+                "d331dba0e0738c381d737f18525070e75b63f3f67efc88d3450db00c755fe6de"
+                "borkdude/graal.locking/0.0.2/graal.locking-0.0.2.jar"
+                "7859697555c154d72030ceb34534cfbaa70ac4b58984041d37850b53bdf7145e"
+                "org/clojure/tools.reader/1.5.2/tools.reader-1.5.2.jar"
+                "cb96ed0efdf0b8bc362632cb74067ef225f6b03f3f478c8ba44182f6a17a37b6"}}
+
+ ;; ── Guest environment contract (consumer-run.sh passes exactly these) ──
+ :guest-env {"HOME" "/root"
+             "JOLT_HOME" "/opt/js1-runtime/jolt"
+             "JOLT_CHEZ" "/usr/local/bin/scheme"
+             "JOLT_QUIET" "1"
+             "PATH" "/usr/local/bin:/usr/bin:/bin"
+             "LC_ALL" "C"}
+
+ ;; ── Output ─────────────────────────────────────────────────────────────
+ :output {:pack-path-relpath ".smolvm/js1-guest.smolmachine"
+          :manifest "pack-manifest.edn"
+          :pack-command "smolvm pack create --from-vm <provisioned build VM>"
+          :status :unbuilt}}

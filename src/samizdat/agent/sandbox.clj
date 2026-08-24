@@ -50,27 +50,71 @@
      :project/read    — :agent/project-read,  capabilities read/list/search/stat
      :project/develop — :agent/project-develop, read/list/search/stat + edit
 
-   Five semantic ops projected as project/read, project/list,
-   project/search, project/stat, project/edit — all rooted at the trusted
-   host root with relative nonescaping paths, symlink escape prevention,
-   bounded reads, deterministic digest stat, and anchored edit
-   (base-digest or :absent, stale conflict detection, no blind overwrite).
-   All returned data is inert/canonical via jolt.sandbox.
+    Five semantic ops projected as project/read, project/list,
+    project/search, project/stat, project/edit — normalized against the
+    frozen bb4t A2/A3b project contract, all rooted at the trusted host
+    root: relative nonescaping paths validated lexically, symbolic links
+    refused everywhere (leaf or component, in-root or escaping), bounded
+    strict-UTF-8 reads that stop at the bound before consuming, one-level
+    inert sorted structured listings, {:path :line :text} search results
+    under file/result/byte/regex bounds with per-file consumption checked
+    before reading, fail-closed stat digests (a coordinate is computed or
+    the operation fails — never nil/fake), and an anchored edit that writes
+    through a sibling temporary and an atomic rename, creates only an
+    absent leaf (never parent hierarchy), and conflicts rather than
+    overwriting blindly.  All returned data is inert/canonical via
+    jolt.sandbox.  Safe host-derived doc/complete unions the effective
+    project operations with the reviewed pure language surface
+    (jolt.sandbox/language-surface at Jolt 619ef196) — trusted static data,
+    never live introspection.
 
-   Timeout uses Jolt cooperative interrupt with an unraiseable host
-   ceiling: jolt.host/run-interruptible checks the token from the host
-   side; SCI code cannot catch or suppress the interruption.
+    Timeout uses Jolt cooperative interrupt with an unraiseable host
+    ceiling: jolt.host/run-interruptible checks the token from the host
+    side; SCI code cannot catch or suppress the interruption.
 
-   Legacy direct API (preserved): new / evaluate! / rebuild! / describe.
-   Note: the original draft named the constructor `registry/new`; under
-   Jolt a multi-segment defn name interns under its final segment, so it
-   was always callable only as plain `new` — that name is kept.
+    Durable recorded evaluation (evaluate-recorded! / rebuild-binding!):
 
-   See samizdat.sandbox-test docstring for the direct invocation.
+      RuntimeCoordinate — every durable record names the exact runtime stack
+        its receipts are meaningful under: Jolt version, vendored SCI
+        coordinate, evaluator-protocol version, reviewed language-surface
+        coordinate, capability-catalog coordinate/version, and
+        receipt-protocol version, all under one versioned self-certifying
+        js1-rt/v1: coordinate.  Verification compares it exactly; an
+        upgraded runtime fails closed instead of replaying across the
+        change.
 
-   Blockers:
-     - jolt.sandbox requires SCI (sci.core) - not available on plain JVM.
-     - jolt.host/run-interruptible and make-interrupt are Jolt host fns."
+      Strict receipts, bounded rendered result — receipt payloads stay in
+        the strict canonical receipt domain, but an evaluation's FINAL value
+        may be any SCI value: inert values are stored exactly, everything
+        else is rendered under print bounds plus a character bound.
+
+        Commit-only state — a recorded evaluation's definitions become
+        evaluator state only by committing.  A failed or interrupted
+        evaluation's partial definitions are rolled back: the instance is
+        rebuilt from the binding's durable committed history and the rebuilt
+        instance is published before the original error propagates.  If that
+        rollback itself fails, the instance is poisoned and refuses further
+        evaluation until rebuilt.
+
+      Whole-history rebuild — rebuild-binding! replays EVERY committed
+        evaluation of a binding, in the binding's durable total order
+        (binding_seq), into ONE fresh SCI context.  Replay runs in
+        jolt.sandbox :replay mode throughout, so zero real project
+        operations execute; every record is validated against the binding's
+        spec/instance/binding identity, authority coordinate, and runtime
+        coordinate before any of it is trusted, and a pending record, a gap
+        in the total order, a shared instance, or any mismatch fails closed.
+
+    Legacy direct API (preserved): new / evaluate! / rebuild! / describe.
+    Note: the original draft named the constructor `registry/new`; under
+    Jolt a multi-segment defn name interns under its final segment, so it
+    was always callable only as plain `new` — that name is kept.
+
+    See samizdat.sandbox-test docstring for the direct invocation.
+
+    Blockers:
+      - jolt.sandbox requires SCI (sci.core) - not available on plain JVM.
+      - jolt.host/run-interruptible and make-interrupt are Jolt host fns."
   (:require [clojure.string :as str]
             [jolt.fs :as fs]
             [jolt.sandbox :as sandbox]
@@ -84,7 +128,25 @@
 (def ^:const default-max-list-entries 1000)
 (def ^:const default-max-search-results 500)
 (def ^:const default-search-max-chars 500000)
+(def ^:const default-search-max-files 20000)
+(def ^:const default-max-write-bytes 1048576)
 (def ^:const default-timeout-ms 30000)
+
+;; Bounds the frozen bb4t A2/A3b contract fixes for every path argument:
+;; a model-supplied path is one bounded (≤ `max-path-chars`) non-empty
+;; relative string, and a search pattern at most `max-search-pattern-chars`.
+(def ^:const max-path-chars 4096)
+(def ^:const max-search-pattern-chars 200)
+(def ^:const max-search-line-chars 300)
+
+(defn- read-byte-ceiling
+  "The byte bound a bounded read stops at, derived from the character bound
+   (a character occupies at most four UTF-8 bytes, so this is the largest
+   byte consumption a max-chars read can ever need).  Bounded BEFORE
+   decoding: no read ever consumes past this ceiling regardless of what the
+   file contains."
+  [max-chars]
+  (* 4 max-chars))
 
 ;; ═══════════════════════════════════════════════════════════════════════════
 ;; Trusted preset catalog (closed)
@@ -107,6 +169,92 @@
                     :project/edit}}})
 
 ;; ═══════════════════════════════════════════════════════════════════════════
+;; RuntimeCoordinate — versioned identity of the runtime a receipt names
+;; ═══════════════════════════════════════════════════════════════════════════
+
+(def ^:const runtime-protocol-version
+  "Version of the RuntimeCoordinate scheme itself (the js1-rt/vN: prefix)."
+  1)
+
+(def ^:const evaluator-protocol-version
+  "Version of the JS1 evaluator protocol: the EvaluatorSpec/Instance/Binding
+   seam, the recorded intent/outcome/completion lifecycle, the five projected
+   operations' normalized frozen-contract semantics (bounded strict-UTF-8
+   read, one-level structured listing, {:path :line :text} bounded search,
+   fail-closed stat digests, atomic anchored edit that never creates
+   hierarchy), and the replay contract this namespace implements.  Bumped to
+   2 with that normalization: durable receipts recorded under the v1 result
+   shapes fail closed at replay instead of being reinterpreted."
+  2)
+
+(def ^:const receipt-protocol-version
+  "Version of the durable receipt protocol shared with samizdat.store.evals:
+   the canonical EDN receipt domain, intent-before-effect ordering, and the
+   append-only pending/completed settlement rules."
+  1)
+
+(def ^:const capability-catalog-version
+  "Version of the trusted closed preset catalog (`presets`).  The catalog
+   content is also named exactly by :runtime/capability-catalog's canonical
+   coordinate; this version names the catalog SCHEMA."
+  1)
+
+(def ^:const sci-implementation
+  "The SCI implementation coordinate named by the RuntimeCoordinate.  SCI
+   exposes no runtime version, so this names the vendored SCI release in the
+   local jolt source tree (vendor/sci, per its resources/SCI_VERSION) as a
+   reviewed constant: bump it deliberately when the vendored tree moves."
+  "sci-0.13.53")
+
+(defn- capability-catalog-description
+  "Inert, canonical description of the closed trusted preset catalog — the
+   capability catalog the RuntimeCoordinate names.  Sets are rendered as
+   sorted vectors so the description is wholly inside the receipt domain."
+  []
+  (into {}
+        (map (fn [[preset-key preset]]
+               [preset-key {:profile (str (:profile preset))
+                            :capabilities (vec (sort-by str (:capabilities preset)))}]))
+        presets))
+
+(defn runtime-snapshot
+  "Inert, data-only description of the exact runtime stack a durable JS1
+   record names: the Jolt version, the vendored SCI coordinate, the
+   evaluator-protocol version, the reviewed language-surface coordinate
+   (jolt.sandbox/language-coordinate, itself versioned), the capability
+   catalog's content coordinate and schema version, and the receipt-protocol
+   version.  Fully canonical (receipt domain throughout); suitable for
+   serialization and comparison."
+  []
+  (sandbox/inert
+    {:runtime/jolt (jolt.host/jolt-version)
+     :runtime/sci sci-implementation
+     :runtime/evaluator-protocol evaluator-protocol-version
+     :runtime/language (sandbox/language-coordinate)
+     :runtime/capability-catalog
+     (sandbox/canonical-coordinate (capability-catalog-description))
+     :runtime/capability-catalog-version capability-catalog-version
+     :runtime/receipt-protocol receipt-protocol-version}))
+
+(def ^:private runtime-coordinate*
+  (delay
+    (let [c (sandbox/canonical-coordinate (runtime-snapshot))]
+      (when-not (str/starts-with? c "js0:")
+        (throw (ex-info "Unexpected JS0 canonical coordinate form"
+                        {:samizdat.sandbox/error :coordinate})))
+      (str "js1-rt/v" runtime-protocol-version ":" (subs c 4)))))
+
+(defn runtime-coordinate
+  "The versioned RuntimeCoordinate of this process, as a self-certifying
+   js1-rt/v1: string: the JS0 canonical form of `runtime-snapshot`, retagged
+   and versioned.  Deterministic for one runtime stack; durable evaluation
+   records carry it and verification compares it exactly, so a runtime that
+   changed out from under a record fails closed at replay instead of
+   reinterpretating its receipts."
+  []
+  @runtime-coordinate*)
+
+;; ═══════════════════════════════════════════════════════════════════════════
 ;; Path resolution (symlink-safe, fail-closed)
 ;; ═══════════════════════════════════════════════════════════════════════════
 
@@ -115,201 +263,467 @@
   [root]
   (str (fs/canonicalize root)))
 
-(defn- resolve-under-root
-  "Resolve relative path under canonical root. Returns the absolute
-   path, or nil if the path escapes, is blank, or causes any I/O error.
-   Canonicalize follows symlinks so any chain that lands outside root
-   is caught.  For non-existing leaf paths the existing prefix is
-   resolved; a symlink in that prefix that points outside root is
-   still caught because canonicalize resolves it before appending the
-   remaining (non-existing) segments."
-  [root-canonical path]
-  (when (and (string? path) (not (str/blank? path)))
-    (try
-      (let [target (str (fs/canonicalize (fs/path root-canonical path)))]
-        (when (or (= target root-canonical)
-                  (str/starts-with? target (str root-canonical "/")))
-          target))
-      (catch Exception _ nil))))
+;; ═══════════════════════════════════════════════════════════════════════════
+;; Path policy — the frozen bb4t A2/A3b rules, model-facing side
+;; ═══════════════════════════════════════════════════════════════════════════
 
-(defn- require-under-root!
-  "Resolve relative path under canonical root; throws on escape or
-   missing path with {:samizdat.sandbox/error} in ex-data."
-  [root-canonical rel-path label]
-  (if-let [abs (resolve-under-root root-canonical rel-path)]
-    abs
-    (throw (ex-info (str label ": path escapes root or is invalid: " rel-path)
-                    {:samizdat.sandbox/error :path-escape
-                     :path rel-path}))))
+(defn- fail!
+  [code message data]
+  (throw (ex-info message (assoc data :samizdat.sandbox/error code))))
+
+(defn- raise-files-failure
+  "Re-throw a samizdat.agent.files substrate failure with the sandbox error
+   key added under the same code, so every model-facing failure carries
+   {:samizdat.sandbox/error …} whichever layer produced it.  Non-files
+   failures pass through untouched."
+  [^Throwable failure]
+  (let [d (ex-data failure)]
+    (if (and (map? d) (contains? d :samizdat.files/error))
+      (throw (ex-info (ex-message failure)
+                      (assoc d :samizdat.sandbox/error (:samizdat.files/error d))
+                      failure))
+      (throw failure))))
+
+(defn- lexical-relative
+  "Validate one model-supplied relative path exactly as the frozen contract
+   does and return its lexically normalized components under the root ([] is
+   the root itself): a bounded non-empty relative string, normalized before
+   any filesystem access, and unable to leave the root lexically.  The root
+   itself is admitted only when allow-root? (listing and searching it is
+   their primary use; read/stat/edit reject it as 'not a regular file')."
+  [root-canonical rel-path operation allow-root?]
+  (when-not (and (string? rel-path)
+                 (not (str/blank? rel-path))
+                 (<= (count rel-path) max-path-chars))
+    (fail! :invalid-path
+           (str operation " expects one bounded non-empty relative path")
+           {:operation/id operation :path (str rel-path)}))
+  (when (fs/absolute? (fs/path rel-path))
+    (fail! :absolute-path
+           (str operation " rejects absolute paths")
+           {:operation/id operation :path rel-path}))
+  (let [lexical (str (fs/normalize (fs/path root-canonical rel-path)))]
+    (when-not (or (= lexical root-canonical)
+                  (str/starts-with? lexical (str root-canonical "/")))
+      (fail! :path-escape
+             (str operation " path escapes the authorized root")
+             {:operation/id operation :path rel-path}))
+    (when (and (= lexical root-canonical) (not allow-root?))
+      (fail! :not-file
+             (str operation " target is the project root, not a file")
+             {:operation/id operation}))
+    (if (= lexical root-canonical)
+      []
+      (vec (remove str/blank? (str/split (subs lexical (inc (count root-canonical)))
+                                         #"/"))))))
+
+(defn- require-directory-component!
+  "One intermediate walk component must exist, be a directory, and NOT be a
+   symbolic link.  Refusing links outright — even links that stay inside the
+   root — is the frozen contract's rule: no walk can be redirected through
+   one, so 'would this link escape?' never has to be answered."
+  [dir component operation]
+  (let [child (str dir "/" component)]
+    (cond
+      (not (fs/exists? child {:nofollow-links true}))
+      (fail! :not-found (str operation " path does not exist")
+             {:operation/id operation :component component})
+
+      (fs/sym-link? child)
+      (fail! :symlink (str operation " will not follow a symbolic link")
+             {:operation/id operation :component component})
+
+      (not (fs/directory? child {:nofollow-links true}))
+      (fail! :not-found (str operation " path component is not a directory")
+             {:operation/id operation :component component}))))
+
+(defn- descend
+  "Walk `components` under the root, refusing every symbolic link and every
+   missing/non-directory component (bb4t's descend).  Returns the absolute
+   path of the directory the walk lands in — the target itself when
+   components is empty."
+  [root-canonical components operation]
+  (loop [dir root-canonical
+         [component & more] components]
+    (if component
+      (do (require-directory-component! dir component operation)
+          (recur (str dir "/" component) more))
+      dir)))
+
+(defn- target-of
+  "Resolve a leaf path to [parent-abs leaf-name kind]: the walk descends to
+   the parent with the frozen rules and classifies the leaf NOFOLLOW."
+  [root-canonical components operation]
+  (let [parent (descend root-canonical (butlast components) operation)
+        leaf (last components)
+        abs (str parent "/" leaf)
+        kind (cond
+               (not (fs/exists? abs {:nofollow-links true})) :absent
+               (fs/sym-link? abs) :symlink
+               (fs/directory? abs {:nofollow-links true}) :directory
+               (fs/regular-file? abs {:nofollow-links true}) :file
+               :else :other)]
+    [parent leaf kind]))
+
+(defn- relative-name
+  "The canonical relative name results carry: the lexically normalized
+   components rejoined, exactly the path the model's write will be known by."
+  [components]
+  (str/join "/" components))
 
 ;; ═══════════════════════════════════════════════════════════════════════════
-;; Digest
+;; Digest — a coordinate is computed or the operation fails
 ;; ═══════════════════════════════════════════════════════════════════════════
 
 (defn- file-digest-str
-  "SHA-256 hex digest string prefixed with 'sha256:', or nil."
-  [abs-path]
-  (when-let [hex (files/file-digest abs-path)]
-    (str "sha256:" hex)))
+  "The file's sha256:… content coordinate, read through the bounded reader.
+   Fail-closed like the frozen contract: a digest that cannot be computed
+   (unreadable, over the byte bound, no digest machinery) FAILS the caller
+   with {:samizdat.sandbox/error :digest-failed} — it never becomes nil or a
+   fake coordinate an anchored write could be tempted to trust."
+  [abs-path max-bytes]
+  (try
+    (str "sha256:" (files/file-digest abs-path max-bytes))
+    (catch Throwable failure
+      (fail! :digest-failed
+             "The content digest could not be computed; refusing to invent one"
+             {:cause (str failure)}))))
 
 ;; ═══════════════════════════════════════════════════════════════════════════
-;; Operation descriptors
+;; Operation descriptors — the frozen bb4t A2/A3b contract, projected
 ;; ═══════════════════════════════════════════════════════════════════════════
 
 (defn- make-read-op
-  "project/read — bounded file read. Returns {:path :content :truncated}"
+  "project/read — one bounded UTF-8 file read.  Returns the decoded string.
+
+   Exactly the frozen contract: a regular file only (a symlink is refused,
+   not followed, whether it points in or out), bytes consumed only up to the
+   derived byte ceiling, strict UTF-8 decoding (invalid input fails, never
+   replaces), and the character bound fails rather than truncates — a bound
+   the caller can rely on naming everything it got."
   [root-canonical max-chars]
-  {:id :project/read :name 'read :effect :observation
-   :fn (fn [rel-path]
-         (let [abs (require-under-root! root-canonical rel-path "project/read")]
-           (when-not (fs/regular-file? abs {:nofollow-links true})
-             (throw (ex-info "project/read: not a regular file"
-                             {:samizdat.sandbox/error :not-file :path rel-path})))
-           (let [content (slurp abs)
-                 truncated? (> (count content) max-chars)
-                 shown (if truncated? (subs content 0 max-chars) content)]
-             {:path rel-path :content shown :truncated truncated?})))})
+  (let [max-bytes (read-byte-ceiling max-chars)]
+    {:id :project/read :name 'read :effect :observation
+     :fn (fn [rel-path]
+           (let [components (lexical-relative root-canonical rel-path
+                                              :project/read false)]
+             (when (empty? components)
+               (fail! :not-file "project/read target is not a regular file"
+                      {:path rel-path}))
+             (let [[parent leaf kind] (target-of root-canonical components
+                                                 :project/read)]
+               (when-not (= :file kind)
+                 (fail! :not-file "project/read target is not a regular file"
+                        {:path rel-path :kind kind}))
+                (let [abs (str parent "/" leaf)]
+                  (try
+                    (let [bytes (files/read-bounded-bytes abs max-bytes)
+                          content (files/decode-utf8 bytes)]
+                      (when (> (count content) max-chars)
+                        (fail! :too-large
+                               "File content exceeds the character limit"
+                               {:path rel-path :limit max-chars}))
+                      content)
+                    (catch Throwable failure
+                      (raise-files-failure failure)))))))}))
 
 (defn- make-list-op
-  "project/list — bounded directory listing.
-   Optional rel-path argument defaults to the root."
+  "project/list — one directory level, as inert structured entries.
+
+   Exactly the frozen contract: exactly one relative path ('.' for the root),
+   the IMMEDIATE entries only (never recursive), each a {:name :kind} map
+   with :bytes on files, :kind one of :file/:directory/:symlink/:other,
+   sorted by name, attributes read NOFOLLOW so a link is a link.  More
+   entries than the bound fails rather than truncating.  Returns the entries
+   vector."
   [root-canonical max-entries]
   {:id :project/list :name 'list :effect :observation
-   :fn (fn [& args]
-         (let [rel-path (or (first args) ".")
-               abs (resolve-under-root root-canonical rel-path)]
-           (if (and abs (fs/directory? abs {:nofollow-links true}))
-             {:path rel-path
-              :entries (files/safe-list-dir root-canonical rel-path max-entries)}
-             {:path rel-path :entries []})))})
+   :fn (fn [rel-path]
+         (let [components (lexical-relative root-canonical rel-path
+                                            :project/list true)
+               dir (descend root-canonical components :project/list)
+               kind (cond
+                      (not (fs/exists? dir {:nofollow-links true})) :absent
+                      (fs/sym-link? dir) :symlink
+                      (fs/directory? dir {:nofollow-links true}) :directory
+                      :else :other)]
+           (cond
+             (= :symlink kind)
+             (fail! :symlink "project/list will not follow a symbolic link"
+                    {:path rel-path})
+
+             (= :absent kind)
+             (fail! :not-found "project/list target does not exist"
+                    {:path rel-path})
+
+             (not= :directory kind)
+             (fail! :not-found "project/list target is not a directory"
+                    {:path rel-path})
+
+              :else (try
+                      (files/list-one-level dir max-entries)
+                      (catch Throwable failure
+                        (raise-files-failure failure))))))})
 
 (defn- make-search-op
-  "project/search — bounded regex search. Returns {:pattern :matches}."
-  [root-canonical max-results max-chars]
-  {:id :project/search :name 'search :effect :observation
-   :fn (fn [pattern & args]
-         (let [rel-path (or (first args) ".")]
-           {:pattern pattern
-            :path rel-path
-            :matches (files/safe-search-files
-                       root-canonical rel-path pattern max-results max-chars)}))})
+  "project/search — bounded regex search.  Returns a vector of
+   {:path :line :text} maps ordered by path.
+
+   Exactly the frozen contract: a bounded pattern (≤ 200 chars) that must
+   compile, an optional options map {:path \"sub\" :include-hidden? true};
+   dot-entries skipped unless included; symlinks never followed; files that
+   are not valid UTF-8 skipped; a file larger than the per-file byte bound
+   skipped with its bytes never consumed (the size is checked first); more
+   regular files than :search-max-files FAILS the search; collection stops
+   at :max-search-results.  Matched text is trimmed and capped."
+  [root-canonical max-results max-chars max-files max-read-chars]
+  (let [max-file-bytes (read-byte-ceiling max-read-chars)]
+    {:id :project/search :name 'search :effect :observation
+     :fn
+     (fn [& args]
+       (let [[pattern options] args]
+         (when-not (and (<= 1 (count args) 2)
+                        (string? pattern)
+                        (not (str/blank? pattern))
+                        (<= (count pattern) max-search-pattern-chars)
+                        (or (nil? options) (map? options)))
+           (fail! :invalid-arguments
+                  "project/search expects a bounded pattern and an optional options map"
+                  {:operation/id :project/search}))
+         (let [rel-path (or (:path options) ".")]
+           (when-not (and (string? rel-path) (not (str/blank? rel-path))
+                          (<= (count rel-path) max-path-chars))
+             (fail! :invalid-path
+                    "project/search :path must be a bounded relative path"
+                    {:path rel-path}))
+           (let [components (lexical-relative root-canonical rel-path
+                                              :project/search true)
+                 dir (descend root-canonical components :project/search)
+                 kind (cond
+                        (not (fs/exists? dir {:nofollow-links true})) :absent
+                        (fs/sym-link? dir) :symlink
+                        (fs/directory? dir {:nofollow-links true}) :directory
+                        :else :other)
+                 re (try (re-pattern pattern)
+                         (catch Throwable _
+                           (fail! :invalid-regex
+                                  "project/search pattern is not a valid regex"
+                                  {:pattern pattern})))]
+             (cond
+               (= :symlink kind)
+               (fail! :symlink "project/search will not follow a symbolic link"
+                      {:path rel-path})
+
+               (= :absent kind)
+               (fail! :not-found "project/search :path does not exist"
+                      {:path rel-path})
+
+               (not= :directory kind)
+               (fail! :not-found "project/search :path is not a directory"
+                      {:path rel-path})
+
+                :else
+                (try
+                  (files/search-tree dir (relative-name components) re
+                                     {:max-results max-results
+                                      :max-file-bytes max-file-bytes
+                                      :max-files max-files
+                                      :include-hidden? (true? (:include-hidden? options))
+                                      :max-chars max-chars
+                                      :max-line-chars max-search-line-chars})
+                  (catch Throwable failure
+                    (raise-files-failure failure))))))))}))
 
 (defn- make-stat-op
-  "project/stat — deterministic stat with coordinate/digest.
-   Returns {:path :exists :type :size :digest}."
-  [root-canonical]
-  {:id :project/stat :name 'stat :effect :observation
-   :fn (fn [rel-path]
-         (if-let [abs (resolve-under-root root-canonical rel-path)]
-           (let [exists? (fs/exists? abs {:nofollow-links true})]
-             (if exists?
-               (let [sym? (fs/sym-link? abs)
-                     dir? (fs/directory? abs {:nofollow-links true})
-                     reg? (and (not sym?) (not dir?) (fs/regular-file? abs))
-                     type (cond sym? :symlink dir? :dir reg? :file)
-                     size (when reg? (fs/size abs))
-                     digest (when reg? (file-digest-str abs))]
-                 {:path rel-path :exists true :type type
-                  :size size :digest digest})
-               {:path rel-path :exists false}))
-           {:path rel-path :exists false}))})
+  "project/stat — deterministic coordinate of one path.
+
+   Exactly the frozen contract: {:path :kind :bytes :digest} for a regular
+   file, {:path :kind} for a directory/symlink/other, {:path :kind :absent}
+   when it does not exist.  The digest is computed through the bounded
+   reader and FAILS on error (unreadable, over the bound, no machinery) — a
+   regular file's coordinate never carries nil, because that is a fake
+   coordinate, not an absent one."
+  [root-canonical max-read-chars]
+  (let [max-bytes (read-byte-ceiling max-read-chars)]
+    {:id :project/stat :name 'stat :effect :observation
+     :fn (fn [rel-path]
+           (let [components (lexical-relative root-canonical rel-path
+                                              :project/stat false)]
+             (when (empty? components)
+               (fail! :not-file "project/stat target is the project root, not a file"
+                      {:path rel-path}))
+             (let [[parent leaf kind] (target-of root-canonical components
+                                                 :project/stat)
+                   rel (relative-name components)]
+               (case kind
+                 :absent {:path rel :kind :absent}
+                 :file {:path rel :kind :file
+                        :bytes (try (files/nofollow-size (str parent "/" leaf))
+                                    (catch Throwable failure
+                                      (fail! :digest-failed
+                                             "The file size could not be read; refusing to invent a coordinate"
+                                             {:path rel :cause (str failure)})))
+                        :digest (file-digest-str (str parent "/" leaf) max-bytes)}
+                 {:path rel :kind kind}))))}))
 
 (defn- make-edit-op
-  "project/edit — anchored edit requiring base digest or :absent.
+  "project/edit — anchored replacement of one regular file's contents.
 
-   Args: [rel-path base-digest new-content]
+   JS1 projection of the frozen contract's edit (positional args, the JS1
+   receipt convention; bb4t spells the same fields as one options map):
 
-   - base-digest is a sha256:… string (for an existing file) or :absent / nil
-     (for creation).  A string base-digest on a non-existing file, or
-     :absent on an existing file, is a conflict.
-   - Stale conflict: file exists but its current digest ≠ base-digest.
-   - No blind overwrite: base-digest must be supplied when the file exists.
-   - Returns {:path :digest :created?}"
-  [root-canonical]
-  {:id :project/edit :name 'edit :effect :actuation
-   :fn (fn [rel-path base-digest new-content]
-         (let [abs (require-under-root! root-canonical rel-path "project/edit")
-               new-content (str new-content)
-               exists? (fs/exists? abs {:nofollow-links true})
-               creating? (or (nil? base-digest) (= :absent base-digest))]
-           (cond
-             ;; Creation path
-             creating?
-             (when exists?
-               (throw (ex-info "project/edit: file already exists"
-                               {:samizdat.sandbox/error :already-exists
-                                :path rel-path
-                                :actual-digest (file-digest-str abs)})))
+     (project/edit rel-path base new-content)
 
-             ;; Update path — base-digest must be a string
-              (string? base-digest)
-              (do
-                (when (not exists?)
-                  (throw (ex-info "project/edit: file does not exist"
-                                  {:samizdat.sandbox/error :not-found
-                                   :path rel-path})))
-                (let [current-digest (file-digest-str abs)]
-                  (when (not= base-digest current-digest)
-                    (throw (ex-info "project/edit: stale conflict"
-                                    {:samizdat.sandbox/error :stale-conflict
-                                     :path rel-path
-                                     :expected base-digest
-                                     :actual current-digest})))))
+   base is :absent (or nil) to CREATE — the leaf must be the only thing
+   absent, so a missing parent FAILS and no directory is ever created — or
+   the file's current sha256:… digest from project/stat: an update states
+   which version it believed, and a file that exists with a different
+   digest, that does not exist, or whose base was :absent while it exists,
+   is a CONFLICT, never a blind overwrite.  The write goes through a
+   sibling temporary and an atomic rename, so a reader never sees a partial
+   file and a failed write leaves the original intact.  Content over the
+   write byte bound fails.  Returns {:path :bytes :digest} of the new
+   content."
+  [root-canonical max-write-bytes max-read-chars]
+  (let [max-bytes (read-byte-ceiling max-read-chars)]
+    {:id :project/edit :name 'edit :effect :actuation
+     :fn (fn [rel-path base-digest new-content]
+           (let [components (lexical-relative root-canonical rel-path
+                                              :project/edit false)]
+             (when (empty? components)
+               (fail! :not-file "project/edit target is the project root, not a file"
+                      {:path rel-path}))
+             (when-not (string? new-content)
+               (fail! :invalid-arguments
+                      "project/edit :content must be a string"
+                      {:path rel-path}))
+             (let [creating? (or (nil? base-digest) (= :absent base-digest))]
+               (when-not (or creating? (string? base-digest))
+                 (fail! :invalid-base-digest
+                        (str "project/edit :base must be :absent or the file's "
+                             "sha256:… digest; an edit without a base coordinate "
+                             "is a blind overwrite")
+                        {:path rel-path :base-digest (str base-digest)}))
+               (let [encoded (files/utf8-bytes new-content)]
+                 (when (> (alength encoded) max-write-bytes)
+                   (fail! :write-limit
+                          "project/edit content exceeds the write byte limit"
+                          {:limit max-write-bytes
+                           :bytes (alength encoded)}))
+                 (let [[parent leaf kind] (target-of root-canonical components
+                                                     :project/edit)
+                       abs (str parent "/" leaf)
+                       rel (relative-name components)]
+                   (cond
+                     (contains? #{:symlink :directory :other} kind)
+                     (fail! :not-file "project/edit target is not a regular file"
+                            {:path rel :kind kind})
 
-             ;; Invalid base-digest
-             :else
-             (throw (ex-info "project/edit: invalid base-digest"
-                             {:samizdat.sandbox/error :invalid-base-digest
-                              :path rel-path
-                              :base-digest base-digest})))
+                     ;; Creation: the leaf must be the ONLY thing absent.  A
+                     ;; missing parent fails here through the descent above;
+                     ;; no hierarchy is ever materialized.
+                     (and creating? (not= :absent kind))
+                     (fail! :already-exists
+                            "project/edit conflict: file exists but base was :absent"
+                            {:path rel
+                             :conflict/observed (when (= :file kind)
+                                                 (file-digest-str abs max-bytes))
+                             :bbagent/conflict true})
 
-         ;; Perform the write
-         (when-let [parent (fs/parent abs)]
-           (fs/create-dirs parent))
-         (spit abs new-content)
+                     (and (not creating?) (= :absent kind))
+                     (fail! :not-found
+                            "project/edit conflict: file does not exist"
+                            {:path rel
+                             :conflict/expected base-digest
+                             :bbagent/conflict true})
 
-         ;; Return new digest
-         (let [new-digest (file-digest-str abs)]
-           {:path rel-path
-            :digest new-digest
-            :created? (not exists?)})))})
+                     :else
+                     (do
+                       (when (and (not creating?) (= :file kind))
+                         (let [observed (file-digest-str abs max-bytes)]
+                           (when-not (= base-digest observed)
+                             (fail! :stale-conflict
+                                    "project/edit conflict: file changed since it was read"
+                                    {:path rel
+                                     :conflict/expected base-digest
+                                     :conflict/observed observed
+                                     :bbagent/conflict true}))))
+                       (files/atomic-write-file! abs encoded (not creating?))
+                       {:path rel
+                        :bytes (alength encoded)
+                        :digest (str "sha256:" (files/bytes-digest encoded))})))))))}))
 
 ;; ═══════════════════════════════════════════════════════════════════════════
 ;; Operation construction
 ;; ═══════════════════════════════════════════════════════════════════════════
 
 (defn- build-operations
-  "Build the five semantic operation descriptors."
+  "Build the five semantic operation descriptors from the resolved bounds."
   [root-canonical {:keys [max-read-chars max-list-entries
-                           max-search-results search-max-chars]}]
-  [(make-read-op  root-canonical (or max-read-chars default-max-read-chars))
-   (make-list-op  root-canonical (or max-list-entries default-max-list-entries))
+                           max-search-results search-max-chars
+                           search-max-files max-write-bytes]}]
+  [(make-read-op root-canonical (or max-read-chars default-max-read-chars))
+   (make-list-op root-canonical (or max-list-entries default-max-list-entries))
    (make-search-op root-canonical
-                     (or max-search-results default-max-search-results)
-                     (or search-max-chars default-search-max-chars))
-   (make-stat-op  root-canonical)
-   (make-edit-op  root-canonical)])
+                   (or max-search-results default-max-search-results)
+                   (or search-max-chars default-search-max-chars)
+                   (or search-max-files default-search-max-files)
+                   (or max-read-chars default-max-read-chars))
+   (make-stat-op root-canonical (or max-read-chars default-max-read-chars))
+   (make-edit-op root-canonical
+                 (or max-write-bytes default-max-write-bytes)
+                 (or max-read-chars default-max-read-chars))])
 
 (def ^:private operation-docs
   "Host-owned inert documentation for the five projected operations — the
-   same knowledge the constructors above encode, kept beside them so safe
-   discovery (operation-doc) can describe authority without evaluating any
-   form inside the sandbox."
+    same knowledge the constructors above encode, kept beside them so safe
+    discovery (operation-doc) can describe authority without evaluating any
+    form inside the sandbox.  Mirrors the frozen bb4t A2/A3b contract."
   {:project/read
    {:arglists '([rel-path])
-    :doc "Bounded read of one file under the sandbox root. Returns {:path :content :truncated}."}
+    :doc (str "Read one UTF-8 file relative to the authorized project root. "
+              "Reads at most the context's byte and character bounds and "
+              "fails when they are exceeded; invalid UTF-8 fails.  A "
+              "symbolic link is refused, not followed.  Returns the decoded "
+              "string.")}
    :project/list
-   {:arglists '([rel-path?])
-    :doc "Bounded listing of a directory under the sandbox root (default the root itself). Returns {:path :entries}."}
+   {:arglists '([rel-path])
+    :doc (str "List entries directly under one directory relative to the "
+              "authorized project root (\".\" for the root itself).  Returns "
+              "a vector of {:name :kind} sorted by name, where :kind is "
+              ":file, :directory, :symlink or :other, and files also carry "
+              ":bytes.  Exactly one level; does not follow symbolic links; "
+              "more entries than the bound fails.")}
    :project/search
-   {:arglists '([pattern rel-path?])
-    :doc "Bounded regex search under the sandbox root. Returns {:pattern :path :matches}."}
+   {:arglists '([pattern] [pattern options])
+    :doc (str "Search file contents under the authorized project root for a "
+              "regular expression (at most 200 characters).  Returns a "
+              "vector of {:path :line :text} ordered by path.  Options: "
+              "{:path \"subdir\"} to search one subtree, {:include-hidden? "
+              "true} to include dot-entries, which are skipped by default. "
+              "Does not follow symbolic links, skips files that are not "
+              "valid UTF-8, skips files larger than the per-file byte bound "
+              "without reading them, and fails past its file limit.")}
    :project/stat
    {:arglists '([rel-path])
-    :doc "Deterministic stat of one path, with content digest. Returns {:path :exists :type :size :digest}."}
+    :doc (str "Report {:path :kind :bytes :digest} for a file under the "
+              "authorized project root, {:path :kind} for a directory, "
+              "symbolic link or other entry, or {:path :kind :absent} when "
+              "it does not exist.  The :digest is the coordinate "
+              "project/edit requires as its base; if it cannot be computed "
+              "the operation fails rather than returning a fake one.")}
    :project/edit
-   {:arglists '([rel-path base-digest new-content])
-    :doc "Anchored write: base-digest is the file's current sha256:… digest, or :absent to create. A stale digest conflicts; existing files are never blindly overwritten. Returns {:path :digest :created?}."}})
+   {:arglists '([rel-path base new-content])
+    :doc (str "Replace one file's contents under the authorized project "
+              "root.  base is the file's current sha256:… digest from "
+              "project/stat, or :absent to create a file that must not "
+              "already exist.  Fails as a conflict — never overwrites — "
+              "when the file changed since that digest, exists against "
+              ":absent, or is missing against a digest.  Creates no "
+              "directories: the leaf must be the only thing absent.  Writes "
+              "through a temporary and renames atomically, so a reader "
+              "never sees a partial file.  Returns {:path :bytes :digest} "
+              "of the new content.")}})
 
 ;; ═══════════════════════════════════════════════════════════════════════════
 ;; EvaluatorSpec — inert, self-certifying coordinate
@@ -337,13 +751,16 @@
   v)
 
 (defn- resolve-bounds
-  "Validate the four bound options (defaults applied).  Fail-closed: every
+  "Validate the six bound options (defaults applied).  Fail-closed: every
    bound must be a positive integer."
-  [{:keys [max-read-chars max-list-entries max-search-results search-max-chars]}]
+  [{:keys [max-read-chars max-list-entries max-search-results search-max-chars
+           search-max-files max-write-bytes]}]
   (let [bounds {:max-read-chars (or max-read-chars default-max-read-chars)
                 :max-list-entries (or max-list-entries default-max-list-entries)
                 :max-search-results (or max-search-results default-max-search-results)
-                :search-max-chars (or search-max-chars default-search-max-chars)}]
+                :search-max-chars (or search-max-chars default-search-max-chars)
+                :search-max-files (or search-max-files default-search-max-files)
+                :max-write-bytes (or max-write-bytes default-max-write-bytes)}]
     (doseq [[k v] bounds]
       (require-positive-int! (str "bound " (name k)) v))
     bounds))
@@ -364,14 +781,15 @@
    Required opts:
      :root — trusted host root directory (string)
 
-   Optional controller attenuation / bounds:
-     :capabilities — subset of the preset's capabilities (default: the
-                     preset's exact set).  Anything beyond the preset is a
-                     fail-closed :over-request.
-     :max-read-chars / :max-list-entries / :max-search-results /
-     :search-max-chars — bounds (positive integers; defaults apply)
-     :timeout-ms — cooperative interrupt ceiling (non-negative integer;
-                   0 disables; default 30000)
+    Optional controller attenuation / bounds:
+      :capabilities — subset of the preset's capabilities (default: the
+                      preset's exact set).  Anything beyond the preset is a
+                      fail-closed :over-request.
+      :max-read-chars / :max-list-entries / :max-search-results /
+      :search-max-chars / :search-max-files / :max-write-bytes — bounds
+                      (positive integers; defaults apply)
+      :timeout-ms — cooperative interrupt ceiling (non-negative integer;
+                    0 disables; default 30000)
 
    The returned map is fully inert (jolt.sandbox receipt domain): no
    functions, atoms, or host values.  :capabilities is a sorted vector;
@@ -464,7 +882,13 @@
      ;; not to a caller thread or a DB record.  Contention fails closed rather
      ;; than letting an unrecorded evaluation pass through somebody else's
      ;; hook.
-     ::evaluation-owner (atom nil)}))
+     ::evaluation-owner (atom nil)
+     ;; Commit-only discipline: when a failed/interrupted recorded evaluation
+     ;; cannot be rolled back to the durable committed state, the live context
+     ;; is no longer a state the history can reconstruct.  The instance is
+     ;; poisoned and refuses further evaluation; only a rebuild (which forks a
+     ;; fresh, unpoisoned context) cures it.
+     ::poisoned (atom nil)}))
 
 (defn instantiate!
   "Allocate a live Instance from an inert EvaluatorSpec (controller API).
@@ -481,16 +905,17 @@
   ([spec] (instantiate! spec nil))
   ([spec {:keys [instance/key] :or {key :standalone}}]
    (let [c (context-from-spec spec)]
-     {:samizdat.sandbox/kind :instance
-      :instance/key key
-       :instance/id (str "inst:" (name key))
-       :spec spec
-       :root-canonical (:root-canonical c)
-       :timeout-ms (:timeout-ms spec)
-       :operations (:operations c)
-       ::state (::state c)
-       ::effect-hook (::effect-hook c)
-       ::evaluation-owner (::evaluation-owner c)})))
+      {:samizdat.sandbox/kind :instance
+       :instance/key key
+        :instance/id (str "inst:" (name key))
+        :spec spec
+        :root-canonical (:root-canonical c)
+        :timeout-ms (:timeout-ms spec)
+        :operations (:operations c)
+        ::state (::state c)
+        ::effect-hook (::effect-hook c)
+        ::evaluation-owner (::evaluation-owner c)
+        ::poisoned (::poisoned c)})))
 
 ;; ═══════════════════════════════════════════════════════════════════════════
 ;; Provider — JS1 acquire/bind policy
@@ -613,14 +1038,16 @@
      :profile — :agent/minimal, :agent/project-read, or
                 :agent/project-develop
 
-   Optional opts:
-     :authorized-capabilities — explicit subset of the profile's maximum
-                                (default: the profile maximum itself)
-     :max-read-chars    — bounded read limit (default 60000)
-     :max-list-entries  — bounded list limit (default 1000)
-     :max-search-results — bounded search result limit (default 500)
-     :search-max-chars  — bounded search scan limit (default 500000)
-     :timeout-ms        — cooperative interrupt ceiling (default 30000)
+    Optional opts:
+      :authorized-capabilities — explicit subset of the profile's maximum
+                                 (default: the profile maximum itself)
+      :max-read-chars    — bounded read limit (default 60000)
+      :max-list-entries  — bounded list limit (default 1000)
+      :max-search-results — bounded search result limit (default 500)
+      :search-max-chars  — bounded search scan limit (default 500000)
+      :search-max-files  — search file-count limit (default 20000)
+      :max-write-bytes   — edit write byte limit (default 1048576)
+      :timeout-ms        — cooperative interrupt ceiling (default 30000)
 
    Returns an opaque context map for use with evaluate!, rebuild!,
    describe, and capabilities."
@@ -661,7 +1088,8 @@
          :spec sp
          ::state (::state c)
          ::effect-hook (::effect-hook c)
-         ::evaluation-owner (::evaluation-owner c)}))))
+         ::evaluation-owner (::evaluation-owner c)
+         ::poisoned (::poisoned c)}))))
 
 (def ^:private authority-selection-keys
   "evaluate! is the model-facing entry: authority was fixed when the
@@ -676,7 +1104,8 @@
    bridge dynamically resolves samizdat.store.evals, keeping this namespace
    directly loadable on the small Jolt+SCI classpath.  A controller/test may
    bind a map containing :begin!, :record-intent!, :record-outcome!,
-   :complete!, :load-eval, and :verify-binding! to supply the same contract."
+   :complete!, :load-eval, :verify-binding!, and :history to supply the same
+   contract."
   nil)
 
 (def ^:private eval-store-symbols
@@ -685,7 +1114,8 @@
    :record-outcome! 'samizdat.store.evals/record-outcome!
    :complete! 'samizdat.store.evals/complete!
    :load-eval 'samizdat.store.evals/load-eval
-   :verify-binding! 'samizdat.store.evals/verify-binding!})
+   :verify-binding! 'samizdat.store.evals/verify-binding!
+   :history 'samizdat.store.evals/history})
 
 (defn- eval-store
   "Resolve the complete durable-store surface at call time.  Resolution is
@@ -722,10 +1152,41 @@
   (let [target (if (::instance x) (::instance x) x)]
     (when-not (and (::state target)
                    (::effect-hook target)
-                   (::evaluation-owner target))
+                   (::evaluation-owner target)
+                   (::poisoned target))
       (throw (ex-info (str label " needs a sandbox context, instance, or binding")
                       {:samizdat.sandbox/error :not-a-context})))
     target))
+
+(defn- check-not-poisoned!
+  "Evaluation is refused on a poisoned instance: its live context is known not
+   to be the committed state, and only a rebuild (which forks a fresh context)
+   may follow a failed rollback.  Rebuild paths deliberately do NOT call this
+   — they are the cure."
+  [target label]
+  (when @(::poisoned target)
+    (throw (ex-info (str label " refused: the instance is poisoned because a"
+                         " failed evaluation could not be rolled back to its"
+                         " committed state; rebuild it from durable history"
+                         " before evaluating")
+                    {:samizdat.sandbox/error :instance-poisoned
+                     :instance/id (:instance/id target)}))))
+
+(defn- check-current-binding!
+  "Fail closed when `binding` has been superseded in its provider registry by
+   a rebuild/rollback.  A recorded evaluation must run on the instance the
+   registry currently publishes: the durable record names stable
+   spec/instance/binding ids, so source evaluated on a superseded context
+   would append receipts a whole-history rebuild cannot have produced."
+  [binding]
+  (when-let [reg (::registry binding)]
+    (let [registered (get-in @reg [:bindings (:work-id binding)])]
+      (when (and registered
+                 (not= (::state (::instance registered))
+                       (::state (::instance binding))))
+        (throw (ex-info "Binding has been superseded by a rebuild; re-acquire it from the provider"
+                        {:samizdat.sandbox/error :stale-binding
+                         :binding/id (:binding/id binding)}))))))
 
 (defn- reject-authority-selection!
   [label opts]
@@ -801,6 +1262,7 @@
    (let [target (evaluation-target x "evaluate!")
          claim (claim-evaluation! target)]
      (try
+       (check-not-poisoned! target "evaluate!")
        (evaluate-state! target source opts)
        (finally
          (release-evaluation! target claim))))))
@@ -817,15 +1279,71 @@
   binding)
 
 (defn- binding-identity
+  "The durable identity of a binding: the three stable ids plus the versioned
+   RuntimeCoordinate of this process.  begin! stores all four (with the exact
+   authority coordinate as the fifth durable field); verify-binding! and
+   whole-history validation compare all five."
   [binding]
   {:spec-id (:spec/coordinate (:spec binding))
    :instance-id (:instance/id binding)
-   :binding-id (:binding/id binding)})
+   :binding-id (:binding/id binding)
+   :runtime (runtime-coordinate)})
 
 (defn- current-coordinate
   [target]
   (sandbox/canonical-coordinate
    (sandbox/effective-authority @(::state target))))
+
+;; ═══════════════════════════════════════════════════════════════════════════
+;; Bounded rendered final result
+;; ═══════════════════════════════════════════════════════════════════════════
+
+(def ^:const max-render-chars
+  "Character bound on a rendered final result.  Only reached by non-inert
+   values; inert final values are stored exactly and never truncated."
+  8000)
+
+(def ^:const render-print-length 100)
+(def ^:const render-print-level 20)
+
+(defn- result-record
+  "The durable terminal result for an evaluation's final value.
+
+   Receipt payloads stay strict (jolt.sandbox/inert) — a receipt that cannot
+   round-trip as data is not a receipt.  The FINAL value of an evaluation is
+   different: it is the answer, not an effect, and arbitrary SCI values are
+   legitimate answers.  An inert final value is stored exactly under :value;
+   any other value (functions, floats, seqs, host objects) is accepted by
+   rendering it — printed under *print-length*/*print-level* bounds (an
+   infinite or very deep value cannot hang or explode the rendering) and then
+   character-bounded, with :render-truncated? recording whether the bound
+   cut.  Rendering is deterministic for replay verification: the same value
+   under the same RuntimeCoordinate renders to the same stored form, and a
+   value that does not (e.g. one whose printed form carries identity) fails
+   closed at replay instead of pretending a match."
+  [value]
+  (let [inert-attempt (try {:ok (sandbox/inert value)}
+                           (catch Throwable _ nil))]
+    (if (contains? inert-attempt :ok)
+      {:value (:ok inert-attempt)}
+      (let [rendered (try
+                       (binding [*print-length* render-print-length
+                                 *print-level* render-print-level]
+                         (pr-str value))
+                       (catch Throwable render-error
+                         (str "#<unrenderable " (type render-error) ">")))
+            truncated? (> (count rendered) max-render-chars)]
+        {:rendered (if truncated? (subs rendered 0 max-render-chars) rendered)
+         :render-truncated? truncated?}))))
+
+(defn- result-matches?
+  "Whether a replayed final `value` matches a durable record's terminal
+   :result — exactly for inert values, rendering-compared otherwise.  A
+   record with no structured result at all (nil) matches nothing."
+  [record value]
+  (and (some? (:result record))
+       (= (sandbox/inert (:result record))
+          (sandbox/inert (result-record value)))))
 
 (defn- run-recorded-effect!
   "Persist intent, run exactly once, then persist exactly one outcome.  A
@@ -852,18 +1370,60 @@
   ((:complete! store) conn eval-id
    {:status :failed :result {:error (str error)}}))
 
+;; Defined in the whole-history rebuild section below; rollback after a
+;; failed/interrupted recorded evaluation is the same operation.
+(declare rebuild-binding-internal!)
+
+(defn- rollback-to-committed!
+  "Roll the instance back to the binding's durable committed state after a
+   failed/interrupted recorded evaluation: rebuild from the whole committed
+   history and publish the fresh instance.  The caller holds the evaluation
+   claim, so the rebuild core runs without re-claiming.
+
+   Commit-only discipline: definitions become evaluator state only by
+   committing, so the state after a failure must be exactly the committed
+   history, never whatever partial definitions the failed source happened to
+   land.  If the rebuild cannot be completed, the live context is no longer
+   a state the durable history can reconstruct: the instance is poisoned
+   (further evaluation is refused until a rebuild cures it) and a
+   :rollback-failed error naming the original evaluation error is thrown."
+  [store conn binding target eval-id evaluation-error]
+  (try
+    (rebuild-binding-internal! store conn binding target)
+    (catch Throwable rollback-error
+      (reset! (::poisoned target) true)
+      (throw (ex-info
+              "Evaluation failed and rollback to the committed state failed; the instance is poisoned"
+              {:samizdat.sandbox/error :rollback-failed
+               :eval-id eval-id
+               :evaluation-error (str evaluation-error)}
+              rollback-error)))))
+
 (defn evaluate-recorded!
   "Evaluate source in a controller-minted Binding while appending a durable
    JS1 record to trusted `conn`.
 
    The evaluation row (spec/instance/binding ids, exact current authority
-   coordinate, and source) lands before source runs.  Every semantic operation
-   appends intent before touching the project and outcome afterward.  The
-   terminal row is appended only after evaluation returns and all outcomes have
-   settled.  Returns {:eval-id id :value value}.
+   coordinate, versioned runtime coordinate, and source) lands before source
+   runs.  Every semantic operation appends intent before touching the project
+   and outcome afterward.  The terminal row is appended only after evaluation
+   returns and all outcomes have settled.  Returns {:eval-id id :value value}.
+
+   Commit-only evaluator state: a committed evaluation's definitions persist;
+   a failed or interrupted evaluation leaves the instance rolled back —
+   rebuilt from the binding's durable committed history and republished —
+   before the original error propagates, so partial definitions of failed
+   source never become evaluator state.
+
+   The final value may be any SCI value: inert values are stored exactly,
+   anything else is stored as a bounded rendering (see result-record).
+   Receipt payloads remain strict.
 
    If an outcome append fails after an operation, completion also fails closed
-   and the durable record remains pending with its unsettled intent."
+   and the durable record remains pending with its unsettled intent.  If the
+   :failed terminal row itself cannot be appended, the record likewise stays
+   pending and the instance is poisoned: a pending record blocks whole-history
+   rebuild, so the dirty context has no cure and must refuse evaluation."
   ([conn binding source] (evaluate-recorded! conn binding source nil))
   ([conn binding source opts]
    (require-binding! binding "evaluate-recorded!")
@@ -872,6 +1432,8 @@
          target (evaluation-target binding "evaluate-recorded!")
          claim (claim-evaluation! target)]
      (try
+       (check-not-poisoned! target "evaluate-recorded!")
+       (check-current-binding! binding)
        (let [identity (binding-identity binding)
              eval-id ((:begin! store) conn
                       (assoc identity
@@ -884,9 +1446,7 @@
          (try
            (let [outcome (try
                            (let [value (evaluate-state! target source opts)]
-                             {:ok true
-                              :value value
-                              :inert-value (sandbox/inert value)})
+                             {:ok true :value value})
                            (catch Throwable evaluation-error
                              {:ok false :error evaluation-error}))]
              (if (:ok outcome)
@@ -896,17 +1456,20 @@
                  ;; leave the original record pending.
                  ((:complete! store) conn eval-id
                   {:status :completed
-                   :result {:value (:inert-value outcome)}})
+                   :result (result-record (:value outcome))})
                  {:eval-id eval-id :value (:value outcome)})
                (let [evaluation-error (:error outcome)]
                  (try
                    (complete-failed-evaluation! store conn eval-id evaluation-error)
                    (catch Throwable completion-error
+                     (reset! (::poisoned target) true)
                      (throw (ex-info
-                             "Evaluation failed and its durable record could not be completed; the record remains pending"
+                             "Evaluation failed and its durable record could not be completed; the record remains pending and the instance is poisoned"
                              {:samizdat.sandbox/error :durable-evaluation-incomplete
                               :eval-id eval-id}
                              completion-error))))
+                 (rollback-to-committed! store conn binding target
+                                         eval-id evaluation-error)
                  (throw evaluation-error))))
            (finally
              (reset! hook nil))))
@@ -957,7 +1520,8 @@
 (defn- fresh-target
   "Allocate an independent context from the same spec, attenuated to the
    source target's current authority.  It intentionally does not publish into
-   a provider registry until replay has succeeded exactly."
+   a provider registry until replay has succeeded exactly.  The fresh context
+   is never poisoned: a rebuild is the cure for a poisoned instance."
   [target]
   (let [c (context-from-spec (:spec target))
         old-state @(::state target)
@@ -968,7 +1532,8 @@
                      :operations (:operations c)
                      ::state (::state c)
                      ::effect-hook (::effect-hook c)
-                     ::evaluation-owner (::evaluation-owner c))]
+                     ::evaluation-owner (::evaluation-owner c)
+                     ::poisoned (::poisoned c))]
     (doseq [capability (remove authorized (set (:capabilities (:spec target))))]
       (sandbox/revoke! fresh-state capability))
     fresh))
@@ -1049,12 +1614,8 @@
               state @(::state fresh-instance)]
           (sandbox/load-receipts! state receipts)
           (sandbox/set-mode! state :replay)
-          (let [value (evaluate-state! fresh-instance (:source record) nil)
-                inert-value (sandbox/inert value)
-                result (:result record)]
-            (when-not (and (map? result)
-                           (contains? result :value)
-                           (= (sandbox/inert (:value result)) inert-value))
+          (let [value (evaluate-state! fresh-instance (:source record) nil)]
+            (when-not (result-matches? record value)
               (throw (ex-info "Replayed source result does not match its durable completion"
                               {:samizdat.sandbox/error :replay-result-mismatch
                                :eval-id eval-id})))
@@ -1064,6 +1625,141 @@
             (sandbox/load-receipts! state [])
             (sandbox/set-mode! state :normal)
             (publish-recorded-rebuild! binding fresh-instance))))
+      (finally
+        (release-evaluation! target claim)))))
+
+;; ═══════════════════════════════════════════════════════════════════════════
+;; Whole-history rebuild — one fresh SCI context from the committed record
+;; ═══════════════════════════════════════════════════════════════════════════
+
+(defn- check-single-recorded-binding!
+  "Whole-history rebuild reconstructs the INSTANCE from ONE binding's durable
+   history, which is sound only when that binding is the instance's sole
+   recorded binding — the JS1 provider policy (one work-id per instance key;
+   a controller needing isolation passes a distinct :instance/key).  A
+   provider registry showing a second binding on the same instance key fails
+   closed: replaying one binding's history would silently drop the sibling's
+   committed definitions."
+  [binding]
+  (when-let [reg (::registry binding)]
+    (let [siblings (->> (:bindings @reg)
+                        vals
+                        (filter #(= (:instance/key binding) (:instance/key %)))
+                        (map :binding/id)
+                        distinct
+                        vec)]
+      (when (< 1 (count siblings))
+        (throw (ex-info "Instance is shared by multiple bindings; one binding's durable history cannot rebuild it"
+                        {:samizdat.sandbox/error :shared-instance
+                         :instance/key (:instance/key binding)
+                         :binding-ids siblings}))))))
+
+(defn- validate-history!
+  "Fail-closed validation of a binding's durable evaluation history before any
+   of it is trusted as replay material:
+
+     - the total order is contiguous from 0 (a gap is a torn record);
+     - no record is pending (an unfinished evaluation's actuations may or may
+       not have happened — the honest answer is refusal, and an unsettled
+       effect intent inside one is the same refusal one level down);
+     - every record — replayed or not — names exactly this spec, instance,
+       binding, current authority coordinate, and current runtime coordinate."
+  [identity coordinate rows]
+  (when-not (= (mapv :binding_seq rows) (vec (range (count rows))))
+    (throw (ex-info "Durable evaluation history is not a contiguous total order from 0"
+                    {:samizdat.sandbox/error :malformed-history
+                     :binding-seqs (mapv :binding_seq rows)})))
+  (let [expected {:spec_id (str (:spec-id identity))
+                  :instance_id (str (:instance-id identity))
+                  :binding_id (str (:binding-id identity))
+                  :coordinate (str coordinate)
+                  :runtime (str (:runtime identity))}]
+    (doseq [record rows]
+      (when (= :pending (:status record))
+        (throw (ex-info "Durable evaluation history contains a pending record; its actuations may or may not have happened"
+                        {:samizdat.sandbox/error :pending-history
+                         :eval-id (:id record)
+                         :binding_seq (:binding_seq record)})))
+      (when-not (= expected (select-keys record (keys expected)))
+        (throw (ex-info "Durable evaluation record does not match this binding's spec, instance, binding, coordinate, or runtime"
+                        {:samizdat.sandbox/error :history-mismatch
+                         :eval-id (:id record)
+                         :expected expected
+                         :actual (select-keys record (keys expected))}))))))
+
+(defn- replay-one-record!
+  "Replay one validated completed record into the fresh instance: its exact
+   durable receipts in, its source evaluated in :replay mode — so every
+   operation is served from the receipts and ZERO real project operations
+   execute — then its replayed final value checked against the durable
+   terminal result.  jolt.sandbox itself fails replay on operation or
+   argument mismatch and on unconsumed receipts."
+  [fresh-instance record]
+  (let [state @(::state fresh-instance)
+        receipts (replay-receipts fresh-instance record)]
+    (sandbox/load-receipts! state receipts)
+    (sandbox/set-mode! state :replay)
+    (let [value (evaluate-state! fresh-instance (:source record) nil)]
+      (when-not (result-matches? record value)
+        (throw (ex-info "Replayed source result does not match its durable completion"
+                        {:samizdat.sandbox/error :replay-result-mismatch
+                         :eval-id (:id record)}))))))
+
+(defn- rebuild-binding-internal!
+  "Whole-history rebuild core, shared by rebuild-binding! and the
+   commit-only rollback path: validate the binding's durable history against
+   its current identity, then replay EVERY committed evaluation, in the
+   binding's total order, into ONE fresh SCI context, and publish the fresh
+   instance only after every replay has matched exactly.  Failed evaluations
+   are validated but not replayed — their definitions never committed.
+   Returns the rebuilt Binding.  The caller must hold the evaluation claim
+   on `target`."
+  [store conn binding target]
+  (check-single-recorded-binding! binding)
+  (let [identity (binding-identity binding)
+        coordinate (current-coordinate target)
+        rows ((:history store) conn (:binding/id binding))]
+    ;; Validation is complete before the fresh context is allocated: nothing
+    ;; the history says is trusted until every record has checked out.
+    (validate-history! identity coordinate rows)
+    (let [fresh-instance (fresh-target target)
+          state @(::state fresh-instance)]
+      (doseq [record rows]
+        (when (= :completed (:status record))
+          (replay-one-record! fresh-instance record)))
+      ;; Historical evidence remains in the DB, not in the now-live context.
+      ;; Clearing it also prevents a later mode change from accidentally
+      ;; treating history as a new replay program.
+      (sandbox/load-receipts! state [])
+      (sandbox/set-mode! state :normal)
+      (publish-recorded-rebuild! binding fresh-instance))))
+
+(defn rebuild-binding!
+  "Rebuild `binding`'s instance from its WHOLE durable committed history:
+   every committed evaluation for the binding, in the binding's durable
+   total order, replayed into ONE fresh SCI context.  Returns the rebuilt
+   Binding.
+
+   Zero real project operations execute: replay runs in jolt.sandbox :replay
+   mode throughout, so every observation and actuation is served from the
+   exact durable receipts of its original evaluation.  Before any record is
+   trusted, the whole history is validated — contiguous total order, no
+   pending records, and per-record spec/instance/binding identity plus exact
+   authority and runtime coordinates — and any gap, pending record, shared
+   instance, or mismatch fails closed.  Each replayed evaluation must also
+   reproduce its durable terminal result exactly.
+
+   A binding with no recorded history rebuilds to a fresh empty context.
+   This supersedes rebuild-recorded! (which replays a single evaluation)
+   whenever definitions span evaluations: it is the resume/reconcile
+   operation, and it is what rollback after a failed evaluation runs."
+  [conn binding]
+  (require-binding! binding "rebuild-binding!")
+  (let [store (eval-store)
+        target (evaluation-target binding "rebuild-binding!")
+        claim (claim-evaluation! target)]
+    (try
+      (rebuild-binding-internal! store conn binding target)
       (finally
         (release-evaluation! target claim)))))
 
@@ -1127,17 +1823,19 @@
      :jolt.sandbox/authorized — authorized capability IDs
      :jolt.sandbox/operations — authorized operation descriptors
 
-   JS1 seam coordinates:
-     :samizdat.sandbox/kind — :context / :instance / :binding
-     :samizdat.sandbox/root-canonical — the trusted root
-     :samizdat.sandbox/timeout-ms — the configured ceiling
-     :samizdat.sandbox/bounds — the four bounds
-     :samizdat.sandbox/preset — the trusted preset (catalog specs only)
-     :samizdat.sandbox/spec-coordinate — the inert js1: content coordinate
-     :samizdat.sandbox/instance-key / :samizdat.sandbox/instance-id
-       (instances and bindings)
-     :samizdat.sandbox/binding-id / :samizdat.sandbox/work-id
-       (bindings only)"
+    JS1 seam coordinates:
+      :samizdat.sandbox/kind — :context / :instance / :binding
+      :samizdat.sandbox/root-canonical — the trusted root
+      :samizdat.sandbox/timeout-ms — the configured ceiling
+       :samizdat.sandbox/bounds — the six bounds
+      :samizdat.sandbox/preset — the trusted preset (catalog specs only)
+      :samizdat.sandbox/spec-coordinate — the inert js1: content coordinate
+      :samizdat.sandbox/runtime-coordinate — the versioned js1-rt/v1:
+        RuntimeCoordinate of this process
+      :samizdat.sandbox/instance-key / :samizdat.sandbox/instance-id
+        (instances and bindings)
+      :samizdat.sandbox/binding-id / :samizdat.sandbox/work-id
+        (bindings only)"
   [x]
   (let [binding (when (::instance x) x)
         target (if binding (::instance x) x)
@@ -1153,7 +1851,8 @@
                   :samizdat.sandbox/root-canonical (:root-canonical target)
                   :samizdat.sandbox/timeout-ms (:timeout-ms target)
                   :samizdat.sandbox/bounds (:bounds spec)
-                  :samizdat.sandbox/spec-coordinate (:spec/coordinate spec))
+                  :samizdat.sandbox/spec-coordinate (:spec/coordinate spec)
+                  :samizdat.sandbox/runtime-coordinate (runtime-coordinate))
           (:preset spec)
           (assoc :samizdat.sandbox/preset (:preset spec))
           (:instance/id target)
@@ -1206,39 +1905,156 @@
       (when (re-matches #"[A-Za-z0-9*+!_'?<>=./-]+" s)
         (keyword s)))))
 
-(defn operation-doc
-  "Host-derived safe capability discovery for `doc`: an inert doc-style map
-   for the projected operation named by `sym` (e.g. \"project/read\"), or
-   nil when no authorized operation matches.
+(def ^:private reviewed-surface*
+  "The reviewed pure language surface as trusted static data —
+   jolt.sandbox/language-surface (Jolt 619ef196): derived solely from the
+   reviewed static allow-list, inert and canonical, with no live SCI
+   Context, no introspection, and no host handles.  Cached: the surface is
+   a constant of the runtime the RuntimeCoordinate already names."
+  (delay (:jolt.sandbox.surface/symbols (sandbox/language-surface))))
 
-   Derived ONLY from the target's effective authority (describe) plus the
-   host-owned operation-docs table.  No resolve/find-ns/ns-publics/meta
-   form is ever evaluated inside the sandbox: the sandbox vocabulary
+(defn- reviewed-symbols
+  "The reviewed pure symbol-name strings, sorted."
+  []
+  @reviewed-surface*)
+
+(defn- reviewed-symbol?
+  "Whether `s` names a symbol of the reviewed pure language surface."
+  [s]
+  (boolean (some #{s} (reviewed-symbols))))
+
+(def ^:private pure-symbol-docs
+  "Host-owned inert documentation for the reviewed pure symbols models ask
+   about most, keyed by surface symbol name.  The language surface carries
+   names, not docs, by design — this is the host's documentation database
+   the surface description names.  Absent entries get the generic
+   reviewed-surface doc; nothing here grants or attests authority."
+  {"map" {:arglists '([f coll] [f c1 c2] [f c1 c2 c3] [f c1 c2 c3 & colls])
+          :doc "Returns the lazy sequence of applying f to each item in the coll(s)."}
+   "mapv" {:arglists '([f coll] [f c1 c2] [f c1 c2 c3] [f c1 c2 c3 & colls])
+           :doc "Applies f to each item in the coll(s), eagerly into a vector."}
+   "filter" {:arglists '([pred coll])
+             :doc "Returns the lazy sequence of items of coll for which (pred item) is true."}
+   "filterv" {:arglists '([pred coll])
+              :doc "Returns a vector of items of coll for which (pred item) is true."}
+   "reduce" {:arglists '([f coll] [f init coll])
+             :doc "Accumulates f over coll, optionally starting from init."}
+   "mapcat" {:arglists '([f coll] [f c1 c2] [f c1 c2 c3] [f c1 c2 c3 & colls])
+             :doc "Applies f to each item of the coll(s) and concatenates the results."}
+   "first" {:arglists '([coll]) :doc "The first item of coll, or nil if empty."}
+   "rest" {:arglists '([coll]) :doc "The items of coll after the first; empty seq if none."}
+   "last" {:arglists '([coll]) :doc "The last item of coll, in linear time."}
+   "count" {:arglists '([coll]) :doc "The number of items in coll."}
+   "take" {:arglists '([n coll]) :doc "The lazy sequence of the first n items of coll."}
+   "drop" {:arglists '([n coll]) :doc "The lazy sequence of all but the first n items of coll."}
+   "nth" {:arglists '([coll index] [coll index not-found])
+          :doc "The item at index of coll, or not-found when out of range."}
+   "str" {:arglists '([& xs]) :doc "Concatenates the string forms of xs, with no separators."}
+   "subs" {:arglists '([s start] [s start end])
+           :doc "The substring of s from start (inclusive) to end (defaults to the end)."}
+   "split-at" {:arglists '([n coll])
+               :doc "A pair [(take n coll) (drop n coll)]."}
+   "sort" {:arglists '([coll] [comp coll])
+           :doc "A sorted sequence of coll's items, optionally by comparator."}
+   "sort-by" {:arglists '([keyfn coll] [keyfn comp coll])
+              :doc "A sorted sequence of coll's items by (keyfn item)."}
+   "assoc" {:arglists '([map key val] [map key val & kvs])
+            :doc "Associates key with val in map, later pairs winning."}
+   "dissoc" {:arglists '([map key] [map key & ks])
+             :doc "Dissociates the keys from map."}
+   "get" {:arglists '([map key] [map key not-found])
+          :doc "The value for key in map, or not-found."}
+   "merge" {:arglists '([& maps])
+            :doc "Merges the maps left to right, later entries winning."}
+   "select-keys" {:arglists '([map keyseq])
+                  :doc "A map of only the entries of map whose keys are in keyseq."}
+   "defn" {:arglists '([name doc-string? attr-map? [params*] prepost-map? body])
+           :doc "Defines a function. Pure here: the sandbox vocabulary reaches nothing."}
+   "let" {:arglists '([bindings & body])
+          :doc "Binding => binding-form init-expr; evaluates body with the bindings."}
+   "if-let" {:arglists '([binding then] [binding then else])
+             :doc "Binds the test's value when truthy, evaluating then, else else."}
+   "cond" {:arglists '([& clauses])
+           :doc "Takes test/expr pairs; evaluates the expr of the first truthy test."}
+   "range" {:arglists '([] [end] [start end] [start end step])
+            :doc "A lazy sequence of numbers from start (0) to end by step (1)."}
+   "vec" {:arglists '([coll]) :doc "Creates a vector containing the items of coll."}
+   "vector" {:arglists '([& xs]) :doc "Creates a vector of the arguments."}
+   "set" {:arglists '([coll]) :doc "Creates a set containing the distinct items of coll."}
+   "frequencies" {:arglists '([coll])
+                  :doc "A map from the distinct items of coll to their counts."}
+   "group-by" {:arglists '([f coll])
+               :doc "A map from (f item) to the vectors of items producing it."}
+   "distinct" {:arglists '([coll])
+               :doc "The lazy sequence of coll's items with duplicates removed."}
+   "apply" {:arglists '([f args] [f x args] [f x y args] [f x y z args] [f a b c d & more])
+            :doc "Applies f to the arguments, splicing the final coll's items in."}
+   "partial" {:arglists '([f] [f arg1] [f arg1 arg2] [f arg1 arg2 arg3] [f arg1 arg2 arg3 & more])
+              :doc "A partially applied f with the given arguments fixed."}
+   "comp" {:arglists '([& fs]) :doc "Composes the functions right to left."}
+   "pr-str" {:arglists '([& xs]) :doc "Prints the arguments to a string."}
+   "format" {:arglists '([fmt & args])
+             :doc "Formats args per the java.util.Formatter-style fmt string."}
+   "name" {:arglists '([x]) :doc "The name string of a string, symbol or keyword."}
+   "keyword" {:arglists '([x] [ns x]) :doc "A keyword from the name (and namespace)."}
+   "symbol" {:arglists '([name] [ns name]) :doc "A symbol from the name (and namespace)."}})
+
+(defn- reviewed-symbol-doc
+  "The inert doc map for one reviewed pure symbol: the host-owned curated
+   entry when there is one, otherwise the generic reviewed-surface doc."
+  [s]
+  (if-let [curated (get pure-symbol-docs s)]
+    {:name s
+     :arglists (vec (:arglists curated))
+     :doc (str (:doc curated) "  Effect: pure.")}
+    {:name s
+     :doc (str "Reviewed pure language-surface symbol (js0-pure-sci): computes "
+               "over inert values and reaches nothing — no IO, no state, no "
+               "host access.  Part of the frozen reviewed vocabulary named by "
+               "the runtime coordinate.  Effect: pure.")}))
+
+(defn operation-doc
+  "Host-derived safe discovery for `doc`: an inert doc-style map for the
+   projected operation named by `sym` (e.g. \"project/read\"), or for a
+   symbol of the reviewed pure language surface (e.g. \"map\"), or nil.
+
+   The answer is the UNION the model can actually call: effective project
+   operations (from the target's describe map plus the host-owned
+   operation-docs table) and pure reviewed symbols (from
+   jolt.sandbox/language-surface — trusted static data with a versioned
+   coordinate, never a live SCI Context).  No resolve/find-ns/ns-publics/
+   meta form is ever evaluated inside the sandbox: the sandbox vocabulary
    forbids them, and splicing untrusted symbol text into evaluated source
    would be an injection seam, so discovery never evaluates at all — the
    symbol text is matched as inert data.  Ungranted capabilities are not
-   discoverable."
+   discoverable, and no doc attests anything the target cannot do."
   [x sym]
   (when-let [cap (discovery-symbol sym)]
     (let [d (describe-for-discovery x)
           ;; :op/id is the string form ":project/read"; re-keyword it.
           op (some (fn [o] (when (= cap (keyword (subs (:op/id o) 1))) o))
                    (:jolt.sandbox/operations d))]
-      (when op
-        (let [docs (or (get operation-docs cap) {})]
-          {:name (str "project/" (:op/name op))
-           :arglists (vec (or (:arglists docs) '([& args])))
-           :doc (str (:doc docs)
-                     "  Effect: " (name (:op/effect op)) ".")})))))
+      (or (when op
+            (let [docs (or (get operation-docs cap) {})]
+              {:name (str "project/" (:op/name op))
+               :arglists (vec (or (:arglists docs) '([& args])))
+               :doc (str (:doc docs)
+                         "  Effect: " (name (:op/effect op)) ".")}))
+          (let [s (name cap)]
+            (when (reviewed-symbol? s)
+              (reviewed-symbol-doc s)))))))
 
 (defn complete-capability
-  "Host-derived safe capability discovery for `complete`: the sorted
-   projected operation names (\"project/…\") authorized for `x` whose full
-   name starts with `prefix`.  Pure filtering over effective authority —
-   nothing is evaluated inside the sandbox, so untrusted prefix text can
-   only narrow the answer, never widen it or run."
+  "Host-derived safe discovery for `complete`: the sorted names `x`'s
+   evaluation can actually resolve, filtered by `prefix` — the UNION of the
+   authorized projected operation names (\"project/…\") and the reviewed
+   pure language surface's symbol names.  Both corpora are inert data
+   (effective authority and jolt.sandbox/language-surface); nothing is
+   evaluated inside the sandbox, so untrusted prefix text can only narrow
+   the answer, never widen it or run."
   [x prefix]
   (let [p (str prefix)]
     (vec (sort (filter #(str/starts-with? % p)
-                       (map (fn [cap] (str "project/" (name cap)))
-                            (capabilities x)))))))
+                       (concat (map (fn [cap] (str "project/" (name cap)))
+                                    (capabilities x))
+                               (reviewed-symbols)))))))

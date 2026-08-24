@@ -248,88 +248,335 @@
            :repaired? (= :repaired status)})
          (miss branch (str "Path " path " is outside the project root and cannot be written."))))))
 
-;; --- sandbox helpers: digest, bounded list/search ---------------------------------
+;; --- sandbox substrate: strict UTF-8, bounded reads, digests, listing, search ---
+;;
+;; The primitives the JS1 sandbox's five projected semantic operations are
+;; normalized against: the frozen bb4t A2/A3b project contract.  Everything
+;; here fails closed — bounded reads stop AT the bound instead of consuming
+;; whole files first, strict UTF-8 decoding rejects rather than replaces,
+;; digests propagate errors instead of returning nil, and no walk ever
+;; follows a symbolic link.
+
+(defn utf8-bytes
+  "The UTF-8 encoding of `s` as a byte array."
+  [^String s]
+  (.getBytes s "UTF-8"))
+
+(defn utf8-byte-count
+  "The UTF-8 byte length of `s`."
+  [^String s]
+  (alength (utf8-bytes s)))
+
+(defn valid-utf8?
+  "Strict structural UTF-8 validation of `bs`: rejects truncated sequences,
+  bad continuations, overlong forms, surrogates and code points beyond
+  U+10FFFF — the same inputs a Java CharsetDecoder with REPORT would
+  reject."
+  [^bytes bs]
+  (let [n (alength bs)
+        continuation? (fn [b] (<= 0x80 b 0xbf))]
+    (loop [i 0]
+      (if (>= i n)
+        true
+        (let [b (bit-and (aget bs i) 0xff)]
+          (cond
+            (< b 0x80) (recur (inc i))
+
+            (<= 0xc2 b 0xdf)
+            (and (< (inc i) n)
+                 (continuation? (bit-and (aget bs (inc i)) 0xff))
+                 (recur (+ i 2)))
+
+            ;; Three-byte forms: e0 and ed constrain the second byte
+            ;; (overlong forms, surrogates); the tail is plain continuation.
+            (= b 0xe0)
+            (and (< (+ i 2) n)
+                 (<= 0xa0 (bit-and (aget bs (inc i)) 0xff) 0xbf)
+                 (continuation? (bit-and (aget bs (+ i 2)) 0xff))
+                 (recur (+ i 3)))
+
+            (or (<= 0xe1 b 0xec) (<= 0xee b 0xef))
+            (and (< (+ i 2) n)
+                 (continuation? (bit-and (aget bs (inc i)) 0xff))
+                 (continuation? (bit-and (aget bs (+ i 2)) 0xff))
+                 (recur (+ i 3)))
+
+            (= b 0xed)
+            (and (< (+ i 2) n)
+                 (<= 0x80 (bit-and (aget bs (inc i)) 0xff) 0x9f)
+                 (continuation? (bit-and (aget bs (+ i 2)) 0xff))
+                 (recur (+ i 3)))
+
+            ;; Four-byte forms: f0 and f4 constrain the second byte
+            ;; (overlong forms, beyond U+10FFFF).
+            (= b 0xf0)
+            (and (< (+ i 3) n)
+                 (<= 0x90 (bit-and (aget bs (inc i)) 0xff) 0xbf)
+                 (continuation? (bit-and (aget bs (+ i 2)) 0xff))
+                 (continuation? (bit-and (aget bs (+ i 3)) 0xff))
+                 (recur (+ i 4)))
+
+            (<= 0xf1 b 0xf3)
+            (and (< (+ i 3) n)
+                 (continuation? (bit-and (aget bs (inc i)) 0xff))
+                 (continuation? (bit-and (aget bs (+ i 2)) 0xff))
+                 (continuation? (bit-and (aget bs (+ i 3)) 0xff))
+                 (recur (+ i 4)))
+
+            (= b 0xf4)
+            (and (< (+ i 3) n)
+                 (<= 0x80 (bit-and (aget bs (inc i)) 0xff) 0x8f)
+                 (continuation? (bit-and (aget bs (+ i 2)) 0xff))
+                 (continuation? (bit-and (aget bs (+ i 3)) 0xff))
+                 (recur (+ i 4)))
+
+            ;; 0xc0, 0xc1 (overlong two-byte), 0xf5..0xff: never valid.
+            :else false))))))
+
+(defn decode-utf8
+  "Strict UTF-8 decode of `bs`.  Malformed input fails
+   {:samizdat.files/error :invalid-utf8} — never silently replaced — so a
+   binary file is an error (read) or a skip (search), not mojibake."
+  [^bytes bs]
+  (when-not (valid-utf8? bs)
+    (throw (ex-info "Content is not valid UTF-8"
+                    {:samizdat.files/error :invalid-utf8})))
+  (String. bs "UTF-8"))
+
+(defn decode-utf8-or-nil
+  "Strict decode, or nil for anything that is not valid UTF-8 — how a binary
+   file is recognized during search without guessing from its name."
+  [^bytes bs]
+  (try (decode-utf8 bs) (catch Exception _ nil)))
+
+(defn read-bounded-bytes
+  "Read at most `max-bytes` bytes from `path`.  Consumption stops at the
+   bound: content larger than the limit fails
+   {:samizdat.files/error :too-large :limit max-bytes} instead of being read
+   whole and truncated afterwards.  Any read failure propagates."
+  [path max-bytes]
+  (let [input (java.io.FileInputStream. (str path))]
+    (try
+      (let [output (java.io.ByteArrayOutputStream.)
+            buffer (byte-array 8192)]
+        (loop [total 0]
+          (let [remaining (- (inc max-bytes) total)
+                read (.read input buffer 0 (min (alength buffer) remaining))]
+            (cond
+              (neg? read) (.toByteArray output)
+
+              (> (+ total read) max-bytes)
+              (throw (ex-info "File content exceeds the byte limit"
+                              {:samizdat.files/error :too-large
+                               :limit max-bytes}))
+
+              :else
+              (do (.write output buffer 0 read)
+                  (recur (+ total read)))))))
+      (finally
+        (try (.close input) (catch Throwable _ nil))))))
+
+;; --- digest ------------------------------------------------------------------
+
+(def ^:private libcrypto-candidates
+  "The shared libraries jolt-crypto's foreign functions resolve against
+   (mirroring its :jolt/native declaration), tried in order."
+  ["libcrypto.so.3" "libcrypto.so.1.1" "libcrypto.so"
+   "/opt/homebrew/opt/openssl@3/lib/libcrypto.dylib"
+   "/usr/lib/libcrypto.dylib" "libcrypto.dylib"])
+
+(defn- hex-encode
+  "Lowercase hex of `bs`, two digits per byte."
+  [^bytes bs]
+  (apply str (map #(format "%02x" %) bs)))
+
+(defn- compute-digest
+  "One digest attempt: getInstance (whose miss auto-loads jolt.crypto's
+   host-class shim when that namespace is on the roots) then the one-shot
+   digest over `bs`."
+  [^bytes bs]
+  (hex-encode (.digest (java.security.MessageDigest/getInstance "SHA-256") bs)))
+
+(defn bytes-digest
+  "SHA-256 hex digest (64 lowercase hex chars) of `bs`.  Fail-closed, with a
+   one-time bootstrap for processes that did not get jolt-crypto's natives
+   through dependency resolution (an -Scp run loads none): the first failure
+   opens libcrypto, loads jolt.crypto — installing the MessageDigest shim
+   and binding its foreign functions to the opened handle — and retries
+   once.  Any remaining failure propagates: a digest is a content
+   coordinate, and an uncomputable coordinate must not become a fake one."
+  [^bytes bs]
+  (try
+    (compute-digest bs)
+    (catch Throwable failure
+      (try
+        (doseq [lib libcrypto-candidates]
+          (try (jolt.ffi/load-native lib) (catch Throwable _ nil)))
+        (require 'jolt.crypto)
+        (compute-digest bs)
+        (catch Throwable _
+          (throw failure))))))
 
 (defn file-digest
-  "SHA-256 hex digest of file at `path`.  Returns a 64-character lowercase
-   hex string, or nil if the file cannot be read.  The hex string is the receipt-
-   domain representation of a content identity — a deterministic fingerprint
-   suitable for anchored-edit base-digest comparison."
+  "SHA-256 hex digest of a file's bytes, reading at most `max-bytes` through
+   the bounded reader.  Fail-closed: over the bound, unreadable, or without
+   digest machinery it THROWS — never nil — so stat/edit cannot hand out a
+   coordinate that was never computed."
+  [path max-bytes]
+  (bytes-digest (read-bounded-bytes path max-bytes)))
+
+;; --- one-level listing -------------------------------------------------------
+
+(defn nofollow-size
+  "The lstat byte size of `path` (a symbolic link reports the link, not its
+   target).  Throws when the attributes cannot be read."
   [path]
-  (try
-    (when (and path (fs/exists? path))
-      (let [^java.security.MessageDigest d
-            (doto (java.security.MessageDigest/getInstance "SHA-256")
-              (.update (fs/read-all-bytes path)))]
-        (format "%064x" (java.math.BigInteger/1 (.digest d)))))
-    (catch Exception _ nil)))
+  (fs/get-attribute path "basic:size" {:nofollow-links true}))
 
-(defn safe-list-dir
-  "List entries under `root` at relative `rel-path`, bounded to `max-entries`.
-   Returns a sorted vector of relative path strings (from root).  Only
-   descend into directories; symlinks are not followed so a symlink that
-   would escape root never causes the walk to leave it.  Returns an empty
-   vector for non-directory or missing paths."
-  ([root rel-path] (safe-list-dir root rel-path 1000))
-  ([root rel-path max-entries]
-   (let [root* (str (fs/canonicalize root))]
-     (if-let [abs (resolve-under-root root* (or rel-path "."))]
-       (if (fs/directory? abs {:nofollow-links true})
-         (let [entries (atom [])
-               limit (atom max-entries)]
-           (fs/walk-file-tree
-             abs
-             {:follow-links false
-              :pre-visit-dir (fn [_ _]
-                               (if (pos? @limit) :continue :terminate))
-              :visit-file (fn [f _]
-                           (if (pos? @limit)
-                             (do (swap! entries conj
-                                    (str (fs/relativize root* (str f))))
-                                 (swap! limit dec)
-                                 :continue)
-                             :terminate))})
-           (sort @entries))
-         [])
-        []))))
+(defn entry-kind
+  "The NOFOLLOW kind of `path`: :symlink, :directory, :file or :other.  A
+   link is reported as a link and never followed, inside or outside any
+   root.  Existence is the caller's question — this mirrors bb4t's
+   entry-kind, which is only asked about entries known to exist."
+  [path]
+  (cond
+    (fs/sym-link? path) :symlink
+    (fs/directory? path {:nofollow-links true}) :directory
+    (fs/regular-file? path {:nofollow-links true}) :file
+    :else :other))
 
-(defn safe-search-files
-  "Search for `pattern` (a regex string) in files under `root` at relative
-   `rel-path`, bounded by `max-results` and `max-chars`.  Returns a vector of
-   `[rel-path line-number line-text]` tuples.  Symlinks are not followed.
-   Returns an empty vector for non-directory or missing paths."
-  ([root rel-path pattern] (safe-search-files root rel-path pattern 500 500000))
-  ([root rel-path pattern max-results max-chars]
-   (let [root* (str (fs/canonicalize root))
-         re (re-pattern pattern)]
-     (if-let [abs (resolve-under-root root* (or rel-path "."))]
-       (if (fs/directory? abs {:nofollow-links true})
-         (let [results (atom [])
-               chars-scanned (atom 0)]
-           (fs/walk-file-tree
-             abs
-             {:follow-links false
-              :pre-visit-dir (fn [_ _]
-                              (if (and (< (count @results) max-results)
-                                       (< @chars-scanned max-chars))
-                                :continue
-                                :terminate))
-              :visit-file
-              (fn [f _]
-                (if (and (< (count @results) max-results)
-                         (< @chars-scanned max-chars))
-                  (try
-                    (let [content (slurp (str f))
-                          _ (swap! chars-scanned + (count content))
-                          rel (str (fs/relativize root* (str f)))]
-                      (doseq [[i line] (map-indexed vector
-                                                   (str/split content #"\n" -1))
-                              :while (< (count @results) max-results)
-                              :when (re-find re line)]
-                        (swap! results conj [rel (inc i) line]))
-                      :continue)
-                    (catch Exception _ :continue))
-                  :terminate))})
-            (vec @results))
-         [])
-        []))))
+(defn list-one-level
+  "The IMMEDIATE entries of the directory at `abs-dir` — exactly one level,
+   never recursing — as inert structured maps sorted by name:
+   {:name :kind} with :bytes added for regular files, :kind one of :file,
+   :directory, :symlink, :other.  Attributes are read NOFOLLOW so a symbolic
+   link is a link, not whatever it names.  More than `max-entries` entries
+   fails {:samizdat.files/error :too-many-entries} rather than truncating:
+   a bounded listing is a bound, not a sample."
+  [abs-dir max-entries]
+  (let [entries (mapv (fn [p]
+                        (let [kind (entry-kind p)]
+                          (cond-> {:name (str (fs/file-name p)) :kind kind}
+                            (= :file kind) (assoc :bytes (nofollow-size p)))))
+                      (fs/list-dir abs-dir))]
+    (when (> (count entries) max-entries)
+      (throw (ex-info "Project directory exceeds the entry limit"
+                      {:samizdat.files/error :too-many-entries
+                       :limit max-entries})))
+    (vec (sort-by :name entries))))
+
+;; --- atomic anchored write ---------------------------------------------------
+
+(defn atomic-write-file!
+  "Write `content-bytes` at `abs-path` through a sibling temporary and an
+   atomic rename, so a reader never observes a partially written file and a
+   failed write leaves any original intact.  `replace-existing?` selects
+   rename-onto-target (an anchored update) against fail-if-present (a
+   creation whose leaf must be the only thing absent).  The temporary is
+   removed on any failure.  Creates no directories — the parent must exist:
+   the frozen A2 edit contract never materializes a hierarchy."
+  [abs-path ^bytes content-bytes replace-existing?]
+  (let [parent (fs/parent abs-path)
+        temp (str parent "/.samizdat-edit-" (random-uuid))]
+    (try
+      (fs/create-file temp)
+      (let [out (java.io.FileOutputStream. temp)]
+        (try
+          (.write out content-bytes)
+          (finally (try (.close out) (catch Throwable _ nil)))))
+      (fs/move temp abs-path {:replace-existing replace-existing?
+                              :atomic-move true})
+      (catch Throwable failure
+        (try (fs/delete-if-exists temp) (catch Throwable _ nil))
+        (throw failure)))))
+
+;; --- bounded search ----------------------------------------------------------
+
+(def ^:const search-match-budget
+  "Character budget one line may cost the regex engine before the whole
+   search fails — the superlinear-backtracking bound bb4t enforces with a
+   counting CharSequence.  Implemented here as a line-length gate: a line
+   longer than the budget necessarily costs at least its length in matcher
+   reads on a full scan, so refusing it up front holds the same bound."
+  200000)
+
+(defn search-tree
+  "Bounded regex search under the directory at `abs-dir`, with match paths
+   prefixed by `prefix`.  Returns a vector of {:path :line :text} maps
+   ordered by path (depth-first walk, entries sorted at every level).
+   Bounds, exactly the frozen A2 semantics:
+
+     :max-results    collection STOPS when reached;
+     :max-file-bytes a file larger than this is SKIPPED — its size is
+                     checked BEFORE any byte is consumed, so a huge file is
+                     never slurped and discarded;
+     :max-files      more regular files than this FAILS the search;
+     :include-hidden? dot-entries are skipped unless true;
+     :max-chars      total decoded characters the scan may consume (a JS1
+                     narrowing beyond the frozen contract; only ever stops
+                     the walk earlier).
+
+   Symbolic links are never followed; files that are not valid UTF-8 are
+   skipped; matched line text is trimmed and capped at :max-line-chars.
+   `re` must already be compiled."
+  [abs-dir prefix re {:keys [max-results max-file-bytes max-files
+                             include-hidden? max-chars max-line-chars]}]
+  (let [state (atom {:results [] :files 0 :chars 0})
+        budget-file!
+        (fn [file]
+          "Consume `file`'s size against the total budget BEFORE reading;
+           nil means the budget is exhausted for this file (skip)."
+          (let [size (nofollow-size file)]
+            (when (<= (+ (:chars @state) size) max-chars)
+              (swap! state update :chars + size)
+              size)))
+        search-file!
+        (fn [file rel]
+          (when-let [size (budget-file! file)]
+            (when (<= size max-file-bytes)
+              (when-let [content (decode-utf8-or-nil
+                                   (read-bounded-bytes file max-file-bytes))]
+                (loop [lines (str/split content #"\n" -1)
+                       number 1]
+                  (when (and (seq lines)
+                             (< (count (:results @state)) max-results))
+                    (let [line (first lines)]
+                      (when (> (count line) search-match-budget)
+                        (throw (ex-info
+                                "Project search pattern exceeded its matching budget"
+                                {:samizdat.files/error :match-budget
+                                 :budget search-match-budget})))
+                      (when (re-find re line)
+                        (swap! state update :results conj
+                               {:path rel
+                                :line number
+                                :text (let [trimmed (str/trim line)]
+                                        (if (> (count trimmed) max-line-chars)
+                                          (str (subs trimmed 0 max-line-chars) "...")
+                                          trimmed))}))
+                      (recur (rest lines) (inc number)))))))))
+        search-directory!
+        (fn search-directory! [dir prefix']
+          (doseq [entry (sort-by (fn [p] (str (fs/file-name p)))
+                                 (fs/list-dir dir))
+                  :while (< (count (:results @state)) max-results)]
+            (let [name (str (fs/file-name entry))
+                  rel (if (str/blank? prefix')
+                        name (str prefix' "/" name))]
+              (when (or include-hidden? (not (str/starts-with? name ".")))
+                (case (entry-kind entry)
+                  ;; Never followed, exactly as in listing, so a search
+                  ;; cannot be steered out of the authorized root.
+                  :symlink nil
+                  :directory (search-directory! entry rel)
+                  :file (do
+                          (when (>= (:files @state) max-files)
+                            (throw (ex-info
+                                    "Project search exceeded its file limit"
+                                    {:samizdat.files/error :too-many-files
+                                     :limit max-files})))
+                          (swap! state update :files inc)
+                          (search-file! entry rel))
+                  nil)))))]
+    (search-directory! abs-dir prefix)
+    (vec (:results @state))))

@@ -60,6 +60,15 @@
 
  :nrepl/middleware [nrepl.middleware/default-middleware]
 
+ ;; JS1 (the SCI sandbox seam) is NOT an alias here: it needs the pinned
+ ;; Jolt runtime's vendored SCI on the source roots, and that checkout's
+ ;; location is only known at run time.  bin/js1 owns the whole
+ ;; construction (locate + pin-check the runtime, hand jolt a generated
+ ;; alias so JOLT composes the roots — reading the jolt-crypto pin from
+ ;; :deps above, since the sandbox's digest substrate needs exactly the
+ ;; production coordinate); docs/JS1_RUNTIME.md names the pins.  Nothing
+ ;; below changes: no alias or task under this comment is selected by an
+ ;; ordinary invocation.
  :aliases {:test {:extra-paths ["test" "gui"]
                   :main-opts ["-m" "samizdat.test-runner"]}
            ;; command-line nREPL client, plus the test tree, so the live
