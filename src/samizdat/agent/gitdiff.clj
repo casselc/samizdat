@@ -10,12 +10,14 @@
   already uncommitted. Everything here fails soft: no git, no repo, or any
   error yields an empty diff, and the critic simply reviews completeness only."
   (:require [clojure.string :as str]
-            [samizdat.engine.proc :as proc]))
+            [samizdat.engine.proc :as proc]
+            [samizdat.security.secrets :as secrets]))
 
 (def max-diff-chars 12000)
 
 (defn- git [root & args]
-  (let [r (apply proc/run {:timeout-ms 15000} "git" "-C" (str root) args)]
+  (let [r (apply proc/run {:timeout-ms 15000 :env (secrets/scrubbed-process-env)}
+                 "git" "-C" (str root) args)]
     (when (and (not (:timeout r)) (zero? (or (:exit r) 1)))
       (:out r))))
 

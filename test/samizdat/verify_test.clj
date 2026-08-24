@@ -7,7 +7,9 @@
   (karamazov-dvz follow-up: the worker loop must be test-driven, not one-shot)."
   (:require [clojure.string :as str]
             [clojure.test :refer [deftest testing is]]
-            [samizdat.agent.verify :as verify]))
+            [samizdat.agent.verify :as verify]
+            [samizdat.engine.proc :as proc]
+            [samizdat.security.secrets :as secrets]))
 
 (deftest test-file?-recognises-test-and-spec-paths
   (is (verify/test-file? "test/samizdat/foo_test.clj"))
@@ -23,6 +25,26 @@
          (verify/ns-from-test-path "test/samizdat/knowledge_test.clj")))
   (is (nil? (verify/ns-from-test-path "resources/skills/repl-workflow.md"))
       "a non-clj path has no namespace"))
+
+(deftest ns-from-test-path-rejects-anything-not-a-plain-namespace
+  (testing "a file name crafted to break out of the sh -c single-quoting yields no ns"
+    (is (nil? (verify/ns-from-test-path "test/foo'; echo pwned; echo '.clj")))
+    (is (nil? (verify/ns-from-test-path "test/foo$(touch /tmp/pwned)_test.clj")))
+    (is (nil? (verify/ns-from-test-path "test/foo`x`_test.clj")))
+    (is (nil? (verify/ns-from-test-path "test/foo bar_test.clj"))))
+  (testing "plain namespaces still map"
+    (is (= "samizdat.knowledge-test"
+           (verify/ns-from-test-path "test/samizdat/knowledge_test.clj")))))
+
+(deftest focused-cmd-embeds-no-shell-breakout
+  (let [cmd (verify/focused-cmd ["test/foo'; echo MARKER-INJECTED; echo '.clj"
+                                 "test/samizdat/knowledge_test.clj"])]
+    (is (some? cmd))
+    (is (str/includes? cmd "samizdat.knowledge-test") "the focusable ns is still targeted")
+    (is (not (str/includes? cmd "MARKER-INJECTED")) "the crafted file name contributes nothing")
+    (is (not (str/includes? cmd "echo")) "no injected shell segment"))
+  (testing "nothing focusable survives the crafted names => nil (verify-cmd fallback)"
+    (is (nil? (verify/focused-cmd ["test/foo'; echo pwned; echo '.clj"])))))
 
 (deftest focused-cmd-runs-only-the-changed-test-namespaces
   (let [cmd (verify/focused-cmd ["src/samizdat/agent/tools/knowledge.clj"
@@ -79,3 +101,32 @@
 (deftest verify-block-trusts-a-green-run-when-git-cannot-tell
   (is (nil? (verify/verify-block {:verify-on? true :result {:green? true :output ""}
                                   :changed nil :require-test? true}))))
+
+;; --- run-verify: the trust boundary (review3 #1) ------------------------------
+;;
+;; The verify child must not inherit the parent's secrets, and its output is
+;; model-bound: what run-verify returns has to pass the same redaction boundary
+;; the shell tool enforces (docs/security.md properties 1 and 2).
+
+(deftest run-verify-spawns-with-a-scrubbed-environment
+  (let [captured (atom nil)]
+    (with-redefs [proc/run (fn [opts & args]
+                             (reset! captured (assoc opts :args args))
+                             {:exit 0 :out "" :err ""})]
+      (verify/run-verify "/tmp/some-root" "jolt test" 1000))
+    (let [env (:env @captured)]
+      (is (map? env) "proc/run receives an explicit :env")
+      (is (= (secrets/scrubbed-process-env) env)
+          "the child environment is the scrubbed process environment")
+      (is (str/starts-with? (str (last (:args @captured))) "cd '/tmp/some-root'")
+          "the root is single-quoted, not interpolated bare"))))
+
+(deftest run-verify-redacts-known-secrets-in-the-output
+  (let [token "sk-Abcdefghijklmnopqrstuvwxyz123456"]
+    (with-redefs [proc/run (fn [_ & _] {:exit 0
+                                         :out (str "dump: " token "\n")
+                                         :err ""})]
+      (let [r (verify/run-verify "/tmp/r" "printenv" 1000)]
+        (is (:green? r))
+        (is (str/includes? (:output r) "[REDACTED]") "the token is redacted")
+        (is (not (str/includes? (:output r) token)) "the token itself is gone")))))

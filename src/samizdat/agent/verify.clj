@@ -17,7 +17,8 @@
   derivation (`focused-cmd`) are pure, so the gate is testable without spawning a
   process. Same split as planner.clj vs cells/team.clj."
   (:require [clojure.string :as str]
-            [samizdat.engine.proc :as proc]))
+            [samizdat.engine.proc :as proc]
+            [samizdat.security.secrets :as secrets]))
 
 (defn test-file?
   "Whether a changed path is a test/spec file — the evidence that a change was
@@ -29,16 +30,23 @@
   "The Clojure namespace a test file defines: strip the leading source root
   (test/ or gui/), drop the extension, '/'->'.', '_'->'-'. Returns nil for a
   non-Clojure path.
-  e.g. \"test/samizdat/agent/decompose_test.clj\" -> \"samizdat.agent.decompose-test\"."
+  e.g. \"test/samizdat/agent/decompose_test.clj\" -> \"samizdat.agent.decompose-test\".
+
+  The derived namespace is embedded in a shell command (focused-cmd), and the
+  path is model-controlled — a file name crafted to close the sh -c quoting
+  (`test/foo'; CMD; echo '.clj`) must yield NO namespace, so the result is
+  whitelisted to plain namespace characters and anything else is dropped."
   [path]
   (let [p (str path)]
     (when (re-find #"\.cljc?$" p)
-      (-> p
-          (str/replace #"^(test|gui|src)/" "")
-          (str/replace #"\.cljc?$" "")
-          (str/replace "_" "-")
-          (str/replace "/" ".")
-          not-empty))))
+      (let [ns (-> p
+                   (str/replace #"^(test|gui|src)/" "")
+                   (str/replace #"\.cljc?$" "")
+                   (str/replace "_" "-")
+                   (str/replace "/" ".")
+                   not-empty)]
+        (when (and ns (re-matches #"[a-zA-Z0-9.*-]+" ns))
+          ns)))))
 
 (defn focused-cmd
   "A test command that runs ONLY the test namespaces among `changed`, with an
@@ -54,8 +62,9 @@
                       "(clojure.core/println s)"
                       "(clojure.core/flush)"
                       "(java.lang.System/exit (if (clojure.core/pos? (+ (:fail s) (:error s))) 1 0)))")]
-        ;; single-quote the whole -e expression for sh -c; the expr has no single
-        ;; quotes of its own (quote, not '), so this is safe.
+        ;; single-quote the whole -e expression for sh -c; every namespace in
+        ;; it came through ns-from-test-path's whitelist, so the expression
+        ;; genuinely has no single quotes of its own (review3 #1).
         (str "jolt -A:test -e '" expr "'")))))
 
 (defn- tail
@@ -113,15 +122,22 @@
 (defn run-verify
   "Run `cmd` in the project root and report whether it is green. Bounded by
   `timeout-ms` (default 10 min). Never throws — a spawn failure reads as
-  not-green, which sends the branch back rather than shipping."
+  not-green, which sends the branch back rather than shipping.
+
+  Trust boundary (docs/security.md): the child runs with the SCRUBBED process
+  environment — never the parent's, which holds provider keys — and its output
+  is model-bound, so it passes the redaction boundary before it is returned."
   [root cmd timeout-ms]
   (try
-    (let [r (proc/run {:timeout-ms (or timeout-ms 600000)}
-                      "sh" "-c" (str "cd " (str root) " && " cmd))]
+    (let [root* (str/replace (str root) "'" "'\\\\''")
+          r (proc/run {:timeout-ms (or timeout-ms 600000)
+                       :env (secrets/scrubbed-process-env)}
+                      "sh" "-c" (str "cd '" root* "' && " cmd))
+          known (secrets/known-values (into {} (System/getenv)))]
       {:green? (and (not (:timeout r)) (zero? (or (:exit r) 1)))
        :timeout? (boolean (:timeout r))
        :exit (:exit r)
-       :output (str (:out r) "\n" (:err r))})
+       :output (secrets/redact (str (:out r) "\n" (:err r)) known)})
     (catch Throwable e
       {:green? false :timeout? false
        :output (str "verify command failed to run: " (ex-message e))})))

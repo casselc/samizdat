@@ -4,7 +4,16 @@
 (ns samizdat.gitdiff-test
   (:require [clojure.test :refer [deftest is testing]]
             [samizdat.agent.gitdiff :as gd]
-            [samizdat.engine.proc :as proc]))
+            [samizdat.engine.proc :as proc]
+            [samizdat.security.secrets :as scrub]))
+
+(deftest gitdiff-spawns-with-a-scrubbed-environment
+  (let [captured (atom nil)]
+    (with-redefs [proc/run (fn [opts & _] (reset! captured opts) {:exit 0 :out "" :err ""})]
+      (gd/diff "/tmp/some-root" "HEAD"))
+    (is (map? (:env @captured)) "git children get an explicit environment")
+    (is (= (scrub/scrubbed-process-env) (:env @captured))
+        "the git child sees the scrubbed process environment, not the parent's")))
 
 (deftest diff-fails-soft
   ;; No root, no baseline, or no repo must yield an empty diff, not a throw —
