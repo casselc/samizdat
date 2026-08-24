@@ -29,7 +29,6 @@
             [clojure.test :refer [deftest testing is are]]
             [samizdat.agent.arbiter :as arbiter]
             [samizdat.agent.beam :as beam]
-            [samizdat.agent.claims :as claims]
             [samizdat.agent.critic :as critic]
             [samizdat.agent.gates :as gates]
             [samizdat.agent.loop :as aloop]
@@ -206,7 +205,7 @@
     ;; PR 740's rule: a signal may only tune a guard that fires on the same
     ;; thing the signal measures. The tier observes tool-call mechanics only.
     (doseq [k [:cull-threshold :stuck-threshold :progress-stall-threshold
-               :prologue-cap :fast-verify-edit-threshold]]
+               :prologue-cap]]
       (is (false? (get-in (gates/config) [k :capability-tunable?]))
           (str k " must not be capability-tunable"))))
 
@@ -419,28 +418,26 @@
       (is (empty? (journal/unsettled-gates c rid "B1")))
       (is (= 1 (:met (first (journal/gate-tally c rid))))))))
 
-(deftest claim-registry-follows-the-ucla-protocol
-  (let [r (claims/new-registry)]
-    (testing "atomic double-claim: second branch is told who holds it"
-      (is (= :claimed (claims/try-claim! r "B1" "the zebra owner drinks water")))
-      (let [answer (claims/try-claim! r "B2" "The Zebra owner drinks WATER!")]
-        (is (= :held (:status answer)) "normalization groups the phrasings")
-        (is (= "B1" (:holder answer)))))
-    (testing "a verdict settles the claim and stays, even a failing one"
-      (claims/complete! r "B1" "the zebra owner drinks water" :failed "prolog said no")
-      (let [answer (claims/try-claim! r "B2" "the zebra owner drinks water")]
-        (is (= :done (:status answer)))
-        (is (= :failed (:outcome answer)))
-        (is (= "prolog said no" (:reason answer))
-            "a failed verdict is information, not a slot to re-race")))
-    (testing "release drops an in-flight claim so another branch may try"
-      (is (= :claimed (claims/try-claim! r "B1" "n < 2^n for all n")))
-      (claims/release! r "B1" "n < 2^n for all n")
-      (is (= :claimed (claims/try-claim! r "B2" "n < 2^n for all n"))))
-    (testing "only the holder may release"
-      (claims/release! r "B1" "n < 2^n for all n")
-      (is (= :held (:status (claims/try-claim! r "B3" "n < 2^n for all n")))
-          "B1's release of B2's claim must not have dropped it"))))
+(deftest the-fork-invite-floor-gates-repopulation
+  ;; review2 #13: :fork-invite-floor documented minimum critic scores for a
+  ;; fork invitation and nothing read it — the scheduler invited the
+  ;; strongest survivor even when every survivor sat below the floor,
+  ;; spending budget on lines not yet earning it.
+  (let [floor (gates/threshold :fork-invite-floor)
+        weak [{:id "B1" :status :active :critic {:scores {:viability 1 :progress 1}}}]
+        strong [{:id "B1" :status :active :critic {:scores {:viability 1 :progress 1}}}
+                {:id "B2" :status :active :critic {:scores {:viability 9 :progress 8}}}]]
+    (is (map? floor) "the floor is configured")
+    (is (every? (fn [[obj minimum]]
+                  (< (get-in (first weak) [:critic :scores obj] 0) minimum))
+                floor)
+        "sanity: the weak fixture is below the configured floor")
+    (is (empty? (filter :fork-invited
+                        (#'beam/repopulate {:beam-width 3} weak 2 5)))
+        "no survivor above the floor: nobody is invited to reseed")
+    (is (= ["B2"] (mapv :id (filter :fork-invited
+                                    (#'beam/repopulate {:beam-width 3} strong 2 5))))
+        "a survivor above the floor is still invited")))
 
 ;; --- the explore/build phase machine (vf-b25, vf-eaw) ----------------------
 

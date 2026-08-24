@@ -60,15 +60,6 @@
         ends it early — a branch failing at twice the cull threshold is not
         reframing."}
 
- :stale-approach-threshold
- {:value 0.6 :kind :threshold :capability-tunable? false
-  :doc "Jaccard cutoff for deciding a claim re-runs the approach the branch was
-        told to abandon. Sameness rather than mere failure, so a branch
-        grinding genuinely different steps of a long proof is not punished for
-        the proof being long (vf-9wx). Same shingle machinery and same
-        UNCALIBRATED 0.6 as sketch-duplicate-threshold, inherited from ledger
-        claim dedup — where, unlike here, it was tuned on claims."}
-
  :progress-stall-threshold
  {:value 4 :kind :threshold :capability-tunable? false
   :doc "Turns with no progress event before the stall nudge fires. Arms only
@@ -113,19 +104,10 @@
         happened-versus-already-reacted blindness re-fire guards exist for.
         Once: the steer either lands or the cull proceeds on its own."}
 
- :max-tier-escalations
- {:value 2 :kind :re-fire-guard :capability-tunable? false
-  :doc "How often the fast-green-only escalation may fire."}
-
  :max-done-blocks
  {:value 3 :kind :cost-ceiling :capability-tunable? false
   :doc "How often `done` may be refused before the branch is told to give up.
         A cost ceiling because each refusal spends another model turn."}
-
- :fast-verify-edit-threshold
- {:value 3 :kind :threshold :capability-tunable? false
-  :doc "Artifacts produced with nothing from the slow tier run before the
-        mid-run tier nudge fires."}
 
  :turn-budget-notices
  {:value [0.6 0.85] :kind :threshold :capability-tunable? false
@@ -178,11 +160,6 @@
         for 4 confirmed artifacts before being stopped. The forks were
         genuinely distinct, so this is not a diversity problem; it is that
         the ceiling was set without anyone having measured the bill."}
-
- :prediction-window
- {:value 3 :kind :threshold :capability-tunable? false
-  :doc "Turns a gate's declared prediction has to come true in before it
-        settles as unmet."}
 
  :critic-every
  {:value 5 :kind :cost-ceiling :capability-tunable? false

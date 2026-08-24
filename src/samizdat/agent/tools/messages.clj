@@ -38,7 +38,10 @@
         "send"
         (if (or (nil? body) (str/blank? (str body)))
           (base/malformed branch (str "`message send` needs a `body`. " message-usage))
-          (let [id (messages/send! conn {:run-id run-id :from branch :to to :body body})]
+           ;; :from is the branch's ID, not the branch map (review2 #2): the
+           ;; store str's it, and a str'd 50KB state dump both bloated the
+           ;; table and broke the inbox's sender-exclusion comparison.
+           (let [id (messages/send! conn {:run-id run-id :from (:id branch) :to to :body body})]
             (base/ok branch
                      (str "Sent " id
                           (if (str/blank? (str to)) " (broadcast)" (str " to " to))

@@ -30,6 +30,21 @@
     (knowledge/forget! @conn id)
     (is (empty? (knowledge/recall @conn "needle")))))
 
+(deftest remember-rethrows-non-collision-failures-instead-of-retrying
+  ;; review2 #15: same as messages/send! — only a UNIQUE collision is an
+  ;; id-allocation problem worth retrying; anything else must propagate.
+  (let [real-execute db/execute!
+        inserts (atom 0)]
+    (with-redefs [db/execute!
+                  (fn [conn q & opts]
+                    (when (str/includes? (str (first q)) "INSERT INTO knowledge")
+                      (swap! inserts inc)
+                      (throw (ex-info "disk I/O error" {:errno 5})))
+                    (apply real-execute conn q opts))]
+      (is (thrown-with-msg? Exception #"disk I/O error"
+                            (knowledge/remember! @conn {:content "nope"}))))
+    (is (= 1 @inserts) "a non-collision failure is not retried")))
+
 (deftest kind-defaults-to-note
   (knowledge/remember! @conn {:content "kindless"})
   (is (= ["note"] (distinct (mapv :kind (knowledge/recall @conn "kindless"))))))

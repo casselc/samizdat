@@ -33,6 +33,10 @@
   "Open a run and return its id."
   [conn {:keys [problem provider model max-turns beam-width prompt-digest]}]
   (let [id (str (random-uuid))]
+    ;; The retention sweep (review2 #11): events outlive their run's tail
+    ;; window, then go — every durable table keeps the content.
+    (journal/prune-finished!
+     conn (str (.minusSeconds (java.time.Instant/now) (* 24 3600))))
     (db/with-writer
       (db/execute! conn
                      ["INSERT INTO runs (id, problem, status, provider, model, max_turns,
@@ -48,12 +52,20 @@
     id))
 
 (defn finish-run!
+  "Terminal only from 'running', decided by the ROW rather than the caller
+  (review2 #4): abort!'s transient window could overwrite a run that completed
+  between its registry read and this write. Returns rows written; 0 means the
+  run was already terminal and nothing changed, the journal says nothing."
   [conn run-id status final-answer]
-  (db/with-writer
-    (db/execute! conn
-                   ["UPDATE runs SET status = ?, final_answer = ?, ended_at = ? WHERE id = ?"
-                    (name status) final-answer (db/now) run-id]))
-  (journal/note! conn run-id :run-finished {:data {:status status}}))
+  (let [n (db/with-writer
+            (db/execute! conn
+                         ["UPDATE runs SET status = ?, final_answer = ?, ended_at = ?
+                            WHERE id = ? AND status = 'running'"
+                          (name status) final-answer (db/now) run-id])
+            (db/change-count conn))]
+    (when (pos? n)
+      (journal/note! conn run-id :run-finished {:data {:status status}}))
+    n))
 
 (defn reconcile-orphans!
   "Mark every run still claiming to be running as interrupted. Returns how many.
@@ -103,8 +115,10 @@
   [conn run-id]
   (db/with-writer
     (db/execute! conn
-                 ["UPDATE runs SET status = 'running', ended_at = NULL WHERE id = ?"
-                  run-id])))
+                 ["UPDATE runs SET status = 'running', ended_at = NULL
+                    WHERE id = ? AND status NOT IN ('completed','aborted')"
+                  run-id])
+    (db/change-count conn)))
 
 (defn get-run [conn run-id]
   (db/fetch-one conn ["SELECT * FROM runs WHERE id = ?" run-id]))
@@ -163,14 +177,20 @@
   branch-id)
 
 (defn close-branch!
+  "Only from 'active' (review2 #4): a late close used to overwrite a closed
+  branch's status and inactive_reason — the column the cull-honesty work
+  exists to keep truthful. Returns rows written."
   [conn run-id branch-id status reason]
-  (db/with-writer
-    (db/execute! conn
-                   ["UPDATE branches SET status = ?, inactive_reason = ?
-                     WHERE run_id = ? AND id = ?"
-                    (name status) reason run-id branch-id]))
-  (journal/note! conn run-id :branch-closed
-                 {:branch-id branch-id :data {:status status :reason reason}}))
+  (let [n (db/with-writer
+            (db/execute! conn
+                         ["UPDATE branches SET status = ?, inactive_reason = ?
+                            WHERE run_id = ? AND id = ? AND status = 'active'"
+                          (name status) reason run-id branch-id])
+            (db/change-count conn))]
+    (when (pos? n)
+      (journal/note! conn run-id :branch-closed
+                     {:branch-id branch-id :data {:status status :reason reason}}))
+    n))
 
 (defn extend-budget!
   "Raise a run's max_turns. Only ever called with an explicitly requested

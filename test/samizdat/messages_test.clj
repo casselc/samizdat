@@ -24,6 +24,7 @@
   mark-read! is what consumes."
   (:require [clojure.test :refer [deftest is testing use-fixtures]]
             [clojure.string :as str]
+            [samizdat.agent.tools :as tools]
             [samizdat.store.db :as db]
             [samizdat.store.messages :as messages]))
 
@@ -70,3 +71,37 @@
     (is (= ["two" "one"] (mapv :body (messages/thread @conn run))))
     (is (= ["two"] (mapv :body (messages/thread @conn run 1)))))
   (is (empty? (messages/thread @conn "no-such-run"))))
+
+(deftest send-rethrows-non-collision-failures-instead-of-retrying
+  ;; review2 #15: the id-retry loop caught every Exception, so a disk or
+  ;; lock failure was retried five times and then reported as an id
+  ;; allocation problem. Only a UNIQUE collision is retryable.
+  (let [real-execute db/execute!
+        inserts (atom 0)]
+    (with-redefs [db/execute!
+                  (fn [conn q & opts]
+                    (when (str/includes? (str (first q)) "INSERT INTO messages")
+                      (swap! inserts inc)
+                      (throw (ex-info "disk I/O error" {:errno 5})))
+                    (apply real-execute conn q opts))]
+      (is (thrown-with-msg? Exception #"disk I/O error"
+                            (messages/send! @conn {:run-id run :from "b1"
+                                                   :body "will not land"}))))
+    (is (= 1 @inserts) "a non-collision failure is not retried")))
+
+(deftest the-message-tool-sends-the-branch-id-as-from
+  ;; review2 #2: the tool passed the whole branch map as :from and the store
+  ;; str'd it — from_branch held 50-73KB state dumps (confirmed against the
+  ;; live DB), and the inbox's from_branch != sender comparison could never
+  ;; match, so senders saw their own broadcasts.
+  (let [b {:id "b1"}]
+    (doseq [body ["from the tool" "second note"]]
+      (tools/run-tool {:branch b :conn @conn :run-id run :turn 1
+                       :tool-name "message"
+                       :args {:action "send" :body body}}))
+    (let [rows (db/fetch @conn ["SELECT from_branch FROM messages ORDER BY id"])]
+      (is (seq rows))
+      (is (every? #(= "b1" (:from_branch %)) rows)
+          "from_branch holds the branch id, not a str'd branch map"))
+    ;; and the sender-exclusion the store builds on actually works
+    (is (empty? (messages/inbox @conn run "b1")))))

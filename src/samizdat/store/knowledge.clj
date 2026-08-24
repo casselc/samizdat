@@ -50,8 +50,10 @@
                                  VALUES (?, ?, ?, ?)"
                                 id (str content) kind now]))
                 1
-                (catch Exception _
-                  0))]
+                (catch Exception e
+                  ;; Only a UNIQUE collision is an id problem; anything else
+                  ;; (disk, lock) must surface as itself (review2 #15).
+                  (if (db/id-collision? e) 0 (throw e))))]
         (if (pos? n)
           id
           (if (< attempt 5)

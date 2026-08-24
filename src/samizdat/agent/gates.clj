@@ -446,7 +446,7 @@
     (>= (fired-count branch (:gate gate)) (threshold k))))
 
 (defn describe
-  "The gate table, for docs and for /v1/harness/state."
+  "The gate table, for docs and for /v1/harness/gates."
   []
   (for [g gates]
     {:gate (:gate g) :priority (:priority g)

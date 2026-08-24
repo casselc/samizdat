@@ -29,6 +29,7 @@
   indexed is a projection of claim plus reason and external-content deletes
   require the exact indexed values back. Sync is app-managed here, no triggers."
   (:require [clojure.string :as str]
+            [clojure.tools.logging :as log]
             [jdbc.core :as jdbc]
             [samizdat.store.db :as db]
             [samizdat.store.journal :as journal]))
@@ -80,9 +81,13 @@
                        FROM failures_fts fts
                        JOIN failures f ON f.id = fts.rowid
                        WHERE failures_fts MATCH ? AND f.run_id = ?
-                       ORDER BY bm25(failures_fts) LIMIT ?"
-                      q run-id limit])
-         (catch Throwable _ []))))))
+                        ORDER BY bm25(failures_fts) LIMIT ?"
+                       q run-id limit])
+          (catch Throwable e
+            ;; Empty stays the contract (a quiet FTS miss must not cost a
+            ;; turn), but a persistent fault must leave a trace (review2 #15).
+            (log/warn "failures/similar failed; returning empty:" (ex-message e))
+            []))))))
 
 (defn recent
   ([conn run-id] (recent conn run-id 10))

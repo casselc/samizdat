@@ -103,7 +103,6 @@
     the detection it was meant to restore."
   (:require [clojure.data.json :as json]
             [samizdat.agent.beam :as beam]
-            [samizdat.agent.claims :as claims]
             [samizdat.agent.gates :as gates]
             [samizdat.agent.loop :as branch-loop]
             [samizdat.agent.state :as state]
@@ -261,10 +260,7 @@
                :llm-adapter llm-adapter :llm-config llm-config
                :max-turns max-turns :beam? (> width 1) :beam-width width
                :sessions sessions
-               :abort abort
-               ;; One claim registry per run: two branches reaching the same
-               ;; claim share one slow verification instead of racing it.
-               :claims (claims/new-registry)}
+               :abort abort}
           branches (mapv (fn [row]
                            (rebuild-branch run row turns artifacts firings
                                            max-turns))

@@ -296,3 +296,56 @@
                                                :args {:action "close" :id id}}))]
         (aloop/run-turn ctx b1 2))
       (is (= "done" (:status (tasks/get-task c id)))))))
+
+(deftest update-loses-to-a-write-that-lands-in-its-window
+  ;; review2 #1: update! was a read-then-write pair over two lock
+  ;; acquisitions, so a claim landing between them was silently erased by
+  ;; the stale write — the a#4 class one def over from the guarded claim!.
+  ;; The UPDATE must carry what the read saw and lose to a row that moved.
+  (with-db [c]
+    (let [id (tasks/create! c {:title "race"})
+          stale (tasks/get-task c id)
+          real-get tasks/get-task
+          served-stale? (atom false)]
+      (is (= "run-9" (:run_id (tasks/claim! c id "run-9"))))
+      (with-redefs [tasks/get-task
+                    (fn [conn id]
+                      (if (compare-and-set! served-stale? false true)
+                        stale
+                        (real-get conn id)))]
+        (tasks/update! c id {:priority "high"}))
+      (let [t (tasks/get-task c id)]
+        (is (= "run-9" (:run_id t)) "the claim that landed in the window survives")
+        (is (= "in_progress" (:status t)))
+        (is (= "high" (:priority t)) "and the edit still lands")))))
+
+(deftest claim-does-not-resurrect-a-terminal-task
+  ;; review2 #14: a closed task with run_id NULL still satisfied
+  ;; run_id IS NULL, so a claim flipped done back to in_progress — completed
+  ;; work reappearing on the claiming run's board. Claiming is for available
+  ;; work; reopening is an explicit status change through update!.
+  (with-db [c]
+    (let [id (tasks/create! c {:title "finished business"})]
+      (tasks/close! c id "done")
+      (is (nil? (tasks/claim! c id "run-1")))
+      (let [t (tasks/get-task c id)]
+        (is (= "done" (:status t)))
+        (is (some? (:closed_at t)))))))
+
+(deftest create-rethrows-non-collision-failures-instead-of-retrying
+  ;; review2 #15: create!'s retry caught Throwable — retrying failures that
+  ;; can never succeed by retrying, then reporting them as an id-allocation
+  ;; problem. Only a UNIQUE collision is retryable; the real failure must
+  ;; propagate.
+  (with-db [c]
+    (let [real-execute db/execute!
+          inserts (atom 0)]
+      (with-redefs [db/execute!
+                    (fn [conn q & opts]
+                      (when (str/includes? (str (first q)) "INSERT INTO tasks")
+                        (swap! inserts inc)
+                        (throw (ex-info "disk I/O error" {:errno 5})))
+                      (apply real-execute conn q opts))]
+        (is (thrown-with-msg? Exception #"disk I/O error"
+                              (tasks/create! c {:title "nope"}))))
+      (is (= 1 @inserts) "a non-collision failure is not retried"))))

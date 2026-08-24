@@ -73,3 +73,93 @@
         (write-frame! resp-writer {:jsonrpc "2.0" :id 1 :result "hover"})
         (is (= "def" (deref f2 5000 ::timeout)))
         (is (= "hover" (deref f1 5000 ::timeout)))))))
+
+(deftest client-for-starts-one-client-per-root-under-race
+  ;; review2 #9: client-for was get-then-start, so two branches sharing a
+  ;; machine could both miss and both start! — the loser leaked a clojure-lsp
+  ;; process and the registry only remembered one of them.
+  (let [started (atom 0)
+        latch (promise)
+        slow-start (fn [_root]
+                     (swap! started inc)
+                     @latch
+                     {:fake (deref started)})
+        root (io/file "/tmp" "samizdat-lsp-race")]
+    (with-redefs [client/available? (constantly true)
+                  client/start! slow-start]
+      (let [f1 (future (client/client-for root))
+            f2 (future (client/client-for root))]
+        (Thread/sleep 100)                       ;; both are inside start!
+        (deliver latch :go)
+        (let [c1 (deref f1 5000 ::timeout)
+              c2 (deref f2 5000 ::timeout)]
+          (is (= 1 @started) "the registry starts one client per root")
+          (is (identical? c1 c2) "both racers get the same client"))
+        (swap! @#'client/clients dissoc root)))))
+
+(defn- fake-diag-client
+  [f resp-writer]
+  {:in (java.io.BufferedInputStream. (java.io.PipedInputStream. resp-writer))
+   :out (java.io.ByteArrayOutputStream.)
+   :root "/tmp/samizdat-lsp-diag-root"
+   :next-id (atom 0)
+   :opened (atom #{(str f)})
+   :diagnostics (atom {})
+   :diag-n (atom 0)
+   :pending (atom {})})
+
+(deftest a-late-diagnostics-caller-does-not-erase-a-waiting-caller-s-push
+  ;; review2 #10: diagnostics dissoc'd the uri at entry, so a second caller
+  ;; on the same file erased the push the first caller was still waiting for
+  ;; — the first caller timed out and [] read as "clean". The store is
+  ;; version-keyed per uri instead, and a timeout is an error, not silence.
+  (let [f (doto (java.io.File. "/tmp" "samizdat-diag.clj") (spit "(ns d)\n"))
+        resp-writer (java.io.PipedOutputStream.)
+        c (fake-diag-client f resp-writer)
+        out (:out c)
+        u (str "file://" (.getAbsolutePath f))
+        push! (fn [diags]
+                (write-frame! resp-writer
+                              {:jsonrpc "2.0"
+                               :method "textDocument/publishDiagnostics"
+                               :params {:uri u :diagnostics diags}}))]
+    (#'client/start-reader! c)
+    ;; A enters: takes its snapshot, sends didChange (a frame on :out), polls
+    (let [n0 (.size out)
+          a (future (client/diagnostics c (str f)))]
+      (while (= n0 (.size out)) (Thread/sleep 5))
+      ;; A's push lands while only A is waiting
+      (push! [{:a 1}])
+      (Thread/sleep 100)                       ;; inside A's 250ms poll window
+      ;; B enters on the same uri: under the old code its entry dissoc
+      ;; erased A's arrived push and A starved into a [] false-clean
+      (let [n1 (.size out)
+            b (future (client/diagnostics c (str f)))]
+        (while (= n1 (.size out)) (Thread/sleep 5))
+        (is (= [{:a 1}] (deref a 8000 ::timeout))
+            "A gets the push that landed in its window, not B's erasure")
+        (push! [{:b 2}])
+        (is (= [{:b 2}] (deref b 8000 ::timeout)) "B gets its own later push")
+        ;; a caller whose push never arrives is an error, not "clean"
+        (is (thrown? Exception (client/diagnostics c (str f)))))
+      (swap! @#'client/clients dissoc (:root c)))))
+
+(deftest a-dead-reader-releases-waiters-and-evicts-the-client
+  ;; review2 #17: the reader's routing ran outside any guard, so a throw
+  ;; there killed the loop without releasing parked requests — and even a
+  ;; clean EOF left the corpse in the registry, so every later call reused a
+  ;; dead client and waited out the full 20s timeout.
+  (let [f (doto (java.io.File. "/tmp" "samizdat-evict.clj") (spit "(ns e)\n"))
+        resp-writer (java.io.PipedOutputStream.)
+        c (fake-diag-client f resp-writer)
+        reg (deref (var client/clients))]
+    (#'client/start-reader! c)
+    (swap! reg assoc (:root c) c)
+    (let [req (future (#'client/request! c "textDocument/hover" {}))]
+      (while (nil? (get @(:pending c) 1)) (Thread/sleep 5))
+      (.close resp-writer)
+      (is (thrown? Exception (deref req 5000 ::timeout))
+          "the parked request fails fast with server-closed, not a 20s hang")
+      (Thread/sleep 200)
+      (is (nil? (get @reg (:root c)))
+          "the dead client is evicted so the next call starts a fresh one"))))

@@ -37,7 +37,6 @@
   (:require [clojure.data.json :as json]
             [clojure.string :as str]
             [clojure.tools.logging :as log]
-            [samizdat.agent.claims :as claims]
             [samizdat.agent.critic :as critic]
             [samizdat.agent.gates :as gates]
             [samizdat.agent.loop :as branch-loop]
@@ -315,6 +314,14 @@
   [{:keys [conn run-id beam-width]} branches total-count turn]
   (let [cap (gates/threshold :max-total-branches)
         cooldown (gates/threshold :fork-invite-cooldown)
+        floor (gates/threshold :fork-invite-floor)
+        earning? (fn [b]
+                   ;; The floor (review2 #13, wired): a survivor below the
+                   ;; minimum critic scores is not invited to reseed — growth
+                   ;; does not spend budget on lines not yet earning it.
+                   (every? (fn [[obj minimum]]
+                             (>= (get-in b [:critic :scores obj] 0) minimum))
+                           floor))
         alive (filterv state/active? branches)
         target (or beam-width 1)
         strength (fn [b]
@@ -325,6 +332,7 @@
                     (->> alive
                          (remove #(when-let [t (:fork-invited %)]
                                     (< (- turn t) cooldown)))
+                         (filter earning?)
                          (sort-by strength)
                          reverse
                          first))]
@@ -782,10 +790,7 @@
              :max-turns max-turns :beam? (> width 1) :beam-width width
              :sessions sessions
              :engine-sessions engine-sessions
-             :abort abort
-             ;; One claim registry per run: two branches reaching the same
-             ;; claim share one slow verification instead of racing it.
-             :claims (claims/new-registry)}]
+             :abort abort}]
     ;; Before the branches, not after. api.control/start-run! blocks until this
     ;; fires, so this line is how long POST /v1/runs takes — and open-branch!
     ;; spawns a Prolog session per branch, so putting it after made the endpoint

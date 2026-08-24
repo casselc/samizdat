@@ -25,6 +25,7 @@
   own safety under Chez threads is unproven. A single writer sidesteps the
   question; readers open their own connections."
   (:require [clojure.string :as str]
+            [clojure.tools.logging :as log]
             [jdbc.core :as jdbc]
             [samizdat.store.migrations :as migrations]))
 
@@ -127,23 +128,51 @@
   ;; index into a compiled-in vector, never user input.
   (jdbc/execute! conn (str "PRAGMA user_version = " (long n))))
 
+(defn change-count
+  "Rows affected by the statement just executed on this connection — how a
+  guarded UPDATE reports whether it won (review2 #4). Read before anything
+  else runs on the connection."
+  [conn]
+  (-> (jdbc/fetch-one conn "SELECT changes()") vals first))
+
+(defn id-collision?
+  "Whether e is a UNIQUE-constraint failure — the only insert error that
+  retrying with a fresh short id can fix. The id-retry loops used to catch
+  everything, converting disk and lock failures into five blind retries and
+  then 'could not allocate an id' (review2 #15)."
+  [e]
+  (str/includes? (str e) "UNIQUE"))
+
 (defn migrate!
   "Apply every migration past the current user_version. Idempotent: running it
-  twice is a no-op. Returns the version now in effect."
+  twice is a no-op. Each migration is all-or-nothing with its version bump
+  INSIDE the transaction (review2 #3): v2/v4/v5 are non-idempotent ALTERs, and
+  running them as autocommitted statements with the bump after the last one
+  meant a crash in between left user_version stale — every later boot died on
+  `duplicate column name` forever. Returns the version now in effect."
   [conn]
   (let [applied (schema-version conn)
-        pending (subvec migrations/migrations (min applied (count migrations/migrations)))]
-    (doseq [[i statements] (map-indexed vector pending)]
+        total (count migrations/migrations)]
+    (when (> applied total)
+      (log/warn "db schema version" applied "exceeds this binary's" total
+                "migrations — a newer database on an older binary; applying nothing"))
+    (doseq [[i statements] (map-indexed vector (subvec migrations/migrations (min applied total)))]
       (let [version (+ applied i 1)]
-        (doseq [sql statements]
-          (try
-            (jdbc/execute! conn sql)
-            (catch Throwable e
-              (throw (ex-info (str "Migration v" version " failed: " (ex-message e))
-                              {:version version
-                               :statement (subs sql 0 (min 120 (count sql)))}
-                              e)))))
-        (set-schema-version! conn version)))
+        (jdbc/execute! conn "BEGIN IMMEDIATE")
+        (try
+          (doseq [sql statements]
+            (try
+              (jdbc/execute! conn sql)
+              (catch Throwable e
+                (throw (ex-info (str "Migration v" version " failed: " (ex-message e))
+                                {:version version
+                                 :statement (subs sql 0 (min 120 (count sql)))}
+                                e)))))
+          (set-schema-version! conn version)
+          (jdbc/execute! conn "COMMIT")
+          (catch Throwable e
+            (try (jdbc/execute! conn "ROLLBACK") (catch Throwable _ nil))
+            (throw e)))))
     (schema-version conn)))
 
 (defn open!

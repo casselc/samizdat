@@ -91,19 +91,29 @@
   pending, so it falls through to the notification path and is dropped —
   nobody else can consume it by mistake.
 
-  EOF or a read error releases every pending waiter with ::closed, so
-  nobody waits out the full timeout on a server that is gone."
+  Any exit — EOF, a read failure, or a throw while routing a frame (which
+  used to kill the loop with waiters still parked, review2 #17) — releases
+  every pending waiter with ::closed and evicts the client from the
+  registry by its :root, so a later call starts a fresh server instead of
+  reusing a corpse and waiting out the full timeout."
   [{:keys [pending] :as client}]
   (future
-    (loop []
+    (loop [alive? true]
       (let [msg (try (read-frame client)
-                     (catch Throwable _ nil))]
-        (if msg
-          (do (if-let [[_ p] (find @pending (:id msg))]
-                (deliver p msg)
-                (store-diagnostics! client msg))
-              (recur))
-          (doseq [[_ p] @pending] (deliver p ::closed))))))
+                     (catch Throwable _ nil))
+            ok? (when (and msg alive?)
+                  (try
+                    (if-let [[_ p] (find @pending (:id msg))]
+                      (deliver p msg)
+                      (store-diagnostics! client msg))
+                    true
+                    (catch Throwable _ false)))]
+        (when (and msg ok?)
+          (recur true))))
+    ;; any exit: release every waiter, evict the corpse (review2 #17)
+    (doseq [[_ p] @pending] (deliver p ::closed))
+    (when-let [root (:root client)]
+      (swap! clients dissoc root)))
   nil)
 
 ;; ---- request / notify -----------------------------------------------------
@@ -111,8 +121,11 @@
 (defn- store-diagnostics! [client msg]
   (when (= "textDocument/publishDiagnostics" (:method msg))
     (let [uri (get-in msg [:params :uri])
-          diags (get-in msg [:params :diagnostics])]
-      (swap! (:diagnostics client) assoc uri diags))))
+          diags (get-in msg [:params :diagnostics])
+          ;; Version the push so a waiter can tell a push that answers ITS
+          ;; request from one that predates it (review2 #10).
+          n (swap! (:diag-n client) inc)]
+      (swap! (:diagnostics client) assoc uri {:n n :diags diags}))))
 
 (defn- request!
   "Send a request and park on its id until the reader delivers the response
@@ -139,18 +152,20 @@
 
 (defn- uri [path] (str "file://" (.getAbsolutePath (io/file path))))
 
-(defn- start!
+(defn start!
   "Spawn clojure-lsp for `root` and run the initialize/initialized
   handshake. Returns the client map."
   [root]
   (let [p (jp/process ["clojure-lsp" "listen"])
         ^java.lang.Process osproc (:proc p)
         client {:proc p
+                :root root
                 :out (.getOutputStream osproc)
                 :in (BufferedInputStream. (.getInputStream osproc))
                 :next-id (atom 0)
                 :opened (atom #{})
                 :diagnostics (atom {})
+                :diag-n (atom 0)
                 :pending (atom {})}]
     ;; The reader must be running before the first request parks on it.
     (start-reader! client)
@@ -161,13 +176,16 @@
 
 (defn client-for
   "The live client for `root`, started on first use. nil when clojure-lsp
-  is not installed."
+  is not installed. The miss-then-start is one critical section (review2
+  #9): two callers racing on a fresh root used to both start!, leaking the
+  loser's clojure-lsp process and remembering only one of them."
   [root]
   (when (available?)
-    (or (get @clients root)
-        (let [c (start! root)]
-          (swap! clients assoc root c)
-          c))))
+    (locking clients
+      (or (get @clients root)
+          (let [c (start! root)]
+            (swap! clients assoc root c)
+            c)))))
 
 (defn shutdown!
   "Stop the server for `root`, if any."
@@ -207,20 +225,24 @@
 
 (defn diagnostics
   "The problems clojure-lsp reports for `path`. didOpen/didChange trigger a
-  publishDiagnostics push; the reader thread stores it per uri, so this only
-  waits briefly for it to arrive, then returns what came."
+  publishDiagnostics push; the reader stores each push versioned per uri, so
+  this takes the version at entry and waits for a push newer than it
+  (review2 #10) — another caller on the same file cannot erase what this one
+  is waiting for, and this one cannot return a push that predates its own
+  request. A push that never arrives is an error, not a silent [] `clean`."
   [client path]
-  (let [u (uri path)]
-    (swap! (:diagnostics client) dissoc u)
+  (let [u (uri path)
+        n0 @(:diag-n client)]
     (ensure-open! client path)
     ;; ask the server to (re-)analyse the doc as it stands on disk
     (notify! client "textDocument/didChange"
              {:textDocument {:uri u :version 2}
               :contentChanges [{:text (slurp path)}]})
     (loop [waited 0]
-      (let [d (get @(:diagnostics client) u)]
+      (let [e (get @(:diagnostics client) u)]
         (cond
-          (some? d) d
-          (>= waited 5000) []
+          (and e (> (:n e) n0)) (:diags e)
+          (>= waited 5000) (throw (ex-info (str "lsp: no diagnostics push for " u)
+                                           {:uri u}))
           :else (do (Thread/sleep 250)
                     (recur (+ waited 250))))))))

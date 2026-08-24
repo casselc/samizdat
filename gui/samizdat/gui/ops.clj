@@ -1,0 +1,62 @@
+;; samizdat - a claim-first verification harness
+;; Copyright (C) 2026 Dmitri Sotnikov
+;;
+;; This program is free software: you can redistribute it and/or modify
+;; it under the terms of the GNU General Public License as published by
+;; the Free Software Foundation, either version 3 of the License, or
+;; (at your option) any later version.
+;;
+;; This program is distributed in the hope that it will be useful,
+;; but WITHOUT ANY WARRANTY; without even the implied warranty of
+;; MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+;; GNU General Public License for more details.
+;;
+;; You should have received a copy of the GNU General Public License
+;; along with this program.  If not, see <https://www.gnu.org/licenses/>.
+
+(ns samizdat.gui.ops
+  "The pure decisions behind gui.core's fetch/scroll wiring — extracted so
+  they are testable without loading a toolkit: glimmer/GTK deps live only
+  under the :gui alias, so the suite stays headless and cannot require
+  gui.core itself. Each fn answers one review-2026-08-2 finding:
+  scroll-props #6, refetch-after? #7, tail-target #8.")
+
+(defn scroll-props
+  "Props for the inspector's :scrolled wrapper. `:scroll-top` belongs ONLY
+  on the render that follows a selection change: glimmer-gtk's scrolled
+  spec resets the adjustment whenever the prop is present (the value is
+  ignored), and the reconciler re-applies the full prop map on every
+  render — with the prop always present, every poller batch (≤1.5s), hover
+  change or draft keystroke yanked a long turn log back to the top
+  mid-read (review2 #6). `prev` is the selection the previous render saw;
+  the caller memoizes it."
+  [prev selected]
+  (if (= prev selected)
+    {:vexpand true}
+    {:vexpand true :scroll-top (str selected)}))
+
+(defn refetch-after?
+  "Whether a fetch that just completed for `fetch-sel` should re-run for a
+  recorded pending selection. When the single-flight CAS in
+  refresh-branch-log! fails, the new selection's fetch is not dropped — it
+  is recorded as pending, and the in-flight fetch's finally re-runs for it
+  (review2 #7); without that, the in-flight fetch discarded its own result
+  (selection moved), the CAS loser was discarded, and on a finished run no
+  poller event ever re-triggered — the panel read `(loading …)` forever.
+  The same selection must NOT re-run: that is the busy guard's coalescing,
+  which exists so a poller firing every second for one branch queues
+  exactly one fetch."
+  [pending fetch-sel]
+  (boolean (and pending (not= pending fetch-sel))))
+
+(defn tail-target
+  "Which run to tail after a run-list refresh. nil means keep tailing
+  whatever is currently tailed. An EMPTY list is `don't know`, not `no
+  runs` (review2 #8): list-runs answers {:ok false} — no throw — on a dead
+  or busy server, and treating that as `no runs` disconnected the run
+  being tailed (worst case right after start-new-run!, while the run was
+  actively spending) and wiped the graph."
+  [current runs]
+  (when (seq runs)
+    (when-not (some #(= current (:id %)) runs)
+      (some-> runs first :id))))

@@ -351,3 +351,22 @@
   "A free-form journal entry, for anything without a table of its own."
   [conn run-id kind data]
   (emit! conn run-id kind data))
+
+(defn prune-finished!
+  "Delete the events rows of runs that ended before `cutoff` (an ISO-8601
+  timestamp). Events are a tail buffer for the live run — their only readers
+  are the live tail and last-progress-at — and every kind that matters is
+  also written to a durable table (turns, artifacts, failures,
+  gate_firings). Nothing pruned them, so the one shared DB file grew
+  without bound (review2 #11). The sweep runs on run start, not at finish:
+  a tailing client still reads a just-finished run's events to see the
+  :run-finished entry — that is how it learns the run ended — so events
+  ride out a retention window (24h in start-run!) and go after that."
+  [conn cutoff]
+  (db/with-writer
+    (db/execute! conn
+                 ["DELETE FROM events WHERE run_id IN
+                    (SELECT id FROM runs
+                      WHERE status != 'running' AND ended_at IS NOT NULL
+                        AND ended_at < ?)"
+                  cutoff])))

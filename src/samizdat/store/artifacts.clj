@@ -34,6 +34,7 @@
   every context. The FTS table is standalone, and sync is app-managed here."
   (:require [clojure.set]
             [clojure.string :as str]
+            [clojure.tools.logging :as log]
             [jdbc.core :as jdbc]
             [samizdat.llm.message :as message]
             [samizdat.store.db :as db]
@@ -99,8 +100,8 @@
 
 (defn- normalize-claim
   "Spelling-level normalisation only — case and punctuation — matching
-  claims/normalize and consensus/normalize-claim. Two phrasings that group
-  together there must group together here."
+  consensus/normalize-claim. Two phrasings that group together there must
+  group together here."
   [claim]
   (-> (str/lower-case (or claim ""))
       (str/replace #"[^a-z0-9]+" " ")
@@ -207,9 +208,13 @@
                        FROM shared_artifacts_fts fts
                        JOIN shared_artifacts sa ON sa.id = fts.rowid
                        WHERE shared_artifacts_fts MATCH ? AND sa.run_id = ?
-                       ORDER BY bm25(shared_artifacts_fts) LIMIT ?"
-                      q run-id limit])
-         (catch Throwable _ []))))))
+                        ORDER BY bm25(shared_artifacts_fts) LIMIT ?"
+                       q run-id limit])
+          (catch Throwable e
+            ;; Empty stays the contract, but a persistent fault must leave a
+            ;; trace (review2 #15).
+            (log/warn "artifacts/similar failed; returning empty:" (ex-message e))
+            []))))))
 
 (defn recent
   ([conn run-id] (recent conn run-id 10))

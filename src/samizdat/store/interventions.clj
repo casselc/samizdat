@@ -79,15 +79,23 @@
   "Record what the arbiter or scheduler did with a directive. `status` is
   applied or rejected, and `disposition` says why — a directive refused because
   it would cull the last branch is a different thing from one that landed, and
-  the UI has to be able to tell them apart."
+  the UI has to be able to tell them apart.
+
+  Decided by the ROW (review2 #4): only a still-pending directive of THIS run
+  resolves — a double resolve must not overwrite the first disposition, and a
+  resolve under the wrong run-id must not journal into that run. Returns rows
+  written."
   [conn run-id id status disposition turn]
-  (db/with-writer
-    (db/execute! conn
-                   ["UPDATE interventions SET status = ?, disposition = ?, applied_at_turn = ?
-                     WHERE id = ?"
-                    (name status) disposition turn id]))
-  (journal/note! conn run-id :intervention-resolved
-                 {:turn turn :data {:id id :status status :disposition disposition}}))
+  (let [n (db/with-writer
+            (db/execute! conn
+                         ["UPDATE interventions SET status = ?, disposition = ?, applied_at_turn = ?
+                            WHERE id = ? AND run_id = ? AND status = 'pending'"
+                          (name status) disposition turn id run-id])
+            (db/change-count conn))]
+    (when (pos? n)
+      (journal/note! conn run-id :intervention-resolved
+                     {:turn turn :data {:id id :status status :disposition disposition}}))
+    n))
 
 (defn history [conn run-id]
   (db/fetch conn ["SELECT * FROM interventions WHERE run_id = ? ORDER BY id" run-id]))

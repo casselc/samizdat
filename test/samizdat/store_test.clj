@@ -25,6 +25,7 @@
   no error. Counting objects created against statements written is how that
   failure mode stays loud."
   (:require [clojure.test :refer [deftest testing is]]
+            [clojure.string :as str]
             [jdbc.core :as jdbc]
             [samizdat.agent.gates :as gates]
             [samizdat.agent.loop :as branch-loop]
@@ -32,6 +33,7 @@
             [samizdat.api.runs :as api-runs]
             [samizdat.store.artifacts :as artifacts]
             [samizdat.store.db :as db]
+            [samizdat.store.interventions :as interventions]
             [samizdat.store.journal :as journal]
             [samizdat.store.migrations :as migrations]
             [samizdat.store.runs :as runs]))
@@ -851,3 +853,90 @@
         (runs/open-branch! c rid2 {:branch-id "B1"})
         (is (empty? (artifacts/sibling-sketches c rid2 "B1"))
             "no sketches at all is an empty set, not an error")))))
+
+(deftest a-failed-migration-rolls-back-and-keeps-the-version
+  ;; review2 #3: migrations are non-idempotent ALTERs, but each ran as
+  ;; autocommitted statements with the version bump after the last one — a
+  ;; crash between the two left user_version stale and every later boot
+  ;; died on `duplicate column name` forever. A migration must be
+  ;; all-or-nothing with the bump inside it.
+  (with-db [c]
+    (db/execute! c ["PRAGMA user_version = 1"])
+    (with-redefs [migrations/migrations
+                  [["CREATE TABLE mg_one (x)"]
+                   ["CREATE TABLE mg_two (x)"
+                    "THIS IS NOT SQL"
+                    "CREATE TABLE mg_three (x)"]]]
+      (is (thrown? Exception (db/migrate! c))))
+    (is (= 1 (db/schema-version c)) "the version bump did not survive the rollback")
+    (is (empty? (filter #(str/starts-with? % "mg_") (db/table-names c)))
+        "no partially-applied statements survive")
+    (with-redefs [migrations/migrations
+                  [["CREATE TABLE mg_one (x)"]
+                   ["CREATE TABLE mg_two (x)" "CREATE TABLE mg_three (x)"]]]
+      (is (= 2 (db/migrate! c))
+          "the next boot with the fixed migration applies cleanly"))
+    (is (= #{"mg_two" "mg_three"}
+           (set (filter #(str/starts-with? % "mg_") (db/table-names c)))))))
+
+(deftest lifecycle-writes-are-decided-by-the-row
+  ;; review2 #4: finish-run!/mark-running!/close-branch!/resolve! were
+  ;; WHERE id = ? only, so a stale caller rewrote a terminal run (abort!'s
+  ;; transient window vs the run's own completion) or a closed branch's
+  ;; inactive_reason. Guards follow reconcile-orphans!'s precedent.
+  (with-db [c]
+    (let [rid (runs/start-run! c {:problem "p"})]
+      (runs/open-branch! c rid {:branch-id "B1"})
+      (is (pos? (runs/finish-run! c rid :completed "answer")))
+      (is (zero? (runs/finish-run! c rid :aborted nil))
+          "a stale finisher loses to the terminal row")
+      (let [r (runs/get-run c rid)]
+        (is (= "completed" (:status r)))
+        (is (= "answer" (:final_answer r))))
+      (is (zero? (runs/mark-running! c rid))
+          "a terminal run cannot be marked running again")
+      (is (= "completed" (:status (runs/get-run c rid))))
+      ;; mark-running! still serves the resume path: failed -> running
+      (let [r2 (runs/start-run! c {:problem "q"})]
+        (runs/finish-run! c r2 :failed nil)
+        (is (pos? (runs/mark-running! c r2)))
+        (is (= "running" (:status (runs/get-run c r2)))))
+      (runs/close-branch! c rid "B1" :exhausted "turn cap")
+      (is (zero? (runs/close-branch! c rid "B1" :abandoned "late close"))
+          "a late close does not overwrite a closed branch")
+      (is (= "exhausted" (:status (runs/get-branch c rid "B1"))))
+      (let [i1 (interventions/submit! c rid {:kind "pause"})
+            other (runs/start-run! c {:problem "r"})]
+        (is (pos? (interventions/resolve! c rid i1 :applied "ok" 3)))
+        (is (zero? (interventions/resolve! c rid i1 :rejected "double resolve" 4)))
+        (is (zero? (interventions/resolve! c other i1 :applied "wrong run" 5)))
+        (is (= "applied" (:status (some #(when (= i1 (:id %)) %)
+                                        (interventions/history c rid)))))))))
+
+(deftest old-finished-runs-get-their-events-pruned-on-the-next-start
+  ;; review2 #11: events are a durable duplicate of every turn/artifact/
+  ;; failure/gate write whose only readers are the live tail and
+  ;; last-progress-at; nothing ever pruned them, so the one shared DB file
+  ;; grew without bound. The sweep runs at run START, not at finish: a
+  ;; tailing client still reads a just-finished run's events (that is how
+  ;; it sees :run-finished), so events ride out a 24h window and the
+  ;; durable tables hold the content forever.
+  (with-db [c]
+    (let [old (runs/start-run! c {:problem "old"})
+          recent (runs/start-run! c {:problem "recent"})]
+      (journal/note! c old :gate {:gate :test})
+      (runs/finish-run! c old :completed "done")
+      ;; backdate its end past the retention window
+      (db/execute! c ["UPDATE runs SET ended_at = ? WHERE id = ?"
+                      (str (.minusSeconds (java.time.Instant/now) (* 48 3600))) old])
+      ;; a fresh finished run inside the window keeps its events
+      (journal/note! c recent :gate {:gate :test})
+      (runs/finish-run! c recent :completed "ok")
+      ;; starting the next run sweeps
+      (runs/start-run! c {:problem "next"})
+      (is (zero? (:n (db/fetch-one c ["SELECT COUNT(*) AS n FROM events
+                                       WHERE run_id = ?" old])))
+          "a finished run's events are pruned once past the window")
+      (is (pos? (:n (db/fetch-one c ["SELECT COUNT(*) AS n FROM events
+                                      WHERE run_id = ?" recent])))
+          "a just-finished run keeps its events for the tail"))))

@@ -99,6 +99,7 @@
             [samizdat.server-test]
             [samizdat.store-test]
             [samizdat.gui-api-test]
+            [samizdat.gui-ops-test]
             [samizdat.gui-graph-test]
             [samizdat.gui-style-test]
             [samizdat.gui-input-test]
@@ -183,6 +184,7 @@
     samizdat.prompt-test
     samizdat.server-test
     samizdat.gui-api-test
+    samizdat.gui-ops-test
     samizdat.gui-graph-test
     samizdat.gui-style-test
     samizdat.gui-input-test

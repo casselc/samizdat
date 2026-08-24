@@ -96,35 +96,53 @@
                                 now now (when (terminal? status) now)]))
                 id
                 (catch Throwable e
-                  (if (< attempt 5) ::retry (throw e))))]
+                  (if (and (db/id-collision? e) (< attempt 5))
+                    ::retry
+                    (throw e))))]
         (if (= ::retry r) (recur (inc attempt)) r)))))
 
 (defn update!
   "Update the given fields, bump updated_at, and keep closed_at honest: a
-  transition into a terminal status stamps it, a transition out clears it."
+  transition into a terminal status stamps it, a transition out clears it.
+
+  The write names ONLY the fields the caller passed (review2 #1): the old
+  full-row rewrite from a (possibly stale) read silently erased whatever a
+  concurrent writer had landed in between — a claim, another run's edit — the
+  a#4 race class one def over from the guarded claim!. An updated_at guard
+  was tried and rejected: db/now has millisecond precision, so a claim in the
+  same millisecond as the create it raced passed the guard. A field-scoped
+  write cannot clobber what it never names."
   [conn id {:keys [title body type status priority parent-id run-id contract tests]}]
   (let [t (get-task conn id)]
     (when-not t
       (throw (ex-info (str "no task " id) {:id id})))
     (let [status (some-> status normalize-status)
           priority (some-> priority normalize-priority)
-          closed-at (cond
-                      (nil? status) (:closed_at t)
-                      (terminal? status) (or (:closed_at t) (db/now))
-                      :else nil)]
+          closed-at (when status
+                      (cond
+                        (terminal? status) (or (:closed_at t) (db/now))
+                        :else nil))
+          ;; Column -> value for exactly the fields given. status drags
+          ;; closed_at along so the stamp stays honest; nil still means
+          ;; "not passed" everywhere (a field cannot be cleared to NULL via
+          ;; update!, same contract as before).
+          cols (cond-> {}
+                 title (assoc :title title)
+                 body (assoc :body body)
+                 type (assoc :type type)
+                 status (assoc :status status :closed_at closed-at)
+                 priority (assoc :priority priority)
+                 parent-id (assoc :parent_id parent-id)
+                 run-id (assoc :run_id run-id)
+                 contract (assoc :contract contract)
+                 tests (assoc :tests tests))]
       (db/with-writer
         (db/execute! conn
-                     ["UPDATE tasks SET title = ?, body = ?, type = ?, status = ?,
-                                        priority = ?, parent_id = ?, run_id = ?,
-                                        contract = ?, tests = ?,
-                                        updated_at = ?, closed_at = ?
-                       WHERE id = ?"
-                      (or title (:title t)) (or body (:body t)) (or type (:type t))
-                      (or status (:status t)) (or priority (:priority t))
-                      (or parent-id (:parent_id t)) (or run-id (:run_id t))
-                      (or contract (:contract t)) (or tests (:tests t))
-                      (db/now) closed-at id]))
-      (get-task conn id))))
+                     (into [(str "UPDATE tasks SET "
+                                 (str/join ", " (map #(str (name %) " = ?") (keys cols)))
+                                 ", updated_at = ? WHERE id = ?")]
+                           (concat (vals cols) [(db/now) id])))))
+    (get-task conn id)))
 
 (defn claim!
   "Assign a backlog task to a run and mark it in_progress. Returns the updated
@@ -138,7 +156,9 @@
     (db/execute! conn
                  ["UPDATE tasks SET run_id = ?, status = 'in_progress',
                                     updated_at = ?, closed_at = NULL
-                   WHERE id = ? AND (run_id IS NULL OR run_id = ?)"
+                   WHERE id = ? AND (run_id IS NULL OR run_id = ?)
+                     AND closed_at IS NULL
+                     AND status NOT IN ('done','cancelled')"
                   run-id (db/now) id run-id]))
   (let [t (get-task conn id)]
     (when (and t (= run-id (:run_id t)) (= "in_progress" (:status t)))

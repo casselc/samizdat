@@ -34,6 +34,7 @@
   (:require [glimmer-gl.gl :as gl]
             [glimmer-gl.gtk :as glx]
             [glimmer-gtk.ffi :as gffi]
+            [glimmer.core :as ui]
             [jolt.ffi :as ffi]
             [samizdat.gui.graph :as graph]
             [samizdat.gui.input :as input]
@@ -244,7 +245,13 @@
 
 (defn request-render! []
   (when-let [area (:area @st)]
-    (glx/queue-render area)))
+    ;; queue-render is a bare FFI binding, and this is called from the
+    ;; poller and branch-log futures — off the main thread, which GTK (and
+    ;; AppKit under it on macOS) rejects intermittently. Hop through the
+    ;; same g_idle_add marshal the reconciler uses (review2 #5); on-gui
+    ;; runs the work inline when no loop is running, so headless callers
+    ;; and tests still queue directly.
+    (ui/on-gui #(glx/queue-render area))))
 
 (defn reset-pan! []
   (swap! st assoc :pan [0.0 0.0])

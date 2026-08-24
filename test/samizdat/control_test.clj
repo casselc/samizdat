@@ -129,3 +129,19 @@
           (is gone? "no stranded active entry after an instant run"))
         (is (= 409 (:status (api-control/abort! c rid)))
             "abort on a finished run refuses rather than rewriting status")))))
+
+(deftest abort-refuses-when-the-run-won-the-finish-race
+  ;; review2 #4: the transient window a#3 could not close — the run's own
+  ;; :completed lands between abort!'s registry read and its finish-run!.
+  ;; The store guard refuses the rewrite; abort! must answer 409 rather
+  ;; than claim an abort that did not land.
+  (with-db [c]
+    (let [rid (runs/start-run! c {:problem "p"})]
+      (runs/finish-run! c rid :completed "done")
+      ;; simulate the in-window registry entry the run's thread has not
+      ;; dissoc'd yet
+      (swap! api-control/active assoc rid {:abort (atom false)})
+      (try
+        (is (= 409 (:status (api-control/abort! c rid))))
+        (is (= "completed" (:status (runs/get-run c rid))))
+        (finally (swap! api-control/active dissoc rid))))))

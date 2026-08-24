@@ -41,6 +41,7 @@
             [samizdat.gui.graph :as graph]
             [samizdat.gui.mathtext :as mt]
             [samizdat.gui.newrun :as newrun]
+            [samizdat.gui.ops :as ops]
             ;; Registers [:text-view ...] with glimmer as a side effect of
             ;; loading — the problem statement needs more than one line.
             [samizdat.gui.textview]))
@@ -86,6 +87,7 @@
 ;; fetch slower than the 1.5s interval used to stack another every tick
 ;; (same review).
 (defonce ^:private branch-log-busy (atom false))
+(defonce ^:private branch-log-pending (atom nil))
 
 ;; --- selection and the branch log --------------------------------------------
 
@@ -109,18 +111,33 @@
   (let [{:keys [base-url run] :as st} @state
         branch (selected-branch-id st)
         sel (:selected st)]
-    (when (and run branch (compare-and-set! branch-log-busy false true))
-      (future
-        (try
-          (let [r (api/branch-detail base-url run branch)]
-            (when (= sel (:selected @state))
-              (if (:ok r)
-                (swap! state assoc :branch-log (:body r) :branch-log-error nil)
-                (swap! state assoc :branch-log-error
-                       (or (:error r) (str "HTTP " (:status r)))))))
-          (finally
-            (reset! branch-log-busy false)
-            (glpane/request-render!)))))))
+    (when (and run branch)
+      (if (compare-and-set! branch-log-busy false true)
+        (future
+          (try
+            (let [r (api/branch-detail base-url run branch)]
+              (when (= sel (:selected @state))
+                (if (:ok r)
+                  (swap! state assoc :branch-log (:body r) :branch-log-error nil)
+                  (swap! state assoc :branch-log-error
+                         (or (:error r) (str "HTTP " (:status r)))))))
+            (finally
+              (reset! branch-log-busy false)
+              ;; A selection that lost the CAS is not dropped (review2 #7):
+              ;; refetch for it now that the single-flight slot is free — on
+              ;; a finished run no poller event ever would. A same-selection
+              ;; request stays coalesced (see ops/refetch-after?): the busy
+              ;; guard exists so a poller firing every second for one branch
+              ;; queues exactly one fetch.
+              (let [pending @branch-log-pending]
+                (reset! branch-log-pending nil)
+                (when (ops/refetch-after? pending sel)
+                  (refresh-branch-log!)))
+              (glpane/request-render!))))
+        ;; busy: a fetch for an older selection is mid-flight and will
+        ;; discard its own result by its completion guard; record this
+        ;; selection for its finally (review2 #7).
+        (reset! branch-log-pending sel)))))
 
 (defn- select-node! [id]
   (swap! state assoc :selected id :branch-log nil :branch-log-error nil)
@@ -186,12 +203,13 @@
     (let [base (:base-url @state)
           runs (vec (some-> (api/list-runs base) :body :runs))]
       (swap! state assoc :runs runs)
-      (let [current (:run @state)]
-        ;; No :run-status mirror: nothing ever read it, and the poller's
-        ;; :connected? already covers liveness (code-review-2026-08 dead
-        ;; code).
-        (when-not (and current (some #(= current (:id %)) runs))
-          (connect-to! (some-> runs first :id)))))))
+      ;; No :run-status mirror: nothing ever read it, and the poller's
+      ;; :connected? already covers liveness (code-review-2026-08 dead
+      ;; code). tail-target keeps the current tail on an empty list — a
+      ;; failed fetch (list-runs answers {:ok false}, no throw) is
+      ;; "don't know", not "no runs" (review2 #8).
+      (when-let [target (ops/tail-target (:run @state) runs)]
+        (connect-to! target)))))
 
 (defn- cycle-run!
   "Step through the known runs; the picker with no dropdown widget."
@@ -576,6 +594,17 @@
          (when-let [c (:code art)]
            (str "\n\n" (mt/heading "CODE THAT RAN") "\n" (mt/mono c))))))
 
+(defonce ^:private last-scroll-sel (atom nil))
+
+(defn- scrolled-props-for
+  "The inspector's scrolled props, memoized on the selection the previous
+  render saw — :scroll-top rides only the render after a change (review2
+  #6, decision in ops/scroll-props)."
+  [selected]
+  (let [prev @last-scroll-sel]
+    (reset! last-scroll-sel selected)
+    (ops/scroll-props prev selected)))
+
 (defn- log-panel []
   (let [{:keys [graph selected branch-log branch-log-error]} @state
         node (get-in graph [:nodes selected])]
@@ -584,7 +613,7 @@
                       selected (str "branch " selected)
                       :else "inspector")
              :vexpand true :width-request 620}
-     [:scrolled {:vexpand true :scroll-top (str selected)}
+     [:scrolled (scrolled-props-for selected)
       [:label {:markup (cond
                        (nil? selected)
                        (mt/dim "click a branch for its thesis and progress, or an attempt for what it tried")
@@ -629,4 +658,10 @@
 
 (defn -main [& _]
   (refresh-runs!)
-  (ui/run root :title "samizdat" :width 1100 :height 720))
+  (ui/run root :title "samizdat" :width 1100 :height 720)
+  ;; ui/run returns only after the last window closed and the loop exited.
+  ;; Stop the poller there (review2 #16): otherwise it keeps hitting the
+  ;; server every ≤30s forever after the app is gone, and in the post-close
+  ;; window its swaps render inline on the poller thread against a
+  ;; destroyed widget tree.
+  (when-let [{:keys [stop!]} @poller] (stop!)))

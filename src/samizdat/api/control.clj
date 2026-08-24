@@ -142,11 +142,17 @@
   [conn run-id]
   (if-let [{:keys [abort]} (get @active run-id)]
     (do (reset! abort true)
-        (runs/finish-run! conn run-id :aborted nil)
-        ;; :body, not a bare map: the run's own :status is the string
-        ;; "aborting", and a route reading (:status r) as an HTTP code would
-        ;; have sent that.
-        {:body {:run_id run-id :status "aborting"}})
+        (if (pos? (runs/finish-run! conn run-id :aborted nil))
+          ;; :body, not a bare map: the run's own :status is the string
+          ;; "aborting", and a route reading (:status r) as an HTTP code would
+          ;; have sent that.
+          {:body {:run_id run-id :status "aborting"}}
+          ;; The run finished between the registry read and the store write;
+          ;; the row guard refused the rewrite (review2 #4). Same refusal
+          ;; shape as an unknown run — the abort did not land.
+          {:status 409
+           :body {:error {:message (str "run " run-id " already finished")}
+                  :run_id run-id}}))
     ;; 409, matching resume's "not resumable": the run may well exist, it is
     ;; just not in a state that can be aborted. This answered 200 with an error
     ;; body, so a caller reading the status code alone saw a refusal as a
