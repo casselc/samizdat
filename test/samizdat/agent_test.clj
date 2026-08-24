@@ -238,7 +238,51 @@
                                                   :artifacts
                                                   [{:claim "every element of S satisfies P"
                                                     :claim-status :confirmed}])}))
-          (str "gate " gate " has no way to be met; it can only expire unmet")))))
+           (str "gate " gate " has no way to be met; it can only expire unmet")))))
+
+(deftest settle-and-verification-names-are-registered-tools
+  ;; review3 #6/#7. The proof-era tool names (verify_template, review, audit,
+  ;; sketch, retract_rule, proof_*, octave_eval) outlived the tool surface
+  ;; that served them. A settle name the loop can never dispatch is a gate
+  ;; whose settle silently narrows — and vf-9bo's every-tool probe above
+  ;; cannot catch that, because a clause with one live name among three dead
+  ;; ones still settles :met. This walks the vocabularies themselves: every
+  ;; name the settle table reads, and every name verification-tools counts as
+  ;; an attempt, must be a run-tool the loop can actually dispatch.
+  (let [registered (set (tools/tool-names))
+        names-fn (resolve 'samizdat.agent.arbiter/settle-called-names)]
+    (is (some? names-fn)
+        "settle-called-names exists — the settle vocabulary is walkable data")
+    (when names-fn
+      (doseq [n (@names-fn)]
+        (is (contains? registered n)
+            (str "settle reads `" n "` — no run-tool method dispatches it"))))
+    (doseq [n state/verification-tools]
+      (is (contains? registered n)
+          (str "verification-tools names `" n "` — no run-tool method dispatches it")))))
+
+(deftest a-reframed-branch-settles-stuck-with-a-live-verification
+  ;; The stuck gate's compliance clause: a verification the harness ACCEPTED
+  ;; while the reframe stood is compliance by construction — the withheld
+  ;; claim is still refused, so the call that got through was on a different
+  ;; one. It has been dead since the proof tools left: verification-tools
+  ;; named nine unregistered tools, so the some? never found a call. On the
+  ;; coding loop the engines are eval and shell; the clause must fire on one.
+  (let [b (assoc (branch-with) :reframe-entered-turn 4)]
+    (is (= :met (arbiter/settle {:gate :stuck :turn 4 :window 3}
+                                {:current-turn 5
+                                 :tools-called ["eval"]
+                                 :branch-before b
+                                 :branch-after b})))))
+
+(deftest gates-config-carries-no-keys-for-removed-machinery
+  ;; review3 #9: :sketch-duplicate-threshold documented the sketch diversity
+  ;; gate (vf-eaw) whose tool left with the proof harness. The code it points
+  ;; at hardcodes 0.6 and its query is test-only — the key is doc-rot, the
+  ;; same class as the four keys pass 2 deleted.
+  (gates/reload-config!)
+  (is (nil? (get (gates/config) :sketch-duplicate-threshold))
+      ":sketch-duplicate-threshold still served by /v1/harness/gates"))
 
 ;; --- the done gate ----------------------------------------------------------
 
@@ -455,16 +499,6 @@
     (is (= 3 (:phase-entered-turn (state/enter-build b 9)))
         "already in build: the phase did not begin again, so the stamp does
          not move")))
-
-(deftest reenter-explore-restarts-the-phase-clock
-  ;; vf-9wx will drop a stuck branch back into explore; the cap has to
-  ;; restart when it does, or the branch would be re-forced into build on
-  ;; the very next turn.
-  (let [b (-> (state/new-branch {:id "B1" :problem "p"})
-              (state/enter-build 3)
-              (state/reenter-explore 17))]
-    (is (= :explore (:phase b)))
-    (is (= 17 (:phase-entered-turn b)))))
 
 (deftest explore-cap-expires-after-cap-full-turns
   (let [b (state/new-branch {:id "B1" :problem "p" :created-at-turn 0})]

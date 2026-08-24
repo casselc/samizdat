@@ -124,6 +124,33 @@
          (count (state/confirmed-artifacts before)))
       (> (count (:artifacts after)) (count (:artifacts before)))))
 
+;; The tool names each gate's settle reads as compliance (review3 #6). This is
+;; data — not inline strings in a case — so a test can walk it and assert every
+;; name resolves to a registered run-tool: a settle name the loop can never
+;; dispatch is a gate whose prediction silently narrows to :unmet. The proof-era
+;; names (verify_template, review, audit, retract_rule, add_rule, sketch) came
+;; out with their tool surface; what remains is the live vocabulary.
+(def ^:private settle-called
+  {:milestone        #{"done"}
+   :branch-out       #{"branch_theses"}
+   :repopulate       #{"branch_theses"}
+   :emergency-review #{"done" "thesis"}
+   :stuck            #{"thesis"}
+   :safe-state       #{"thesis" "done" "give_up"}
+   :done-blocked     #{"done" "give_up"}
+   :turn-budget      #{"done" "give_up"}
+   :wind-down        #{"done"}
+   :last-call        #{"done" "give_up"}
+   :reflection       #{"introspect" "reload_cells" "cells"}
+   :studying         #{"write_file" "edit_file" "shell" "reload_cells"
+                       "done" "give_up"}})
+
+(defn settle-called-names
+  "Every tool name any settle rule reads as compliance, deduped. Exposed for
+  the vocabulary test (review3 #6)."
+  []
+  (distinct (mapcat seq (vals settle-called))))
+
 (defn settle
   "Decide whether an open prediction came true, given what the branch did.
 
@@ -135,21 +162,16 @@
   Returns :met, :unmet, or nil for still-open."
   [{:keys [gate turn window]} {:keys [current-turn tools-called branch-before branch-after]}]
   (let [expired? (>= (- current-turn turn) window)
-        called? (fn [& names] (boolean (some (set names) tools-called)))]
+        tools-met? (fn [g] (boolean (some (get settle-called g) tools-called)))]
     (cond
       (case gate
-        :milestone (called? "review" "done" "verify_template")
-        :branch-out (called? "branch_theses")
-        :repopulate (called? "branch_theses")
-        :emergency-review (called? "review" "done" "thesis")
         ;; Now that the gate withholds rather than suggests (vf-49o), what
         ;; counts as compliance is what the branch DOES about the refused
-        ;; approach: a new plan, a restated thesis, a retraction — or a result
-        ;; the withheld approach could not have produced, whatever tool
-        ;; produced it. The last clause matters because on a non-Lean problem
-        ;; the reframe is claim-scoped only, and complying looks exactly like
-        ;; verifying something else successfully.
-        :stuck (or (called? "retract_rule" "thesis" "add_rule" "sketch")
+        ;; approach: a new plan, a restated thesis — or a result the withheld
+        ;; approach could not have produced, whatever tool produced it. The
+        ;; last clause matters because the reframe is claim-scoped, and
+        ;; complying looks exactly like verifying something else successfully.
+        :stuck (or (tools-met? :stuck)
                    (progressed? branch-before branch-after)
                    ;; A verification the harness ACCEPTED while the reframe
                    ;; stood. The withheld claim is refused for as long as the
@@ -178,35 +200,14 @@
                    ;; that had not happened. A settling that can be wrong in
                    ;; THIS direction is worse than one that is blind, because
                    ;; the met-rate is the only evidence the reframe works.
-                   ;; Known soft spot: octave_eval carries no claim and is
-                   ;; never refused, so it reads as compliance on its own.
+                   ;; Known soft spot: eval and shell carry no claim and are
+                   ;; never refused, so they read as compliance on their own.
                    (and (:reframe-entered-turn branch-after)
                         (some (set tools-called) state/verification-tools)
                         (zero? (or (:consecutive-mechanics-failures branch-after) 0))))
-        ;; Its prediction is "the branch retracts, changes technique, or ships
-        ;; what it has", and each of those is a tool the harness can see.
-        ;; Absent from this case the fallthrough returned false, so the gate
-        ;; could only ever expire :unmet — 0 met to 2 unmet across gen-22, 23
-        ;; and 24, which read as a gate the model ignored when nothing had
-        ;; been checked.
-        :safe-state (called? "retract_rule" "thesis" "done" "give_up" "review")
-        :prologue-cap (progressed? branch-before branch-after)
-        :progress-stalled (progressed? branch-before branch-after)
-        :tier-escalation (called? "verify_template" "review" "audit")
-        :done-blocked (called? "done" "give_up" "audit" "review")
+        (:prologue-cap :progress-stalled) (progressed? branch-before branch-after)
         :human-directive true
-        :turn-budget (called? "done" "give_up" "review" "audit")
-        :wind-down (called? "review" "audit" "done")
-        ;; Met when the branch actually ships or bails — the whole point of the
-        ;; forced done is a terminal call, not more exploration.
-        :last-call (called? "done" "give_up")
-        ;; The nudge is met when the branch actually looked at or changed its
-        ;; loop — the only observable a reflection can leave.
-        :reflection (called? "introspect" "reload_cells" "cells")
-        ;; Met when the branch stops studying and ships something.
-        :studying (called? "write_file" "edit_file" "shell" "reload_cells"
-                           "done" "give_up")
-        false)
+        (tools-met? gate))
       :met
 
       expired? :unmet

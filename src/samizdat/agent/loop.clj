@@ -402,19 +402,12 @@
                    (tools/run-tool (assoc ctx :branch branch :turn turn
                                           :tool-name tool :args (:args parsed))))
         branch (-> (:branch result)
-                   ;; Any attempt at an engine clears the search counter,
-                   ;; including one that fails — trying is what the refusal
-                   ;; asks for, not succeeding.
-                   (cond-> (contains? state/verification-tools tool)
-                     (dissoc :searches-since-attempt))
-                   ;; The tool and the claim ride along so the branch can
-                   ;; remember what it was grinding when it failed — which is
-                   ;; what the stuck gate withholds (vf-9wx).
-                   (state/record-outcome
-                    (assoc result :tool tool
-                           :claim (or (get-in parsed [:args :claim])
-                                      (when (#{"proof_start" "proof_step"} tool)
-                                        (get-in branch [:proof :claim])))))
+                    ;; The tool and the claim ride along so the branch can
+                    ;; remember what it was grinding when it failed — which is
+                    ;; what the stuck gate withholds (vf-9wx).
+                    (state/record-outcome
+                     (assoc result :tool tool
+                            :claim (get-in parsed [:args :claim])))
                    (state/add-turn {:turn turn :tool tool
                                     :category (:category result)
                                     ;; Kept for failures AND malformed calls,
@@ -591,8 +584,7 @@
           ;; branch, so its effect is applied here.
           (= :stuck (:gate decision))
           (state/begin-reframe turn
-                               (:last-failed-claim branch)
-                               (:last-failed-tool branch)))))))
+                               (:last-failed-claim branch)))))))
 
 (defn run-turn
   "Advance one branch by one turn. Returns the updated branch.

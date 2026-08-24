@@ -163,7 +163,7 @@
                (str (prompt "wind-down")
                     "\n\nYou are at turn " (state/turn-count branch)
                     " of " max-turns "."))
-    :prediction (fn [_] "the branch calls review, audit, or done")
+    :prediction (fn [_] "the branch ships")
     :window 3}
 
    {:gate :emergency-review
@@ -178,7 +178,7 @@
             (and (>= (:consecutive-failures branch) (threshold :cull-threshold))
                  (state/confirmed-in-last branch (threshold :cull-recent-window))))
     :message (fn [_] (prompt "emergency-review"))
-    :prediction (fn [_] "the branch calls review or done, or changes technique")
+    :prediction (fn [_] "the branch ships or changes technique")
     :window 3}
 
    {:gate :milestone
@@ -192,7 +192,7 @@
           (vf-8fl), which is the same failure the zebra run produced."
     :when (fn [{:keys [branch]}] (state/has-relevant-confirmed? branch))
     :message (fn [_] (prompt "milestone"))
-    :prediction (fn [_] "the branch calls review or done within two turns")
+    :prediction (fn [_] "the branch ships within two turns")
     :window 2}
 
    {:gate :branch-out

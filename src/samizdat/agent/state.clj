@@ -287,59 +287,28 @@
 (def verification-tools
   "Tools that actually put a claim in front of an engine.
 
-  Used to clear the consecutive-search counter: a branch that has been
-  searching has to TRY something, and a failed attempt counts — it tells the
-  branch which step is hard, which another search does not.
+  On the coding loop the engines are the REPL and the shell: an `eval` runs
+  the claim, a `shell` runs the command that checks it. Used to clear the
+  consecutive-search counter: a branch that has been searching has to TRY
+  something, and a failed attempt counts — it tells the branch which step is
+  hard, which another search does not.
 
-  Also the set the forced reframe scopes over (vf-9wx). That one is right to
-  use the WIDE set, unlike the explore phase below: what it withholds is a
-  claim rather than a path, an approach can be ground in Z3 as easily as in
-  Lean, and its substitute — verify something different — is available on
-  every engine here."
-  #{"verify" "verify_smt" "verify_lean" "verify_octave" "verify_template"
-    "proof_start" "proof_step" "measure" "octave_eval"})
+  Also the set the stuck gate's compliance clause scopes over: a verification
+  the harness ACCEPTED while a reframe stood is compliance by construction,
+  whatever engine ran it.
 
-(def lean-verification-tools
-  "The subset of `verification-tools` that a Lean sketch can stand in for.
-
-  What the explore phase withholds (vf-b25), which is deliberately NARROWER
-  than `verification-tools`. The only way out of explore is to bank a sketch,
-  and `sketch` is Lean only — it lints its argument as Lean and requires it to
-  elaborate with open sorries. Withholding Prolog, Z3 and Octave as well would
-  ask a problem with no Lean content for a move it cannot make: refused, told
-  to sketch, unable to, and burning the whole explore budget before the cap
-  releases it. Nine of the fifteen bench problems are prolog/smt only,
-  including knights-3, whose own note calls it the floor that catches
-  regressions, and the odd-covering campaign was entirely Z3 and Prolog.
-
-  So the phase gates the path its plan is written in. That is also what the
-  literature separates: DSP and Hilbert are about drafting a proof for an
-  interactive theorem prover, not about deferring a decision procedure.
-
-  The wider set still exists and is still what clears the search counter — a
-  branch that has been searching has to try SOMETHING, and any engine counts
-  (vf-2vi)."
-  #{"verify_lean" "proof_start" "proof_step"})
+  Every name here must be a registered run-tool — the vocabulary test in
+  agent-test pins it (review3 #6)."
+  #{"eval" "shell"})
 
 (defn enter-build
   "Transition the branch into :build, stamping the turn the phase began.
 
-  A no-op when already there: the stamp means when THIS phase began, and the
-  release valve's re-entry is reenter-explore's job (vf-9wx)."
+  A no-op when already there: the stamp means when THIS phase began."
   [branch turn]
   (if (= :build (:phase branch))
     branch
     (assoc branch :phase :build :phase-entered-turn turn)))
-
-(defn reenter-explore
-  "Drop the branch back into :explore and restart the phase clock.
-
-  Nothing calls this yet — vf-9wx, the stuck-branch recovery, will. The
-  restart is the point: the explore cap is per-entry, not per-branch, so a
-  branch re-dropped into explore gets a fresh budget rather than being
-  re-forced out on the next turn."
-  [branch turn]
-  (assoc branch :phase :explore :phase-entered-turn turn))
 
 (defn enter-reframe
   "Withhold `claim` from this branch and start the reframe clock.
@@ -386,23 +355,15 @@
                     (< (- turn (:reframe-entered-turn branch)) grace)))))
 
 (defn begin-reframe
-  "Enter a reframe, and drop the branch back into :explore when — and only
-  when — the approach that failed was a Lean one.
+  "Enter a reframe: record the withheld claim and start the reframe clock.
 
-  The conditional is the vf-2vi rule applied in the other direction. A gate
-  that withholds must not demand a move the branch cannot make, and `sketch`
-  lints its argument as Lean and requires it to elaborate with open sorries.
-  A branch failing on Prolog or Z3 has no Lean skeleton to write, so putting
-  it in :explore would ask for one while withholding nothing it was using.
-  For those branches the claim-scoped refusal is the whole mechanism, which is
-  the design it should have been anyway.
-
-  For a Lean branch the phase machine is worth the extra step: it reopens
-  `sketch`, closes Lean verification until a NEW plan elaborates, and restarts
-  the explore clock so the cap does not force it straight back out."
-  [branch turn claim failing-tool]
-  (cond-> (enter-reframe branch turn claim)
-    (contains? lean-verification-tools failing-tool) (reenter-explore turn)))
+  The claim-scoped refusal is the whole mechanism now. The proof harness's
+  extra step — dropping a Lean branch back into :explore to force a new plan —
+  left with its tool surface (review3 #6); the phase machine's live work is
+  the explore cap, the release valve that keeps a branch from camping in
+  explore forever."
+  [branch turn claim]
+  (enter-reframe branch turn claim))
 
 (defn abandoned-log
   "The claims this branch has had withheld and reframed away from, newest
@@ -474,24 +435,14 @@
       ;; has not been told to abandon anything. Left alone on a claimless
       ;; failure rather than cleared, because the last claim that DID fail is
       ;; still the better answer to "what is this branch grinding".
-      ;; Not for Lean. Lean has no refuting outcome — it rejects PROOFS, never
-      ;; claims — which is why verify_lean deliberately declines to record
-      ;; :refuted for a snippet Lean throws out. The same reasoning has to
-      ;; reach this counter: an unknown constant or an unsolved goal is
-      ;; evidence about the proof, not about whether the statement is true, and
-      ;; withholding the claim on it tells a branch to abandon something it was
-      ;; right about. gen-31 B1 was the only branch attempting the run's target
-      ;; and lost it to a mistyped lemma name.
-      ;;
-      ;; A Lean branch is still redirected: begin-reframe re-enters :explore on
-      ;; a Lean failure, so verification stays shut until a NEW sketch
-      ;; elaborates. That is the right response to a proof that will not go
-      ;; through — try a different proof — and it needs no claim to withhold.
-      ;; The tool is still recorded, because that is what chooses the phase.
-      (and (= :failure category) (seq (str claim))
-           (not (contains? lean-verification-tools tool)))
-      (assoc :last-failed-claim claim
-             :abandoned (vec (take-last 5 (conj (or (:abandoned branch) []) claim))))
+       ;; A failing call that carried a claim records it, so the stuck gate
+       ;; knows what the branch was grinding on when it failed. The proof
+       ;; harness's Lean exclusion (an unsolved goal is evidence about the
+       ;; proof, not the statement) left with its tool surface (review3 #6);
+       ;; on the coding loop a failing claim is fair game to withhold.
+       (and (= :failure category) (seq (str claim)))
+       (assoc :last-failed-claim claim
+              :abandoned (vec (take-last 5 (conj (or (:abandoned branch) []) claim))))
       (= :failure category) (assoc :last-failed-tool tool)
       ;; Cleared by a success, so the gate can never withhold something the
       ;; branch has already got past. Without this, a branch that failed on A,

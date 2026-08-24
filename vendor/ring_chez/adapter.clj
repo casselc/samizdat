@@ -292,6 +292,30 @@
           (when (pos? sent) (recur (+ off sent))))))
     (ffi/free buf)))
 
+(defn- drain!
+  "Read and discard what the peer still has in flight, bounded by the recv
+  timeout and 4 MiB. An error response usually leaves unread request bytes in
+  the socket (the chunked body we refused, the tail of an oversized one);
+  closing with unread data sends RST, and the RST can destroy the response we
+  just wrote before the client has read it."
+  [conn]
+  (let [buf (ffi/alloc bufsize)]
+    (try
+      (loop [drained 0]
+        (let [n (c-recv conn buf bufsize 0)]
+          (when (and (pos? n) (< drained 4194304))
+            (recur (+ drained n)))))
+      (finally (ffi/free buf)))))
+
+(defn- send-error!
+  "Send an error response, then drain so the close that follows cannot RST the
+  response away."
+  [conn status body]
+  (send-all conn (response->string {:status status
+                                    :headers {"Content-Type" "text/plain"}
+                                    :body body}))
+  (drain! conn))
+
 ;; --- the accept loop --------------------------------------------------------
 ;; Clean shutdown: stop-server closes the listen fd (which unblocks accept) and
 ;; clears `running?`; the loop then exits instead of spinning on the dead fd.
@@ -305,19 +329,14 @@
         (cond
           (nil? r) nil
           (= ::chunked r)
-          (send-all conn (response->string
-                          {:status 411 :headers {"Content-Type" "text/plain"}
-                           :body "Length Required: this server reads Content-Length bodies only"}))
+          (send-error! conn 411
+                       "Length Required: this server reads Content-Length bodies only")
           (= ::too-large r)
-          (send-all conn (response->string
-                          {:status 413 :headers {"Content-Type" "text/plain"}
-                           :body "Payload Too Large"}))
+          (send-error! conn 413 "Payload Too Large")
           :else
           (send-all conn (response->string (handler (request->ring r port))))))
       (catch Throwable _e
-        (try (send-all conn (response->string {:status 500
-                                               :headers {"Content-Type" "text/plain"}
-                                               :body "Internal Server Error"}))
+        (try (send-error! conn 500 "Internal Server Error")
              (catch Throwable _ nil))))
     (finally (c-close conn))))
 

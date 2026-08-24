@@ -230,11 +230,4 @@
         and a sketch attempt or two, against prologue-cap's 8. The forced
         transition is the release valve that keeps a branch which cannot get
         a skeleton to elaborate from being locked out of verification for the
-        whole run."}
-
- :sketch-duplicate-threshold
- {:value 0.6 :kind :threshold :capability-tunable? false
-  :doc "Jaccard cutoff for refusing a sketch too close to a live sibling's.
-        UNCALIBRATED: the sketch tool landed after gen-30, so there is no
-        historical sketch data to tune against, and 0.6 is inherited from
-        ledger claim dedup, where it was tuned on claims, not plans."}}
+        whole run."}}
