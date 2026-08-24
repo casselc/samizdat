@@ -36,6 +36,7 @@
             [samizdat.store.db :as db]
             [samizdat.store.grants :as grants]
             [samizdat.store.interventions :as interventions]
+            [samizdat.store.journal :as journal]
             [samizdat.store.runs :as runs]))
 
 (defmacro with-db [[binding] & body]
@@ -170,3 +171,24 @@
       (is (= 0 (count (:runs (api-runs/list-runs c -1))))))
     (testing "a positive limit still bounds"
       (is (= 2 (count (:runs (api-runs/list-runs c 2))))))))
+
+(deftest watch-follows-the-run-not-a-hardcoded-branch
+  ;; review3 #13: watch read branch-turns for "B1" and only "B1", so on a
+  ;; beam run — 5 branches by default — the supervisor's window showed one
+  ;; arm of the run and the other four were invisible, including whatever
+  ;; branch was actually doing the work. Default to the run's last active
+  ;; branch; an explicit id still narrows.
+  (with-db [c]
+    (let [rid (runs/start-run! c {:problem "p"})]
+      (runs/open-branch! c rid {:branch-id "B1"})
+      (runs/open-branch! c rid {:branch-id "B2"})
+      (journal/record-turn! c rid {:branch-id "B1" :turn 1
+                                   :tool-name "shell" :result "b1-work"
+                                   :category :success})
+      (journal/record-turn! c rid {:branch-id "B2" :turn 1
+                                   :tool-name "shell" :result "b2-work"
+                                   :category :success})
+      (testing "default follows the last active branch"
+        (is (= ["b2-work"] (mapv :result (control/watch c rid)))))
+      (testing "an explicit branch still narrows"
+        (is (= ["b1-work"] (mapv :result (control/watch c rid 8 "B1"))))))))

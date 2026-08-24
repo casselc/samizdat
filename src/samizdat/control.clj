@@ -87,13 +87,26 @@
 
 (defn watch
   "The last `n` turns of a run: what the agent did and how each landed. The
-  REPL supervisor's window into a live run."
+  REPL supervisor's window into a live run.
+
+  Defaults to the run's last active branch — a beam run is several branches
+  wide, and the window is for watching the work, not one named arm (review3
+  #13: this hardcoded \"B1\", which made the other branches invisible). An
+  explicit branch id still narrows."
   ([conn run-id] (watch conn run-id 8))
   ([conn run-id n]
-   (->> (journal/branch-turns conn run-id "B1")
-        (take-last n)
-        (mapv (fn [t] {:turn (:turn t)
-                       :tool (:tool_name t)
-                       :category (:category t)
-                       :result (let [r (str (:result t))]
-                                 (subs r 0 (min (count r) 160)))})))))
+   (let [bs (runs/branches conn run-id)]
+     (watch conn run-id n
+            ;; last branch still active, else the last branch there was
+            (when (seq bs)
+              (:id (or (last (filter #(= "active" (:status %)) bs))
+                       (last bs)))))))
+  ([conn run-id n branch-id]
+   (when branch-id
+     (->> (journal/branch-turns conn run-id branch-id)
+          (take-last n)
+          (mapv (fn [t] {:turn (:turn t)
+                         :tool (:tool_name t)
+                         :category (:category t)
+                         :result (let [r (str (:result t))]
+                                  (subs r 0 (min (count r) 160)))}))))))
