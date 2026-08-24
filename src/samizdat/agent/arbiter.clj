@@ -124,32 +124,20 @@
          (count (state/confirmed-artifacts before)))
       (> (count (:artifacts after)) (count (:artifacts before)))))
 
-;; The tool names each gate's settle reads as compliance (review3 #6). This is
-;; data — not inline strings in a case — so a test can walk it and assert every
-;; name resolves to a registered run-tool: a settle name the loop can never
-;; dispatch is a gate whose prediction silently narrows to :unmet. The proof-era
-;; names (verify_template, review, audit, retract_rule, add_rule, sketch) came
-;; out with their tool surface; what remains is the live vocabulary.
-(def ^:private settle-called
-  {:milestone        #{"done"}
-   :branch-out       #{"branch_theses"}
-   :repopulate       #{"branch_theses"}
-   :emergency-review #{"done" "thesis"}
-   :stuck            #{"thesis"}
-   :safe-state       #{"thesis" "done" "give_up"}
-   :done-blocked     #{"done" "give_up"}
-   :turn-budget      #{"done" "give_up"}
-   :wind-down        #{"done"}
-   :last-call        #{"done" "give_up"}
-   :reflection       #{"introspect" "reload_cells" "cells"}
-   :studying         #{"write_file" "edit_file" "shell" "reload_cells"
-                       "done" "give_up"}})
+;; The tool names each gate's settle reads as compliance (review3 #6). Tier
+;; 1a: the table lives in gates.edn as :tool-vocab :settle-called — data,
+;; not inline strings in a case, so a test can walk it and assert every name
+;; resolves to a registered run-tool: a settle name the loop can never
+;; dispatch is a gate whose prediction silently narrows to :unmet. The
+;; proof-era names (verify_template, review, audit, retract_rule, add_rule,
+;; sketch) came out with their tool surface; what remains is the live
+;; vocabulary.
 
 (defn settle-called-names
   "Every tool name any settle rule reads as compliance, deduped. Exposed for
   the vocabulary test (review3 #6)."
   []
-  (distinct (mapcat seq (vals settle-called))))
+  (distinct (mapcat seq (vals (gates/tool-vocab :settle-called)))))
 
 (defn settle
   "Decide whether an open prediction came true, given what the branch did.
@@ -161,7 +149,8 @@
 
   Returns :met, :unmet, or nil for still-open."
   [{:keys [gate turn window]} {:keys [current-turn tools-called branch-before branch-after]}]
-  (let [expired? (>= (- current-turn turn) window)
+  (let [settle-called (gates/tool-vocab :settle-called)
+        expired? (>= (- current-turn turn) window)
         tools-met? (fn [g] (boolean (some (get settle-called g) tools-called)))]
     (cond
       (case gate
@@ -202,9 +191,9 @@
                    ;; the met-rate is the only evidence the reframe works.
                    ;; Known soft spot: eval and shell carry no claim and are
                    ;; never refused, so they read as compliance on their own.
-                   (and (:reframe-entered-turn branch-after)
-                        (some (set tools-called) state/verification-tools)
-                        (zero? (or (:consecutive-mechanics-failures branch-after) 0))))
+                    (and (:reframe-entered-turn branch-after)
+                         (some (set tools-called) (gates/tool-vocab :verification))
+                         (zero? (or (:consecutive-mechanics-failures branch-after) 0))))
         (:prologue-cap :progress-stalled) (progressed? branch-before branch-after)
         :human-directive true
         (tools-met? gate))

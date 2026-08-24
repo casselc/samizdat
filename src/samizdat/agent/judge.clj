@@ -29,7 +29,8 @@
 
   Everything here is pure and unit-testable; the cell that calls the model and
   routes on the verdict lives in resources/cells/critic.clj."
-  (:require [clojure.string :as str]))
+  (:require [clojure.string :as str]
+            [samizdat.agent.gates :as gates]))
 
 (def verdicts #{:complete :incomplete :abstain})
 
@@ -74,7 +75,7 @@
         by-tool (frequencies (keep :tool_name rows))
         arg (fn [r k] (get-in r [:args k] (get (:args r) (name k))))
         files (->> rows
-                   (filter #(#{"write_file" "edit_file"} (:tool_name %)))
+                   (filter #(contains? (gates/tool-vocab :file-write) (:tool_name %)))
                    (keep #(arg % :path))
                    distinct)
         cmds (->> rows
@@ -103,7 +104,7 @@
 
 (defn- edited-code? [rows]
   (tool-used? rows
-              (fn [r] (and (#{"write_file" "edit_file"} (:tool_name r))
+              (fn [r] (and (contains? (gates/tool-vocab :file-write) (:tool_name r))
                            (re-find #"(?i)\.(clj|cljc|cljs|edn|py|ts|js|rs|go)$"
                                     (str (get-in r [:args :path])))))))
 

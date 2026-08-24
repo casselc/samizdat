@@ -240,15 +240,15 @@
                                                     :claim-status :confirmed}])}))
            (str "gate " gate " has no way to be met; it can only expire unmet")))))
 
-(deftest settle-and-verification-names-are-registered-tools
+(deftest settle-and-tool-vocab-names-are-registered-tools
   ;; review3 #6/#7. The proof-era tool names (verify_template, review, audit,
   ;; sketch, retract_rule, proof_*, octave_eval) outlived the tool surface
   ;; that served them. A settle name the loop can never dispatch is a gate
   ;; whose settle silently narrows — and vf-9bo's every-tool probe above
   ;; cannot catch that, because a clause with one live name among three dead
-  ;; ones still settles :met. This walks the vocabularies themselves: every
-  ;; name the settle table reads, and every name verification-tools counts as
-  ;; an attempt, must be a run-tool the loop can actually dispatch.
+  ;; ones still settles :met. This walks the vocabularies themselves — since
+  ;; the tier-1a migration they live in gates.edn as :tool-vocab — and
+  ;; asserts every name is a run-tool the loop can actually dispatch.
   (let [registered (set (tools/tool-names))
         names-fn (resolve 'samizdat.agent.arbiter/settle-called-names)]
     (is (some? names-fn)
@@ -257,9 +257,24 @@
       (doseq [n (@names-fn)]
         (is (contains? registered n)
             (str "settle reads `" n "` — no run-tool method dispatches it"))))
-    (doseq [n state/verification-tools]
+    (doseq [vocab [:verification :shipping :file-write]
+            n (gates/tool-vocab vocab)]
       (is (contains? registered n)
-          (str "verification-tools names `" n "` — no run-tool method dispatches it")))))
+          (str "tool-vocab " vocab " names `" n "` — no run-tool method dispatches it")))))
+
+(deftest tool-vocab-is-gates-edn-data
+  ;; Tier 1a: the vocabularies the gates read (settle's compliance tools,
+  ;; verification, shipping, file-write) moved out of src defs into
+  ;; resources/gates.edn, so a vocabulary changes at runtime without a
+  ;; rebuild. Pin the move: the keys exist, carry the live vocabulary, and
+  ;; settle's table still keys by gate.
+  (is (= #{"eval" "shell"} (gates/tool-vocab :verification)))
+  (is (= #{"write_file" "edit_file"} (gates/tool-vocab :file-write)))
+  (is (contains? (gates/tool-vocab :shipping) "write_file"))
+  (let [settle-called (gates/tool-vocab :settle-called)]
+    (is (map? settle-called))
+    (is (= #{"done"} (:milestone settle-called)))
+    (is (= #{"thesis" "done" "give_up"} (:safe-state settle-called)))))
 
 (deftest a-reframed-branch-settles-stuck-with-a-live-verification
   ;; The stuck gate's compliance clause: a verification the harness ACCEPTED

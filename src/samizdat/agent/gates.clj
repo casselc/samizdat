@@ -54,6 +54,14 @@
 (defn threshold [k]
   (get-in (config) [k :value]))
 
+(defn tool-vocab
+  "The tool vocabulary `k` (:verification, :shipping, :file-write,
+  :settle-called) from gates.edn. The vocabularies the gates read are
+  runtime-tunable data, like the thresholds; the vocabulary test in
+  agent-test walks every name against the registered run-tools (review3 #6)."
+  [k]
+  (get-in (config) [:tool-vocab k]))
+
 (defn- prompt [name]
   (slurp (io/resource (str "prompts/" name ".md"))))
 
@@ -376,10 +384,13 @@
           reads tool mechanics, not verification."
     :when (fn [{:keys [branch]}]
             (and (state/active? branch)
-                 (supervisor/over-studying? (:turns branch)
+                 (supervisor/over-studying? (tool-vocab :shipping)
+                                            (:turns branch)
                                             (threshold :studying-turns))))
     :message (fn [{:keys [branch]}]
-               (supervisor/stall-nudge (:turns branch) (threshold :studying-turns)))
+               (supervisor/stall-nudge (tool-vocab :shipping)
+                                       (:turns branch)
+                                       (threshold :studying-turns)))
     :prediction (fn [_] "the branch commits a change, runs a test, or ships")
     :window 3}
 

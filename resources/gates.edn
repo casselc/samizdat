@@ -230,4 +230,29 @@
         and a sketch attempt or two, against prologue-cap's 8. The forced
         transition is the release valve that keeps a branch which cannot get
         a skeleton to elaborate from being locked out of verification for the
-        whole run."}}
+        whole run."}
+
+ :tool-vocab
+ ;; Tier 1a: the tool vocabularies the gates and their settlers read — data
+ ;; here, alongside the thresholds, so a vocabulary changes at runtime
+ ;; without a rebuild. agent-test walks every name against the registered
+ ;; run-tools (review3 #6): a name the loop cannot dispatch is a gate whose
+ ;; prediction silently narrows to :unmet.
+ {:verification #{"eval" "shell"}
+  :shipping #{"write_file" "edit_file" "shell" "reload_cells" "manifest"
+              "done" "give_up" "thesis" "branch_theses"}
+  :file-write #{"write_file" "edit_file"}
+  :settle-called
+  {:milestone        #{"done"}
+   :branch-out       #{"branch_theses"}
+   :repopulate       #{"branch_theses"}
+   :emergency-review #{"done" "thesis"}
+   :stuck            #{"thesis"}
+   :safe-state       #{"thesis" "done" "give_up"}
+   :done-blocked     #{"done" "give_up"}
+   :turn-budget      #{"done" "give_up"}
+   :wind-down        #{"done"}
+   :last-call        #{"done" "give_up"}
+   :reflection       #{"introspect" "reload_cells" "cells"}
+   :studying         #{"write_file" "edit_file" "shell" "reload_cells"
+                       "done" "give_up"}}}}

@@ -283,23 +283,6 @@
   (boolean (some #(advances-thesis? branch (:claim %))
                  (confirmed-artifacts branch))))
 
-(def verification-tools
-  "Tools that actually put a claim in front of an engine.
-
-  On the coding loop the engines are the REPL and the shell: an `eval` runs
-  the claim, a `shell` runs the command that checks it. Used to clear the
-  consecutive-search counter: a branch that has been searching has to TRY
-  something, and a failed attempt counts — it tells the branch which step is
-  hard, which another search does not.
-
-  Also the set the stuck gate's compliance clause scopes over: a verification
-  the harness ACCEPTED while a reframe stood is compliance by construction,
-  whatever engine ran it.
-
-  Every name here must be a registered run-tool — the vocabulary test in
-  agent-test pins it (review3 #6)."
-  #{"eval" "shell"})
-
 (defn enter-build
   "Transition the branch into :build, stamping the turn the phase began.
 

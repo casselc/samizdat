@@ -18,15 +18,12 @@
   consumer, and grow as the role does."
   (:require [clojure.string :as str]))
 
-(def shipping-tools
-  "Tools that change or run something — real movement toward finishing, as
-  opposed to inspecting. Anything NOT here (read_file, grep, eval, doc,
-  complete, lsp, introspect, fetch_artifact, fetch_turn, cells, skill, recall,
-  task, remember) counts as studying."
-  #{"write_file" "edit_file" "shell" "reload_cells" "manifest"
-    "done" "give_up" "thesis" "branch_theses"})
+;; The shipping vocabulary lives in gates.edn (:tool-vocab :shipping, tier
+;; 1a) and is passed in by the caller, keeping this namespace pure and free
+;; of the config layer. Shipping tools change or run something — real
+;; movement toward finishing; anything else counts as studying.
 
-(defn shipped? [entry] (contains? shipping-tools (:tool entry)))
+(defn shipped? [tools entry] (contains? tools (:tool entry)))
 
 (defn over-studying?
   "The branch shipped something at some point, then spent the last `threshold`
@@ -34,24 +31,24 @@
   opening exploration — reading its way into an unfamiliar area — is never
   nagged; the stall is when a branch that WAS making changes has lapsed into
   reading and stopped moving."
-  [turns threshold]
+  [tools turns threshold]
   (let [turns (vec turns)]
     (and (>= (count turns) threshold)
-         (some shipped? turns)
-         (not-any? shipped? (take-last threshold turns)))))
+         (some (partial shipped? tools) turns)
+         (not-any? (partial shipped? tools) (take-last threshold turns)))))
 
 (defn recent-studying-tools
   "The distinct inspection tools the branch has leaned on in its last
   `threshold` turns — named back to it so the nudge is concrete."
-  [turns threshold]
-  (->> (take-last threshold turns) (keep :tool) (remove shipping-tools) distinct vec))
+  [tools turns threshold]
+  (->> (take-last threshold turns) (keep :tool) (remove tools) distinct vec))
 
 (defn stall-nudge
   "The correction: stop studying, commit and test. Names the tools it has been
   cycling so the message is not generic."
-  [turns threshold]
+  [tools turns threshold]
   (str "You have spent " threshold " turns inspecting ("
-       (str/join ", " (recent-studying-tools turns threshold))
+       (str/join ", " (recent-studying-tools tools turns threshold))
        ") without changing anything. Commit your best current version to a file"
        " and test it — a rough version you refine beats more reading. If you were"
        " re-checking something already done, it is done: move to the next step"
