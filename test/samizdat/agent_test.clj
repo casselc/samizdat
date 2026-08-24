@@ -508,6 +508,20 @@
     (is (not (state/explore-cap-expired? (state/enter-build b 3) 5 20))
         "only the explore phase is capped")))
 
+(deftest explore-cap-prose-names-the-current-surface
+  ;; The valve's message survived the proof-engine removal still telling
+  ;; branches to prove claims with Lean — instructions for a surface that
+  ;; no longer exists. Pin it to the current vocabulary.
+  (with-redefs [gates/threshold (fn [_] 5)]
+    (let [b (state/new-branch {:id "B1" :problem "p" :created-at-turn 0})
+          out (aloop/phase-valve b 6)
+          msg (:content (peek (:messages out)))]
+      (is (some? msg) "the valve fired and left a message")
+      (is (not (re-find #"(?i)lean|sketch" msg))
+          "no removed-tool vocabulary survives in the prose")
+      (is (re-find #"(?i)build" msg)
+          "the phase change is still named"))))
+
 ;; --- the forced reframe (vf-9wx, vf-31m, vf-49o) -----------------------------
 ;;
 ;; The harness's only answer to repeated failure was to kill the branch. These
@@ -767,12 +781,12 @@
   ;; after proving against git that the store covered every file changed
   ;; since green. In this harness the journal IS the replay log — resume
   ;; rebuilds branches from it — and it is append-only, so the green point
-  ;; is the turn cursor at the confirmation and coverage reduces to the
+  ;; is the turn cursor at the green verify and coverage reduces to the
   ;; log still reaching that cursor.
   (testing "no green point means nothing to fall back to"
     (is (false? (:ok (state/snapshot-covers? (branch-with)))))
     (is (str/includes? (:reason (state/snapshot-covers? (branch-with)))
-                       "no confirmed result")))
+                       "no green verify")))
 
   (testing "covered: the turn log still reaches the green point"
     (let [b (state/mark-green (branch-with :turns (vec (repeat 3 {}))))
@@ -796,26 +810,29 @@
   (testing "and never trips without a green point at all"
     (is (not (state/safe-state-due? (branch-with :consecutive-failures 99) 3)))))
 
-(deftest confirmation-marks-the-green-point
-  ;; The store-checkpoint version the old stub waited for: the journal is
-  ;; the checkpoint, and a confirmed artifact stamps the cursor into it.
+(deftest green-verify-marks-the-green-point
+  ;; No tool on the current surface emits :claim-status artifacts (the proof
+  ;; engines that did are gone), so keying the green point on :confirmed was
+  ;; keying it on a status that never occurs. A green ship-verify — the suite
+  ;; actually passed — is the real known-good state; ship reports it and the
+  ;; loop stamps the cursor.
     (with-redefs [tools/run-tool (fn [{:keys [branch]}]
                                  {:branch branch
-                                  :result "confirmed"
-                                  :artifact {:claim "c" :claim-status :confirmed}})]
+                                  :result "Answer accepted."
+                                  :verified-green? true})]
     (let [branch (assoc (branch-with) :turns (vec (repeat 4 {})))
-          r (aloop/tool-step {} branch 5 {:name "thesis" :args {:claim "c"}})]
+          r (aloop/tool-step {} branch 5 {:name "done" :args {:answer "all green"}})]
       (is (= 5 (:green-snapshot (:branch r)))
-          "the cursor is the turn count at the confirmation")
+          "the cursor is the turn count at the green verify")
       (is (:ok (state/snapshot-covers? (:branch r))))))
 
-  (testing "an unconfirmed artifact does not move the green point"
+  (testing "a red or skipped verify does not move the green point"
     (with-redefs [tools/run-tool (fn [{:keys [branch]}]
                                    {:branch branch
-                                    :result "measured"
-                                    :artifact {:claim "c" :claim-status :empirical}})]
+                                    :result "Answer accepted."
+                                    :verified-green? false})]
       (let [branch (assoc (branch-with) :turns (vec (repeat 4 {})))
-            r (aloop/tool-step {} branch 5 {:name "thesis" :args {:claim "c"}})]
+            r (aloop/tool-step {} branch 5 {:name "done" :args {:answer "still red"}})]
         (is (nil? (:green-snapshot (:branch r))))))))
 
 ;; --- forking ----------------------------------------------------------------

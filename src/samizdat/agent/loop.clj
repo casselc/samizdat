@@ -297,10 +297,9 @@
                 "Your re-planning budget is spent: "
                 "The explore prologue is over: ")
               (gates/threshold :explore-cap)
-              " turns without a sketch on record. You are in the"
-              " BUILD phase — Lean verification is available and"
-              " `sketch` is not. The way forward is to prove your"
-              " claims directly.")))))
+              " turns without banked work. You are in the"
+              " BUILD phase — the prologue is over. The way forward is"
+              " concrete edits and a green test run, not more reading.")))))
 
 (defn provider-error-step
   "A provider failure is not the branch's fault and must not count against it
@@ -430,21 +429,19 @@
                                " different encoding of the same one."))
                  result)
          branch (if-let [a (:artifact result)]
-                  (cond-> (state/add-artifact branch (assoc a :turn turn))
-                    ;; A banked sketch is the way out of the explore prologue:
-                    ;; from the turn it lands, verification is open (vf-b25).
-                    (= :sketch (:claim-status a))
-                    (state/enter-build turn)
-                    ;; And anything banked at all ends a reframe: the withheld
-                    ;; approach could not have produced it (vf-9wx).
-                    (:reframe-entered-turn branch)
-                    (state/clear-reframe)
-                    ;; An engine confirmation is the green point the
-                    ;; safe-state rung falls back to.
-                    (= :confirmed (:claim-status a))
-                    (state/mark-green))
+                   (state/add-artifact branch (assoc a :turn turn))
+                   branch)
+         ;; A green ship-verify is the green point the safe-state rung
+         ;; rewinds to. No tool on the current surface emits :claim-status
+         ;; artifacts (the proof engines that did are gone), so the old
+         ;; :confirmed trigger keyed on a status that never occurred. Green
+         ;; work also ends a reframe: the withheld approach could not have
+         ;; produced it (vf-9wx).
+         branch (if (:verified-green? result)
+                  (-> (state/mark-green branch)
+                      (state/clear-reframe))
                   branch)]
-    ;; A confirmation marks the green point the safe-state rung falls back
+    ;; A green verify marks the green point the safe-state rung falls back
     ;; to. The snapshot is the turn cursor: the journal is the store
     ;; checkpoint — append-only, and what resume replays from — so the
     ;; cursor is all the rung needs to name a rewindable state.

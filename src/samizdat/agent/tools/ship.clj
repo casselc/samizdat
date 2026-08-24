@@ -314,7 +314,11 @@
        :progress? true
        :done? true
        :answer answer
-       :result (str "Answer accepted.\n\n" answer)})))
+       ;; The green point the safe-state rung rewinds to (loop.clj tool-step
+    ;; consumes this): done with the suite actually passing is the branch's
+    ;; last known-good state.
+    :verified-green? (boolean (:green? vresult))
+    :result (str "Answer accepted.\n\n" answer)})))
 
 (defmethod base/run-tool "give_up" [{:keys [branch] :as ctx}]
   (let [reason (or (base/arg ctx :reason) "no reason given")]

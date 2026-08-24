@@ -223,17 +223,24 @@ pin (the gate table no longer contains `:safe-state`).
 All actionable findings fixed on the working tree the same day; suite green
 before commit.
 
-- **#1 safe-state rung — SHIPPED.** `mark-green` now takes `[branch]` and
-  stamps `:green-snapshot (count (:turns branch))` — the turn cursor into
-  the journal replay log. Called from `loop.clj` `tool-step` in the
-  artifact branch when `(:claim-status artifact)` is `:confirmed`.
-  `snapshot-covers? [branch]` reads it; `loop.clj` steer-step now passes
-  `(state/snapshot-covers? branch)` where a hard-coded `nil` used to be
-  (with a comment claiming dormancy). `safe-state-due?` (2× cull-threshold
-  window) unchanged. `:green-at-turn` renamed `:green-snapshot` throughout;
-  gate message and `:doc` updated to match. Tests: rewritten
-  `safe-state-coverage-gate` + new `confirmation-marks-the-green-point`;
-  live probe verified the gate trips at 2× cull with a rendered message.
+- **#1 safe-state rung — SHIPPED** (trigger corrected same day). `mark-green`
+  takes `[branch]` and stamps `:green-snapshot (count (:turns branch))` —
+  the turn cursor into the journal replay log. First wiring keyed the
+  stamp on `:confirmed` artifacts; the src/ audit then established that
+  **no tool on the current surface emits `:claim-status` artifacts at all**
+  (the proof engines that did are gone), so the trigger keyed on a status
+  that never occurred. Re-keyed to the real signal: `done` reports
+  `:verified-green?` when its ship-verify rung is green
+  (`ship.clj`), and `tool-step` stamps `mark-green` + `clear-reframe` on
+  it — a green suite run is the branch's last known-good state.
+  `snapshot-covers? [branch]` reads the cursor; steer-step passes
+  `(state/snapshot-covers? branch)` where a hard-coded `nil` used to be.
+  The dead proof-era `:sketch`/`:confirmed` cond clauses are gone from
+  `tool-step`, and the explore-cap valve's message no longer tells
+  branches to use Lean (pinned by `explore-cap-prose-names-the-current-
+  surface`). Tests: `green-verify-marks-the-green-point`, rewritten
+  `safe-state-coverage-gate`, prose pin; live probe verified the gate
+  trips at 2× cull with a rendered message.
 - **#2 intervention 400 — withdrawn**, see the issue text: fixed at the
   control layer since review3; this pass searched the wrong layer.
 - **#3 `lsp shutdown!` — WIRED** via new `client/shutdown-all!` (locking,

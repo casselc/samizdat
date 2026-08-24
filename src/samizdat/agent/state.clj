@@ -70,11 +70,10 @@
    ;; the signal measures (dirge PR 740).
    :mechanics {:calls 0 :parse-errors 0 :auto-repairs 0
                :unknown-tools 0 :truncations 0 :multi-fences 0}
-   ;; The draft/prove split (vf-b25): :explore until a sketch is on record,
-   ;; :build after. Verification is withheld during explore — the harness's
-   ;; one reliably-working gate is the one that WITHHOLDS — and sketch is
-   ;; withheld after, or a branch that cannot prove anything retreats into
-   ;; re-planning forever.
+   ;; The draft/commit split (vf-b25): :explore until the cap, :build
+   ;; after — the phase-valve message tells the branch why. Withholding
+   ;; here is the harness's one reliably-working gate: explore cannot
+   ;; become an endless planning loop.
    :phase :explore
    ;; The turn the CURRENT phase began, not when the branch did. Starts at
    ;; branch creation so a forked branch gets a full explore budget instead
@@ -684,10 +683,10 @@
         now   (count (:turns branch))]
     (cond
       (nil? green)
-      {:ok false :reason "no confirmed result to fall back to"}
+      {:ok false :reason "no green verify to fall back to"}
 
       (> green now)
-      {:ok false :reason "the turn log no longer reaches the confirmed point — the journal was pruned or rewritten, and replaying past it would produce a session that never existed"}
+      {:ok false :reason "the turn log no longer reaches the green point — the journal was pruned or rewritten, and replaying past it would produce a session that never existed"}
 
       :else
       {:ok true :rewinding (- now green)})))

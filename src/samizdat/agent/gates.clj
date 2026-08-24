@@ -96,16 +96,16 @@
     :priority 2
     :budget :max-safe-state-aborts
     :doc "DS1's third failure rung. The branch has failed repeatedly since a
-          confirmation, so what it changed since is the suspect, not the
-          claim. Advisory by default: it names the fallback rather than
-          performing it, because a restore that is not fully covered produces a
-          session that never existed."
+          green ship-verify, so what it changed since is the suspect, not
+          the approach. Advisory by default: it names the fallback rather
+          than performing it, because a restore that is not fully covered
+          produces a session that never existed."
     :when (fn [{:keys [branch]}]
             (state/safe-state-due? branch (threshold :cull-threshold)))
     :message (fn [{:keys [branch safe-state-coverage]}]
                (str (prompt "safe-state")
-                    "\n\nYour last confirmed result was at turn "
-                    (:green-snapshot branch) ". "
+                    "\n\nYour last green test run was at turn "
+                     (:green-snapshot branch) ". "
                     (if (:ok safe-state-coverage)
                       (str "Every turn since is journalled, so replaying up to"
                            " that point is a state the branch actually occupied"
