@@ -116,12 +116,21 @@
 ;; A route is [method pattern handler]. A pattern segment starting with ':'
 ;; binds; the bindings arrive under :path-params.
 
+(def ^:private slow-ms-cap 10000)
+
+(defn- clamp-slow-ms
+  "/slow exists so the smoke probe can prove /health still answers while a
+  handler is busy; its ms parameter is a dial for \"briefly busy\", not a lease
+  on a connection thread, so it is clamped (review3 #4)."
+  [ms]
+  (min (max (or ms 1000) 0) slow-ms-cap))
+
 (defn- slow
   "Sleeps, so the smoke probe can prove /health still answers while a handler is
   busy. That is the property the vendored thread-per-connection change buys and
   the reason a multi-minute beam can share a process with a UI."
   [req]
-  (let [ms (or (some-> (query-param req "ms") parse-long) 1000)]
+  (let [ms (clamp-slow-ms (long-param req "ms"))]
     (Thread/sleep ms)
     (json-response {:slept_ms ms})))
 

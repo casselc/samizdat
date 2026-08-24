@@ -22,7 +22,8 @@
   (:require [clojure.test :refer [deftest testing is]]
             [jolt.process :as p]
             [ring-chez.adapter :as adapter]
-            [samizdat.api.control :as control]))
+            [samizdat.api.control :as control]
+            [samizdat.server :as server]))
 
 (defn- request [body]
   (str "POST /v1/runs HTTP/1.1\r\n"
@@ -30,6 +31,20 @@
        "Content-Length: " (alength (.getBytes body "UTF-8")) "\r\n"
        "\r\n"
        body))
+
+(deftest slow-clamps-its-sleep
+  ;; /slow exists so the smoke probe can prove /health still answers while a
+  ;; handler is busy; its ms parameter is a dial for "briefly busy", not a
+  ;; lease on a connection thread, so it is clamped (review3 #4). Resolved at
+  ;; runtime so the missing var reads as a failing assertion, not a dead file.
+  (let [clamp (resolve 'samizdat.server/clamp-slow-ms)]
+    (is (some? clamp) "clamp-slow-ms exists")
+    (when clamp
+      (testing "the dial has both ends"
+        (is (= 1000 (@clamp nil)) "no parameter means the default")
+        (is (= 250 (@clamp 250)) "an in-range value passes through")
+        (is (= 10000 (@clamp 999999999)) "the ceiling holds")
+        (is (= 0 (@clamp -5)) "a negative asks to sleep nothing")))))
 
 (deftest content-length-is-octets-not-characters
   ;; A 3-byte em-dash decodes to one char. Judging completeness by char count

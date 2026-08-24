@@ -56,6 +56,8 @@
 ;; SOL_SOCKET / SO_REUSEADDR differ by platform: macOS 0xffff / 4, Linux 1 / 2.
 (def ^:private sol-socket  (if macos? 0xffff 1))
 (def ^:private so-reuse    (if macos? 4 2))
+;; SO_RCVTIMEO likewise: macOS 0x1006, Linux 20.
+(def ^:private so-rcvtimeo (if macos? 0x1006 20))
 ;; F_GETFD / F_SETFD / FD_CLOEXEC are 1 / 2 / 1 on both macOS and Linux.
 (def ^:private f-getfd     1)
 (def ^:private f-setfd     2)
@@ -125,8 +127,28 @@
     (close-on-exec! fd)
     fd))
 
+(defn- set-recv-timeout!
+  "review3 #4: without a receive timeout, a client that sent its headers and
+  stalled held this connection thread in recv for the life of the server.
+  A kernel timeout turns the stall into a dead recv, which read-request reads
+  as a dropped connection. struct timeval is two time_t-width fields; the usec
+  half is written full-width so both layouts find the value in place (macOS
+  stores int32 there, and a value under 2^31 leaves the padding bytes zero)."
+  [fd ms]
+  (try
+    (let [tv (ffi/alloc 16)]
+      (ffi/write tv :int64 0 (quot (long ms) 1000))
+      (ffi/write tv :int64 8 (* 1000 (rem (long ms) 1000)))  ; tv_usec is µs
+      (try (c-setsockopt fd sol-socket so-rcvtimeo tv 16)
+           (finally (ffi/free tv))))
+    (catch Throwable _ nil)))
+
 ;; --- request reading --------------------------------------------------------
 (def ^:private bufsize 65536)
+
+;; review3 #4: every body this API takes is JSON; 2 MiB is far past any real
+;; request and stops a Content-Length claim from being buffered in full.
+(def ^:private max-request 2097152)
 
 (defn- content-length [text hdr-end]
   (let [hdrs (str/lower-case (subs text 0 hdr-end))
@@ -147,16 +169,51 @@
     (>= (alength (.getBytes (subs acc (+ hdr-end 4)) "UTF-8"))
         (content-length acc hdr-end))))
 
-;; read a full request (headers + Content-Length body) into a string, or nil.
-(defn- read-request [conn]
+;; review3 #5: read-bytes decodes exactly the octets it is handed, so decoding
+;; each recv separately and str-ing the pieces together turned a multibyte
+;; UTF-8 char split across packets into U+FFFD replacement chars. Octets
+;; accumulate raw in one buffer — read-into! appends each recv's slice — and
+;; the string is decoded once, from all of them at a time.
+(defn- decode-acc [acc len]
+  (let [p (ffi/alloc (max 1 len))]
+    (try
+      (ffi/write-array p acc 0 len)
+      (ffi/read-bytes p len)
+      (finally (ffi/free p)))))
+
+;; review3 #3: with no Content-Length header, content-length answered 0, so a
+;; chunked body looked complete the moment its headers arrived and the handler
+;; ran on whatever fragment landed in the first recv. This adapter speaks
+;; Content-Length only; a request carrying any Transfer-Encoding is refused
+;; with 411 rather than served as a silent truncation.
+(defn- chunked? [text]
+  (when-let [hdr-end (str/index-of text "\r\n\r\n")]
+    (boolean (str/index-of (str/lower-case (subs text 0 hdr-end))
+                           "transfer-encoding:"))))
+
+;; read a full request (headers + Content-Length body), or a keyword saying
+;; why it could not be read: ::chunked (411) / ::too-large (413). nil means
+;; the connection ended before the request was complete — an incomplete
+;; request is dropped, never handed on as a truncated one.
+(defn- read-request [conn max-bytes]
   (let [buf (ffi/alloc bufsize)]
     (try
-      (loop [acc ""]
+      (loop [acc (byte-array bufsize), len 0]
         (let [n (c-recv conn buf bufsize 0)]
           (if (<= n 0)
-            (when (pos? (count acc)) acc)
-            (let [acc (str acc (ffi/read-bytes buf n))]
-              (if (request-complete? acc) acc (recur acc))))))
+            nil
+            (let [need (+ len n)]
+              (if (> need max-bytes)
+                ::too-large
+                (let [acc (if (> need (alength acc))
+                            (java.util.Arrays/copyOfRange acc 0 (* 2 need))
+                            acc)]
+                  (ffi/read-into! buf acc len n)
+                  (let [text (decode-acc acc need)]
+                    (cond
+                      (chunked? text)          ::chunked
+                      (request-complete? text) text
+                      :else                    (recur acc need)))))))))
       (finally (ffi/free buf)))))
 
 ;; --- request -> Ring map ----------------------------------------------------
@@ -191,7 +248,9 @@
 (def ^:private status-text
   {200 "OK" 201 "Created" 204 "No Content" 301 "Moved Permanently" 302 "Found"
    303 "See Other" 304 "Not Modified" 400 "Bad Request" 401 "Unauthorized"
-   403 "Forbidden" 404 "Not Found" 405 "Method Not Allowed" 500 "Internal Server Error"})
+   403 "Forbidden" 404 "Not Found" 405 "Method Not Allowed"
+   411 "Length Required" 413 "Payload Too Large"
+   500 "Internal Server Error"})
 
 (defn- body->string [b]
   (cond (nil? b) ""
@@ -238,11 +297,23 @@
 ;; clears `running?`; the loop then exits instead of spinning on the dead fd.
 ;; VERIFRAME: one connection's full lifecycle, extracted so the accept loop can
 ;; hand it to a worker instead of running it inline.
-(defn- serve-conn [conn handler port]
+(defn- serve-conn [conn handler port opts]
   (try
     (try
-      (when-let [text (read-request conn)]
-        (send-all conn (response->string (handler (request->ring text port)))))
+      (set-recv-timeout! conn (get opts :read-timeout-ms 30000))
+      (let [r (read-request conn (get opts :max-request-bytes max-request))]
+        (cond
+          (nil? r) nil
+          (= ::chunked r)
+          (send-all conn (response->string
+                          {:status 411 :headers {"Content-Type" "text/plain"}
+                           :body "Length Required: this server reads Content-Length bodies only"}))
+          (= ::too-large r)
+          (send-all conn (response->string
+                          {:status 413 :headers {"Content-Type" "text/plain"}
+                           :body "Payload Too Large"}))
+          :else
+          (send-all conn (response->string (handler (request->ring r port))))))
       (catch Throwable _e
         (try (send-all conn (response->string {:status 500
                                                :headers {"Content-Type" "text/plain"}
@@ -250,7 +321,7 @@
              (catch Throwable _ nil))))
     (finally (c-close conn))))
 
-(defn- serve-loop [listen-fd handler port running?]
+(defn- serve-loop [listen-fd handler port running? opts]
   (loop []
     (let [conn (c-accept listen-fd ffi/null ffi/null)]
       (cond
@@ -264,18 +335,21 @@
           ;; connection is marked too — otherwise a subprocess spawned while a
           ;; request is in flight holds that client's socket open.
           (close-on-exec! conn)
-          (future (serve-conn conn handler port))
+          (future (serve-conn conn handler port opts))
           (recur))))))
 
 (defn run-server
   "Start the server; return a handle {:socket :port :running}. The accept loop
   runs on a background thread; the handler is a synchronous Ring handler. opts:
-  :port (default 3000)."
+  :port (default 3000), :read-timeout-ms (default 30000 — how long a connection
+  may stall mid-request before the server drops it), :max-request-bytes
+  (default 2 MiB — larger requests are refused with 413)."
   [handler opts]
   (let [port (get opts :port 3000)
         fd (listen-socket port)
-        running? (atom true)]
-    (future (serve-loop fd handler port running?))
+        running? (atom true)
+        opts (merge {:read-timeout-ms 30000 :max-request-bytes max-request} opts)]
+    (future (serve-loop fd handler port running? opts))
     {:socket fd :port port :running running?}))
 
 (defn stop-server
