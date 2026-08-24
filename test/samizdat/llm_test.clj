@@ -559,6 +559,24 @@
         ;; and the model replies after it rather than inside it.
         (is (true? (:prefix (last msgs))))))
 
+    (testing "chat-body gates prefill through the protocol, not a private twin"
+      ;; review3 #14: chat-body consulted a private supports-prefill? while
+      ;; the protocol method delegated to it — two paths deciding one
+      ;; question, so a provider update touching one left the other behind.
+      ;; The protocol method is the only gate now: overriding it must change
+      ;; what chat-body sends, in BOTH directions, whatever the config says.
+      (let [v1 {:model "m" :base-url "https://api.deepseek.com/v1"}
+            a (registry/adapter-for :deepseek)
+            opts {:messages [{:role "user" :content "go"}] :prefill "```tool-call\n"}]
+        (with-redefs [adapter/prefill-support? (fn [_ _] true)]
+          (is (some #(and (= "assistant" (:role %)) (true? (:prefix %)))
+                    (:messages (adapter/chat-body a v1 opts)))
+              "protocol says yes on a /v1 config → prefill is sent anyway"))
+        (with-redefs [adapter/prefill-support? (fn [_ _] false)]
+          (is (= [{:role "user" :content "go"}]
+                 (:messages (adapter/chat-body a v1 opts)))
+              "protocol says no → no trailing assistant message"))))
+
     (testing "the models listing does not follow chat onto the beta path"
       ;; /beta is a chat-completions variant: it serves prefix completion and
       ;; returns 404 for /beta/models. Pointing the listing at it turned the

@@ -82,8 +82,11 @@
       {"Authorization" (str "Bearer " k)}
       {}))
 
-  (chat-body [_ config {:keys [messages max-tokens temperature prefill force-tool]}]
-   (let [use-prefill? (and prefill (supports-prefill? provider-id config))]
+  (chat-body [this config {:keys [messages max-tokens temperature prefill force-tool]}]
+   ;; The gate is the protocol method on THIS adapter (review3 #14), so the
+   ;; answer a caller can query and the answer chat-body acts on are one
+   ;; path and cannot drift apart.
+   (let [use-prefill? (and prefill (adapter/prefill-support? this config))]
     (cond-> {:model (:model config)
              :messages (if use-prefill?
                          ;; `:prefix true` is what makes the provider CONTINUE
