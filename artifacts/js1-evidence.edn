@@ -3,9 +3,10 @@
  :js1/record-date "2026-08-24"
  :js1/baseline
  {:samizdat {:branch "js1-bounded-samizdat"
+             :revision "db1226f"
              :recovery-base "321661649e174bb748adeb6970dad6c166003343"
              :upstream-base "dae78547a66c80f31fa7a78d0f9483186a2b0af9"
-             :closure-changes :pending-commit}
+             :closure-changes :committed}
   :jolt {:revision "279bca18bbf50f37b8574a4e6998dee40313cd26"
          :branch "js1-runtime-current-upstream"
          :upstream-base "edda7aec"

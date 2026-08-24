@@ -8,10 +8,9 @@ gates are evidence gaps, not a decision to replace it.
 
 ## Baseline
 
-- Samizdat branch: `js1-bounded-samizdat`, recovery base
-  `321661649e174bb748adeb6970dad6c166003343`, rebased on current upstream
-  `dae78547a66c80f31fa7a78d0f9483186a2b0af9`; deterministic closure changes
-  are pending commit.
+- Samizdat branch: `js1-bounded-samizdat` at
+  `db1226f`, whose recovery base `321661649e174bb748adeb6970dad6c166003343`
+  was rebased on current upstream `dae78547a66c80f31fa7a78d0f9483186a2b0af9`.
 - Current Jolt evaluator runtime:
   `279bca18bbf50f37b8574a4e6998dee40313cd26` on
   `js1-runtime-current-upstream`, rebased on upstream `edda7aec`.

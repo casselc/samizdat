@@ -29,7 +29,7 @@ pin records.
 
 | Component | Coordinate |
 |---|---|
-| Samizdat | this repo — current source is branch `js1-bounded-samizdat` @ `321661649e174bb748adeb6970dad6c166003343` plus the uncommitted JS1 working tree (`bin/js1 check` reports the actual checkout state at run time) |
+| Samizdat | this repo — current source is branch `js1-bounded-samizdat`; `bin/js1 check` reports the actual checkout state at run time |
 | Jolt runtime | `https://github.com/casselc/jolt` branch `js1-runtime-current-upstream` @ **`279bca18bbf50f37b8574a4e6998dee40313cd26`** ("test: wire current SCI evaluator gates"; the branch is rebased onto current upstream `edda7aec`, so the pre-rebase SHAs are superseded) |
 | SCI | `borkdude/sci` **0.13.53**, vendored as the Jolt checkout's `vendor/sci` submodule @ **`32d62a5136ad3dc148588752f5bcc4cc30b14752`** |
 | SCI deps | from the submodule's own `deps.edn` at that commit: `borkdude/edamame` 1.5.39, `org.babashka/sci.impl.types` 0.0.3, `borkdude/graal.locking` 0.0.2, and `org.clojure/tools.reader` 1.5.2 transitively via edamame's POM |
@@ -199,7 +199,7 @@ time):
     $ bin/js1 check
     js1 runtime stack: OK
       samizdat: /home/chuck/opencode/src/samizdat
-                git 321661649e174bb748adeb6970dad6c166003343 (6 tracked file(s) modified)
+                git <captured checkout revision> (the command reports the actual checkout state)
       jolt:     /home/chuck/opencode/src/jolt
                 279bca18bbf50f37b8574a4e6998dee40313cd26 (https://github.com/casselc/jolt branch js1-runtime-current-upstream)
       sci:      /home/chuck/opencode/src/jolt/vendor/sci
