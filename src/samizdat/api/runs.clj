@@ -42,7 +42,10 @@
                  {:id (:id r) :problem (:problem r) :status (:status r)
                   :model (:model r) :beam_width (:beam_width r)
                   :started_at (:started_at r) :ended_at (:ended_at r)})
-               (runs/list-runs conn (or limit 50)))})
+               ;; review3 #12: a negative limit went into SQL LIMIT, where
+               ;; -1 means no limit — a tighter-looking ask that answered
+               ;; with the whole table.
+               (runs/list-runs conn (max 0 (or limit 50))))})
 
 (def stall-threshold-ms
   "How long a running run may say nothing before a reader should doubt it.
@@ -102,7 +105,10 @@
   "Everything after `since`. The `next` cursor is what the client sends back,
   so a poller never has to reason about timestamps or ordering."
   [conn run-id since limit]
-  (let [events (journal/events-since conn run-id (or since 0) (or limit 200))]
+  (let [events (journal/events-since conn run-id (or since 0)
+                                     ;; review3 #12: as list-runs — a negative
+                                     ;; limit is LIMIT -1, i.e. no limit.
+                                     (max 0 (or limit 200)))]
     {:run_id run-id
      :events (mapv #(update % :data parse-json) events)
      :next (or (:id (last events)) (or since 0))

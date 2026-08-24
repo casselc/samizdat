@@ -51,11 +51,39 @@
       (try (json/read-str (if (string? b) b (slurp b)) :key-fn keyword)
            (catch Throwable _ nil)))))
 
+(defn- url-decode
+  "review3 #12: query values arrive %XX-encoded with + for space. Decode to
+  bytes and build the string once from UTF-8, so a multibyte char spread
+  across escapes reassembles whole. A % that does not head a valid escape
+  passes through raw — the client already sent it, and a bad query string
+  should not become a 500."
+  [s]
+  (if-not (or (str/includes? s "%") (str/includes? s "+"))
+    s
+    (let [hex? (fn [c] (try (Integer/parseInt (str c) 16) true
+                            (catch Throwable _ false)))
+          out (java.io.ByteArrayOutputStream.)]
+      (loop [i 0]
+        (if (>= i (count s))
+          (String. (.toByteArray out) "UTF-8")
+          (let [c (nth s i)]
+            (cond
+              (= c \+) (do (.write out 32) (recur (inc i)))
+              (and (= c \%)
+                   (< (+ i 2) (count s))
+                   (hex? (nth s (inc i)))
+                   (hex? (nth s (+ i 2))))
+              (do (.write out (Integer/parseInt (subs s (inc i) (+ i 3)) 16))
+                  (recur (+ i 3)))
+              :else (do (doseq [b (.getBytes (str c) "UTF-8")] (.write out b))
+                        (recur (inc i))))))))))
+
 (defn- query-param [req k]
-  (some-> (:query-string req)
-          (str/split #"&")
-          (->> (keep #(let [[a v] (str/split % #"=" 2)] (when (= a k) v)))
-               first)))
+  (when-let [qs (:query-string req)]
+    (some->> (str/split qs #"&")
+             (keep #(let [[a v] (str/split % #"=" 2)] (when (= a k) v)))
+             first
+             url-decode)))
 
 (defn- long-param [req k] (some-> (query-param req k) parse-long))
 

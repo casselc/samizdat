@@ -249,8 +249,8 @@
   {200 "OK" 201 "Created" 204 "No Content" 301 "Moved Permanently" 302 "Found"
    303 "See Other" 304 "Not Modified" 400 "Bad Request" 401 "Unauthorized"
    403 "Forbidden" 404 "Not Found" 405 "Method Not Allowed"
-   411 "Length Required" 413 "Payload Too Large"
-   500 "Internal Server Error"})
+   409 "Conflict" 411 "Length Required" 413 "Payload Too Large"
+   500 "Internal Server Error" 503 "Service Unavailable"})
 
 (defn- body->string [b]
   (cond (nil? b) ""
@@ -286,11 +286,17 @@
 (defn- send-all [conn s]
   (let [buf (ffi/alloc (max 1 (* 4 (count s))))     ; UTF-8 worst case 4 bytes/char
         n (ffi/write-bytes buf s)]
-    (loop [off 0]
-      (when (< off n)
-        (let [sent (c-send conn (+ buf off) (- n off) 0)]
-          (when (pos? sent) (recur (+ off sent))))))
-    (ffi/free buf)))
+    (try
+      (loop [off 0]
+        (when (< off n)
+          (let [sent (c-send conn (+ buf off) (- n off) 0)]
+            (if (pos? sent)
+              (recur (+ off sent))
+              ;; review3 #12: returning here with bytes unwritten would leave
+              ;; the client holding a Content-Length-complete truncated body
+              ;; — a lie that parses. Throw; serve-conn's error path closes.
+              (throw (ex-info "send() stopped mid-body" {:wrote off :of n}))))))
+      (finally (ffi/free buf)))))
 
 (defn- drain!
   "Read and discard what the peer still has in flight, bounded by the recv
@@ -344,7 +350,9 @@
   (loop []
     (let [conn (c-accept listen-fd ffi/null ffi/null)]
       (cond
-        (not @running?) nil
+        ;; review3 #12: a connection accepted inside the stop-server window
+        ;; was dropped with its fd still open. Close what accept handed back.
+        (not @running?) (do (when (>= conn 0) (c-close conn)) nil)
         (neg? conn) (when @running? (recur))
         :else
         (do

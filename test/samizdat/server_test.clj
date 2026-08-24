@@ -19,7 +19,8 @@
 (ns samizdat.server-test
   "The vendored ring adapter's request reader, and the listen socket's
   close-on-exec."
-  (:require [clojure.test :refer [deftest testing is]]
+  (:require [clojure.string :as str]
+            [clojure.test :refer [deftest testing is]]
             [jolt.process :as p]
             [ring-chez.adapter :as adapter]
             [samizdat.api.control :as control]
@@ -172,3 +173,43 @@
                                             :reasoning_effort "high"})]
         (is (= :deepseek (:provider r)))
         (is (= 16384 (:max-tokens r)))))))
+
+(deftest refusals-carry-their-own-reason-phrase
+  ;; review3 #12: status-text knew 409 and 503 not, and the status line fell
+  ;; back to "OK" — a refusal that read as a success on the wire. Both are
+  ;; statuses this API actually sends (abort/resume 409, start 503).
+  (is (str/starts-with? (#'adapter/response->string
+                         {:status 409 :headers {} :body "x"})
+                        "HTTP/1.1 409 Conflict"))
+  (is (str/starts-with? (#'adapter/response->string
+                         {:status 503 :headers {} :body "x"})
+                        "HTTP/1.1 503 Service Unavailable")))
+
+(deftest a-failed-send-throws-rather-than-truncating
+  ;; review3 #12: send-all stopped silently when c-send answered <= 0, so the
+  ;; client read a body that ended exactly where the socket died while
+  ;; Content-Length promised more — a well-formed lie. Throwing hands the
+  ;; connection to serve-conn's error path instead.
+  (let [fd (adapter/c-socket 2 1 0)]
+    (when (neg? fd) (throw (ex-info "socket() failed in test setup" {})))
+    (try
+      (#'adapter/c-close fd)
+      (is (thrown? Throwable (#'adapter/send-all fd "x"))
+          "send on a dead fd must not return as if it wrote")
+      (finally (#'adapter/c-close fd)))))
+
+(deftest query-params-are-percent-decoded
+  ;; review3 #12: values arrived raw from the query string, so %XX stayed %XX
+  ;; and + stayed +. The API's own params are numeric, but a steer or a UI
+  ;; search that ever carries text should not have to know the adapter's
+  ;; omission.
+  (let [q (fn [qs k] (#'server/query-param {:query-string qs} k))]
+    (testing "plain values pass through"
+      (is (= "250" (q "ms=250" "ms"))))
+    (testing "+ is space"
+      (is (= "a b" (q "ms=a+b" "ms"))))
+    (testing "%XX decodes, byte-exact across a UTF-8 sequence"
+      (is (= "€" (q "ms=%E2%82%AC" "ms")))
+      (is (= "50%" (q "ms=50%25" "ms"))))
+    (testing "a lone % the client never escaped survives"
+      (is (= "50%" (q "ms=50%" "ms"))))))

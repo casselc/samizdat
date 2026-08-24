@@ -229,16 +229,24 @@
       {:status 400
        :body {:error {:message "a grant intervention needs payload.pattern — the shell glob to allow"
                      :run_id run-id}}})
-    (let [id (interventions/submit! conn run-id
-                                    {:branch-id (:branch_id body)
-                                     :kind (:kind body)
-                                     :payload (:payload body)
-                                     :issued-by (or (:issued_by body) "human")})]
-      {:body
-       {:id id
-        :status "pending"
-        ;; Said plainly rather than implied, because the difference between
-        ;; accepted and applied is the thing a UI most easily lies about.
-        :note "Queued. It applies at the branch's next turn boundary, not now."}})))
+    (if-not (contains? interventions/kinds (:kind body))
+      ;; review3 #12: this reached submit!'s throw and surfaced as the
+      ;; server's catch-all 500. An unknown kind is the client's mistake.
+      {:status 400
+       :body {:error {:message (str "Unknown intervention kind " (pr-str (:kind body))
+                                    "; known: "
+                                    (str/join ", " (sort (keys interventions/kinds))))}
+              :run_id run-id}}
+      (let [id (interventions/submit! conn run-id
+                                      {:branch-id (:branch_id body)
+                                       :kind (:kind body)
+                                       :payload (:payload body)
+                                       :issued-by (or (:issued_by body) "human")})]
+        {:body
+         {:id id
+          :status "pending"
+          ;; Said plainly rather than implied, because the difference between
+          ;; accepted and applied is the thing a UI most easily lies about.
+          :note "Queued. It applies at the branch's next turn boundary, not now."}}))))
 
 (defn kinds [] {:kinds interventions/kinds})

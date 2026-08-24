@@ -30,6 +30,7 @@
             [samizdat.agent.loop :as aloop]
             [samizdat.agent.state :as state]
             [samizdat.api.control :as api-control]
+            [samizdat.api.runs :as api-runs]
             [samizdat.llm.client :as llm]
             [samizdat.security.policy :as policy]
             [samizdat.store.db :as db]
@@ -145,3 +146,27 @@
         (is (= 409 (:status (api-control/abort! c rid))))
         (is (= "completed" (:status (runs/get-run c rid))))
         (finally (swap! api-control/active dissoc rid))))))
+
+(deftest an-unknown-intervention-kind-is-a-400-not-a-500
+  ;; review3 #12: submit! throws on an unknown kind, and intervene! let it
+  ;; fly through to the server's catch-all 500. A bad request is the
+  ;; client's to fix; the API should say 400 and name the known kinds.
+  (with-db [c]
+    (let [rid (runs/start-run! c {:problem "p"})]
+      (let [r (api-control/intervene! c rid {:kind "explode" :payload "x"})]
+        (is (= 400 (:status r)) "refused with a client error")
+        (is (str/includes? (str (get-in r [:body :error :message])) "kind")
+            "the message says what was wrong")
+        (is (empty? (interventions/pending c rid))
+            "nothing was queued")))))
+
+(deftest a-negative-limit-is-not-a-disguised-no-limit
+  ;; review3 #12: a negative limit went straight into SQL LIMIT, and SQLite
+  ;; reads LIMIT -1 as no limit at all — so ?limit=-1 answered with the whole
+  ;; table while looking like a tighter ask. The API edge clamps it to zero.
+  (with-db [c]
+    (dotimes [_ 3] (runs/start-run! c {:problem "p"}))
+    (testing "a negative limit returns nothing, not everything"
+      (is (= 0 (count (:runs (api-runs/list-runs c -1))))))
+    (testing "a positive limit still bounds"
+      (is (= 2 (count (:runs (api-runs/list-runs c 2))))))))
