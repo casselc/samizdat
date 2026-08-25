@@ -33,7 +33,13 @@
   A gate that fires records what it expects to happen next, and a later turn
   settles that prediction from the journal with no model in the path. A gate
   whose predictions never settle is not steering anything, and that is
-  measurable rather than arguable."
+  measurable rather than arguable.
+
+  MECHANISM, with nothing of its own to say. Every input to the choice is gate
+  DATA: which gates exist and their :when forms, their :priority, and the
+  budget key each spends against. This namespace filters on those, sorts on
+  those, and takes the first. So a project retunes what the harness says to a
+  branch, and when, by editing gates.edn — not by editing this."
   (:require [samizdat.agent.gates :as gates]
             [samizdat.agent.state :as state]
             [samizdat.util :as util]))

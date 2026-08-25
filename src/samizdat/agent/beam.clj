@@ -17,19 +17,45 @@
 ;; SPDX-License-Identifier: GPL-3.0-or-later
 
 (ns samizdat.agent.beam
-  "The beam: many branches advancing the same problem in parallel.
+  "The beam's CAPABILITIES: what it takes to run many branches at once, with
+  none of the judgement about which of them should live.
 
-  Each branch carries its own Prolog session, message history and turn log.
-  The only thing they share is the failure log, and that sharing is the point:
-  an approach one branch disproved should not be retried by another. It is
-  FTS-ranked rather than broadcast whole, so a branch is shown the failures
-  most like what it just tried instead of everything everyone ever got wrong.
+  The round itself is manifests/beam.edn, and the decisions inside it are
+  cells/beam.clj — both userspace, both this project's own copy. What is left
+  here is the set of pieces that round is assembled from, and this docstring's
+  job is to say why each one is a piece rather than a policy that got away.
 
-  Scheduling is a barrier per turn: every active branch advances once, then
-  culls, forks and the done check run against the settled set. A pipeline would
-  be faster in wall clock, but a branch deciding whether to fork needs the
-  failure log as of the whole beam's last turn, not as of whenever it happened
-  to finish.
+  MECHANISM, deliberately:
+
+  - `advance-branch` / `advance-all` — drive one branch through its turn
+    manifest, and fan that out over the active set under a deadline. The
+    barrier is structural, not a preference: a branch deciding whether to fork
+    needs the failure log as of the whole beam's last round, not as of whenever
+    a sibling happened to finish. A branch that THROWS is abandoned and a
+    branch that HANGS forfeits its turn — both are fault handling, not a
+    verdict on the branch's line of inquiry, which is why neither touches the
+    failure counters the retention policy reads.
+  - `drain-directives!` — apply a human's instruction at a turn boundary and
+    resolve it in the record. It EXECUTES a decision rather than making one.
+    Its one refusal — a cull that would empty the run — is a safety guard on an
+    irreversible action, of the same kind as refusing to delete the last
+    backup; the alternative is guessing that a person meant to end their run.
+  - `select-done-branch` — rank the branches that shipped. The rubric is
+    already phases.edn data (`state/finished-key`); this just applies it and
+    journals the comparison.
+  - `child-ids` — allocate unused ids for a parent's children. Naming, not
+    deciding.
+  - `record-inactive!`, `dispose-branch-engines!` — write an ending and release
+    what the branch held.
+  - `run-rounds` / `run!` — the driver: compile the round manifest, hand it the
+    branches, own the crash record and the teardown. See `run-rounds` for why
+    those two cannot live in the manifest.
+
+  Each branch carries its own message history and turn log. The only thing they
+  share is the failure log, and that sharing is the point: an approach one
+  branch disproved should not be retried by another. It is FTS-ranked rather
+  than broadcast whole, so a branch is shown the failures most like what it
+  just tried instead of everything everyone ever got wrong.
 
   The width is not treated as justified. The original never measured five
   branches against one branch at five times the turn budget, and
@@ -64,16 +90,17 @@
   Lean can have a child that uses both. Own-lineage results are excluded
   because the child already carries them in its inherited history."
   [conn run-id parent-id]
-  (let [others (remove #(= parent-id (:branch_id %))
+  (let [{:keys [statuses limit]} (gates/threshold :crossover)
+        others (remove #(= parent-id (:branch_id %))
                        (journal/artifacts conn run-id))
-        confirmed (filter #(= "confirmed" (:claim_status %)) others)]
+        confirmed (filter #(contains? statuses (:claim_status %)) others)]
     (when (seq confirmed)
       ;; Tier 2d: the header prose is prompts/crossover.md — runtime-editable,
       ;; the same seam every gate message reads through.
       (str "\n\n"
            (prompt/render "crossover"
              {:artifacts (str/join "\n"
-                                   (for [a (take-last 8 confirmed)]
+                                   (for [a (take-last limit confirmed)]
                                      (str "- [" (:branch_id a) " " (:kind a) "] "
                                           (:claim a))))})))))
 
@@ -121,173 +148,6 @@
                   :inherited (some? (:forked-at b))}))))
       b)))
 
-(defn cull-or-keep
-  "Apply the retention rule to a branch that just failed.
-
-  A branch that banked something recently is never culled — incremental
-  strategies naturally look like verify size N, fail at N+1, verify N+1, and
-  culling them throws away the most productive branch in the beam. The
-  emergency-review gate is what talks to it instead, and the arbiter has
-  already had its say by the time this runs.
-
-  A recent MEASUREMENT counts here as well as a confirmation. A branch
-  locating something empirically confirms nothing by construction, and the run
-  that motivated this culled exactly such a branch at turn 12 with most of its
-  simulation already done (vf-0of). The gates that ask a branch to ship still
-  read confirmations only.
-
-  The scalar rule (consecutive failures, no recent confirmation) is the
-  TRIGGER; the critic's Pareto frontier is the verdict. A triggered branch
-  is culled when a living sibling dominates it on every critic objective,
-  when the critic itself scored the line a dead end, or when no scores
-  exist (the critic is advisory — absent, the scalar rule stands). A
-  triggered branch that is NOT dominated keeps its distinct strengths and
-  survives, journaled and on a clock: at cull-hard-multiple times the
-  threshold the reprieve ends unconditionally, because Pareto's known
-  weakness is permissiveness and a zombie beam is the failure mode.
-
-  A branch inside a REFRAME is spared the failure rule outright (vf-31m). It
-  was told to abandon its approach and it carries the failures that caused the
-  reframe, so without this it dies for exactly the thing it was just told to
-  stop doing — the harness advising and executing on the same turn, which is
-  what the stuck gate's 0-met record was really measuring. Bounded like the
-  Pareto reprieve and for the same reason: :reframe-grace turns, and
-  cull-hard-multiple ends it early. Every cull on the failure path says so
-  when the branch had already been handed a reframe, because the reasons are
-  the run's post-hoc account of itself and are read later as evidence.
-
-  `survivors` is how many other branches would still be running. Culling
-  exists to reallocate the beam's budget to branches doing better; when
-  there is nobody to reallocate to, culling is just an early exit with turns
-  left on the clock. The width sweep found this the direct way: the width-1
-  arm was culled at turn 9 of 12 and the run ended there. The last branch
-  standing is never culled; the stuck and emergency-review gates keep
-  talking to it instead."
-  [{:keys [conn run-id turn]} branch survivors sibling-scores]
-  (let [threshold (gates/threshold :cull-threshold)
-        fails (or (:consecutive-failures branch) 0)
-        mech (or (:consecutive-mechanics-failures branch) 0)
-        pol (or (:consecutive-policy-refusals branch) 0)
-        grace (gates/threshold :reframe-grace)
-        ;; Ever handed a reframe, versus still inside its window. The first
-        ;; belongs in the cull record and the second decides the reprieve.
-        reframed? (some? (:reframe-entered-turn branch))
-        reframing? (state/reframe-active? branch turn grace)
-        cull (fn [why] (assoc branch :status :culled :inactive-reason why))
-        ;; The failure-path cull. A branch that was told to change approach and
-        ;; died failing anyway must say so: the cull reasons are the run's
-        ;; post-hoc explanation of itself and are read later as evidence, and
-        ;; "consecutive failures" alone hides the fact that the harness had
-        ;; already intervened and the intervention did not take (vf-31m).
-        cull-fail (fn [why]
-                    (cull (str why
-                               (when reframed?
-                                 (str "; the branch had already been handed a"
-                                      " reframe and kept failing")))))
-        scores (get-in branch [:critic :scores])
-        hard-floor (* (gates/threshold :cull-hard-multiple) threshold)]
-    (cond
-      ;; A branch that cannot emit a well-formed tool call is bounded, but on
-      ;; its own looser threshold and with its own reason. Three bad fences is
-      ;; a model having a bad turn; twice that is a branch that cannot work the
-      ;; protocol, and saying so beats the dead-end line it used to die with.
-      (and (>= mech (* (gates/threshold :cull-mechanics-multiple) threshold))
-           (pos? survivors))
-      (cull (cond
-              ;; The mechanics counter also counts policy refusals, so the
-              ;; reason has to say which actually happened. gen-30 B3.2 was
-              ;; culled with "could not emit a well-formed fence" when the
-              ;; real cause was a harness parse bug, and the reason was
-              ;; believed; a declined sketch or verification is a well-formed
-              ;; call the harness refused, and naming it as a protocol
-              ;; failure would be the same lie in the permanent record.
-              ;; Which policy declined them is not tracked per refusal, so
-              ;; the reason states the conditions rather than guessing between
-              ;; them. Naming one would be the same class of lie.
-              (and (pos? pol) (= pol mech))
-              (str "culled after " mech " consecutive turns with no usable"
-                   " tool call; every call was declined by harness policy —"
-                   " the branch was in the "
-                   (str/upper-case (name (or (:phase branch) :build))) " phase"
-                   (when reframing? " with its approach withheld")
-                   " and did not change what it was asking for")
-
-              (pos? pol)
-              (str "culled after " mech " consecutive turns with no usable"
-                   " tool call; " pol " were declined by harness policy and "
-                   (- mech pol) " could not emit a well-formed fence")
-
-              :else
-              (str "culled after " mech " consecutive turns with no usable tool"
-                   " call; the branch could not emit a well-formed fence")))
-
-      (not (and (>= fails threshold)
-                (not (state/banked-in-last branch
-                                           (gates/threshold :cull-recent-window)))
-                (pos? survivors)))
-      branch
-
-      ;; Ahead of the reframe reprieve, deliberately: a branch still failing
-      ;; at twice the cull threshold is not reframing, and the reprieve is a
-      ;; loan with a clock rather than an exemption.
-      (>= fails hard-floor)
-      (cull-fail (str "culled after " fails
-                      " consecutive failures; the Pareto reprieve was spent"))
-
-      ;; The reframe reprieve (vf-31m). A branch dropped into a reframe carries
-      ;; the failures that caused it, so without this it is culled for exactly
-      ;; the approach it was just told to abandon — the harness advising and
-      ;; executing on the same turn, which is the bug the stuck gate's 0-met
-      ;; record was really measuring. Nothing is said here: the refusal is
-      ;; already talking to the branch every time it retries the old approach.
-      reframing?
-      (do (when (and conn run-id)
-            (journal/note! conn run-id :cull-spared
-                           {:branch-id (:id branch)
-                            :data {:scores scores :failures fails
-                                   :reframe? true
-                                   :reframe-claim (:reframe-claim branch)}}))
-          branch)
-
-      ;; A dead end is a dead end at any age; the critic's own verdict is
-      ;; the one judgement that does not depend on how long the branch has
-      ;; had to accumulate anything.
-      (and scores (<= (:viability scores) 1))
-      (cull-fail (str "culled after " fails
-                      " consecutive failures; the critic scored the line a dead end"))
-
-      ;; Juvenile grace. Progress and momentum are age-correlated, so a
-      ;; newborn is dominated by its own parent one turn after being forked.
-      ;; Let it express itself first.
-      (< (state/turn-count branch) (gates/threshold :juvenile-grace))
-      (do (when (and conn run-id)
-            (journal/note! conn run-id :cull-spared
-                           {:branch-id (:id branch)
-                            :data {:scores scores :failures fails :juvenile? true}}))
-            (state/add-message
-             branch "user"
-             ;; Tier 2d: the spare's prose is prompts/juvenile-grace.md.
-             (prompt/render "juvenile-grace" {:failures fails})))
-
-      (nil? scores)
-      (cull-fail (str "culled after " fails
-                      " consecutive failures with no recent confirmed work"))
-
-      (critic/dominated? scores sibling-scores)
-      (cull-fail (str "culled after " fails
-                      " consecutive failures; dominated by a sibling on every"
-                      " critic objective"))
-
-      :else
-      (do (when (and conn run-id)
-            (journal/note! conn run-id :cull-spared
-                           {:branch-id (:id branch)
-                            :data {:scores scores :failures fails}}))
-            (state/add-message
-             branch "user"
-             ;; Tier 2d: the reprieve's prose is prompts/cull-reprieve.md.
-             (prompt/render "cull-reprieve" {:failures fails :hard-floor hard-floor}))))))
-
 (defn ensure-scored
   "Fresh critic scores for every active branch, at most one sub-LLM call per
   branch per :critic-every window. A scoring that fails leaves the previous
@@ -306,73 +166,6 @@
                 b))
             b))
         branches))
-
-(defn repopulate
-  "Refill the beam when it has fallen below its target width.
-
-  This is the blocker that kept the frontier from being a frontier. Culling
-  removes width permanently, while the only route back up — the branch-out
-  rung — is gated on a confirmation AND a cooldown. So the population
-  monotonically decayed: five campaign runs, five collapses to a single
-  surviving line, whatever the cap allowed. A genetic algorithm maintains
-  its population; death without replacement is just attrition.
-
-  When fewer branches are alive than the run asked for and the cap has
-  room, the strongest survivor is told to reseed. Deliberately NOT gated on
-  a fresh confirmation: refilling an empty slot is a different act from
-  asking a busy branch for more, and the alternative is a beam that spends
-  the rest of the run at width one. The per-branch cooldown still applies,
-  so one death does not produce a stampede of asks at the same branch.
-
-  This MARKS the branch; it does not speak to it. The ask itself is the
-  :repopulate gate, which reads the mark. It used to append the message here,
-  which made it an invitation rather than a mechanism: no prediction, nothing
-  to settle, no row in the gate tally. gen-17 sent 12 and 9 were declined, and
-  that was invisible until someone counted branch-opened events by hand — the
-  same argument that turned branch-out into a gate. Speaking from here also
-  put a second harness voice on a boundary that had already had its one steer.
-
-  The precondition needs facts only the scheduler has (how many are alive, the
-  target width, which survivor is strongest), which is why the split is mark
-  here, ask there."
-  [{:keys [conn run-id beam-width]} branches total-count turn]
-  (let [cap (gates/threshold :max-total-branches)
-        cooldown (gates/threshold :fork-invite-cooldown)
-        floor (gates/threshold :fork-invite-floor)
-        earning? (fn [b]
-                   ;; The floor (review2 #13, wired): a survivor below the
-                   ;; minimum critic scores is not invited to reseed — growth
-                   ;; does not spend budget on lines not yet earning it.
-                   (every? (fn [[obj minimum]]
-                             (>= (get-in b [:critic :scores obj] 0) minimum))
-                           floor))
-        alive (filterv state/active? branches)
-        target (or beam-width 1)
-        strength (fn [b]
-                   (let [sc (get-in b [:critic :scores])]
-                     [(reduce + 0 (vals (select-keys sc critic/survival-objectives)))
-                      (count (state/confirmed-artifacts b))]))
-        candidate (when (and (< (count alive) target) (< total-count cap))
-                    (->> alive
-                         (remove #(when-let [t (:fork-invited %)]
-                                    (< (- turn t) cooldown)))
-                         (filter earning?)
-                         (sort-by strength)
-                         reverse
-                         first))]
-    (if-not candidate
-      branches
-      (do (when (and conn run-id)
-            (journal/note! conn run-id :repopulate
-                           {:branch-id (:id candidate) :turn turn
-                            :data {:alive (count alive) :target target}}))
-          (mapv #(if (= (:id %) (:id candidate))
-                   (assoc % :fork-invited turn
-                            :repopulate-due turn
-                            :repopulate-alive (count alive)
-                            :repopulate-target target)
-                   %)
-                branches)))))
 
 (defn- child-ids
   "`n` unused child ids for `parent-id`, given the ids already `taken`.
@@ -414,10 +207,10 @@
       (zero? room)
       [[] (state/add-message
            parent "user"
-           (str "[harness] Your branch_theses call asked for " (count pending)
-                " sibling branch(es), but the run is at the cap of " cap
-                " branches. None were spawned; assume the existing branches"
-                " already cover similar ground."))]
+           ;; The prose is prompts/branch-cap.md — the same runtime-editable
+           ;; seam every other harness message reads through.
+           (str "[harness] " (prompt/render "branch-cap"
+                               {:none true :asked (count pending) :cap cap})))]
 
       :else
       ;; Read the taken ids from the branches table rather than counting on
@@ -435,44 +228,37 @@
                      (< take-n (count pending))
                      (state/add-message
                       "user"
-                      (str "[harness] You asked for " (count pending)
-                           " sibling branch(es); the cap of " cap
-                           " allowed " take-n ". The rest were dropped.")))]
+                      (str "[harness] " (prompt/render "branch-cap"
+                                          {:asked (count pending) :cap cap
+                                           :allowed take-n}))))]
         [(vec children) parent]))))
 
-(def default-turn-deadline-ms
-  "A hard ceiling on one branch turn, independent of the HTTP layer's own
-  timeout.
+(defn turn-deadline-ms
+  "The hard ceiling on one branch turn, from gates.edn :turn-deadline-ms.
 
-  Found by the first live beam: B1's provider call hung, and because the
-  scheduler is a barrier the whole beam sat still behind it for fifteen
-  minutes. The TypeScript harness carries the same guard and its comment says
-  why — the socket timeout does not always fire, the connection sits
-  ESTABLISHED with zero throughput, and the caller waits forever.
-
-  This is the RAX-manager principle applied to a branch: the stop path must not
-  depend on the component's cooperation. A branch that blows the deadline
-  forfeits the turn and the beam moves on.
-
-  Sized to the worst LEGITIMATE turn rather than to the typical one, because
-  forfeiting a turn that was about to succeed is expensive twice over: the
-  branch loses the turn and the failure is logged for other branches to avoid.
-  The worst legitimate turn is a provider call at its 300000ms socket timeout
-  followed by a Lean tactic at its own 300000ms, so the old 420000ms could not
-  fit one without a false kill. That is separate from what made the first Lean
-  turn hopeless — a 377927ms Mathlib import inside a 420000ms budget — which is
-  fixed by warming at startup rather than by this number."
+  A policy number, so it lives with the other policy numbers rather than as a
+  constant here — a project whose checks are slower raises it for itself. The
+  env override stays for an operator who needs it for one run without editing
+  the project's policy; the reasoning behind the value is in gates.edn."
+  []
   (or (some-> (System/getenv "HARNESS_TURN_DEADLINE_MS") parse-long)
-      900000))
+      (gates/threshold :turn-deadline-ms)))
 
 (defn drain-directives!
   "Apply pending human directives at the boundary, and record what happened to
   each.
 
-  A directive is never silently dropped. `cull` on the last running branch is
-  refused with a reason rather than obeyed, because obeying it would end the
-  run in a way the person almost certainly did not intend, and rather than
-  guessing we say so."
+  MECHANISM, not policy: this executes a decision a person already made. The
+  `:status :culled` it writes is the human's verdict being carried out, which
+  is why it does not go through the retention cascade and why its reason says
+  'culled by a human' rather than naming a rule.
+
+  A directive is never silently dropped. `cull` on the last running branch — or
+  an untargeted one that would take every branch with it — is refused with a
+  reason rather than obeyed. That is a guard on an irreversible action rather
+  than a judgement about the branches: obeying it would end the run in a way
+  the person almost certainly did not intend, and rather than guessing we say
+  so."
   [{:keys [conn run-id]} branches directives turn]
   (reduce
    (fn [bs d]
@@ -493,10 +279,8 @@
            (if (>= doomed alive)
              (do (interventions/resolve!
                   conn run-id (:id d) :rejected
-                  (if (<= alive 1)
-                    "refused: it is the last branch running"
-                    (str "refused: this would cull all " alive " running branches"
-                         " and end the run — name a branch_id to cull one"))
+                  (prompt/render "directive-refused"
+                    {:last-branch (<= alive 1) :alive alive})
                   turn)
                  bs)
              (do (interventions/resolve! conn run-id (:id d) :applied nil turn)
@@ -577,9 +361,12 @@
 (defn advance-all
   "One turn for every active branch, concurrently, each under a hard deadline.
 
-  A branch that throws is abandoned rather than taking the beam down with it:
-  one failing engine session must not cost the other four their work. A branch
-  that hangs loses only its own turn. Phase 1 proved five concurrent swipl
+  MECHANISM. Both failure paths here are fault handling and neither is a
+  verdict: a branch that throws is abandoned rather than taking the beam down
+  with it, and a branch that hangs forfeits its turn. Crucially neither touches
+  the counters the retention policy reads — the branch did not get an answer to
+  be wrong about, so charging it a verification failure would be the vf-jki
+  mistake in a new place. Phase 1 proved five concurrent swipl
   sessions hold, which is what makes this real parallelism rather than a loop
   wearing futures.
 
@@ -590,7 +377,7 @@
   that never depended on cooperation anyway."
   [ctx branches turn]
   (let [deadline (when (get ctx :iterating-loop? true)
-                   (or (:turn-deadline-ms ctx) default-turn-deadline-ms))
+                   (or (:turn-deadline-ms ctx) (turn-deadline-ms)))
         pending (mapv (fn [b]
                         [b (future
                              (try
@@ -612,9 +399,8 @@
                     (-> b
                         (state/add-message
                          "user"
-                         (str "[harness] Your previous turn exceeded the "
-                              (quot deadline 1000) "s deadline and was abandoned."
-                              " Keep your next response short and call a tool."))
+                         (str "[harness] " (prompt/render "turn-deadline"
+                                             {:seconds (quot deadline 1000)})))
                         (update :timeouts (fnil inc 0))))
                 r)))
           pending)))

@@ -326,6 +326,46 @@
         kind exists to forbid (dirge PR 740). gate-config-is-coherent asserts
         it, and caught this entry claiming otherwise."}
 
+ :turn-deadline-ms
+ {:value 900000 :kind :cost-ceiling :capability-tunable? false
+  :doc "A hard ceiling on ONE branch turn, independent of the HTTP layer's own
+        timeout.
+
+        Found by the first live beam: B1's provider call hung, and because the
+        scheduler is a barrier the whole beam sat still behind it for fifteen
+        minutes. The socket timeout does not always fire — the connection sits
+        ESTABLISHED with zero throughput and the caller waits forever. This is
+        the RAX-manager principle applied to a branch: the stop path must not
+        depend on the component's cooperation.
+
+        Sized to the worst LEGITIMATE turn rather than the typical one, because
+        forfeiting a turn that was about to succeed is expensive twice over —
+        the branch loses the turn AND the failure is logged for other branches
+        to avoid. The worst legitimate turn is a provider call at its 300000ms
+        socket timeout followed by an engine call at its own 300000ms, so the
+        old 420000ms could not fit one without a false kill.
+
+        A project whose checks are slower should raise it, which is exactly why
+        it is here rather than a constant in code. Skipped entirely for a
+        non-iterating manifest (team, feature, decompose), where one 'turn' is
+        the branch's whole job.
+
+        HARNESS_TURN_DEADLINE_MS still overrides, for an operator who needs it
+        for one run without editing the project's policy."}
+
+ :crossover
+ {:value {:statuses #{"confirmed"} :limit 8}
+  :kind :threshold :capability-tunable? false
+  :doc "What a newly forked child is shown of what OTHER lineages have proved.
+
+        This is the recombination half of the beam: a child that inherits only
+        its parent's history deepens one line, while a child opened holding
+        what its aunts and uncles confirmed can COMBINE lineages. :statuses is
+        which claim statuses qualify — engine-confirmed only, by default, since
+        the whole value is that the child can build on it without re-checking.
+        :limit bounds how many, newest first, because this lands in the child's
+        opening context and an unbounded block would crowd out its own thesis."}
+
  :critic-objectives
  {:value [:progress :momentum :distinctness :viability] :kind :threshold
   :capability-tunable? false

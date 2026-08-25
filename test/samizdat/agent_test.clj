@@ -40,6 +40,7 @@
             [samizdat.agent.tools.ship :as ship]
             [samizdat.agent.verify :as verify]
             [samizdat.agent.wordlists :as wordlists]
+            [samizdat.cells :as cells]
             [samizdat.agent.gitdiff :as gitdiff]
             [samizdat.llm.client :as llm]
             [clojure.data.json :as json]
@@ -49,6 +50,21 @@
             [samizdat.store.interventions :as interventions]
             [samizdat.store.journal :as journal]
             [samizdat.store.runs :as runs]))
+
+;; The retention and repopulation cascades moved into cells/beam.clj — they are
+;; POLICY, and policy is userspace (samizdat-adw). These assertions did not
+;; change: same arguments, same expectations, resolved out of the cell's
+;; namespace instead of the harness's. Resolved at CALL time rather than at
+;; load, because the cell namespace does not exist until the loader has run.
+(defn- cell-fn [sym]
+  ;; find-ns first: ns-resolve THROWS on an absent namespace rather than
+  ;; returning nil, so an `or` never reaches its fallback.
+  (when-not (find-ns 'cells.beam) (cells/load-cells!))
+  (or (ns-resolve 'cells.beam sym)
+      (throw (ex-info (str "cells.beam/" sym " did not load") {}))))
+
+(defn- cull-or-keep [& args] (apply (cell-fn 'cull-or-keep) args))
+(defn- repopulate [& args] (apply (cell-fn 'repopulate) args))
 
 ;; --- gates and the arbiter --------------------------------------------------
 
@@ -547,10 +563,10 @@
                 floor)
         "sanity: the weak fixture is below the configured floor")
     (is (empty? (filter :fork-invited
-                        (#'beam/repopulate {:beam-width 3} weak 2 5)))
+                        (repopulate {:beam-width 3} weak 2 5)))
         "no survivor above the floor: nobody is invited to reseed")
     (is (= ["B2"] (mapv :id (filter :fork-invited
-                                    (#'beam/repopulate {:beam-width 3} strong 2 5))))
+                                    (repopulate {:beam-width 3} strong 2 5))))
         "a survivor above the floor is still invited")))
 
 ;; --- the explore/build phase machine (vf-b25, vf-eaw) ----------------------
@@ -601,7 +617,7 @@
                                                       :distinctness 5 :viability 4}
                                              :turn 16})
                        (assoc :turns (vec (repeat 3 {}))))
-          spared (#'beam/cull-or-keep ctx juvenile 2
+          spared (cull-or-keep ctx juvenile 2
                                       [{:progress 5 :momentum 5
                                         :distinctness 5 :viability 4}])
           jm (-> spared :messages peek :content)]
@@ -617,7 +633,7 @@
                                                        :distinctness 4 :viability 3}
                                               :turn 20})
                         (assoc :turns (vec (repeat 20 {}))))
-          kept (#'beam/cull-or-keep ctx reprieved 2 [])
+          kept (cull-or-keep ctx reprieved 2 [])
           rm (-> kept :messages peek :content)]
       (is (state/active? kept) "no dominating sibling, so the reprieve holds")
       (is (str/includes? rm "reprieve ends unconditionally at"))
@@ -647,7 +663,7 @@
                               :turns (vec (repeat 10 {})))]
     (is (some #{:stuck} (map :gate (arbiter/eligible {:branch at-stuck :max-turns 40})))
         "the gate fires at its own threshold")
-    (is (= :active (:status (#'beam/cull-or-keep {:turn 10} at-stuck 2 [])))
+    (is (= :active (:status (cull-or-keep {:turn 10} at-stuck 2 [])))
         "and the branch is not yet cullable when it does")))
 
 (deftest a-lookup-miss-is-not-a-mathematical-failure
@@ -724,9 +740,9 @@
         failing (-> (branch-with :consecutive-failures (gates/threshold :cull-threshold))
                     (assoc :turns (vec (repeat 10 {})))
                     (state/enter-reframe 10 "the greedy exchange terminates"))]
-    (is (= :active (:status (#'beam/cull-or-keep {:turn 11} failing 2 [])))
+    (is (= :active (:status (cull-or-keep {:turn 11} failing 2 [])))
         "spared while it is re-planning")
-    (let [expired (#'beam/cull-or-keep {:turn (+ 10 grace)} failing 2 [])]
+    (let [expired (cull-or-keep {:turn (+ 10 grace)} failing 2 [])]
       (is (= :culled (:status expired)) "the loan comes due")
       (is (str/includes? (:inactive-reason expired) "reframe")
           "and the record says the branch had already been given its chance"))
@@ -735,13 +751,13 @@
       (let [floored (assoc failing :consecutive-failures
                            (* (gates/threshold :cull-hard-multiple)
                               (gates/threshold :cull-threshold)))
-            r (#'beam/cull-or-keep {:turn 11} floored 2 [])]
+            r (cull-or-keep {:turn 11} floored 2 [])]
         (is (= :culled (:status r)))
         (is (str/includes? (:inactive-reason r) "reframe")
             "the reason names what actually happened; the cull reasons are the
              run's post-hoc explanation of itself and are read later as evidence")))
     (testing "a branch with no reframe is culled exactly as before"
-      (is (= :culled (:status (#'beam/cull-or-keep
+      (is (= :culled (:status (cull-or-keep
                                {:turn 11}
                                (dissoc failing :reframe-claim :reframe-entered-turn)
                                2 [])))))))
@@ -981,24 +997,24 @@
                     (assoc :turns (vec (repeat 10 {}))))
         productive (assoc failing :artifacts [{:claim "every element of S satisfies P" :claim-status :confirmed
                                                :turn 5}])]
-    (is (= :culled (:status (#'beam/cull-or-keep {} failing 2 []))))
-    (is (= :active (:status (#'beam/cull-or-keep {} productive 2 []))))
+    (is (= :culled (:status (cull-or-keep {} failing 2 []))))
+    (is (= :active (:status (cull-or-keep {} productive 2 []))))
     (testing "a stale confirmation does not protect it forever"
       (let [stale (assoc failing :artifacts [{:claim "every element of S satisfies P" :claim-status :confirmed
                                               :turn 0}])]
-        (is (= :culled (:status (#'beam/cull-or-keep {} stale 2 []))))))
+        (is (= :culled (:status (cull-or-keep {} stale 2 []))))))
     (testing "the last branch standing is never culled"
       ;; Found by the width sweep: the width-1 arm was culled at turn 9 of 12
       ;; and the run ended there, which reads as evidence against narrow beams
       ;; and is actually a rule fired outside the situation it was written for.
-      (is (= :active (:status (#'beam/cull-or-keep {} failing 0 [])))))
+      (is (= :active (:status (cull-or-keep {} failing 0 [])))))
     (testing "a recent measurement protects it too"
       ;; vf-0of. A branch locating something empirically confirms nothing by
       ;; construction, so the confirmation-only trigger culled exactly the
       ;; branch whose thesis was the measurement.
       (let [measuring (assoc failing :artifacts [{:claim "the rate at sigma = 0.7 is 0.72"
                                                   :claim-status :empirical :turn 5}])]
-        (is (= :active (:status (#'beam/cull-or-keep {} measuring 2 []))))))))
+        (is (= :active (:status (cull-or-keep {} measuring 2 []))))))))
 
 (deftest a-run-can-keep-exploring-after-a-branch-ships
   ;; Winner-takes-all ends a research run at the first qualifying answer.
@@ -1181,18 +1197,18 @@
                                               :turn 16})
                         (assoc :turns (vec (repeat turns {})))))]
       (testing "a branch inside its grace period survives a dominating elder"
-        (let [b (#'beam/cull-or-keep ctx (newborn 3) 2 [mature])]
+        (let [b (cull-or-keep ctx (newborn 3) 2 [mature])]
           (is (state/active? b))
           (is (= 1 (count (filter #(= "cull-spared" (:kind %))
                                   (journal/events-since c rid 0)))))))
       (testing "past the grace period the ordinary rules resume"
-        (is (= :culled (:status (#'beam/cull-or-keep
+        (is (= :culled (:status (cull-or-keep
                                  ctx
                                  (newborn (inc (gates/threshold :juvenile-grace)))
                                  2 [mature])))))
       (testing "grace does not save a branch the critic calls a dead end"
         (let [doomed (assoc-in (newborn 3) [:critic :scores :viability] 1)]
-          (is (= :culled (:status (#'beam/cull-or-keep ctx doomed 2 [])))))))))
+          (is (= :culled (:status (cull-or-keep ctx doomed 2 [])))))))))
 
 (deftest pareto-retention-spares-non-dominated-branches
   ;; The scalar rule is the TRIGGER; domination is the verdict. Three runs in
@@ -1207,7 +1223,7 @@
                                      :critic {:scores scores :turn 6})
                         (assoc :turns (vec (repeat 8 {})))))]
       (testing "failing and dominated: culled"
-        (is (= :culled (:status (#'beam/cull-or-keep
+        (is (= :culled (:status (cull-or-keep
                                  ctx
                                  (failing 3 {:progress 2 :momentum 2
                                              :distinctness 2 :viability 3})
@@ -1215,7 +1231,7 @@
                                  [{:progress 3 :momentum 4
                                    :distinctness 3 :viability 4}])))))
       (testing "failing but non-dominated: spared, journaled, and told"
-        (let [b (#'beam/cull-or-keep
+        (let [b (cull-or-keep
                  ctx
                  (failing 3 {:progress 2 :momentum 2
                              :distinctness 5 :viability 3})
@@ -1228,13 +1244,13 @@
           (is (= 1 (count (filter #(= "cull-spared" (:kind %))
                                   (journal/events-since c rid 0)))))))
       (testing "the critic's own dead-end verdict culls"
-        (is (= :culled (:status (#'beam/cull-or-keep
+        (is (= :culled (:status (cull-or-keep
                                  ctx
                                  (failing 3 {:progress 2 :momentum 2
                                              :distinctness 5 :viability 1})
                                  1 [])))))
       (testing "the hard floor: double the threshold ends the reprieve"
-        (is (= :culled (:status (#'beam/cull-or-keep
+        (is (= :culled (:status (cull-or-keep
                                  ctx
                                  (failing 6 {:progress 2 :momentum 2
                                              :distinctness 5 :viability 5})
@@ -1258,7 +1274,7 @@
           dead (assoc (scored "B3" {:progress 1 :momentum 1 :distinctness 1 :viability 1} 12)
                       :status :culled)]
       (testing "below target width, the strongest survivor is marked to reseed"
-        (let [bs (#'beam/repopulate ctx [strong weak dead] 3 20)
+        (let [bs (repopulate ctx [strong weak dead] 3 20)
               b1 (first (filter #(= "B1" (:id %)) bs))
               b2 (first (filter #(= "B2" (:id %)) bs))]
           (is (= 20 (:fork-invited b1)))
@@ -1273,17 +1289,17 @@
                                   (journal/events-since c rid 0)))))))
       (testing "at or above target width it stays quiet"
         (is (nil? (:fork-invited
-                   (first (#'beam/repopulate ctx [strong weak
+                   (first (repopulate ctx [strong weak
                                                   (scored "B4" {:progress 2 :momentum 2
                                                                 :distinctness 2 :viability 2} 12)]
                                              3 20))))))
       (testing "no room under the cap, no ask"
         (is (nil? (:fork-invited
-                   (first (#'beam/repopulate ctx [strong dead]
+                   (first (repopulate ctx [strong dead]
                                              (gates/threshold :max-total-branches) 20))))))
       (testing "a recent ask is not repeated"
         (is (= 18 (:fork-invited
-                   (first (#'beam/repopulate ctx [(assoc strong :fork-invited 18) dead]
+                   (first (repopulate ctx [(assoc strong :fork-invited 18) dead]
                                              3 20)))))))))
 
 (deftest every-gate-renders-its-message
@@ -1652,15 +1668,15 @@
           babbling (fn [n]
                      (-> (branch-with :id "BM" :consecutive-mechanics-failures n)
                          (assoc :turns (vec (repeat 8 {})))))]
-      (is (state/active? (#'beam/cull-or-keep ctx (babbling threshold) 2 []))
+      (is (state/active? (cull-or-keep ctx (babbling threshold) 2 []))
           "at the verification threshold a mechanics-only branch keeps going")
-      (let [dead (#'beam/cull-or-keep ctx (babbling (* 2 threshold)) 2 [])]
+      (let [dead (cull-or-keep ctx (babbling (* 2 threshold)) 2 [])]
         (is (= :culled (:status dead)))
         (is (re-find #"(?i)tool call|fence|malformed" (:inactive-reason dead))
             (str "the reason must name the real cause, not a dead-end line: "
                  (:inactive-reason dead))))
       (testing "and the last branch standing is never culled for it either"
-        (is (state/active? (#'beam/cull-or-keep ctx (babbling (* 4 threshold)) 0 [])))))))
+        (is (state/active? (cull-or-keep ctx (babbling (* 4 threshold)) 0 [])))))))
 
 (deftest a-branch-culled-on-policy-refusals-is-not-blamed-for-malformed-fences
   ;; Six build-phase `sketch` refusals are six perfectly well-formed calls the
@@ -1678,7 +1694,7 @@
                              :consecutive-policy-refusals (* 2 threshold)
                              :phase :build)
                 (assoc :turns (vec (repeat 8 {}))))
-          dead (#'beam/cull-or-keep ctx b 2 [])]
+          dead (cull-or-keep ctx b 2 [])]
       (is (= :culled (:status dead)))
       (is (not (re-find #"(?i)well-formed fence|malformed" (:inactive-reason dead)))
           "a declined call is not a protocol failure")
@@ -1696,7 +1712,7 @@
                              :consecutive-mechanics-failures (* 2 threshold)
                              :consecutive-policy-refusals 2)
                 (assoc :turns (vec (repeat 8 {}))))
-          dead (#'beam/cull-or-keep ctx b 2 [])]
+          dead (cull-or-keep ctx b 2 [])]
       (is (= :culled (:status dead)))
       (is (re-find #"(?i)2 .*policy" (:inactive-reason dead)))
       (is (re-find #"(?i)4 .*fence|4 .*malformed" (:inactive-reason dead))
