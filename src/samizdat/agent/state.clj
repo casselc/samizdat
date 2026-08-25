@@ -106,6 +106,11 @@
    ;; Verification tiers seen. :fast is a one-shot check, :slow is a
    ;; cross-checked template or a review-plus-audit pass.
    :tiers-seen #{}
+   ;; The ONE task this branch is working on, as {:id :title}, or nil. Set by
+   ;; `task claim`, cleared when that task closes. One rather than many so that
+   ;; "until it is done" means something: a branch holding three tasks is a
+   ;; branch that has told you nothing about what it is doing.
+   :task nil
    :final-answer nil})
 
 (defn fork-branch

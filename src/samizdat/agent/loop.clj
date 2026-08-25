@@ -175,7 +175,24 @@
       (journal/note! conn run-id :shared-artifact-hit
                      {:branch-id (:id branch)
                       :data {:claim (:claim a) :source-branch (:branch_id a)}}))
-    (let [blocks (keep identity [;; The run's settled state, first and complete:
+    (let [blocks (keep identity [;; WHAT THIS BRANCH IS WORKING ON, first in the
+                                 ;; block. Restated every turn rather than held
+                                 ;; at a fixed position near the top of the
+                                 ;; array: the block is appended at the END,
+                                 ;; which is where the prefix-cache boundary
+                                 ;; already is, so this costs nothing per turn —
+                                 ;; whereas a block maintained early in the
+                                 ;; array invalidates every cached token behind
+                                 ;; it each time the task changes. The task's
+                                 ;; full statement is pinned into the tape once
+                                 ;; on claim (tools/tasks); this is the
+                                 ;; reminder, and the end is where a model
+                                 ;; attends most.
+                                 (if-let [t (:task branch)]
+                                   (prompt/render "task-current"
+                                     {:id (:id t) :title (:title t)})
+                                   (prompt/prompt "task-none"))
+                                 ;; The run's settled state, first and complete:
                                  ;; what is established and — the half nothing
                                  ;; carried before — what is RULED OUT. Read
                                  ;; from the artifacts table every turn, so it

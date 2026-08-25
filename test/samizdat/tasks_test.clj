@@ -133,13 +133,13 @@
           t2 (tasks/create! c {:title "already mine" :run-id rid :status "in_progress"})]
       (is (= [t1] (mapv :id (tasks/backlog c))))
       (testing "claim! assigns the run and marks in_progress"
-        (is (some? (tasks/claim! c t1 rid)))
+        (is (some? (tasks/claim! c t1 rid "B1")))
         (let [t (tasks/get-task c t1)]
           (is (= rid (:run_id t)))
           (is (= "in_progress" (:status t))))
         (is (empty? (tasks/backlog c))))
       (testing "a task claimed by one run refuses another"
-        (is (nil? (tasks/claim! c t1 other)))
+        (is (nil? (tasks/claim! c t1 other "B1")))
         (is (= rid (:run_id (tasks/get-task c t1)))))
       (testing "the board scopes to a run plus the backlog"
         (let [t3 (tasks/create! c {:title "unclaimed"})
@@ -158,9 +158,9 @@
   (with-db [c]
     (let [id (tasks/create! c {:title "race"})
           stale (tasks/get-task c id)]
-      (is (= "run-1" (:run_id (tasks/claim! c id "run-1"))))
+      (is (= "run-1" (:run_id (tasks/claim! c id "run-1" "B1"))))
       (with-redefs [tasks/get-task (fn [_ _] stale)]
-        (is (nil? (tasks/claim! c id "run-2"))
+        (is (nil? (tasks/claim! c id "run-2" "B1"))
             "a stale read must not let the second writer steal the claim"))
       (is (= "run-1" (:run_id (tasks/get-task c id)))))))
 
@@ -308,7 +308,7 @@
           stale (tasks/get-task c id)
           real-get tasks/get-task
           served-stale? (atom false)]
-      (is (= "run-9" (:run_id (tasks/claim! c id "run-9"))))
+      (is (= "run-9" (:run_id (tasks/claim! c id "run-9" "B1"))))
       (with-redefs [tasks/get-task
                     (fn [conn id]
                       (if (compare-and-set! served-stale? false true)
@@ -328,7 +328,7 @@
   (with-db [c]
     (let [id (tasks/create! c {:title "finished business"})]
       (tasks/close! c id "done")
-      (is (nil? (tasks/claim! c id "run-1")))
+      (is (nil? (tasks/claim! c id "run-1" "B1")))
       (let [t (tasks/get-task c id)]
         (is (= "done" (:status t)))
         (is (some? (:closed_at t)))))))

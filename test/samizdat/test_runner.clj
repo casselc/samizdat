@@ -101,6 +101,7 @@
             [samizdat.manual-test]
             [samizdat.userspace-test]
             [samizdat.beam-test]
+            [samizdat.kanban-test]
             [samizdat.security.policy-test]
             [samizdat.llm-test]
             [samizdat.prompt-test]
@@ -198,6 +199,7 @@
     samizdat.manual-test
     samizdat.userspace-test
     samizdat.beam-test
+    samizdat.kanban-test
     samizdat.security.policy-test
     samizdat.prompt-test
     samizdat.server-test

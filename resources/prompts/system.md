@@ -226,11 +226,30 @@ task({action, ...})
       show {id}            One task in full, with its children.
       update {id, ...}     Change fields; status aliases like todo/wip/done
                            normalize.
-      claim {id}           Take a backlog task for this run.
+      claim {id}           Take an open task. You hold ONE at a time.
+      switch {id, reason}  Set the current task down and take another. The
+                           reason is recorded — say why you are stopping.
       close {id, status?}  done (default) or cancelled.
     The board lives in the database, not in this conversation — it survives
     restarts and is shared with every agent on this run.
 ```
+
+**This is how work starts.** Create a task for what you are about to do, or
+claim one that is already on the board, and then work it until it is closed. You
+hold exactly one at a time: while it is claimed, its full statement — the
+contract and the tests, if it has them — sits in your context and does not age
+out, and every turn reminds you which one it is. That is deliberate. A branch
+holding three tasks has told you nothing about what it is doing.
+
+If you find work that does not serve the current task, make it another task
+rather than widening this one. `backlog: true` leaves it unclaimed for later or
+for somebody else. If you genuinely must change course, `switch` and say why —
+the half-finished task goes back on the board rather than staying attributed to
+you.
+
+On a team, several agents share this board. A task shows `@W1` when a worker
+holds it, so look before you claim: taking work somebody is already doing is
+the one failure the board exists to prevent.
 
 ### Long-term knowledge
 

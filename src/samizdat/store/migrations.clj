@@ -371,6 +371,29 @@
    "CREATE INDEX IF NOT EXISTS idx_userspace_latest
       ON userspace(kind, name, version DESC)"])
 
+(def ^:private v12
+  ;; WHO holds a task, not just which run.
+  ;;
+  ;; claim! guarded on `(run_id IS NULL OR run_id = ?)` and set run_id, which
+  ;; makes the claim exclusive BETWEEN runs and a no-op WITHIN one. In a team
+  ;; workflow the competing agents are branches of a single run — several
+  ;; implementors fanned out over one feature — so two workers both claimed the
+  ;; same task and both believed they held it. The docstring cited a#4 (two beam
+  ;; branches whose reads both saw the unclaimed row) and had fixed the
+  ;; read-then-write race while leaving the granularity wrong for exactly the
+  ;; case it named.
+  ;;
+  ;; run_id keeps its meaning — which board a task is on, NULL for the backlog —
+  ;; and branch_id says who is working it. Both are needed: the board is shared
+  ;; by the run, the work is done by a branch.
+  ["ALTER TABLE tasks ADD COLUMN branch_id TEXT"
+
+   ;; Existing claimed rows predate the distinction. Left with branch_id NULL,
+   ;; which reads as "on this run's board, nobody holding it" — claimable,
+   ;; which is the safe reading: the alternative is a task no branch can ever
+   ;; take because it is attributed to a branch that no longer exists.
+   "CREATE INDEX IF NOT EXISTS idx_tasks_holder ON tasks(run_id, branch_id)"])
+
 (def migrations
   "Ordered. Index 0 is migration 1; PRAGMA user_version holds the count applied."
-  [v1 v2 v3 v4 v5 v6 v7 v8 v9 v10 v11])
+  [v1 v2 v3 v4 v5 v6 v7 v8 v9 v10 v11 v12])

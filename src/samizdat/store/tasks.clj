@@ -145,24 +145,53 @@
     (get-task conn id)))
 
 (defn claim!
-  "Assign a backlog task to a run and mark it in_progress. Returns the updated
-  task, or nil when another run already holds it — the claim is first-writer-
-  wins, decided by the ROW: the UPDATE itself guards on the claim being free,
-  because a read-then-write pair is two lock acquisitions and two beam
+  "Assign a task to a BRANCH of a run and mark it in_progress. Returns the
+  updated task, or nil when somebody else already holds it.
+
+  First-writer-wins decided by the ROW: the UPDATE itself guards on the claim
+  being free, because a read-then-write pair is two lock acquisitions and two
   branches whose reads both saw the unclaimed row could both write (a#4,
-  docs/code-review.md)."
-  [conn id run-id]
+  docs/code-review.md).
+
+  THE HOLDER IS A BRANCH, not a run, and that distinction is the whole point of
+  migration v12. The guard used to be `(run_id IS NULL OR run_id = ?)` with only
+  run_id set, which is exclusive between runs and a NO-OP within one — so in a
+  team workflow, where several implementors fan out over one feature as branches
+  of a single run, two workers both claimed the same task and both believed they
+  held it. That is precisely the case the board exists to arbitrate.
+
+  Re-claiming what you already hold is idempotent, so a branch does not have to
+  remember whether it called this."
+  [conn id run-id branch-id]
   (db/with-writer
     (db/execute! conn
-                 ["UPDATE tasks SET run_id = ?, status = 'in_progress',
+                 ["UPDATE tasks SET run_id = ?, branch_id = ?, status = 'in_progress',
                                     updated_at = ?, closed_at = NULL
-                   WHERE id = ? AND (run_id IS NULL OR run_id = ?)
+                   WHERE id = ?
+                     AND (branch_id IS NULL OR (run_id = ? AND branch_id = ?))
                      AND closed_at IS NULL
                      AND status NOT IN ('done','cancelled')"
-                  run-id (db/now) id run-id]))
+                  run-id branch-id (db/now) id run-id branch-id]))
   (let [t (get-task conn id)]
-    (when (and t (= run-id (:run_id t)) (= "in_progress" (:status t)))
+    (when (and t (= run-id (:run_id t)) (= branch-id (:branch_id t))
+               (= "in_progress" (:status t)))
       t)))
+
+(defn release!
+  "Let go of a task without closing it — back to the board, claimable again.
+
+  What a switch does to the task being set down. Without it a task a branch
+  abandoned stays attributed to that branch forever, which reads as work in
+  progress that nobody is doing: the worst state for a shared board, because it
+  is indistinguishable from work that is progressing."
+  [conn id branch-id]
+  (db/with-writer
+    (db/execute! conn
+                 ["UPDATE tasks SET branch_id = NULL, status = 'open',
+                                    updated_at = ?
+                   WHERE id = ? AND branch_id = ? AND closed_at IS NULL"
+                  (db/now) id branch-id]))
+  (get-task conn id))
 
 (defn close!
   "Mark a task done (or cancelled)."

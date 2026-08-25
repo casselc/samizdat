@@ -193,7 +193,8 @@
 
   DUE means a message that has aged out of the last-`k` verbatim window, whose
   role compaction may rewrite, and which is still a CANDIDATE: neither
-  compacted nor declined. Oldest first, so a backlog drains in order.
+  compacted, nor declined, nor PINNED. Oldest first, so a backlog drains in
+  order.
 
   llm-repl had this duplicated across two functions and recorded what that
   cost: adding `:declined?` to one and not the other is exactly how the
@@ -209,7 +210,14 @@
                           (when (and (< i start)
                                      (contains? roles (:role m))
                                      (not (:compacted? m))
-                                     (not (:declined? m)))
+                                     (not (:declined? m))
+                                     ;; A PINNED message is never unloaded. The
+                                     ;; current task's statement is pinned: it
+                                     ;; is the thing the branch is working on,
+                                     ;; so summarising it away as it ages is
+                                     ;; precisely backwards — it matters more
+                                     ;; the longer the task runs.
+                                     (not (:pinned? m)))
                             i))
                         messages))
      [])))
