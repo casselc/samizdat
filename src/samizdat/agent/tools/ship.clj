@@ -12,7 +12,8 @@
             [samizdat.agent.state :as state]
             [samizdat.agent.verify :as verify]
             [samizdat.agent.wordlists :as wordlists]
-            [samizdat.store.journal :as journal]))
+            [samizdat.store.journal :as journal]
+            [samizdat.util :as util]))
 
 
 
@@ -40,31 +41,36 @@
 ;; Tier 1c: both the framing stopwords and the tool-version pattern are
 ;; wordlists.edn data — retunable at runtime without a rebuild. The section
 ;; comments recording why words are on the list moved with the words.
-(def ^:private stopwords (wordlists/wordlist :answer-framing))
+;; Both memoized against the wordlists' generation rather than realized at
+;; namespace load: system/start! calls wordlists/reload! so a list edit takes
+;; effect, and a top-level def turned that call into a no-op here.
+(def ^:private stopwords
+  (util/generation-cache wordlists/gen #(wordlists/wordlist :answer-framing)))
 
 (def ^:private tool-version-re
-  (re-pattern (wordlists/wordlist :tool-version)))
+  (util/generation-cache wordlists/gen
+                         #(re-pattern (wordlists/wordlist :tool-version))))
 
 (defn answer-tokens
   "Substantive tokens from a proposed answer: numbers and words that are not
   stopwords. Numbers matter most — an answer naming a size, a bound, or a
   witness has to have that number in the evidence."
   [text]
-  (->> (str/split (str/lower-case (str/replace (or text "") tool-version-re " "))
+  (->> (str/split (str/lower-case (str/replace (or text "") (tool-version-re) " "))
                   #"[^a-z0-9_.-]+")
        ;; `.` and `-` stay INSIDE the split class so 3.5 and cross-check survive
        ;; as one token, which means a sentence-final period rides along with the
        ;; last word. Trim the edges, keep the interior.
        (map #(str/replace % #"^[.-]+|[.-]+$" ""))
        (remove str/blank?)
-       (remove stopwords)
+       (remove (stopwords))
        ;; A hyphenated compound is one token, so `engine-confirmed` survived a
        ;; list holding every one of its parts. A compound with a substantive
        ;; half — `optimal-flow` — is not exempt.
        (remove #(and (str/includes? % "-")
                      (let [parts (remove str/blank? (str/split % #"-"))]
                        (and (seq parts)
-                            (every? (fn [p] (or (stopwords p) (< (count p) 4)))
+                            (every? (fn [p] (or ((stopwords) p) (< (count p) 4)))
                                     parts)))))
        (filter #(or (re-matches #"[0-9]+(\.[0-9]+)?" %) (>= (count %) 4)))
        distinct))
@@ -164,23 +170,35 @@
 ;; at fire time. Adding a rung is a data edit.
 
 (defn- compile-rung-form
+  "`*ns*` bound for the same reason as gates/compile-form: the rungs are now
+  compiled on first use rather than at namespace load, and `str/blank?` and
+  `engages-problem?` resolve in this namespace and nowhere the caller might
+  happen to be."
   [form]
-  (eval `(fn [~'ctx]
-           (let [~'answer            (get ~'ctx :answer)
-                 ~'problem           (get ~'ctx :problem)
-                 ~'evidence          (get ~'ctx :evidence)
-                 ~'uncovered-numbers (get ~'ctx :uncovered-numbers)]
-             ~form))))
+  (binding [*ns* (the-ns 'samizdat.agent.tools.ship)]
+    (eval `(fn [~'ctx]
+             (let [~'answer            (get ~'ctx :answer)
+                   ~'problem           (get ~'ctx :problem)
+                   ~'evidence          (get ~'ctx :evidence)
+                   ~'uncovered-numbers (get ~'ctx :uncovered-numbers)]
+               ~form)))))
 
 (def ship-gates
-  "The lexical ship rungs, compiled from gates.edn :ship-gates at load."
-  (mapv (fn [rung]
-          (assoc rung
-                 :when (compile-rung-form (:when rung))
-                 :message (if (:message-form rung)
-                            (compile-rung-form (:message-form rung))
-                            (:message rung))))
-        (gates/threshold :ship-gates)))
+  "The lexical ship rungs, compiled from gates.edn :ship-gates.
+
+  A function, memoized against the config generation, so adding or retuning a
+  rung is the data edit the docstring in gates.edn promises. As a top-level
+  def the rungs were compiled once at namespace load and `reload-config!`
+  could not touch them."
+  (util/generation-cache
+   gates/gen
+   #(mapv (fn [rung]
+            (assoc rung
+                   :when (compile-rung-form (:when rung))
+                   :message (if (:message-form rung)
+                              (compile-rung-form (:message-form rung))
+                              (:message rung))))
+          (gates/threshold :ship-gates))))
 
 (defn ship-gate-block
   "The first lexical ship rung that fires on this evidence, or nil. Pure —
@@ -190,7 +208,7 @@
           (when ((:when rung) evidence)
             (let [m (:message rung)]
               (if (fn? m) (m evidence) m))))
-        ship-gates))
+        (ship-gates)))
 
 ;; --- shipping ---------------------------------------------------------------
 
@@ -267,16 +285,46 @@
                              :sources (vec (distinct (keep :branch_id elsewhere)))}}))
     (if block
       (base/fail branch (str "`done` refused.\n\n" block) :done-block block)
-      {:branch (assoc branch :final-answer answer :status :done)
-       :category :success
-       :progress? true
-       :done? true
-       :answer answer
-       ;; The green point the safe-state rung rewinds to (loop.clj tool-step
-    ;; consumes this): done with the suite actually passing is the branch's
-    ;; last known-good state.
-    :verified-green? (boolean (:green? vresult))
-    :result (str "Answer accepted.\n\n" answer)})))
+      (cond->
+       {:branch (assoc branch :final-answer answer :status :done)
+        :category :success
+        :progress? true
+        :done? true
+        :answer answer
+        ;; The green point the safe-state rung rewinds to (loop.clj tool-step
+        ;; consumes this): done with the suite actually passing is the branch's
+        ;; last known-good state.
+        :verified-green? (boolean (:green? vresult))
+        :result (str "Answer accepted.\n\n" answer)}
+
+        ;; A green ship-verify IS this loop's confirmed artifact.
+        ;;
+        ;; The proof engines produced :confirmed artifacts and left with the
+        ;; proof harness, and nothing replaced them — so `confirmed-artifacts`
+        ;; was empty on every run, by construction, and everything keyed on it
+        ;; was dead code that still read like live policy: the milestone,
+        ;; branch-out and emergency-review gates could not fire, `shareable?`
+        ;; admitted nothing so the shared pool stayed empty (and with it
+        ;; corroborating-artifacts and seed-from-run!), the figure-coverage
+        ;; ship rung had no evidence to check figures against, two of the
+        ;; winner rubric's five components were always 0, and arbiter's
+        ;; `progressed?` — which is how prologue-cap and progress-stalled
+        ;; settle — could never be true.
+        ;;
+        ;; A test run the harness itself spawned and observed exit 0 is the
+        ;; coding loop's exact analogue of an engine confirmation: machine-
+        ;; checked, not self-reported, and produced by the same
+        ;; verify-before-you-ship discipline. So emit one.
+        ;;
+        ;; :tier :slow because a real test run is not a one-shot syntax check
+        ;; — it is the cross-check the rubric's slow-seen component means.
+        (:green? vresult)
+        (assoc :artifact {:kind :test
+                          :claim answer
+                          :code cmd
+                          :verdict :pass
+                          :claim-status :confirmed
+                          :tier :slow})))))
 
 (defmethod base/run-tool "give_up" [{:keys [branch] :as ctx}]
   (let [reason (or (base/arg ctx :reason) "no reason given")]

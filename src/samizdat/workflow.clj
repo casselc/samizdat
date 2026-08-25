@@ -26,15 +26,22 @@
   driving. Activation is serialized by construction — each run loads and
   compiles once, at start.
 
-  The beam still composes its turns directly (karamazov-ioo.20 tracks its
-  migration); both drivers share the step implementations in
-  samizdat.agent.loop, so this manifest and the beam cannot drift apart on
-  behavior — only on composition."
+  The beam drives this manifest too (karamazov-ioo.20, done): it compiles the
+  per-turn SLICE of the run's loop — `turn-manifest` below — and runs one
+  branch through it per scheduling round, owning the scheduling, culling,
+  forking and finishing the manifest's :finish would otherwise do for a single
+  branch. So there is one driver and one definition of a turn.
+
+  It was not always so, and the gap was invisible: the beam called
+  samizdat.agent.loop's steps directly, `run!` here was reached only from
+  tests, and `:run :loop` was documented in config, parsed from HARNESS_LOOP,
+  and read by nothing on the production path — the critic, team, feature and
+  decompose manifests could not run outside the suite. `run!` remains as the
+  single-branch driver a role's sub-loop uses (see `compiled-manifest`)."
   (:require [clojure.edn :as edn]
             [clojure.java.io :as io]
             [clojure.string :as str]
             [clojure.tools.logging :as log]
-            [jolt.fs :as fs]
             [mycelium.core :as myc]
             [mycelium.cell :as cell]
             [mycelium.compose :as compose]
@@ -131,6 +138,91 @@
       :definition (read-definition (:edn row))
       :compiled (compile-loop (read-definition (:edn row)))})))
 
+;; --- the per-turn slice, for the beam ---------------------------------------
+;;
+;; A loop manifest describes a WHOLE run: the per-turn chain, a back edge from
+;; :route to :start, and a :finish that closes the branch and run rows. The
+;; beam needs the per-turn chain alone — it owns scheduling, culling, forking
+;; and finishing across many branches, and a driver that runs one branch to
+;; completion cannot be scheduled against four others.
+;;
+;; Rather than maintain a second per-turn manifest per loop (two files to keep
+;; in agreement, which is how the two drivers drifted apart in the first
+;; place), the slice is DERIVED: every edge that would loop back to the start
+;; node or hand off to :loop/finish instead goes to :end. What remains is one
+;; turn, and the beam does the rest. The cells, the dispatches and the
+;; constraints are untouched, so a manifest edit reaches both drivers.
+
+(def start-node
+  "The manifest's entry node. A convention every shipped manifest follows and
+  mycelium's own compile assumes."
+  :start)
+
+(defn finish-nodes
+  "Nodes whose cell is :loop/finish — the whole-run teardown the beam owns."
+  [definition]
+  (set (keep (fn [[node cell]] (when (= :loop/finish cell) node))
+             (:cells definition))))
+
+(defn iterating?
+  "Whether one pass through this manifest's slice is one TURN — a single model
+  call the beam can schedule against four siblings — or a whole-run workflow
+  that does its own looping inside one call.
+
+  Two conditions, and both are needed. The slice must contain :llm/infer, so
+  that a pass is one model call: `orchestrator` loops back to its start node,
+  but that node is an entire nested worker RUN, and treating it as a turn
+  would put a multi-minute job under the 900s turn deadline and run five of
+  them at once. And the chain must loop back to the start node, so that a pass
+  is a turn rather than the whole job: `team`, `feature` and `decompose` run
+  straight through.
+
+  loop / critic / review / worker / reviewer / supervisor iterate; team,
+  feature, decompose and orchestrator do not. The answer decides the beam's
+  width and whether the per-turn deadline applies."
+  [definition]
+  (let [cells (set (vals (:cells definition)))
+        loops-back? (some (fn [[_ to]]
+                            (if (map? to)
+                              (some #(= start-node %) (vals to))
+                              (= start-node to)))
+                          (:edges definition))]
+    (boolean (and (contains? cells :llm/infer) loops-back?))))
+
+(defn turn-manifest
+  "`definition` reduced to ONE turn: edges back to the start node and edges
+  into :loop/finish are redirected to :end, and the finish node is dropped
+  (mycelium's reachability check refuses an orphan).
+
+  Returns a definition that compiles and runs exactly like the original up to
+  the turn boundary, and then stops."
+  [definition]
+  (let [finish (finish-nodes definition)
+        terminal (conj finish start-node)
+        retarget (fn [to] (if (contains? terminal to) :end to))]
+    (-> definition
+        (assoc :cells (into {} (remove (comp finish key)) (:cells definition)))
+        (assoc :edges
+               (into {}
+                     (for [[from to] (:edges definition)
+                           ;; The finish node's own outgoing edge goes with it.
+                           :when (not (contains? finish from))]
+                       [from (if (map? to)
+                               (into {} (map (juxt key (comp retarget val))) to)
+                               (retarget to))]))))))
+
+(defn compile-turn-loop
+  "Load the named manifest and compile BOTH forms: the whole-run definition
+  (for provenance and for `iterating?`) and its per-turn slice, which is what
+  the beam drives. Returns {:name :version :definition :iterating? :compiled}."
+  [conn name]
+  (let [{:keys [version definition]} (load-loop! conn name)]
+    {:name name
+     :version version
+     :definition definition
+     :iterating? (iterating? definition)
+     :compiled (compile-loop (turn-manifest definition))}))
+
 (defn compiled-manifest
   "Compile the named factory manifest to a runnable sub-loop. The seam a role
   cell uses to run a role's own loop (worker for an implementor, reviewer for a
@@ -157,8 +249,20 @@
   [name]
   (some-> (io/resource (str "prompts/" name ".md")) slurp))
 
-(defn- manifest-name-from-path [p]
-  (-> (str p) (str/replace #".*/" "") (str/replace #"\.edn$" "")))
+(def ^:private factory-manifest-names
+  "The manifests that ship with the harness.
+
+  A literal list, resolved against `io/resource` rather than globbed off a
+  cwd-relative `resources/manifests`. Everything else in this namespace
+  already reads manifests through io/resource — the glob was the one holdout,
+  and it was the same bug review3 #11 fixed for the cells dir: a binary (or a
+  process started anywhere but the project root) found no directory, caught
+  the exception, and served the supervisor a catalogue with the factory half
+  silently missing. There is no portable listing for classpath resources, so
+  the set is enumerated and `catalog` drops any name that does not resolve —
+  a manifest deleted from resources/ falls out rather than 404ing."
+  ["loop" "critic" "orchestrator" "review" "reviewer" "supervisor"
+   "worker" "team" "feature" "decompose"])
 
 (defn catalog
   "The workflows available to select or adapt: every factory manifest and every
@@ -167,8 +271,8 @@
   or author a new one — the compiled menu the self-healing loop chooses from.
   A manifest with no :description still lists, with an empty one."
   [conn]
-  (let [factory (->> (try (fs/glob "resources/manifests" "*.edn") (catch Throwable _ nil))
-                     (map manifest-name-from-path)
+  (let [factory (->> factory-manifest-names
+                     (filter #(io/resource (manifest-resource %)))
                      set)
         stored (->> (try (workflows/names conn) (catch Throwable _ nil))
                     ;; workflows/names yields rows ({:name :version :versions}),

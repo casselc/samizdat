@@ -33,6 +33,11 @@
             [samizdat.agent.gates :as gates]
             [samizdat.prompt :as prompt]))
 
+;; The judge's preamble is read from resources/prompts/judge.md on each use
+;; rather than snapshotted into a def at namespace load. The docstring called
+;; it runtime-editable and the def made it exactly not that; a slurp per
+;; finalization is nothing next to the model call it is part of.
+
 ;; The judge's prompt files read through the shared samizdat.prompt seam
 ;; (tier 2b) — every gate message reads through the same one.
 
@@ -166,10 +171,11 @@
       (claim-block answer rows)
       (source-block answer rows tool-surface)))
 
-(def preamble
+(defn preamble
   "The judge's standing instructions, from resources/prompts/judge.md (tier
   2b — runtime-editable). Calibrated, not trigger-happy. A unified judge:
   it decides completeness AND reviews the run's own diff for defects."
+  []
   (prompt/prompt "judge"))
 
 (defn critic-prompt
@@ -183,7 +189,7 @@
               (str diff) "\n```"))
        "\n\n## Transcript\n\n" (one-line transcript 12000)
        "\n\n## The answer it wants to ship\n\n" (str answer)
-       "\n\nIs this task complete and correct? " preamble))
+       "\n\nIs this task complete and correct? " (preamble)))
 
 (defn blocking-findings
   "The findings a review blocks on — those tagged [critical] or [high]. Returns

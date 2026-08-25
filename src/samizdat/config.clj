@@ -181,6 +181,20 @@
                   ;; pin its own via .samizdat/config.edn, and the agent can add
                   ;; or tune manifests at runtime with the `manifest` tool.
                   :loop       (env "HARNESS_LOOP")
+                  ;; The ship gate's test rung, ON by default. `done` is a hard
+                  ;; gate on a green test (b1a4b88) — but verify-on? needs a
+                  ;; :verify-cmd or this flag, and neither had a default, so the
+                  ;; headline gate was inert on every run that did not ship a
+                  ;; .samizdat/config.edn. Focused rather than the whole suite:
+                  ;; it runs only the test namespaces the branch touched, so a
+                  ;; project with no configured command still pays seconds, and
+                  ;; a branch that changed no test file is refused by the TDD
+                  ;; rung before anything is spawned.
+                  :verify-focused? (not= "0" (or (env "HARNESS_VERIFY_FOCUSED") "1"))
+                  ;; The TDD half: a change with no test file in it is refused.
+                  ;; Read with a default of true at the use site already; named
+                  ;; here so it is visible and switchable.
+                  :require-test? (not= "0" (or (env "HARNESS_REQUIRE_TEST") "1"))
                   ;; Cross-branch sharing of engine-confirmed artifacts. Off by
                   ;; default: shared lemmas may cost the beam its diversity, and
                   ;; whether they earn it is exactly what sweep-widths measures.

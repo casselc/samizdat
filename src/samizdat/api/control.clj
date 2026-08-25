@@ -198,8 +198,14 @@
             (log/error "resume failed:" (ex-message e))
             (swap! active dissoc run-id)
             {:status :error :error (ex-message e)})))
+      ;; The budget this resume is running under, from what the caller asked
+      ;; for, falling back to the row as it stood BEFORE the future started.
+      ;; Reading the row here unconditionally raced the resume that is
+      ;; rewriting it: the answer was whichever thread won, and an explicit
+      ;; max_turns extension was reported as the old budget more often than
+      ;; not.
       {:body {:run_id run-id :status "resuming"
-              :max_turns (:max_turns (runs/get-run conn run-id))}})))
+              :max_turns (or max-turns (:max_turns (runs/get-run conn run-id)))}})))
 (defn- grant-pattern
   "The pattern from a grant payload. Accepts a map (what body-json yields), a
   bare string, or nil. Blank is not a pattern — an unset form posts empty

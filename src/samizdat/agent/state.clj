@@ -30,7 +30,8 @@
   (:require [clojure.set]
             [clojure.string :as str]
             [samizdat.agent.phases :as phases]
-            [samizdat.agent.wordlists :as wordlists]))
+            [samizdat.agent.wordlists :as wordlists]
+            [samizdat.util :as util]))
 
 (defn new-branch
   [{:keys [id parent-id problem prolog messages created-at-turn]}]
@@ -157,8 +158,18 @@
 ;; references something that does not exist.
 
 (def ^:private key-fns
-  (mapv (fn [form] (eval `(fn [~'branch] ~form)))
-        (phases/finished-key-forms)))
+  ;; Memoized against the phase table's generation, not compiled once at
+  ;; namespace load: system/start! calls phases/reload! precisely so a rubric
+  ;; edit takes effect, and a top-level def made that call a no-op for the
+  ;; rubric while working for every plain lookup beside it.
+  (util/generation-cache
+   phases/gen
+   ;; `*ns*` bound for the same reason as gates/compile-form: compiled on
+   ;; first use now, and `confirmed-artifacts` resolves here and nowhere the
+   ;; first caller might be.
+   #(binding [*ns* (the-ns 'samizdat.agent.state)]
+      (mapv (fn [form] (eval `(fn [~'branch] ~form)))
+            (phases/finished-key-forms)))))
 
 (defn finished-key
   "The ranking tuple for a done-eligible branch, best-first component order.
@@ -189,26 +200,41 @@
   - id: ascending, a stable arbitrary tie-break so the ranking never
     depends on vector order."
   [branch]
-  (mapv #(% branch) key-fns))
+  (mapv #(% branch) (key-fns)))
+
+(defn compare-finished-keys
+  "Compare two ranking tuples, best first. Component-wise in key order, so a
+  relaxation never outranks a direct proof no matter how many artifacts it
+  carries; the first component that differs decides.
+
+  Generic over the tuple's SHAPE, which is the point: the rubric is
+  phases.edn data (drg-4026 #30), and a version of this that destructured
+  five named components and negated four of them was data-driven in name
+  only — dropping a component from the rubric threw on `(- nil)` and adding
+  one silently left it out of the ranking. The direction is read off the
+  values instead: a numeric component is bigger-is-better (every rubric
+  component counts evidence), anything else is an ascending tie-break (the
+  id). Both are what the five-component rubric meant.
+
+  Not a chain of `(or (compare …) …)`: `compare` returns 0 on a tie and 0 is
+  truthy, so the chain never falls through to the next component."
+  [a b]
+  (reduce (fn [_ [x y]]
+            (let [c (if (and (number? x) (number? y))
+                      (compare y x)
+                      (compare x y))]
+              (if (zero? c) 0 (reduced c))))
+          0
+          (map vector a b)))
 
 (defn rank-finished
   "Rank done-eligible branches best first, by `finished-key`.
 
   Expects branches holding :final-answer (the caller has filtered); the
   ranking reads only the evidence they carry, never the order they arrived
-  in. Components compare in key order, so a relaxation never outranks a
-  direct proof no matter how many artifacts it carries.
-
-  Implemented as sort-by over a normalized key — numeric components negated
-  so bigger-is-better becomes ascending, the id left as-is — rather than a
-  hand-rolled comparator. The obvious `(or (compare ...) ...)` chain is a
-  bug: `compare` returns 0 on ties and 0 is truthy, so the chain never
-  falls through to the next component."
+  in."
   [branches]
-  (sort-by (fn [b]
-             (let [[non-relax slow diversity confirmed id] (finished-key b)]
-               [(- non-relax) (- slow) (- diversity) (- confirmed) id]))
-           branches))
+  (sort-by finished-key compare-finished-keys branches))
 
 (defn record-mechanics
   "Fold one turn's fence signals into the branch's mechanics counters."
@@ -462,8 +488,19 @@
       real-progress? (assoc :turns-since-progress 0 :any-progress? true)
       (not real-progress?) (update :turns-since-progress inc))))
 
-(defn add-artifact [branch artifact]
-  (update branch :artifacts conj artifact))
+(defn add-artifact
+  "Bank an artifact on the branch, stamping its tier into :tiers-seen.
+
+  The stamp closes a live/replay disagreement. Nothing on the live path ever
+  wrote :tiers-seen — the proof tools that did left with the proof harness —
+  while resume/rebuild-branch reconstructs it as `(set (keep :tier artifacts))`.
+  So the winner rubric's slow-seen component read 0 for a running branch and 1
+  for the same branch after a crash and resume, which is exactly the kind of
+  snapshot-versus-replay drift this namespace's docstring says cannot happen.
+  Deriving it here from the artifact makes the two agree by construction."
+  [branch artifact]
+  (cond-> (update branch :artifacts conj artifact)
+    (:tier artifact) (update :tiers-seen (fnil conj #{}) (:tier artifact))))
 
 (defn add-turn
   "Record one turn on the branch. `entry` carries :turn, :tool, :category, and

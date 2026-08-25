@@ -270,10 +270,17 @@
   symbolic refs, spawn with a scrubbed environment, and redact the output
   before it returns. Returns a tool-result map.
 
-  `ctx` carries :conn :run-id and :args {:command …}; :env defaults to the
-  process environment. This is the one place the perm, scrub, and redact nodes
-  of the security model meet."
-  [{:keys [conn run-id args] :as ctx}]
+  `ctx` carries :conn :run-id :root and :args {:command …}; :env defaults to
+  the process environment. This is the one place the perm, scrub, and redact
+  nodes of the security model meet.
+
+  The command runs in the run's `:root`, like every other tool. It used to run
+  wherever the harness process happened to be: the file tools resolve paths
+  under the root and the ship gate's verify `cd`s into it, so a run targeting
+  another checkout had `shell` reading and building a different tree than
+  `read_file` and `done` — with the same relative paths naming different
+  files. Absent root, the process cwd, which is what it always did."
+  [{:keys [conn run-id args root] :as ctx}]
   (let [command (str (:command args))
         env (or (:env ctx) (into {} (System/getenv)))
         session (if (and conn run-id) (grants/for-run conn run-id) {:grants []})
@@ -300,9 +307,15 @@
             ;; subprocess cannot read a secret the parent holds even by
             ;; expanding $VAR itself. env -i semantics (see proc/run :env).
             child-env (secrets/scrub-env env)
+            ;; Prefixed rather than passed as a :dir, because proc/run has no
+            ;; working-directory option and `bash -c` is already the shell we
+            ;; are handing the command to. The root is single-quoted through
+            ;; the shared helper; `resolved` is the model's own command and is
+            ;; deliberately NOT quoted — running it as written is the tool.
             r (proc/run {:timeout-ms (or (:timeout-ms ctx) 120000)
                          :env child-env}
-                        "bash" "-c" resolved)
+                        "bash" "-c"
+                        (str "cd " (util/sh-quote (or root ".")) " && " resolved))
             out (if (:timeout r)
                   (str "[timed out after " (:ms r) "ms]")
                   (str (:out r)
@@ -313,7 +326,11 @@
             ;; command's output (a test summary, an exit line) is as load-
             ;; bearing as the start.
             redacted (util/truncate-middle (secrets/redact out known) max-output-chars)]
-        {:category (if (and (not (:timeout r)) (zero? (or (:exit r) 0)))
+        ;; A missing exit code is a spawn that did not report one, which is
+        ;; not evidence the command succeeded. `(or (:exit r) 0)` read it as
+        ;; success, the opposite of what run-verify does with the same shape;
+        ;; both now fail closed.
+        {:category (if (and (not (:timeout r)) (zero? (or (:exit r) 1)))
                      :success :failure)
          :progress? true
          :result redacted

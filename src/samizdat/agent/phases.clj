@@ -20,7 +20,21 @@
 
 (def ^:private cache (atom (load-phases)))
 
-(defn reload! [] (reset! cache (load-phases)))
+;; Watched by the winner rubric, which state.clj COMPILES from :finished-key.
+;; Without it reload! swapped this atom and left the compiled rubric frozen at
+;; namespace load — the one part of phases.edn that is forms rather than
+;; lookups was the one part a reload could not reach.
+(def ^:private generation (atom 0))
+
+(defn gen
+  "The phase table's generation. Derived tables cache against this."
+  []
+  @generation)
+
+(defn reload! []
+  (reset! cache (load-phases))
+  (swap! generation inc)
+  nil)
 
 (defn table
   "The whole phases.edn map — :initial-phase, :phases, :transitions,

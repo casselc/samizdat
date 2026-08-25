@@ -104,10 +104,13 @@
   (:require [clojure.data.json :as json]
             [samizdat.agent.beam :as beam]
             [samizdat.agent.gates :as gates]
+            [samizdat.agent.gitdiff :as gitdiff]
             [samizdat.agent.loop :as branch-loop]
             [samizdat.agent.state :as state]
+            [samizdat.repl :as repl]
             [samizdat.store.journal :as journal]
-            [samizdat.store.runs :as runs]))
+            [samizdat.store.runs :as runs]
+            [samizdat.workflow :as workflow]))
 
 (defn- parse-json [s]
   (when s
@@ -256,9 +259,29 @@
           artifacts (group-by :branch_id (journal/artifacts conn run-id))
           firings (group-by :branch_id (journal/gate-firings conn run-id))
           sessions (atom [])
+          ;; Same three keys run! sets. A resumed run works on the same tree
+          ;; and needs the same file root; the eval session is genuinely new,
+          ;; because the old process's namespace died with it and nothing in
+          ;; the journal can rebuild an in-image binding.
+          root (or (get-in config [:run :root]) (System/getProperty "user.dir"))
+          ;; The same compiled per-turn manifest run! drives, recompiled here:
+          ;; a resume enters run-rounds directly, so without this it would
+          ;; silently fall back to the bare composition and finish a critic or
+          ;; feature run on the factory loop.
+          loop-nm (workflow/active-loop-name config)
+          {turn-wf :compiled iterating? :iterating?}
+          (workflow/compile-turn-loop conn loop-nm)
           ctx {:conn conn :run-id run-id :config config :problem (:problem run)
                :llm-adapter llm-adapter :llm-config llm-config
                :max-turns max-turns :beam? (> width 1) :beam-width width
+               :root root
+               :turn-workflow turn-wf
+               :iterating-loop? iterating?
+               ;; Baselined at the RESUME, so a critic reviewing the resumed
+               ;; run sees what the resumption changed. What the dead process
+               ;; changed is already committed to the tree it starts from.
+               :git-baseline (gitdiff/baseline root)
+               :repl-session (repl/new-session)
                :sessions sessions
                :abort abort}
           branches (mapv (fn [row]

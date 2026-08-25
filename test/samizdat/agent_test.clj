@@ -190,7 +190,7 @@
 
 (deftest gate-config-is-coherent
   (testing "every gate with a budget names a threshold that exists"
-    (doseq [g gates/gates :when (:budget g)]
+    (doseq [g (gates/gates) :when (:budget g)]
       (is (some? (gates/threshold (:budget g)))
           (str (:gate g) " names a budget with no entry in gates.edn"))))
 
@@ -202,8 +202,28 @@
     (is (< (gates/threshold :stuck-threshold) (gates/threshold :cull-threshold))))
 
   (testing "priorities are unique, or the arbiter's choice is arbitrary"
-    (let [ps (map :priority gates/gates)]
+    (let [ps (map :priority (gates/gates))]
       (is (= (count ps) (count (distinct ps))))))
+
+  (testing "every gate can be settled — a vocabulary entry or a rule of its own"
+    ;; The budget check above has a sibling this lacked: a gate added to
+    ;; gates.edn :gates with no :tool-vocab :settle-called entry and no
+    ;; explicit clause in arbiter/settle used to hand `nil` to `some` as a
+    ;; predicate and throw on its first firing. `settle` now defaults to #{},
+    ;; so the failure mode is a prediction that can only expire — quieter and
+    ;; still wrong. Name it here instead.
+    (let [vocab (gates/tool-vocab :settle-called)]
+      (doseq [g (gates/gates)]
+        (is (or (contains? vocab (:gate g))
+                (contains? arbiter/settled-by-rule (:gate g)))
+            (str (:gate g) " has no :settle-called vocabulary and no rule in"
+                 " arbiter/settle — its prediction can only ever expire")))))
+
+  (testing "arbiter/settled-by-rule names only gates that exist"
+    (let [known (set (map :gate (gates/gates)))]
+      (doseq [g arbiter/settled-by-rule]
+        (is (contains? known g)
+            (str g " is claimed as rule-settled but is not a gate")))))
 
   (testing "the capability tier may not tune a verification or progress guard"
     ;; PR 740's rule: a signal may only tune a guard that fires on the same
@@ -233,7 +253,7 @@
   ;; here rather than silently three generations later.
   (let [b (branch-with)
         every-tool (vec (tools/tool-names))]
-    (doseq [{:keys [gate]} gates/gates]
+    (doseq [{:keys [gate]} (gates/gates)]
       (is (= :met (arbiter/settle {:gate gate :turn 1 :window 3}
                                   {:current-turn 2
                                    :tools-called every-tool
@@ -1280,7 +1300,7 @@
              :done-block "blocked because ..."
              :directive {:payload "a human said so"}
              :safe-state-coverage {:ok true}}]
-    (doseq [g gates/gates]
+    (doseq [g (gates/gates)]
       (testing (str (:gate g))
         (let [msg ((:message g) ctx)]
           (is (string? msg))
@@ -1599,13 +1619,13 @@
   ;; wrong as a blanket default.
   (testing "a gate whose prediction names exactly one tool carries it"
     (doseq [g [:branch-out :repopulate]]
-      (is (= "branch_theses" (:tool (get gates/by-name g)))
+      (is (= "branch_theses" (:tool (gates/by-name g)))
           (str g " predicts 'the branch calls branch_theses' and should say so"))))
   (testing "a gate naming a choice or a behaviour carries none"
     ;; milestone predicts "review or done", stuck predicts a change of
     ;; technique. Forcing either would be the harness picking, not steering.
     (doseq [g [:milestone :stuck :progress-stalled :turn-budget]]
-      (is (nil? (:tool (get gates/by-name g)))
+      (is (nil? (:tool (gates/by-name g)))
           (str g " names no single tool and must not force one"))))
   (testing "the prefill is the opening fence, plus the name when there is one"
     (is (= "```tool-call\n{\"name\": \"branch_theses\""
@@ -1689,7 +1709,7 @@
   (let [refl (gates/by-name :reflection)]
     (testing "it is the lowest-priority gate"
       (is (= 13 (:priority refl)))
-      (is (= 13 (apply max (map :priority gates/gates)))
+      (is (= 13 (apply max (map :priority (gates/gates))))
           "nothing sits below reflection, so a real steer always outranks it"))
     (testing "fires on a turn that is a multiple of 15, while active"
       (is ((:when refl) {:branch (branch-with :turns (vec (repeat 15 {})))}))
@@ -1806,7 +1826,7 @@
     (doseq [g [:human-directive :done-blocked :safe-state :stuck
                :progress-stalled :studying]]
       (is (contains? data g) (str g " is a gates.edn entry")))
-    (is (= (count gates/gates) (count (:gates (gates/config))))
+    (is (= (count (gates/gates)) (count (:gates (gates/config))))
         "every gate comes from data — no closure half remains")
     (is (= "done-block passthrough"
            ((:message (gates/by-name :done-blocked))
@@ -1856,13 +1876,13 @@
   (is (= :begin-reframe (:effect (gates/by-name :stuck))))
   (is (= :notified-fractions (:effect (gates/by-name :turn-budget))))
   (is (every? (complement :effect)
-              (remove #(contains? #{:stuck :turn-budget} (:gate %)) gates/gates))
+              (remove #(contains? #{:stuck :turn-budget} (:gate %)) (gates/gates)))
       "no other gate claims a branch effect")
   ;; decide carries :effect from the chosen gate's data
-  (with-redefs [gates/gates [{:gate :test-gate :priority 0 :effect :e
+  (with-redefs [gates/gates (constantly [{:gate :test-gate :priority 0 :effect :e
                               :when (fn [_] true)
                               :message (fn [_] "m")
-                              :prediction (fn [_] nil)}]]
+                              :prediction (fn [_] nil)}])]
     (is (= :e (:effect (arbiter/decide {})))))
   ;; apply-effects dispatches on :effect, not the gate's name
   (let [b (branch-with)]
