@@ -25,10 +25,31 @@
           :green-marker "JS1-DOGFOOD-FOCUSED-GREEN"
           :evidence-path "red-evidence.txt"}
  :semantic-operations
- {:before-resume [:project/list :project/search
-                  :project/read :project/read :project/read
-                  :project/stat :project/edit]
-  :after-resume [:project/read :project/stat :project/edit]}
+ {:before-resume
+  {:required-subsequence
+   [{:op :project/list :args ["."]}
+    {:op :project/search :args ["DOGFOOD" {:path "."}]}
+    {:op :project/read :args ["TASK.md"]}
+    {:op :project/read :args ["src/dogfood.clj"]}
+    {:op :project/read :args ["test/dogfood_test.clj"]}
+    {:op :project/stat :args ["src/dogfood.clj"]}
+    {:op :project/edit
+     :path "src/dogfood.clj"
+     :base :sha256
+     :content "(ns fixture.dogfood)\n\n(def dogfood-state :red)\n"}]
+   :minimum-counts {:project/list 1
+                    :project/search 1
+                    :project/read 3}
+   :exact-counts {:project/stat 1
+                  :project/edit 1}
+   :additional-before-edit #{:project/list :project/search :project/read}}
+  :resume-exact
+  [{:op :project/read :args ["red-evidence.txt"]}
+   {:op :project/stat :args ["src/dogfood.clj"]}
+   {:op :project/edit
+    :path "src/dogfood.clj"
+    :base :sha256
+    :content "(ns fixture.dogfood)\n\n(def dogfood-state :green)\n"}]}
  :safety {:target-must-be-detached true
           :target-must-be-outside-source true
           :child-jolt-pwd-must-be-source true

@@ -399,8 +399,99 @@
   (try (if (fs/exists? path) (edn/read-string (slurp path)) default)
        (catch Throwable _ default)))
 
-(defn- op-sequence [counter-path]
-  (mapv :op (:events (read-edn-file counter-path {:events [] :counts {}}))))
+(defn- phase-events [counter-path phase]
+  (->> (:events (read-edn-file counter-path {:events [] :counts {}}))
+       (filter #(= phase (:phase %)))
+       vec))
+
+(defn- event-matches-contract?
+  [event requirement]
+  (let [args (:args event)]
+    (and (= (:op requirement) (:op event))
+         (or (not (contains? requirement :args))
+             (= (:args requirement) args))
+         (or (not (contains? requirement :path))
+             (= (:path requirement) (nth args 0 nil)))
+         (or (not (contains? requirement :content))
+             (= (:content requirement) (nth args 2 nil)))
+         (or (not= :sha256 (:base requirement))
+             (boolean (re-matches #"sha256:[0-9a-f]{64}"
+                                  (str (nth args 1 nil))))))))
+
+(defn- required-subsequence?
+  [events requirements]
+  (loop [events (seq events), requirements (seq requirements)]
+    (cond
+      (nil? requirements) true
+      (nil? events) false
+      (event-matches-contract? (first events) (first requirements))
+      (recur (next events) (next requirements))
+      :else (recur (next events) requirements))))
+
+(defn- validate-pre-red-events!
+  "Order-aware start-phase contract. Extra discovery is allowed, but it must
+  be read-only and before the sole anchored RED edit. The required operations
+  remain an ordered subsequence, stat/edit counts remain exact, and the edit's
+  path, digest-shaped base, and complete content are checked."
+  [events]
+  (let [{:keys [required-subsequence minimum-counts exact-counts
+                additional-before-edit]}
+        (get-in contract [:semantic-operations :before-resume])
+        counts (frequencies (map :op events))
+        edit-indexes (keep-indexed (fn [i event]
+                                     (when (= :project/edit (:op event)) i))
+                                   events)
+        edit-index (first edit-indexes)
+        allowed-before (conj additional-before-edit :project/stat)
+        errors (cond-> []
+                 (not (required-subsequence? events required-subsequence))
+                 (conj :required-subsequence-missing)
+
+                 (some (fn [[op n]] (< (get counts op 0) n)) minimum-counts)
+                 (conj :minimum-count-missing)
+
+                 (some (fn [[op n]] (not= n (get counts op 0))) exact-counts)
+                 (conj :exact-count-violated)
+
+                 (not= 1 (count edit-indexes))
+                 (conj :first-edit-not-unique)
+
+                 (and edit-index (not= edit-index (dec (count events))))
+                 (conj :semantic-operation-after-edit)
+
+                 (and edit-index
+                      (some #(not (contains? allowed-before (:op %)))
+                            (subvec events 0 edit-index)))
+                 (conj :non-discovery-operation-before-edit))]
+    (when (seq errors)
+      (throw (ex-info
+              "RED checkpoint violates the ordered/minimum semantic-operation contract; refusing resume"
+              {:js1-dogfood/error :unexpected-red-operations
+               :errors errors
+               :counts counts
+               :events (mapv #(select-keys % [:phase :op :args]) events)})))
+    {:counts counts
+     :event-count (count events)
+     :extra-read-only-count
+     (- (count events) (count required-subsequence))
+     :required-subsequence true
+     :first-edit-index edit-index}))
+
+(defn- validate-resume-events!
+  "Exact resume-phase contract. Reconstruction itself contributes ZERO
+  events; the only permitted post-reconstruction operations are the new red
+  evidence read, one fresh stat, and one GREEN anchored edit. Thus historical
+  list/search/TASK/source/test observations and the RED edit cannot repeat."
+  [events]
+  (let [expected (get-in contract [:semantic-operations :resume-exact])]
+    (when-not (and (= (count expected) (count events))
+                   (every? true? (map event-matches-contract? events expected)))
+      (throw (ex-info
+              "resume/replay semantic operations were not exact"
+              {:js1-dogfood/error :unexpected-resume-operations
+               :expected expected
+               :actual (mapv #(select-keys % [:phase :op :args]) events)})))
+    {:exact true :event-count (count events)}))
 
 (defn- safe-spit! [path value]
   (spit path (if (string? value) value (pr-str value))))
@@ -744,6 +835,33 @@
 
 ;; ── parent test -------------------------------------------------------------
 
+(deftest pre-red-contract-allows-repeated-read-only-discovery
+  (let [event (fn [op args] {:phase "start" :op op :args args})
+        events [(event :project/list ["."])
+                ;; Exact independently observed live prefix: the first search
+                ;; attempt used the alternate argument order, then discovery
+                ;; retried with the documented order. Both are read-only.
+                (event :project/search [{:path "."} "DOGFOOD"])
+                (event :project/list ["."])
+                (event :project/search ["DOGFOOD" {:path "."}])
+                (event :project/read ["TASK.md"])
+                (event :project/read ["src/dogfood.clj"])
+                (event :project/read ["test/dogfood_test.clj"])
+                (event :project/stat ["src/dogfood.clj"])
+                (event :project/edit
+                       ["src/dogfood.clj"
+                        (str "sha256:" (apply str (repeat 64 "a")))
+                        "(ns fixture.dogfood)\n\n(def dogfood-state :red)\n"])]
+        witness (validate-pre-red-events! events)]
+    (is (:required-subsequence witness))
+    (is (= 2 (:extra-read-only-count witness)))
+    (is (= 1 (get-in witness [:counts :project/edit])))
+    (is (= :unexpected-red-operations
+           (try
+             (validate-pre-red-events! (conj events (event :project/read ["TASK.md"])))
+             nil
+             (catch ExceptionInfo e (:js1-dogfood/error (ex-data e))))))))
+
 (deftest durable-red-quiescence-classification
   ;; Offline discriminator for N1: a pending eval is unsafe even before it has
   ;; an effect, and an unsettled intent is reported explicitly. No SCI or model.
@@ -841,24 +959,19 @@
                   run-id (:run-id checkpoint)
                   _ (swap! run-data assoc :target target :run-id run-id
                            :checkpoint checkpoint :start-result start-result)
-                  before-resume-ops (op-sequence counter-path)]
+                  start-events (phase-events counter-path "start")
+                  pre-red-witness (validate-pre-red-events! start-events)]
               (println "JS1-DOGFOOD-RED-CHECKPOINT" run-id)
               ;; STOP made the first witness race-free; the post-reap witness
               ;; proves shutdown added no torn record before resume is allowed.
               (require-quiescent-db! db-path run-id "after bounded child reap")
-              (when-not (= (get-in contract [:semantic-operations :before-resume])
-                           before-resume-ops)
-                (throw (ex-info
-                        "RED checkpoint has unexpected semantic operations; refusing resume"
-                        {:js1-dogfood/error :unexpected-red-operations
-                         :expected (get-in contract [:semantic-operations :before-resume])
-                         :actual before-resume-ops})))
               (testing "the first process was intentionally killed at durable RED"
                 (is (not (.isAlive (:proc child))))
                 (is (= "(ns fixture.dogfood)\n\n(def dogfood-state :red)\n"
                        (slurp (str target "/src/dogfood.clj"))))
-                (is (= (get-in contract [:semantic-operations :before-resume])
-                       before-resume-ops)))
+                (is (:required-subsequence pre-red-witness))
+                (is (= 1 (get-in pre-red-witness [:counts :project/stat])))
+                (is (= 1 (get-in pre-red-witness [:counts :project/edit]))))
               (let [resume-result (run-child! runtime "resume"
                                               (assoc paths :run-id run-id
                                                      :timeout-ms
@@ -873,6 +986,12 @@
                                                        (min phase-timeout-ms
                                                             remaining))))]
                 (swap! run-data assoc :resume-result resume-result)
+                ;; Per-phase exactness is intentionally separate from the
+                ;; flexible discovery prefix. Replay emits no counter events;
+                ;; resume may only read NEW red evidence, stat, and edit GREEN.
+                (let [resume-witness
+                      (validate-resume-events!
+                       (phase-events counter-path "resume"))]
                 (testing "fresh-process resume reconstructed state and shipped GREEN"
                   (is (str/includes? (:out resume-result)
                                      "JS1-DOGFOOD-RESUME-HELPER-OK"))
@@ -880,10 +999,7 @@
                                      "JS1-DOGFOOD-GREEN-OK"))
                   (is (= "(ns fixture.dogfood)\n\n(def dogfood-state :green)\n"
                          (slurp (str target "/src/dogfood.clj"))))
-                  (is (= (vec (concat
-                               (get-in contract [:semantic-operations :before-resume])
-                               (get-in contract [:semantic-operations :after-resume])))
-                         (op-sequence counter-path))))
+                  (is (:exact resume-witness)))
                 (let [conn (db/connect db-path)]
                   (try
                     (let [run (runs/get-run conn run-id)
@@ -914,7 +1030,7 @@
                                     (map :tool_name turns))))
                       (testing "the same fixed operator verifier eventually recorded GREEN"
                         (is (= 1 (count green-events)))))
-                    (finally (db/close conn)))))))
+                    (finally (db/close conn))))))))
           (finally
             (when-let [target (:target @run-data)]
               (try

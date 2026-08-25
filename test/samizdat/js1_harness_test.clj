@@ -354,9 +354,33 @@
       (is (= [:project/list :project/search
               :project/read :project/read :project/read
               :project/stat :project/edit]
-             (get-in dogfood-contract [:semantic-operations :before-resume])))
+             (mapv :op (get-in dogfood-contract
+                                [:semantic-operations :before-resume
+                                 :required-subsequence]))))
+      (is (= {:project/list 1 :project/search 1 :project/read 3}
+             (get-in dogfood-contract
+                     [:semantic-operations :before-resume :minimum-counts])))
+      (is (= {:project/stat 1 :project/edit 1}
+             (get-in dogfood-contract
+                     [:semantic-operations :before-resume :exact-counts])))
+      (is (= {:op :project/edit
+              :path "src/dogfood.clj"
+              :base :sha256
+              :content "(ns fixture.dogfood)\n\n(def dogfood-state :red)\n"}
+             (last (get-in dogfood-contract
+                           [:semantic-operations :before-resume
+                            :required-subsequence]))))
+      (is (= #{:project/list :project/search :project/read}
+             (get-in dogfood-contract
+                     [:semantic-operations :before-resume
+                      :additional-before-edit])))
       (is (= [:project/read :project/stat :project/edit]
-             (get-in dogfood-contract [:semantic-operations :after-resume])))
+             (mapv :op (get-in dogfood-contract
+                                [:semantic-operations :resume-exact]))))
+      (is (str/includes? suite "required-subsequence?"))
+      (is (str/includes? suite "validate-pre-red-events!"))
+      (is (str/includes? suite "validate-resume-events!"))
+      (is (str/includes? suite "phase-events counter-path \"resume\""))
       (is (str/includes? suite "record-intent! is called"))
       (is (str/includes? suite "when-not (= before after)")))))
 
