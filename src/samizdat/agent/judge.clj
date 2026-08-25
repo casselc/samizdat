@@ -28,7 +28,15 @@
   when unsure — a false block wastes a whole turn.
 
   Everything here is pure and unit-testable; the cell that calls the model and
-  routes on the verdict lives in resources/cells/critic.clj."
+  routes on the verdict lives in resources/cells/critic.clj.
+
+  WHAT IS MECHANISM HERE, now that the prose and the severity vocabulary have
+  moved out: the PARSE PROTOCOL. The regexes that find the VERDICT line and the
+  findings block are the other half of the prompt template — they read the shape
+  the template asks for. So they travel WITH it: change the requested format in
+  prompts/ and change the reader here, in the same edit. That pairing is why
+  they are not policy in their own right, and why a project retuning what the
+  judge is told to say has to touch both."
   (:require [clojure.string :as str]
             [samizdat.agent.gates :as gates]
             [samizdat.prompt :as prompt]))
@@ -192,12 +200,21 @@
        "\n\nIs this task complete and correct? " (preamble)))
 
 (defn blocking-findings
-  "The findings a review blocks on — those tagged [critical] or [high]. Returns
-  the whole findings text when any are, else nil. Medium/low findings are
-  advisory: worth passing back, not worth undoing a done for."
+  "The findings a review blocks on. Returns the whole findings text when any
+  finding carries a blocking severity, else nil.
+
+  WHICH SEVERITIES BLOCK is gates.edn :review-blocking-severities, not a regex
+  in this file. It was `[critical]` or `[high]`, which encoded two project
+  judgements as code: that those are the words a reviewer uses, and that
+  medium is advisory. A project whose reviews say [P0]/[P1], or one that wants
+  medium to block a ship, could not say so without a rebuild."
   [reply]
   (when-let [f (findings reply)]
-    (when (re-find #"(?i)\[(critical|high)\]" f) f)))
+    (let [severities (gates/threshold :review-blocking-severities)]
+      (when (and (seq severities)
+                 (re-find (re-pattern (str "(?i)\\[(" (str/join "|" severities) ")\\]"))
+                          f))
+        f))))
 
 (defn critique-message
   "The single consolidated note injected back into the branch when the judge

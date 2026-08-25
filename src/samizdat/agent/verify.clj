@@ -16,7 +16,8 @@
   The runner is a thin effect; the DECISION (`verify-block`) and the command
   derivation (`focused-cmd`) are pure, so the gate is testable without spawning a
   process. Same split as planner.clj vs cells/team.clj."
-  (:require [clojure.string :as str]
+  (:require [samizdat.prompt :as prompt]
+            [clojure.string :as str]
             [samizdat.agent.gates :as gates]
             [samizdat.engine.proc :as proc]
             [samizdat.security.secrets :as secrets]
@@ -117,14 +118,12 @@
          "then call done.")
 
     (and result (:timeout? result))
-    (str "Your test run TIMED OUT. Something you changed likely loops or blocks. "
-         "Narrow it down — run a smaller piece at the REPL — then call done again.")
+    (prompt/prompt "verify-timeout")
 
     (and result (not (:green? result)))
-    (str "Your tests are not green yet:\n\n" (tail (:output result)
-                (:test-output-lines (gates/threshold :context-budget)))
-         "\n\nYou are NOT done until they pass. Read the failure, change the code, "
-         "re-run the test, and call done again only once it is green.")
+    (prompt/render "verify-red"
+      {:output (tail (:output result)
+                     (:test-output-lines (gates/threshold :context-budget)))})
 
     ;; Ran and green.
     (and result (:green? result)) nil

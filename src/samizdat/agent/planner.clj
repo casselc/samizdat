@@ -8,29 +8,29 @@
 
   This is the flat, one-level decomposition. Recursive decomposition with
   per-part contracts (karamazov-ioo.15) builds on the same parse."
-  (:require [clojure.string :as str]))
+  (:require [clojure.string :as str]
+            [samizdat.agent.gates :as gates]
+            [samizdat.prompt :as prompt]))
 
-(def default-max-parts
-  "Cap on the fan-out width when the planner splits a task itself. Config
-  :run :max-subtasks overrides. Kept small: parallel workers share one
-  workspace, and a wide split multiplies collision risk faster than it buys
-  speed."
-  4)
+(defn default-max-parts
+  "Cap on the fan-out width when the planner splits a task itself, from
+  gates.edn :planner-max-parts. Config :run :max-subtasks still overrides per
+  run. Kept small: parallel workers share one workspace, and a wide split
+  multiplies collision risk faster than it buys speed — which is a judgement
+  about a PROJECT's workspace, so it belongs in that project's policy."
+  []
+  (gates/threshold :planner-max-parts))
 
 (defn plan-prompt
-  "Ask the model to split `problem` into at most `max-parts` independent parts,
-  one per line as a bullet list and nothing else — the shape parse-plan reads."
+  "The split prompt: prompts/planner.md rendered for `problem` and
+  `max-parts`.
+
+  It used to be built with `str` here, which made this the one prompt in the
+  harness a project could not edit — every other one goes through the prompt
+  seam. The shape it asks for is what `parse-plan` reads, so the two travel
+  together: change the requested format in the template and change the parser."
   [problem max-parts]
-  (str "You are splitting a coding task into independent parts so several "
-       "agents can work them in parallel.\n\n"
-       "## Task\n\n" problem "\n\n"
-       "Break this into at most " max-parts " parts that can be built "
-       "independently and in parallel — each a self-contained piece of the work "
-       "with as little overlap as possible. If the task is small enough for one "
-       "agent, return a single part.\n\n"
-       "Return ONLY the parts, one per line, each starting with \"- \" and "
-       "phrased as a concrete instruction. No preamble, no numbering, no "
-       "explanation."))
+  (prompt/render "planner" {:problem problem :max-parts max-parts}))
 
 (def ^:private bullet-re
   ;; A markdown bullet or a numbered/parenthesized item: "- x", "* x", "1. x",

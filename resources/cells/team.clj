@@ -100,7 +100,7 @@
       data
       (let [{:keys [llm-adapter llm-config]} (wf/role-ctx ctx :planner)
             max-parts (or (get-in config [:run :max-subtasks])
-                          planner/default-max-parts)
+                          (planner/default-max-parts))
             reply (try (:content (llm/chat llm-adapter llm-config
                                            [{:role "user"
                                              :content (planner/plan-prompt

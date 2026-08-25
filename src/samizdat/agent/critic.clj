@@ -148,11 +148,13 @@
         scores (try
                  (parse-scores
                   (:content (llm/chat llm-adapter llm-config
+                                      ;; BOTH halves of the critic's prompt come
+                                      ;; from resources. The system half was a
+                                      ;; str in this file, which made the
+                                      ;; critic the one seam where half the
+                                      ;; prompt was editable and half was not.
                                       [{:role "system"
-                                        :content (str "You are a strict research"
-                                                      " director. Keep deliberation"
-                                                      " brief and end with the four"
-                                                      " SCORE lines.")}
+                                        :content (prompt/prompt "critic-system")}
                                        {:role "user" :content p}]
                                       {:temperature 0.0})))
                  (catch Throwable _ nil))]

@@ -378,6 +378,27 @@
         Never scaled UP for a struggling run: a run in trouble spending longer
         per check is how a turn budget disappears into one command."}
 
+ :review-blocking-severities
+ {:value ["critical" "high"] :kind :threshold :capability-tunable? false
+  :doc "The finding severities a review BLOCKS a ship on. Anything else is
+        advisory — passed back to the branch, not grounds for undoing a done.
+
+        Was a regex literal in judge.clj, which encoded two project judgements
+        as code: that a reviewer says [critical]/[high] rather than [P0]/[P1] or
+        [blocker], and that medium never blocks. Both are the project's call. An
+        empty list makes every finding advisory, which is a legitimate stance
+        for a codebase where the reviewer is a second opinion rather than a
+        gate."}
+
+ :planner-max-parts
+ {:value 4 :kind :threshold :capability-tunable? false
+  :doc "How many parts the planner may split a task into — the team fan-out
+        width. Kept small because parallel workers share ONE workspace, and a
+        wide split multiplies collision risk faster than it buys speed. That is
+        a judgement about a project's workspace: a repo of independent packages
+        tolerates a much wider split than one with a single build. Config
+        :run :max-subtasks still overrides for one run."}
+
  :context-budget
  {:value {:tool-result-chars   4000
           :file-read-chars     60000
