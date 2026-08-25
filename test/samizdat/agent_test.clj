@@ -1792,3 +1792,30 @@
     ;; gates.edn, not a src def.
     (is (contains? (gates/config) :forceable-tools))
     (is (= "done" (:name (get-in (gates/config) [:forceable-tools "done"]))))))
+
+(deftest message-builder-gates-are-config-data
+  ;; Tier 3b tranche 2: the six gates whose messages build from branch/ctx
+  ;; state moved to gates.edn with :message-form — an EDN form compiled like
+  ;; :when, seeing the same gate-context keys plus prompt/threshold/state.
+  ;; With these, the entire 15-gate table is data; gates.clj holds only the
+  ;; compiler.
+  (let [data (set (map :gate (:gates (gates/config))))]
+    (doseq [g [:human-directive :done-blocked :safe-state :stuck
+               :progress-stalled :studying]]
+      (is (contains? data g) (str g " is a gates.edn entry")))
+    (is (= (count gates/gates) (count (:gates (gates/config))))
+        "every gate comes from data — no closure half remains")
+    (is (= "done-block passthrough"
+           ((:message (gates/by-name :done-blocked))
+            {:done-block "done-block passthrough"})))
+    (is (str/includes? ((:message (gates/by-name :human-directive))
+                        {:directive {:payload "STOP THE RUN"}})
+                       "**A human has intervened"))
+    (let [b (branch-with :turns-since-progress 7 :any-progress? true)]
+      (is (str/includes? ((:message (gates/by-name :progress-stalled)) {:branch b})
+                         "Nothing has advanced in 7 turns.")))
+    (let [b (branch-with :last-failed-claim "claim z" :abandoned ["x" "y" "z"])]
+      (is (str/includes? ((:message (gates/by-name :stuck)) {:branch b})
+                         "**Withheld**"))
+      (is (str/includes? ((:message (gates/by-name :stuck)) {:branch b})
+                         "- x")))))

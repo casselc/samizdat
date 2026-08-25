@@ -517,6 +517,132 @@
                           (threshold :turn-budget-notices))))
    :message-suffix "**Turn budget**: you have used {{turn-count}} of {{max-turns}} turns. Land what you can verify rather than opening a new line of attack."
    :prediction "the branch converges rather than starting something new"
+   :window 3}
+
+  ;; Tier 3b tranche 2: the six message-builder gates. Their :message-form is
+  ;; an EDN form compiled like :when — same gate-context keys, plus
+  ;; prompt/threshold/state — evaluated at fire time.
+
+  {:gate :human-directive
+   :priority 0
+   :budget nil
+   :doc "A human told the branch to do something. Outranks every machine gate,
+         which is dirge PR 717's finding arriving as a design property rather
+         than a bug fix."
+   :when (some? directive)
+   :message-form (str "**A human has intervened in this run.**\n\n"
+                      (:payload directive)
+                      "\n\nThis takes precedence over anything the harness has told"
+                      " you. Act on it on this turn.")
+   :prediction "the branch acts on the directive on the next turn"
+   :window 1}
+
+  {:gate :done-blocked
+   :priority 1
+   :budget :max-done-blocks
+   :doc "done was called without the evidence it requires. The message says
+         which gate is unmet, because 'not yet' with no reason produces
+         another identical attempt."
+   :when (some? done-block)
+   :message-form done-block
+   :prediction "the branch supplies the missing evidence or gives up"
+   :window 3}
+
+  {:gate :safe-state
+   :priority 2
+   :budget :max-safe-state-aborts
+   :doc "DS1's third failure rung. The branch has failed repeatedly since a
+         green ship-verify, so what it changed since is the suspect, not
+         the approach. Advisory by default: it names the fallback rather
+         than performing it, because a restore that is not fully covered
+         produces a session that never existed."
+   :when (state/safe-state-due? branch (threshold :cull-threshold)
+                               (threshold :safe-state-multiple))
+   :message-form (str (prompt "safe-state")
+                      "\n\nYour last green test run was at turn "
+                      (:green-snapshot branch) ". "
+                      (if (:ok safe-state-coverage)
+                        (str "Every turn since is journalled, so replaying up to"
+                             " that point is a state the branch actually occupied"
+                             " — you can retrace it by hand turn by turn.")
+                        (str "The turn log no longer reaches that point: "
+                             (:reason safe-state-coverage)
+                             " Start from what the journal still shows, or ship"
+                             " what you have.")))
+   :prediction "the branch changes technique, or ships what it has"
+   :window 3}
+
+  {:gate :stuck
+   :priority 8
+   :budget :max-stuck-hints
+   :doc "Consecutive failed or repetitive verifications. Keyed on failure,
+         which is why the progress gate below exists as well.
+
+         The one gate that changes branch state rather than only speaking.
+         It fired at cull-threshold originally, so the advice to change
+         course arrived on the turn the branch became killable for not
+         having changed it (vf-31m); stuck-threshold is now strictly lower
+         and the firing opens a grace window. And it WITHHOLDS (vf-49o):
+         the loop answers a firing by calling state/begin-reframe, after
+         which re-verifying the failing approach is refused on every engine
+         until the branch puts a different one on record. A gate is data
+         and cannot mutate the branch, so that effect lives in the loop
+         beside the turn-budget bookkeeping."
+   :when (>= (:consecutive-failures branch) (threshold :stuck-threshold))
+   :message-form (str (prompt "stuck")
+                      (when-let [c (:last-failed-claim branch)]
+                        (str "\n\n**Withheld**, until you put a different approach"
+                             " on record:\n\n> " c "\n\nThat claim will not reach an"
+                             " engine — any engine — while this stands. Everything"
+                             " else is open, including a smaller piece of the same"
+                             " goal. The next " (threshold :reframe-grace) " turns are"
+                             " yours to change course in; you will not be culled for"
+                             " the failures that led here."))
+                      ;; The reflexion log: everything this branch has already
+                      ;; tried and abandoned (the newest is the withheld claim
+                      ;; above), so it diverges instead of circling back to a
+                      ;; dead end it has forgotten.
+                      (when-let [earlier (seq (butlast (:abandoned branch)))]
+                        (str "\n\nApproaches you have already tried and abandoned"
+                             " — do not retry these:\n"
+                             (str/join "\n" (map #(str "- " %) earlier)))))
+   :prediction "the branch retracts, decomposes, or changes technique"
+   :window 3}
+
+  {:gate :progress-stalled
+   :priority 10
+   :budget :max-stall-nudges
+   :doc "Turns passing with no progress event, after the branch has shown it
+         can make progress. Arms only after the first, so exploration is never
+         nudged."
+   :when (and (:any-progress? branch)
+              (>= (:turns-since-progress branch)
+                  (threshold :progress-stall-threshold)))
+   :message-form (str (prompt "progress-stalled")
+                      "\n\nNothing has advanced in " (:turns-since-progress branch)
+                      " turns.")
+   :prediction "the branch produces a new confirmed artifact or discharges a sub-claim"
+   :window 3}
+
+  {:gate :studying
+   :priority 11
+   :budget :max-studying-nudges
+   :doc "The supervisor's stall: the branch shipped something, then lapsed into
+         inspecting — read/grep/eval turn after turn, all succeeding, changing
+         nothing. The failure gates key on errors (there are none) and the
+         progress gate keys on confirmed artifacts (a coding run makes none),
+         so this is the case both are blind to. It watches the branch's own
+         turn pattern instead — see samizdat.agent.supervisor, which is also
+         what a multi-agent supervisor sub-loop reads. Coding-tunable, since it
+         reads tool mechanics, not verification."
+   :when (and (state/active? branch)
+              (supervisor/over-studying? (tool-vocab :shipping)
+                                         (:turns branch)
+                                         (threshold :studying-turns)))
+   :message-form (supervisor/stall-nudge (tool-vocab :shipping)
+                                         (:turns branch)
+                                         (threshold :studying-turns))
+   :prediction "the branch commits a change, runs a test, or ships"
    :window 3}]
 
  :forceable-tools
