@@ -114,7 +114,7 @@
     (is (not= :allow (:effect (policy/decide {} "PATH=/tmp/evil git status"))))))
 
 (deftest compound-and-redirect-commands-never-ride-an-allow
-  ;; a#1 (docs/code-review.md): `;`, `|`, `&`, a newline, or an unquoted
+  ;; a#1 (docs/RFCS/RFC-000-index.md): `;`, `|`, `&`, a newline, or an unquoted
   ;; redirection mean the shell runs or wires more than the head an allow
   ;; rule matched — the same class as substitution, because the extra command
   ;; never gets its own decision.

@@ -36,10 +36,17 @@
     (is (workflow/iterating? d)
         "one pass is ONE turn — else the beam would run five whole jobs at once")
     (is (contains? (set (vals (:cells d))) :probe/next-move))
-    (is (= (dissoc (:cells d) :probe)
-           (:cells (workflow/read-definition
-                    (slurp (clojure.java.io/resource "manifests/loop.edn")))))
-        "identical to the factory loop but for the one node — a controlled comparison")))
+    ;; The comparison this manifest exists to make: identical to the factory
+    ;; loop except for its probe nodes. Stated as "drop every node whose cell
+    ;; is a :probe/* one" rather than naming them, so adding a probe node does
+    ;; not break the assertion that everything ELSE is unchanged.
+    (let [without-probes (into {} (remove (fn [[_ cell-id]]
+                                            (= "probe" (namespace cell-id)))
+                                          (:cells d)))]
+      (is (= without-probes
+             (:cells (workflow/read-definition
+                      (slurp (clojure.java.io/resource "manifests/loop.edn")))))
+          "identical to the factory loop but for the probe nodes"))))
 
 (deftest the-probe-manifest-is-in-the-catalogue-the-supervisor-reads
   ;; A manifest the supervisor cannot see is one it can never select.

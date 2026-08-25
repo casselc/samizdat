@@ -212,7 +212,7 @@
                        q run-id limit])
           (catch Throwable e
             ;; Empty stays the contract, but a persistent fault must leave a
-            ;; trace (review2 #15).
+            ;; trace (RFC-000 R2-15).
             (log/warn "artifacts/similar failed; returning empty:" (ex-message e))
             []))))))
 
@@ -253,7 +253,7 @@
 
   Gates the ledger's dedupe, which collapses claims that are the same theorem
   differently worded (see dedupe-claims). The sketch diversity gate that also
-  read it (vf-eaw) left with the proof harness's tool surface (review3 #9)."
+  read it (vf-eaw) left with the proof harness's tool surface (RFC-000 R3-9)."
   ([a b] (near-duplicate? a b 0.6))
   ([a b threshold]
    (let [x (shingles a) y (shingles b)]

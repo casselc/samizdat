@@ -110,7 +110,7 @@
 
   (chat-body [this config {:keys [messages max-tokens temperature prefill force-tool
                                   cache-key]}]
-   ;; The gate is the protocol method on THIS adapter (review3 #14), so the
+   ;; The gate is the protocol method on THIS adapter (RFC-000 R3-14), so the
    ;; answer a caller can query and the answer chat-body acts on are one
    ;; path and cannot drift apart.
    (let [use-prefill? (and prefill (adapter/prefill-support? this config))]

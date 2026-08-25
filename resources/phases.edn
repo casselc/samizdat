@@ -30,13 +30,18 @@
  ;; executor. A key is a get-in path into the turn envelope
  ;; {:result <tool return> :artifact <produced artifact>}; when it holds a
  ;; truthy value, each named effect applies. Effect names dispatch in
- ;; loop.clj to state fns — a table cannot mutate the branch. The proof-era
- ;; artifact-status triggers ([::artifact :claim-status :confirmed] and
- ;; friends) left with the tools that produced those statuses; the one live
- ;; transition is the green ship-verify: `done` reports :verified-green?
- ;; from its ship-verify rung, and green work is the green point the
- ;; safe-state rung rewinds to (it also ends a reframe — the withheld
- ;; approach could not have produced it, vf-9wx).
+ ;; loop.clj to state fns — a table cannot mutate the branch. The one
+ ;; transition declared here is the green ship-verify: `done` reports
+ ;; :verified-green? from its ship-verify rung, and green work is the green
+ ;; point the safe-state rung rewinds to (it also ends a reframe — the
+ ;; withheld approach could not have produced it, vf-9wx).
+ ;;
+ ;; An artifact-status trigger ([:artifact :claim-status] and friends) IS
+ ;; available: tools/ship.clj emits {:claim-status :confirmed} on a green
+ ;; ship-verify, so a project that wants an effect keyed on the artifact
+ ;; rather than on the signal can add one. This comment used to say those
+ ;; triggers "left with the tools that produced those statuses", which stopped
+ ;; being true and made a usable extension point look closed. RFC-001 F1.
  :transitions {[:result :verified-green?] [:mark-green :clear-reframe]}
 
  ;; #30: the winner rubric — the ported UCLA FirstProof selector. EDN forms

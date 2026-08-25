@@ -78,7 +78,7 @@
     (is (= :balanced (:status (lisp/balance "(def x 1) ; ) ] } trailing junk"))))))
 
 (deftest an-unterminated-string-is-its-own-status
-  ;; a#5 (docs/code-review.md): a string whose last quote was ESCAPED used to
+  ;; a#5 (docs/RFCS/RFC-000-index.md): a string whose last quote was ESCAPED used to
   ;; scan as "closed exactly at EOF", so the file read as balanced and
   ;; write_file wrote the broken text with no warning.
   (let [escaped-final-quote (str "\"x " "\\" "\"")   ; "x \"

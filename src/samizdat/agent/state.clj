@@ -443,7 +443,7 @@
 
   The claim-scoped refusal is the whole mechanism now. The proof harness's
   extra step — dropping a Lean branch back into :explore to force a new plan —
-  left with its tool surface (review3 #6); the phase machine's live work is
+  left with its tool surface (RFC-000 R3-6); the phase machine's live work is
   the explore cap, the release valve that keeps a branch from camping in
   explore forever."
   [branch turn claim]
@@ -511,7 +511,7 @@
        ;; A failing call that carried a claim records it, so the stuck gate
        ;; knows what the branch was grinding on when it failed. The proof
        ;; harness's Lean exclusion (an unsolved goal is evidence about the
-       ;; proof, not the statement) left with its tool surface (review3 #6);
+       ;; proof, not the statement) left with its tool surface (RFC-000 R3-6);
        ;; on the coding loop a failing claim is fair game to withhold.
        (and (= :failure category) (seq (str claim)))
        (assoc :last-failed-claim claim

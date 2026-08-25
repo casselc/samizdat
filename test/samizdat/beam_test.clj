@@ -179,3 +179,43 @@
         (is (every? :marked-by-the-round @disposed)
             "the round's own progress is visible to teardown, not the input")
         (finally (db/close c)))))
+
+;; --- the wiring, across every shipped manifest -------------------------------
+
+(deftest every-shipped-cell-is-reachable-from-some-manifest
+  ;; RFC-002 F1. A cell no manifest references never runs, so a capability that
+  ;; is "available for later" is really absent — :probe/ab-model sat like that,
+  ;; with a docstring claiming it recorded comparisons it could not have made.
+  ;;
+  ;; :subworkflows count as references: orchestrator declares
+  ;; {:loop/worker "worker"} and register-subworkflows! registers it as a
+  ;; workflow-cell at compile time, so it is absent from cells/loaded and
+  ;; present when the manifest compiles. A check that misses that reports a
+  ;; false missing-cell (RFC-002 F2).
+  (let [names (->> (file-seq (java.io.File. "resources/manifests"))
+                   (filter #(.isFile %))
+                   (map #(clojure.string/replace (.getName %) #"\.edn$" "")))
+        defs (for [n names]
+               (workflow/read-definition
+                (slurp (clojure.java.io/resource (str "manifests/" n ".edn")))))
+        referenced (into (set (mapcat #(vals (:cells %)) defs))
+                         (mapcat #(keys (:subworkflows %)) defs))
+        registered (set (keys (cells/loaded)))]
+    (is (seq registered))
+    (is (empty? (remove referenced registered))
+        (str "these cells are registered but no manifest reaches them, so they"
+             " never run: " (pr-str (vec (remove referenced registered)))))
+    (is (empty? (remove registered (remove (set (mapcat #(keys (:subworkflows %)) defs))
+                                           (set (mapcat #(vals (:cells %)) defs)))))
+        "and no manifest references a cell that is not registered")))
+
+(deftest every-shipped-manifest-compiles-and-is-selectable
+  ;; A manifest in the catalogue that cannot compile is a trap: the supervisor
+  ;; is told it can switch to it, and the switch fails at run time.
+  (let [names (->> (file-seq (java.io.File. "resources/manifests"))
+                   (filter #(.isFile %))
+                   (map #(clojure.string/replace (.getName %) #"\.edn$" "")))
+        listed (set (map :name (workflow/catalog nil)))]
+    (doseq [n names]
+      (is (contains? listed n) (str n " is not in the catalogue the supervisor reads"))
+      (is (some? (workflow/compiled-manifest n)) (str n " does not compile")))))

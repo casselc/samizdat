@@ -105,7 +105,7 @@
   "Update the given fields, bump updated_at, and keep closed_at honest: a
   transition into a terminal status stamps it, a transition out clears it.
 
-  The write names ONLY the fields the caller passed (review2 #1): the old
+  The write names ONLY the fields the caller passed (RFC-000 R2-1): the old
   full-row rewrite from a (possibly stale) read silently erased whatever a
   concurrent writer had landed in between — a claim, another run's edit — the
   a#4 race class one def over from the guarded claim!. An updated_at guard
@@ -150,8 +150,8 @@
 
   First-writer-wins decided by the ROW: the UPDATE itself guards on the claim
   being free, because a read-then-write pair is two lock acquisitions and two
-  branches whose reads both saw the unclaimed row could both write (a#4,
-  docs/code-review.md).
+  branches whose reads both saw the unclaimed row could both write (RFC-000 A-4,
+  docs/RFCS/RFC-000-index.md).
 
   THE HOLDER IS A BRANCH, not a run, and that distinction is the whole point of
   migration v12. The guard used to be `(run_id IS NULL OR run_id = ?)` with only

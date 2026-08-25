@@ -128,7 +128,7 @@
          (count (state/confirmed-artifacts before)))
       (> (count (:artifacts after)) (count (:artifacts before)))))
 
-;; The tool names each gate's settle reads as compliance (review3 #6). Tier
+;; The tool names each gate's settle reads as compliance (RFC-000 R3-6). Tier
 ;; 1a: the table lives in gates.edn as :tool-vocab :settle-called — data,
 ;; not inline strings in a case, so a test can walk it and assert every name
 ;; resolves to a registered run-tool: a settle name the loop can never
@@ -139,7 +139,7 @@
 
 (defn settle-called-names
   "Every tool name any settle rule reads as compliance, deduped. Exposed for
-  the vocabulary test (review3 #6)."
+  the vocabulary test (RFC-000 R3-6)."
   []
   (distinct (mapcat seq (vals (gates/tool-vocab :settle-called)))))
 

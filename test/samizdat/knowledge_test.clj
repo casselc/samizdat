@@ -32,7 +32,7 @@
     (is (empty? (knowledge/recall @conn "needle")))))
 
 (deftest remember-rethrows-non-collision-failures-instead-of-retrying
-  ;; review2 #15: same as messages/send! — only a UNIQUE collision is an
+  ;; RFC-000 R2-15: same as messages/send! — only a UNIQUE collision is an
   ;; id-allocation problem worth retrying; anything else must propagate.
   (let [real-execute db/execute!
         inserts (atom 0)]

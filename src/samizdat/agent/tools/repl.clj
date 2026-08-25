@@ -21,10 +21,33 @@
 
   Evaluating Clojure in the live image is the primary feedback loop; these
   three methods only dispatch it. See samizdat.agent.tools.base for the
-  shared result helpers and the run-tool multimethod."
+  shared result helpers and the run-tool multimethod.
+
+  THE REDACTION BOUNDARY APPLIES HERE TOO (RFC-003 F1). `eval` runs in the
+  harness process, so unlike the shell it can read the environment, the
+  resolved config and the secret store directly — strictly more capability
+  than the path that gets a scrubbed env and a redacted result. It had
+  neither, and the security model asserted that no path from the environment
+  reaches model space unredacted while its graph omitted this tool entirely.
+
+  What redacting here does and does not buy: it closes the ACCIDENTAL leak,
+  which is the realistic one — a model prints a config map while debugging and
+  a provider key lands in the branch messages and the journal permanently.
+  It does not stop deliberate exfiltration, because a model that wants the
+  value out can encode it, and in-process execution cannot be contained from
+  inside the process. That case is out of scope by design and RFC-003 says so
+  rather than leaving it silently unhandled."
   (:require [clojure.string :as str]
             [samizdat.agent.tools.base :as base]
-            [samizdat.repl :as repl]))
+            [samizdat.repl :as repl]
+            [samizdat.security.secrets :as secrets]))
+
+(defn- scrubbed
+  "A model-bound eval payload with known secret values and credential-shaped
+  strings replaced. Same function the shell path uses, so the two boundaries
+  cannot drift in what they consider a secret."
+  [s]
+  (secrets/redact (str s) (secrets/known-values (into {} (System/getenv)))))
 
 (defmethod base/run-tool "eval" [{:keys [branch repl-session] :as ctx}]
   ;; Evaluate Clojure in the live harness image. REPL-first development: the
@@ -37,10 +60,11 @@
     (let [timeout (some-> (base/arg ctx :timeout-ms) str str/trim not-empty parse-long)
           r (repl/eval-code (str (base/arg ctx :code)) repl-session timeout)]
       (if (:ok r)
-        (base/ok branch (str "=> " (:value r)
-                        (when (seq (:out r)) (str "\n" (:out r)))))
-        (base/fail branch (str "Eval error: " (:error r)
-                          (when (seq (:out r)) (str "\n" (:out r)))))))))
+        (base/ok branch (scrubbed (str "=> " (:value r)
+                                       (when (seq (:out r)) (str "\n" (:out r))))))
+        (base/fail branch (scrubbed (str "Eval error: " (:error r)
+                                         (when (seq (:out r))
+                                           (str "\n" (:out r))))))))))
 
 (defmethod base/run-tool "doc" [{:keys [branch] :as ctx}]
   (if-let [m (base/missing ctx :symbol)]

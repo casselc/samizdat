@@ -28,7 +28,7 @@
   a journal row — catching vendor-prefix tokens, URL passwords, and any value
   the run is known to hold.
 
-  The security-model diagram (docs/security.md) is the specification: env and
+  The security-model diagram (docs/RFCS/RFC-003-security-model.md) is the specification: env and
   secrets reach the model, messages, or journal ONLY through redact, verified
   by chiasmus. These functions are the redact node and the scrub node."
   (:require [clojure.string :as str]))
@@ -124,7 +124,20 @@
                  (str/replace s v redacted)
                  s))
              t
-             (remove str/blank? (distinct (or known-values [])))))))
+             ;; `(into [] …)` and NOT `(distinct …)`. `distinct` on a SET
+             ;; returns the first element as nil under this runtime —
+             ;; (distinct #{"a" "b"}) => (nil "b") — and `known-values`
+             ;; returns a set, so this whole pass iterated over nothing: the
+             ;; substring boundary, which exists precisely for opaque secrets
+             ;; with no recognizable shape, was dead on every real call path.
+             ;;
+             ;; It looked tested. The canary in
+             ;; secrets-test/spec-a-planted-canary-never-reaches-model-space
+             ;; starts with `sk-`, so the VENDOR-PREFIX REGEX caught it and the
+             ;; test passed while asserting nothing about the pass it was
+             ;; written for. A set is already distinct, so dedupe was never
+             ;; needed here. RFC-003 F4.
+             (remove str/blank? (into [] (or known-values [])))))))
 
 ;; --- scrubbing the child environment ----------------------------------------
 

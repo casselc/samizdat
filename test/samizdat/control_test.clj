@@ -65,7 +65,7 @@
              (mapv :payload (control/pending c rid)))))))
 
 (deftest a-grant-intervention-is-applied-immediately
-  ;; a#2 (docs/code-review.md): grants/grant! had no production caller, so
+  ;; a#2 (docs/RFCS/RFC-000-index.md): grants/grant! had no production caller, so
   ;; every deliberate :ask blocked a run forever — no endpoint, no tool, no
   ;; intervention kind wrote a grant. The human intervention surface is the
   ;; write path, and it applies on arrival rather than queueing for a
@@ -114,7 +114,7 @@
             (is (= "applied" (:status (first (interventions/history c rid)))))))))))
 
 (deftest a-run-that-finishes-in-the-start-window-leaves-no-active-entry
-  ;; code-review-2026-08 #3: the run future's completion dissoc'd `active`
+  ;; RFC-000 CR1-3: the run future's completion dissoc'd `active`
   ;; before the request thread had assoc'd it, stranding an entry that let
   ;; abort! rewrite a finished run's status to :aborted. Registration must
   ;; happen inside the run's own thread (on-start), so it can never land
@@ -136,7 +136,7 @@
             "abort on a finished run refuses rather than rewriting status")))))
 
 (deftest abort-refuses-when-the-run-won-the-finish-race
-  ;; review2 #4: the transient window a#3 could not close — the run's own
+  ;; RFC-000 R2-4: the transient window RFC-000 A-3 could not close — the run's own
   ;; :completed lands between abort!'s registry read and its finish-run!.
   ;; The store guard refuses the rewrite; abort! must answer 409 rather
   ;; than claim an abort that did not land.
@@ -152,7 +152,7 @@
         (finally (swap! api-control/active dissoc rid))))))
 
 (deftest an-unknown-intervention-kind-is-a-400-not-a-500
-  ;; review3 #12: submit! throws on an unknown kind, and intervene! let it
+  ;; RFC-000 R3-12: submit! throws on an unknown kind, and intervene! let it
   ;; fly through to the server's catch-all 500. A bad request is the
   ;; client's to fix; the API should say 400 and name the known kinds.
   (with-db [c]
@@ -165,7 +165,7 @@
             "nothing was queued")))))
 
 (deftest a-negative-limit-is-not-a-disguised-no-limit
-  ;; review3 #12: a negative limit went straight into SQL LIMIT, and SQLite
+  ;; RFC-000 R3-12: a negative limit went straight into SQL LIMIT, and SQLite
   ;; reads LIMIT -1 as no limit at all — so ?limit=-1 answered with the whole
   ;; table while looking like a tighter ask. The API edge clamps it to zero.
   (with-db [c]
@@ -176,7 +176,7 @@
       (is (= 2 (count (:runs (api-runs/list-runs c 2))))))))
 
 (deftest watch-follows-the-run-not-a-hardcoded-branch
-  ;; review3 #13: watch read branch-turns for "B1" and only "B1", so on a
+  ;; RFC-000 R3-13: watch read branch-turns for "B1" and only "B1", so on a
   ;; beam run — 5 branches by default — the supervisor's window showed one
   ;; arm of the run and the other four were invisible, including whatever
   ;; branch was actually doing the work. Default to the run's last active

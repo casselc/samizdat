@@ -358,7 +358,7 @@
   are the live tail and last-progress-at — and every kind that matters is
   also written to a durable table (turns, artifacts, failures,
   gate_firings). Nothing pruned them, so the one shared DB file grew
-  without bound (review2 #11). The sweep runs on run start, not at finish:
+  without bound (RFC-000 R2-11). The sweep runs on run start, not at finish:
   a tailing client still reads a just-finished run's events to see the
   :run-finished entry — that is how it learns the run ended — so events
   ride out a retention window (24h in start-run!) and go after that."

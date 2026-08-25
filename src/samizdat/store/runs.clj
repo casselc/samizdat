@@ -33,7 +33,7 @@
   "Open a run and return its id."
   [conn {:keys [problem provider model max-turns beam-width prompt-digest]}]
   (let [id (str (random-uuid))]
-    ;; The retention sweep (review2 #11): events outlive their run's tail
+    ;; The retention sweep (RFC-000 R2-11): events outlive their run's tail
     ;; window, then go — every durable table keeps the content.
     (journal/prune-finished!
      conn (str (.minusSeconds (java.time.Instant/now) (* 24 3600))))
@@ -53,7 +53,7 @@
 
 (defn finish-run!
   "Terminal only from 'running', decided by the ROW rather than the caller
-  (review2 #4): abort!'s transient window could overwrite a run that completed
+  (RFC-000 R2-4): abort!'s transient window could overwrite a run that completed
   between its registry read and this write. Returns rows written; 0 means the
   run was already terminal and nothing changed, the journal says nothing."
   [conn run-id status final-answer]
@@ -177,7 +177,7 @@
   branch-id)
 
 (defn close-branch!
-  "Only from 'active' (review2 #4): a late close used to overwrite a closed
+  "Only from 'active' (RFC-000 R2-4): a late close used to overwrite a closed
   branch's status and inactive_reason — the column the cull-honesty work
   exists to keep truthful. Returns rows written."
   [conn run-id branch-id status reason]

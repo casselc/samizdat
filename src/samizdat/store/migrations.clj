@@ -287,7 +287,7 @@
   ;; human, the grant persists here scoped to its run and is consulted ahead of
   ;; the base rules on later commands. Human-only writes: nothing the model
   ;; emits reaches this table (the model has no edge into grants — see the
-  ;; security model, docs/security.md). A grant can never override a hard deny.
+  ;; security model, docs/RFCS/RFC-003-security-model.md). A grant can never override a hard deny.
   ["CREATE TABLE IF NOT EXISTS grants (
       id         INTEGER PRIMARY KEY AUTOINCREMENT,
       run_id     TEXT NOT NULL,
@@ -378,7 +378,7 @@
   ;; makes the claim exclusive BETWEEN runs and a no-op WITHIN one. In a team
   ;; workflow the competing agents are branches of a single run — several
   ;; implementors fanned out over one feature — so two workers both claimed the
-  ;; same task and both believed they held it. The docstring cited a#4 (two beam
+  ;; same task and both believed they held it. The docstring cited RFC-000 A-4 (two beam
   ;; branches whose reads both saw the unclaimed row) and had fixed the
   ;; read-then-write race while leaving the granularity wrong for exactly the
   ;; case it named.

@@ -16,6 +16,7 @@
 {:description "The factory loop plus a non-committing probe: before spending a turn on a branch that has been emitting unusable calls, try several framings of the next step against its own context and steer toward the one that produced a real tool call. Costs inference, never a turn."
  :cells {:start          :loop/assemble
          :probe          :probe/next-move
+         :ab             :probe/ab-model
          :infer          :llm/infer
          :parse          :llm/parse
          :provider-error :loop/provider-error
@@ -30,7 +31,12 @@
          ;; The probe is a pass-through when it declines to fire, so there is
          ;; no branch here: either it added a steer message or it did not, and
          ;; the model call is next either way.
-         :probe          :infer
+         :probe          :ab
+         ;; The A/B arm is a pass-through until gates.edn :probe :variants
+         ;; names some models, which it does not by default. Wired anyway: a
+         ;; cell no manifest reaches is unreachable, so "the comparison is
+         ;; recorded" was an intention rather than a fact (RFC-002 F1).
+         :ab             :infer
          :infer          :parse
          :parse          {:provider-error :provider-error
                           :no-call        :no-call

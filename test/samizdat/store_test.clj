@@ -821,7 +821,7 @@
        (is (re-find #"(?i)UNVERIFIED|not results" block)))))
 
 (deftest a-failed-migration-rolls-back-and-keeps-the-version
-  ;; review2 #3: migrations are non-idempotent ALTERs, but each ran as
+  ;; RFC-000 R2-3: migrations are non-idempotent ALTERs, but each ran as
   ;; autocommitted statements with the version bump after the last one — a
   ;; crash between the two left user_version stale and every later boot
   ;; died on `duplicate column name` forever. A migration must be
@@ -846,7 +846,7 @@
            (set (filter #(str/starts-with? % "mg_") (db/table-names c)))))))
 
 (deftest lifecycle-writes-are-decided-by-the-row
-  ;; review2 #4: finish-run!/mark-running!/close-branch!/resolve! were
+  ;; RFC-000 R2-4: finish-run!/mark-running!/close-branch!/resolve! were
   ;; WHERE id = ? only, so a stale caller rewrote a terminal run (abort!'s
   ;; transient window vs the run's own completion) or a closed branch's
   ;; inactive_reason. Guards follow reconcile-orphans!'s precedent.
@@ -880,7 +880,7 @@
                                         (interventions/history c rid)))))))))
 
 (deftest old-finished-runs-get-their-events-pruned-on-the-next-start
-  ;; review2 #11: events are a durable duplicate of every turn/artifact/
+  ;; RFC-000 R2-11: events are a durable duplicate of every turn/artifact/
   ;; failure/gate write whose only readers are the live tail and
   ;; last-progress-at; nothing ever pruned them, so the one shared DB file
   ;; grew without bound. The sweep runs at run START, not at finish: a

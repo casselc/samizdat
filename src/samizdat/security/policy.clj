@@ -32,7 +32,7 @@
   Session grants (human-only, from the grants table) are consulted ahead of the
   base rules, so an approved `ask` becomes an allow for the rest of the run —
   but a hard deny always wins. This is the `perm` node of the security model
-  (docs/security.md), and `run-shell` is where it, the env scrub, and the
+  (docs/RFCS/RFC-003-security-model.md), and `run-shell` is where it, the env scrub, and the
   redaction boundary meet on the shell tool path."
   (:require [clojure.string :as str]
             [samizdat.engine.proc :as proc]
@@ -88,7 +88,7 @@
 
   Redirection does not split: it does not start a new command, and a deny glob
   (`.*` spans the rest of the string) already covers the tail of its segment.
-  This is the lexer a#1 (docs/code-review.md) asked for — the old regex-only
+  This is the lexer RFC-000 A-1 asked for — the old regex-only
   classification let `echo pwned; rm -rf ~` ride `echo **` because `.*`
   matches `;` too."
   [raw]

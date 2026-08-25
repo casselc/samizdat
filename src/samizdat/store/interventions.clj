@@ -81,7 +81,7 @@
   it would cull the last branch is a different thing from one that landed, and
   the UI has to be able to tell them apart.
 
-  Decided by the ROW (review2 #4): only a still-pending directive of THIS run
+  Decided by the ROW (RFC-000 R2-4): only a still-pending directive of THIS run
   resolves — a double resolve must not overwrite the first disposition, and a
   resolve under the wrong run-id must not journal into that run. Returns rows
   written."

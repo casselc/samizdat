@@ -78,7 +78,7 @@
                       "(java.lang.System/exit (if (clojure.core/pos? (+ (:fail s) (:error s))) 1 0)))")]
         ;; single-quote the whole -e expression for sh -c; every namespace in
         ;; it came through ns-from-test-path's whitelist, so the expression
-        ;; genuinely has no single quotes of its own (review3 #1).
+        ;; genuinely has no single quotes of its own (RFC-000 R3-1).
         (str (:cmd-prefix (conventions)) expr "'")))))
 
 (defn- tail
@@ -137,7 +137,7 @@
   `timeout-ms` (default 10 min). Never throws — a spawn failure reads as
   not-green, which sends the branch back rather than shipping.
 
-  Trust boundary (docs/security.md): the child runs with the SCRUBBED process
+  Trust boundary (docs/RFCS/RFC-003-security-model.md): the child runs with the SCRUBBED process
   environment — never the parent's, which holds provider keys — and its output
   is model-bound, so it passes the redaction boundary before it is returned."
   [root cmd timeout-ms]

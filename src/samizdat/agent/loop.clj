@@ -423,12 +423,20 @@
                    (state/add-artifact branch (assoc a :turn turn))
                    branch)
          ;; A green ship-verify is the green point the safe-state rung
-         ;; rewinds to. No tool on the current surface emits :claim-status
-         ;; artifacts (the proof engines that did are gone), so the old
-         ;; :confirmed trigger keyed on a status that never occurred. Green
-         ;; work also ends a reframe: the withheld approach could not have
-         ;; produced it (vf-9wx). The signal→effect table itself is
-         ;; phases.edn :transitions data (drg-4026 #3).
+         ;; rewinds to, and green work also ends a reframe: the withheld
+         ;; approach could not have produced it (vf-9wx). The signal→effect
+         ;; table itself is phases.edn :transitions data (drg-4026 #3).
+         ;;
+         ;; This comment used to say that nothing on the current surface emits
+         ;; :claim-status artifacts, as the reason the trigger keys on the
+         ;; verify signal rather than on :confirmed. That stopped being true:
+         ;; tools/ship.clj emits {:claim-status :confirmed} on a green
+         ;; ship-verify, so the artifact machinery downstream of it is LIVE —
+         ;; cross-branch sharing admits those artifacts, and the winner
+         ;; rubric's confirmed-count and engine-diversity components rank on
+         ;; them. Keying on the verify signal is still right (it is the direct
+         ;; observation rather than an inference from an artifact), but not for
+         ;; the reason that was written here. RFC-001 F1.
          branch (apply-transitions result (:artifact result) branch)]
     ;; A green verify marks the green point the safe-state rung falls back
     ;; to. The snapshot is the turn cursor: the journal is the store

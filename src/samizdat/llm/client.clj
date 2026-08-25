@@ -79,7 +79,7 @@
   several OpenAI-compatible providers send instead. UNCLAMPED: the in-run cap
   check in `chat` must see the provider's real ask — clamping here hid a usage
   cap wearing a rate-limit's headers under a 60s ceiling that could never
-  cross the 300s window (code-review-2026-08 #2). The ceiling on what we
+  cross the 300s window (RFC-000 CR1-2). The ceiling on what we
   actually sleep is applied in backoff-ms."
   [headers]
   (let [h (fn [k] (get headers k))

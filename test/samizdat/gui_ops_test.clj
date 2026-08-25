@@ -22,7 +22,7 @@
             [samizdat.gui.ops :as ops]))
 
 (deftest scroll-props-reset-only-on-selection-change
-  ;; review2 #6: :scroll-top in the scrolled props on every render resets
+  ;; RFC-000 R2-6: :scroll-top in the scrolled props on every render resets
   ;; the adjustment (glimmer-gtk applies the prop whenever present — the
   ;; value is ignored), yanking a long turn log back to the top on every
   ;; poller batch. The prop belongs only to the render after a change.
@@ -35,7 +35,7 @@
   (is (= "B" (:scroll-top (ops/scroll-props "A" "B")))))
 
 (deftest a-selection-that-lost-the-fetch-race-is-refetched
-  ;; review2 #7: when the single-flight CAS failed, the new selection's
+  ;; RFC-000 R2-7: when the single-flight CAS failed, the new selection's
   ;; fetch was discarded; the in-flight fetch discarded its own result
   ;; because the selection moved; nothing re-triggered on a finished run.
   ;; The completing fetch must re-run for a pending DIFFERENT selection —
@@ -46,7 +46,7 @@
   (is (false? (ops/refetch-after? nil "A")) "no pending selection, no refetch"))
 
 (deftest an-empty-run-list-means-unknown-not-none
-  ;; review2 #8: list-runs answers {:ok false} (not a throw) on a dead or
+  ;; RFC-000 R2-8: list-runs answers {:ok false} (not a throw) on a dead or
   ;; busy server, and the empty list used to read as "no runs" —
   ;; disconnecting the tailed run, worst case right after start-new-run!.
   ;; nil means "keep tailing whatever is tailed".

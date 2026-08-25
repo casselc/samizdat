@@ -259,7 +259,7 @@
   A literal list, resolved against `io/resource` rather than globbed off a
   cwd-relative `resources/manifests`. Everything else in this namespace
   already reads manifests through io/resource — the glob was the one holdout,
-  and it was the same bug review3 #11 fixed for the cells dir: a binary (or a
+  and it was the same bug RFC-000 R3-11 fixed for the cells dir: a binary (or a
   process started anywhere but the project root) found no directory, caught
   the exception, and served the supervisor a catalogue with the factory half
   silently missing. There is no portable listing for classpath resources, so
@@ -412,6 +412,6 @@
             (assoc :run-id run-id)))
       (finally
         ;; The run's eval namespace does not outlive the run
-        ;; (code-review-2026-08 #6): one namespace per run, never removed, was
+        ;; (RFC-000 CR1-6): one namespace per run, never removed, was
         ;; unbounded growth on a serve process.
         (repl/close-session (:repl-session ctx))))))

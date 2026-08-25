@@ -17,7 +17,7 @@
 
 (ns samizdat.adapter-test
   "The vendored ring adapter's connection handling, driven end to end through a
-  raw socket client: chunked-body refusal (review3 #3), the request-size cap
+  raw socket client: chunked-body refusal (RFC-000 R3-3), the request-size cap
   and read timeout (#4), and byte-exact body decoding across packet splits
   (#5). The client carries its own 5s SO_RCVTIMEO so a broken server FAILS
   these tests instead of hanging the suite."
@@ -123,7 +123,7 @@
        body))
 
 (deftest chunked-request-bodies-are-refused-not-truncated
-  ;; review3 #3: with no Content-Length header, content-length answered 0, so
+  ;; RFC-000 R3-3: with no Content-Length header, content-length answered 0, so
   ;; a chunked body looked complete the instant its headers arrived and the
   ;; handler ran on whatever fragment happened to land in the first recv. A
   ;; 1.1 server that does not speak chunked must refuse it (411), never serve
@@ -145,7 +145,7 @@
             (finally (adapter/c-close fd))))))))
 
 (deftest a-request-over-the-cap-is-refused-not-buffered-forever
-  ;; review3 #4: the read loop appended whatever arrived with no ceiling, so a
+  ;; RFC-000 R3-4: the read loop appended whatever arrived with no ceiling, so a
   ;; Content-Length claim of any size was buffered in full — and read to the
   ;; end — before anyone looked at it.
   (let [captured (atom [])]
@@ -163,7 +163,7 @@
             (finally (adapter/c-close fd))))))))
 
 (deftest a-request-that-stalls-is-closed-not-held
-  ;; review3 #4: recv blocked forever with no SO_RCVTIMEO, so a client that
+  ;; RFC-000 R3-4: recv blocked forever with no SO_RCVTIMEO, so a client that
   ;; sent its headers and vanished held its connection thread for the life of
   ;; the server. With a server-side read timeout the stalled connection is
   ;; closed on the server's schedule — :closed? here is true only when the
@@ -181,7 +181,7 @@
             (finally (adapter/c-close fd))))))))
 
 (deftest a-body-split-across-packets-decodes-exactly-once
-  ;; review3 #5: the accumulator decoded every recv separately and str'd the
+  ;; RFC-000 R3-5: the accumulator decoded every recv separately and str'd the
   ;; pieces together, so a multibyte UTF-8 char landing across two packets
   ;; reached the handler as U+FFFD replacement chars. Octets must accumulate
   ;; raw and the string decode once, after the body is complete.

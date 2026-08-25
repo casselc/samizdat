@@ -622,7 +622,7 @@
         (is (true? (:prefix (last msgs))))))
 
     (testing "chat-body gates prefill through the protocol, not a private twin"
-      ;; review3 #14: chat-body consulted a private supports-prefill? while
+      ;; RFC-000 R3-14: chat-body consulted a private supports-prefill? while
       ;; the protocol method delegated to it — two paths deciding one
       ;; question, so a provider update touching one left the other behind.
       ;; The protocol method is the only gate now: overriding it must change
@@ -766,7 +766,7 @@
   (testing "the ask is unclamped — the ceiling lives at the sleep"
     ;; The clamp used to sit in retry-after-ms, which made the in-run cap
     ;; check compare a 60s-bounded number against a 300s threshold and so
-    ;; never fire (code-review-2026-08 #2).
+    ;; never fire (RFC-000 CR1-2).
     (is (= 3600000 (client/retry-after-ms {"retry-after" "3600"})))
     (is (= client/max-backoff-ms (#'client/backoff-ms 0 {"retry-after" "3600"}))
         "what we actually sleep is still bounded by our ceiling"))
@@ -902,7 +902,7 @@
     (is (nil? (fence/parse-tool-call "<invoke>no name here</invoke>")))))
 
 (deftest retry-after-is-the-providers-ask-unclamped
-  ;; code-review-2026-08 #2: the value was clamped to max-backoff-ms (60s)
+  ;; RFC-000 CR1-2: the value was clamped to max-backoff-ms (60s)
   ;; BEFORE the in-run cap check compared it against max-in-run-retry-wait-ms
   ;; (300s) — a 60s ceiling under a 300s guard made the "usage cap wearing a
   ;; rate limit" branch unreachable. The clamp belongs at the sleep, not here.

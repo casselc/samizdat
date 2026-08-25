@@ -264,7 +264,7 @@
         cooldown (gates/threshold :fork-invite-cooldown)
         floor (gates/threshold :fork-invite-floor)
         earning? (fn [b]
-                   ;; The floor (review2 #13, wired): a survivor below the
+                   ;; The floor (RFC-000 R2-13, wired): a survivor below the
                    ;; minimum critic scores is not invited to reseed — growth
                    ;; does not spend budget on lines not yet earning it.
                    (every? (fn [[obj minimum]]

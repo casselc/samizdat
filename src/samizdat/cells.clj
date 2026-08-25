@@ -57,7 +57,7 @@
   project's own overrides. A later dir's cell of the same id wins (it loads
   last), so a project can replace a shipped cell without touching it.
 
-  The shipped entry resolves through the classpath (review3 #11): a built
+  The shipped entry resolves through the classpath (RFC-000 R3-11): a built
   binary started outside the project root must still find the cells it
   ships — a cwd-relative `resources/cells` there resolves to nothing and
   the kernel silently registers zero cells. The override dir stays
