@@ -35,14 +35,15 @@
   whose predictions never settle is not steering anything, and that is
   measurable rather than arguable."
   (:require [samizdat.agent.gates :as gates]
-            [samizdat.agent.state :as state]))
+            [samizdat.agent.state :as state]
+            [samizdat.util :as util]))
 
 (defn eligible
   "Every gate whose precondition holds and whose budget is not spent, in
   priority order. Exposed so a test can assert what the arbiter passed over,
   not only what it chose."
   [ctx]
-  (->> gates/gates
+  (->> (gates/gates)
        (filter (fn [g] (and ((:when g) ctx)
                             (not (gates/budget-exceeded? g (:branch ctx))))))
        (sort-by :priority)))
@@ -97,8 +98,11 @@
   "Schemas for the tools a gate may FORCE via native tool_choice, from
   gates.edn :forceable-tools (tier 3b: data). Only the terminal tools —
   forcing a mid-task tool would be the harness deciding rather than
-  steering. Minimal: enough for the provider to accept the function."
-  (:forceable-tools (gates/config)))
+  steering. Minimal: enough for the provider to accept the function.
+
+  Read through the config generation rather than snapshotted at namespace
+  load, so reload-config! reaches it like every other derived table."
+  (util/generation-cache gates/gen #(:forceable-tools (gates/config))))
 
 (defn force-tool-for
   "The native-tool spec to FORCE for a decision naming a forceable tool, or nil.
@@ -109,7 +113,7 @@
   on GLM cannot rely on that. See samizdat.llm.adapter.openai."
   [decision]
   (when-let [t (:tool decision)]
-    (get forceable t)))
+    (get (forceable) t)))
 
 ;; --- settling predictions ---------------------------------------------------
 
@@ -133,6 +137,14 @@
   []
   (distinct (mapcat seq (vals (gates/tool-vocab :settle-called)))))
 
+(def settled-by-rule
+  "The gates `settle` decides with a rule of its own rather than by asking
+  which tool was called — so they are the ones legitimately absent from the
+  :settle-called vocabulary. Kept beside the `case` below and asserted
+  against it by the coherence test, so a gate that falls out of both is
+  caught at test time rather than by settling :unmet forever."
+  #{:stuck :prologue-cap :progress-stalled :human-directive})
+
 (defn settle
   "Decide whether an open prediction came true, given what the branch did.
 
@@ -145,7 +157,13 @@
   [{:keys [gate turn window]} {:keys [current-turn tools-called branch-before branch-after]}]
   (let [settle-called (gates/tool-vocab :settle-called)
         expired? (>= (- current-turn turn) window)
-        tools-met? (fn [g] (boolean (some (get settle-called g) tools-called)))]
+        ;; `#{}` rather than nil for a gate the vocabulary does not name:
+        ;; `(some nil tools-called)` calls nil as a predicate and throws, so a
+        ;; gate added to gates.edn :gates without a :settle-called entry took
+        ;; the settle path down with it on its first firing. Adding a gate is
+        ;; supposed to be a data edit; a missing vocabulary now settles :unmet
+        ;; at the window instead, and the coherence test names the omission.
+        tools-met? (fn [g] (boolean (some (get settle-called g #{}) tools-called)))]
     (cond
       (case gate
         ;; Now that the gate withholds rather than suggests (vf-49o), what

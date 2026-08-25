@@ -22,6 +22,7 @@
   hand-written loop did. Editing the stored definition changes the next run —
   that is the whole point."
   (:require [clojure.data.json :as json]
+            [samizdat.agent.beam :as beam]
             [samizdat.cells :as cells]
             [clojure.edn :as edn]
             [clojure.string :as str]
@@ -118,6 +119,50 @@
         (let [turns (journal/branch-turns c (:run-id r) "B1")]
           (is (= ["thesis" "done"] (mapv :tool_name turns))))
         (is (= "completed" (:status (runs/get-run c (:run-id r)))))))))
+
+(deftest the-beam-drives-the-manifest-too
+  ;; The fix for the review's biggest finding: the beam used to call
+  ;; samizdat.agent.loop's steps directly and never touch a manifest, so
+  ;; `:run :loop` was documented, parsed from HARNESS_LOOP, and read by
+  ;; nothing on the production path — every POST /v1/runs got the factory
+  ;; composition no matter what was configured, and critic/team/feature/
+  ;; decompose ran only under this suite. The beam now compiles the per-turn
+  ;; SLICE of the selected manifest and runs each branch through it.
+  (with-db [c]
+    (with-redefs [llm/chat (scripted
+                            (fence {:name "thesis"
+                                    :args {:goal "solve the problem"
+                                           :technique "direct"}})
+                            (fence {:name "done"
+                                    :args {:answer "the problem is solved directly"}}))]
+      (let [r (beam/run! {:conn c :config {:run {:beam-width 1}}
+                          :llm-adapter :a :llm-config {:max-tokens 16384}
+                          :problem "solve the problem" :max-turns 10 :beam-width 1})]
+        (is (= :completed (:status r)))
+        (is (= "the problem is solved directly" (:answer r)))
+        (testing "the branch ran the manifest's per-turn chain"
+          (is (= ["thesis" "done"]
+                 (mapv :tool_name (journal/branch-turns c (:run-id r) "B1")))))
+        (testing "the run records which loop drove it, like the other driver"
+          (let [note (->> (journal/events-since c (:run-id r) 0)
+                          (filter #(= "loop-workflow" (:kind %)))
+                          first)]
+            (is (some? note)
+                "a beam run journals its :loop-workflow provenance")))))))
+
+(deftest a-non-iterating-manifest-forces-beam-width-1
+  ;; team/feature/decompose are whole-run workflows: one pass is the branch's
+  ;; entire job, not one model call. Running five concurrently would multiply
+  ;; the job rather than explore five lines of one, so the beam overrides the
+  ;; requested width and says so in the run row.
+  (with-db [c]
+    (with-redefs [llm/chat (scripted (fence {:name "give_up"
+                                             :args {:reason "stub"}}))]
+      (let [r (beam/run! {:conn c :config {:run {:loop "team" :subtasks ["a"]}}
+                          :llm-adapter :a :llm-config {:max-tokens 16384}
+                          :problem "anything" :max-turns 4 :beam-width 5})]
+        (is (= 1 (:beam_width (runs/get-run c (:run-id r))))
+            "a whole-run manifest runs one branch regardless of the width asked for")))))
 
 (deftest the-turn-cap-exhausts-through-the-manifest
   (with-db [c]

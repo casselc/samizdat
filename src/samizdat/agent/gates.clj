@@ -37,7 +37,8 @@
             [clojure.string :as str]
             [samizdat.agent.state :as state]
             [samizdat.agent.supervisor :as supervisor]
-            [samizdat.prompt :as sp]))
+            [samizdat.prompt :as sp]
+            [samizdat.util :as util]))
 
 (defn load-config
   "Gate thresholds from resources/gates.edn. Read through io/resource so the
@@ -47,10 +48,24 @@
 
 (defonce ^:private config-cache (atom nil))
 
+;; Bumped by reload-config!, watched by everything COMPILED from the config
+;; (the gate table below, ship.clj's rungs, arbiter's forceable schemas). A
+;; reload used to swap the config atom and leave every derived table frozen at
+;; namespace load; the generation is what makes reload mean what it says.
+(defonce ^:private generation (atom 0))
+
+(defn gen
+  "The config's generation. Derived tables cache against this."
+  []
+  @generation)
+
 (defn config []
   (or @config-cache (reset! config-cache (load-config))))
 
-(defn reload-config! [] (reset! config-cache (load-config)))
+(defn reload-config! []
+  (reset! config-cache (load-config))
+  (swap! generation inc)
+  nil)
 
 (defn threshold [k]
   (get-in (config) [k :value]))
@@ -86,16 +101,24 @@
   "Compile an EDN form into (fn [ctx] form) with the gate-context keys bound
   as plain locals — the environment both :when and :message-form build on.
   prompt/threshold/state and the required namespaces resolve at compile, in
-  this namespace; the config atom is still read at FIRE time."
+  this namespace; the config atom is still read at FIRE time.
+
+  `*ns*` is bound explicitly because `eval` resolves the form's free symbols
+  against whatever namespace is current when it runs. That used to be this
+  one for free: the table was a top-level `def`, so the compile happened at
+  namespace load. Now that it is memoized and compiled on FIRST USE, the
+  caller could be anything — jolt.main, a test namespace — and `threshold`,
+  `prompt`, `state/…` and `supervisor/…` resolve in none of them."
   [form]
-  (eval `(fn [~'ctx]
+  (binding [*ns* (the-ns 'samizdat.agent.gates)]
+    (eval `(fn [~'ctx]
            (let [~'directive            (get ~'ctx :directive)
                  ~'done-block           (get ~'ctx :done-block)
                  ~'branch               (get ~'ctx :branch)
                  ~'max-turns            (get ~'ctx :max-turns)
                  ~'branch-count         (get ~'ctx :branch-count)
                  ~'safe-state-coverage  (get ~'ctx :safe-state-coverage)]
-             ~form))))
+             ~form)))))
 
 (defn- compile-when
   [form]
@@ -121,11 +144,24 @@
          :prediction (let [p (:prediction entry)] (fn [_] p))))
 
 (def gates
-  "The steer table, compiled from gates.edn :gates at load — all data since
-  tier 3b. Priorities, not table order, decide arbitration."
-  (mapv compile-gate (:gates (config))))
+  "The steer table, compiled from gates.edn :gates — all data since tier 3b.
+  Priorities, not table order, decide arbitration.
 
-(def by-name (into {} (map (juxt :gate identity)) gates))
+  A FUNCTION, not a value: the compile is memoized against the config
+  generation, so `reload-config!` genuinely re-reads and re-compiles the
+  table. As a top-level `def` it was compiled once at namespace load and a
+  reload changed only the thresholds the forms read at fire time — editing a
+  gate's :when, adding a gate, or removing one needed a process restart, in
+  the one namespace whose whole premise is that the steer policy is data."
+  (util/generation-cache gen #(mapv compile-gate (:gates (config)))))
+
+(def ^:private by-name*
+  (util/generation-cache gen #(into {} (map (juxt :gate identity)) (gates))))
+
+(defn by-name
+  "The compiled gate `k`, or nil."
+  [k]
+  (get (by-name*) k))
 
 (defn crossed-fractions
   "Which turn-budget notice thresholds this branch has now passed. The loop
@@ -143,7 +179,7 @@
 (defn describe
   "The gate table, for docs and for /v1/harness/gates."
   []
-  (for [g gates]
+  (for [g (gates)]
     {:gate (:gate g) :priority (:priority g)
      :budget (:budget g)
      :budget-kind (some-> (:budget g) (#(get-in (config) [% :kind])))

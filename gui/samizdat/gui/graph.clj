@@ -187,10 +187,18 @@
   `w`x`h` viewport with `pad` pixels of margin, preserving aspect. A
   single-node (degenerate) bounding box maps to the viewport center."
   [positions w h pad]
+  ;; `(reduce min ())` is `(min)`, an arity error — an empty graph threw here
+  ;; rather than framing nothing. The only caller guards with `(seq positions)`,
+  ;; so this was latent, but a pure function the headless suite is meant to
+  ;; cover should not depend on its caller for that. The empty box is
+  ;; degenerate at the origin, which `max 1e-9` below maps to the viewport
+  ;; centre. NOT a seeded fold: `(reduce min 0.0 xs)` would drag the origin
+  ;; into every non-empty bounding box and shift the framing of every graph
+  ;; that does not straddle it.
   (let [xs (map first (vals positions))
         ys (map second (vals positions))
-        [x0 x1] [(reduce min xs) (reduce max xs)]
-        [y0 y1] [(reduce min ys) (reduce max ys)]
+        [x0 x1] (if (seq xs) [(reduce min xs) (reduce max xs)] [0.0 0.0])
+        [y0 y1] (if (seq ys) [(reduce min ys) (reduce max ys)] [0.0 0.0])
         dx (max 1e-9 (- x1 x0))
         dy (max 1e-9 (- y1 y0))
         s (min (/ (- w (* 2 pad)) dx)

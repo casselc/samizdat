@@ -300,6 +300,15 @@
 
 (def ^:private think-re #"(?s)<think>.*?</think>")
 
+;; An opener whose closer never came, to end of text. A reply truncated
+;; mid-thought (finish_reason "length") emits `<think>` and stops, and the
+;; balanced pattern above then matches nothing — so the whole reasoning
+;; stream stayed in the text, inside the prefilled fence, and corrupted the
+;; JSON with exactly the stray parens and quotes the strip exists to remove.
+;; Applied only after the balanced pass, so a well-formed reply is untouched
+;; and nothing after a real `</think>` is ever swallowed.
+(def ^:private open-think-re #"(?s)<think>.*\z")
+
 (defn- strip-think
   "Remove <think>…</think> reasoning blocks before parsing. A reasoning model
   puts its thinking in the content, and after a prefilled `` ```tool-call `` it
@@ -308,7 +317,9 @@
   read (the durable transcript still keeps the full text, stripped only on the
   way to the wire)."
   [s]
-  (str/replace (str s) think-re ""))
+  (-> (str s)
+      (str/replace think-re "")
+      (str/replace open-think-re "")))
 
 (defn- parse-tool-call* [response]
   (let [fenced (extract-fences response)

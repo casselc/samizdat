@@ -125,7 +125,7 @@
   ;; FINDINGS:/severity-tag formats, so the move pins them: the def IS the
   ;; file's contents.
   (let [file (slurp (io/resource "prompts/judge.md"))]
-    (is (= file judge/preamble))
+    (is (= file (judge/preamble)))
     (is (str/includes? file "VERDICT: COMPLETE"))
     (is (str/includes? file "FINDINGS:"))
     (is (str/includes? file "[critical]")))

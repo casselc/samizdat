@@ -37,16 +37,20 @@
   (:require [clojure.data.json :as json]
             [clojure.string :as str]
             [clojure.tools.logging :as log]
+            [mycelium.core :as myc]
             [samizdat.agent.critic :as critic]
             [samizdat.agent.gates :as gates]
+            [samizdat.agent.gitdiff :as gitdiff]
             [samizdat.agent.loop :as branch-loop]
             [samizdat.agent.state :as state]
             [samizdat.prompt :as prompt]
+            [samizdat.repl :as repl]
             [samizdat.store.artifacts :as artifacts]
             [samizdat.store.failures :as failures]
             [samizdat.store.interventions :as interventions]
             [samizdat.store.journal :as journal]
-            [samizdat.store.runs :as runs])
+            [samizdat.store.runs :as runs]
+            [samizdat.workflow :as workflow])
   (:refer-clojure :exclude [run!]))
 
 (defn- crossover-block
@@ -454,15 +458,28 @@
            alive (count (filter state/active? bs))]
        (case kind
          "cull"
-         (if (<= alive 1)
-           (do (interventions/resolve! conn run-id (:id d) :rejected
-                                       "refused: it is the last branch running" turn)
-               bs)
-           (do (interventions/resolve! conn run-id (:id d) :applied nil turn)
-               (mapv #(if (and (matches? %) (state/active? %))
-                        (assoc % :status :culled :inactive-reason "culled by a human")
-                        %)
-                     bs)))
+         ;; What the directive would actually kill, not just how many are
+         ;; alive. An UNTARGETED cull matches every branch, so on a beam of
+         ;; three it emptied the run outright — the guard below only ever
+         ;; caught the alive=1 case, and the outcome it exists to prevent
+         ;; (ending the run in a way the person almost certainly did not
+         ;; intend) arrived by the other door. Refuse whenever nothing would
+         ;; be left running, and say which case it was.
+         (let [doomed (count (filter #(and (matches? %) (state/active? %)) bs))]
+           (if (>= doomed alive)
+             (do (interventions/resolve!
+                  conn run-id (:id d) :rejected
+                  (if (<= alive 1)
+                    "refused: it is the last branch running"
+                    (str "refused: this would cull all " alive " running branches"
+                         " and end the run — name a branch_id to cull one"))
+                  turn)
+                 bs)
+             (do (interventions/resolve! conn run-id (:id d) :applied nil turn)
+                 (mapv #(if (and (matches? %) (state/active? %))
+                          (assoc % :status :culled :inactive-reason "culled by a human")
+                          %)
+                       bs))))
 
          "retract"
          ;; Applied here rather than at submit time so it lands on a turn
@@ -496,6 +513,43 @@
    branches
    directives))
 
+(defn advance-branch
+  "One turn for one branch.
+
+  The seam where the two drivers became one. The beam used to call
+  branch-loop/run-turn directly while the manifest driver ran the same steps
+  as mycelium cells, and nothing in the production path ever reached the
+  manifest — `:run :loop` was documented, parsed, and read by no live code, so
+  the critic, feature, team and decompose loops existed only under the test
+  suite. The beam now drives the run's compiled PER-TURN manifest slice
+  (workflow/turn-manifest), which for the factory loop composes exactly the
+  steps run-turn composed.
+
+  run-turn remains the fallback for a ctx carrying no workflow — the benches
+  and any caller that wants the bare composition.
+
+  A structural failure is this branch's problem, not the beam's: it abandons
+  the branch with the reason, the same shape as a throw. The manifest driver
+  threw here and ended the whole run, which is right for a single-branch
+  driver and wrong for one branch of five."
+  [ctx b turn]
+  (if-let [wf (:turn-workflow ctx)]
+    (let [data (myc/run-compiled wf ctx {:branch b :turn turn})
+          fail (fn [why]
+                 (log/warn "branch" (:id b) "turn" turn "loop workflow failed:" why)
+                 (assoc b :status :abandoned
+                        :inactive-reason (str "loop workflow failed: " why)))]
+      (cond
+        (myc/error? data) (fail (pr-str (myc/workflow-error data)))
+        ;; A turn that came back carrying no branch is a manifest whose slice
+        ;; dropped the key — an edit the compile cannot catch, since :branch is
+        ;; data rather than structure. Abandoning ONE branch with a legible
+        ;; reason beats returning nil into the scheduler, where it would
+        ;; surface several rounds later as an NPE on somebody else's turn.
+        (nil? (:branch data)) (fail "the turn returned no :branch")
+        :else (:branch data)))
+    (branch-loop/run-turn ctx b turn)))
+
 (defn- advance-all
   "One turn for every active branch, concurrently, each under a hard deadline.
 
@@ -503,13 +557,20 @@
   one failing engine session must not cost the other four their work. A branch
   that hangs loses only its own turn. Phase 1 proved five concurrent swipl
   sessions hold, which is what makes this real parallelism rather than a loop
-  wearing futures."
+  wearing futures.
+
+  The deadline is skipped for a NON-ITERATING manifest (team, feature,
+  decompose): there a `turn` is the branch's entire job rather than one model
+  call, so the turn deadline would abandon the run partway through the work it
+  was asked to do. Those runs stop by the abort flag, which is the stop path
+  that never depended on cooperation anyway."
   [ctx branches turn]
-  (let [deadline (or (:turn-deadline-ms ctx) default-turn-deadline-ms)
+  (let [deadline (when (get ctx :iterating-loop? true)
+                   (or (:turn-deadline-ms ctx) default-turn-deadline-ms))
         pending (mapv (fn [b]
                         [b (future
                              (try
-                               (branch-loop/run-turn ctx b turn)
+                               (advance-branch ctx b turn)
                                (catch Throwable e
                                  (log/warn "branch" (:id b) "died on turn" turn
                                            ":" (ex-message e))
@@ -518,7 +579,7 @@
                                         (str "branch error: " (ex-message e))))))])
                       branches)]
     (mapv (fn [[b fut]]
-            (let [r (deref fut deadline ::timeout)]
+            (let [r (if deadline (deref fut deadline ::timeout) @fut)]
               (if (= ::timeout r)
                 (do (log/warn "branch" (:id b) "exceeded the turn deadline on turn" turn)
                     ;; Not a verification failure: the branch did not get an
@@ -616,7 +677,7 @@
   Returns {:status :completed|:aborted|:exhausted :run-id :branches ...}.
   Teardown lives here rather than in the callers, so every engine session is
   disposed no matter how the run ended."
-  [{:keys [conn run-id max-turns abort sessions] :as ctx} branches start-turn]
+  [{:keys [conn run-id max-turns abort sessions repl-session] :as ctx} branches start-turn]
   (let [live-branches (atom branches)]
     (try
       (loop [branches branches, turn start-turn]
@@ -743,7 +804,15 @@
         ;; still collect, and per-branch disposal still runs through
         ;; dispose-branch-engines!, so the coding tools' sessions (nREPL,
         ;; subprocesses) plug their disposal back in here.
-        (doseq [b @live-branches] (dispose-branch-engines! b))))))
+        (doseq [b @live-branches] (dispose-branch-engines! b))
+        ;; The run's eval namespace does not outlive the run
+        ;; (code-review-2026-08 #6). Best effort, and only for a session this
+        ;; ctx actually carries: a resume that entered here without one has
+        ;; nothing to close.
+        (when repl-session
+          (try (repl/close-session repl-session)
+               (catch Throwable e
+                 (log/warn "closing the run's eval session failed:" (ex-message e)))))))))
 
 (defn run!
   "Run a beam to completion.
@@ -754,7 +823,22 @@
   [{:keys [conn config llm-adapter llm-config problem max-turns beam-width
            abort on-start seed-run quarantine] :as opts}]
   (let [max-turns (or max-turns (get-in config [:run :max-turns]) 40)
-        width (or beam-width (get-in config [:run :beam-width]) 5)
+        ;; Which loop drives this run, compiled to its per-turn slice. Before
+        ;; on-start, and so before POST /v1/runs returns, because the run row
+        ;; records the width this decides and a compile failure must refuse
+        ;; the request rather than surface as a dead run. It costs one cell
+        ;; load and one manifest compile — well under the open-branch! cost
+        ;; the comment below is about.
+        loop-nm (workflow/active-loop-name config)
+        {loop-version :version turn-wf :compiled iterating? :iterating?}
+        (workflow/compile-turn-loop conn loop-nm)
+        ;; A non-iterating manifest (team, feature, decompose) is a whole-run
+        ;; workflow: one "turn" is the branch's entire job, and it fans out
+        ;; internally. Running five of those concurrently would multiply the
+        ;; whole job rather than explore five lines of one, so the beam is
+        ;; width 1 there regardless of what was asked for.
+        requested-width (or beam-width (get-in config [:run :beam-width]) 5)
+        width (if iterating? requested-width 1)
         ;; Seeding forces sharing on for this run regardless of the config
         ;; flag: seeds enter through the shared log's context blocks, and
         ;; seeds nobody reads would be dead rows.
@@ -783,9 +867,30 @@
         ;; paths discard one: the tool-level catch, the turn deadline, and a
         ;; turn that throws. See tools/register-session! (vf-cfp).
         engine-sessions (atom [])
+        ;; The three ctx keys the manifest driver set and this one did not.
+        ;; Every consumer defends with `(or root ".")` or a nil check, so the
+        ;; omission was silent: `:run :root` was documented and ignored, every
+        ;; run's file tools resolved against the serve process's cwd, and
+        ;; `eval` fell through to repl/default-session — one process-wide
+        ;; namespace, never closed, shared by every run on the box. That is
+        ;; the leak code-review-2026-08 #6 fixed on the other driver only.
+        root (or (get-in config [:run :root]) (System/getProperty "user.dir"))
         ctx {:conn conn :run-id run-id :config config :problem problem
              :llm-adapter llm-adapter :llm-config llm-config
              :max-turns max-turns :beam? (> width 1) :beam-width width
+             :root root
+             ;; The compiled per-turn manifest advance-branch drives, and
+             ;; whether it is a per-turn loop at all (which decides the turn
+             ;; deadline; see advance-all).
+             :turn-workflow turn-wf
+             :iterating-loop? iterating?
+             ;; What this run changed, for the ship gate's focused verify and
+             ;; for a finalization critic reading the run's own diff.
+             :git-baseline (gitdiff/baseline root)
+             ;; One eval namespace per RUN: defs the agent makes with `eval`
+             ;; persist across its turns and die with the run. run-rounds
+             ;; closes it in the same finally that disposes the sessions.
+             :repl-session (repl/new-session)
              :sessions sessions
              :engine-sessions engine-sessions
              :abort abort}]
@@ -801,6 +906,16 @@
     ;; journal poller handles that, and it is the honest picture — the branches
     ;; genuinely do not exist yet.
     (when on-start (on-start run-id))
+    ;; Which loop drove this run, durably: an agent reading a surprising run
+    ;; back needs to know which version of itself produced it.
+    (journal/note! conn run-id :loop-workflow
+                   {:data {:name loop-nm :version loop-version
+                           :iterating? iterating?
+                           :beam-width width
+                           :requested-beam-width requested-width}})
+    (when (not= width requested-width)
+      (log/info "loop" loop-nm "is a whole-run workflow; beam width forced to 1"
+                "(asked for" (str requested-width ")")))
     (let [initial (mapv #(open-branch! ctx (str "B" (inc %)) nil nil 0) (range width))]
       (run-rounds ctx initial 1))))
 

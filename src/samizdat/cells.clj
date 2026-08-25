@@ -88,6 +88,34 @@
          (filter #(str/ends-with? % ".clj"))
          sort)))
 
+(def shipped-cells
+  "The cell files that ship with the harness, as RESOURCE names.
+
+  Enumerated rather than globbed, and read through io/resource, so the shipped
+  cells load from a built binary that has no resources/ on disk (deps.edn
+  :jolt/build :embed bakes them in). A classpath has no directory listing and
+  an embedded resource has no filesystem path for `.getPath` to name, so the
+  glob above finds nothing there and the kernel registered ZERO cells — which
+  surfaces as `Cell :loop/assemble not found in registry` the moment a run
+  tries to compile its loop. Same reasoning as workflow/factory-manifest-names;
+  both are pinned against their directory by a test so the list cannot drift.
+
+  Lowest precedence: a project's .samizdat/cells override still loads after
+  these and wins, and in a source checkout the dir scan reads the very same
+  files, so a shipped cell edited in place is picked up from disk."
+  ["cells/critic.clj" "cells/decompose.clj" "cells/feature.clj"
+   "cells/loop.clj" "cells/team.clj"])
+
+(defn- shipped-sources
+  "The shipped cells as {:id :content} — read from the classpath (embedded or
+  not). Skips any whose dir scan already produced it, so a source checkout
+  loads each file once and from disk."
+  [covered]
+  (for [r shipped-cells
+        :let [url (io/resource r)]
+        :when (and url (not (contains? covered (last (str/split r #"/")))))]
+    {:id r :content (slurp url) :file? false}))
+
 (defn- defcell-ids
   "The cell ids a cell file defines, by reading its `defcell` forms — so a
   reload attributes a cell to its file even though re-registration is not a
@@ -102,8 +130,11 @@
        (filter keyword?)
        vec))
 
-(defn- load-file!
-  "Load one cell file into the live image; return the cell ids it defines.
+(defn- load-source!
+  "Load one cell SOURCE into the live image; return the cell ids it defines.
+
+  Takes {:id :content} rather than a path, because a shipped cell may come
+  from an embedded resource with no file behind it.
 
   The load is wrapped in a *ns* binding: a cell file begins with an `(ns …)`
   form, and load-string's evaluation of it switches *ns* and does not restore
@@ -111,11 +142,10 @@
   a second load. Binding *ns* to itself reverts it on exit, so the loader is
   repeatable (the reload the mutation protocol needs) and leaves the caller's
   namespace untouched."
-  [path]
-  (let [content (slurp path)]
-    (binding [*ns* *ns*]
-      (load-string content))
-    (defcell-ids content)))
+  [{:keys [content]}]
+  (binding [*ns* *ns*]
+    (load-string content))
+  (defcell-ids content))
 
 (defn load-cells!
   "Load every cell file under the given dirs (default `default-dirs`) into the
@@ -125,13 +155,20 @@
   ([] (load-cells! default-dirs))
   ([dirs]
    (let [snapshot (cell/registry-snapshot)
-         files (mapcat cell-files dirs)]
+         files (mapcat cell-files dirs)
+         ;; Shipped resources FIRST and only where the dir scan did not
+         ;; already produce that file, so a source checkout loads each cell
+         ;; once from disk and a built binary with no resources/ dir still
+         ;; gets the loop's cells (deps.edn :jolt/build :embed).
+         sources (concat (shipped-sources
+                          (set (map #(last (str/split (str %) #"/")) files)))
+                         (for [p files] {:id p :content (slurp p) :file? true}))]
      (try
-       (let [loaded (reduce (fn [acc path]
-                              (into acc (for [id (load-file! path)]
-                                          [id {:source path}])))
+       (let [loaded (reduce (fn [acc src]
+                              (into acc (for [id (load-source! src)]
+                                          [id {:source (:id src)}])))
                             {}
-                            files)]
+                            sources)]
          ;; Drop any cell we loaded before that is gone from the new set (a
          ;; deleted cell file / removed defcell), WITHOUT clearing the shared
          ;; registry — other code and tests hold cells here that are not ours.
@@ -141,7 +178,13 @@
          ;; Remember the good on-disk content, so the mutation protocol can
          ;; roll a later bad edit back to exactly this. Only reached on
          ;; success, so it never records a half-loaded state.
-         (reset! loaded-content (into {} (map (juxt identity slurp)) files))
+         ;; Only the sources backed by a real file: the mutation protocol
+         ;; restores by spitting content back to the path, and an embedded
+         ;; resource has no path to spit to (nor any way for the agent to
+         ;; have edited it).
+         (reset! loaded-content
+                 (into {} (for [src sources :when (:file? src)]
+                            [(:id src) (:content src)])))
          loaded)
           (catch Throwable e
             (cell/registry-restore! snapshot)

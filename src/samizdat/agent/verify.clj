@@ -19,12 +19,15 @@
   (:require [clojure.string :as str]
             [samizdat.agent.gates :as gates]
             [samizdat.engine.proc :as proc]
-            [samizdat.security.secrets :as secrets]))
+            [samizdat.security.secrets :as secrets]
+            [samizdat.util :as util]))
 
-(defn- conventions []
+(defn- conventions
   "The focused-verify conventions, from gates.edn :focused-verify (drg-4026
   #47/48) — read at fire time so a project retunes them at runtime."
+  []
   (gates/threshold :focused-verify))
+
 
 (defn test-file?
   "Whether a changed path is a test/spec file — the evidence that a change was
@@ -139,10 +142,9 @@
   is model-bound, so it passes the redaction boundary before it is returned."
   [root cmd timeout-ms]
   (try
-    (let [root* (str/replace (str root) "'" "'\\\\''")
-          r (proc/run {:timeout-ms (or timeout-ms 600000)
+    (let [r (proc/run {:timeout-ms (or timeout-ms 600000)
                        :env (secrets/scrubbed-process-env)}
-                      "sh" "-c" (str "cd '" root* "' && " cmd))
+                      "sh" "-c" (str "cd " (util/sh-quote root) " && " cmd))
           known (secrets/known-values (into {} (System/getenv)))]
       {:green? (and (not (:timeout r)) (zero? (or (:exit r) 1)))
        :timeout? (boolean (:timeout r))

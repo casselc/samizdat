@@ -23,7 +23,20 @@
 
 (def ^:private cache (atom (load-wordlists)))
 
-(defn reload! [] (reset! cache (load-wordlists)))
+;; Watched by ship.clj, which turns :answer-framing into a set and
+;; :tool-version into a compiled Pattern at namespace load. Without a
+;; generation those two were frozen and reload! moved nothing that mattered.
+(def ^:private generation (atom 0))
+
+(defn gen
+  "The wordlists' generation. Derived values cache against this."
+  []
+  @generation)
+
+(defn reload! []
+  (reset! cache (load-wordlists))
+  (swap! generation inc)
+  nil)
 
 (defn wordlist
   "Wordlist `k` (:claim-relevance, :answer-framing, :tool-version) from
