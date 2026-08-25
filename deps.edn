@@ -63,6 +63,18 @@
  ;; before that namespace is required.
  :jolt/native [{:name "libc (POSIX sockets)" :process true}]
 
+ ;; Bake resources/ into the binary, so io/resource resolves with no files on
+ ;; disk and a built harness runs from any cwd.
+ ;;
+ ;; `jolt build` links code and deps, not data: without this the binary
+ ;; resolved gates.edn, phases.edn, wordlists.edn, prompts/, manifests/ and
+ ;; cells/ RELATIVE TO THE WORKING DIRECTORY, so it booted from the project
+ ;; root and died anywhere else with "Cannot open <nil> as a Reader" — a
+ ;; nil resource handed to slurp, from the first reload-config! in
+ ;; system/start!. Every "works interpreted and inside an AOT binary" comment
+ ;; on an io/resource seam in src was true only by accident of cwd.
+ :jolt/build {:embed ["resources"]}
+
  :nrepl/middleware [nrepl.middleware/default-middleware]
 
  :aliases {:test {:extra-paths ["test" "gui"]

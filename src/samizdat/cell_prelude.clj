@@ -19,8 +19,17 @@
   reuses it. A preload, not a dependency — nothing here is called; the `require`
   is the whole point. Add a namespace here whenever a new shipped cell reaches
   for one that nothing in src already pulls in."
-  (:require [samizdat.agent.gitdiff]
+  (:require [samizdat.agent.decompose]
+            [samizdat.agent.gitdiff]
             [samizdat.agent.judge]
             [samizdat.agent.planner]
             [samizdat.agent.telemetry]
             [samizdat.engine.proc]))
+
+;; decompose was the one shipped-cell dependency nothing in src reached, so it
+;; was never compiled into a `jolt build` image and cells/decompose.clj's
+;; load-string fell through to "Could not locate samizdat/agent/decompose on
+;; the source roots". Invisible until now for two reasons: a built binary did
+;; not boot outside the project root at all, and inside it the source tree was
+;; sitting there for the fallback to find. cells-test walks every shipped
+;; cell's requires against this list so the next one is caught at test time.

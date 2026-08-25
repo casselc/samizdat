@@ -43,6 +43,44 @@
 
 ;; --- loading ----------------------------------------------------------------
 
+(deftest shipped-cells-match-what-ships
+  ;; The shipped cells are enumerated as resource names rather than globbed:
+  ;; `jolt build` bakes resources/ into the binary (deps.edn :jolt/build
+  ;; :embed), and an embedded resource has no filesystem path for the glob to
+  ;; walk — so a built binary run outside the project root registered zero
+  ;; cells and every run died with "Cell :loop/assemble not found in
+  ;; registry". An enumerated list cannot drift on its own, so pin it.
+  (let [on-disk (->> (fs/glob "resources/cells" "**.clj")
+                     (map #(str "cells/" (last (clojure.string/split (str %) #"/"))))
+                     set)]
+    (is (seq on-disk) "resources/cells is readable from the test's cwd")
+    (is (= on-disk (set cells/shipped-cells))
+        (str "cells/shipped-cells and resources/cells disagree; missing: "
+             (sort (remove (set cells/shipped-cells) on-disk))
+             ", listed but absent: "
+             (sort (remove on-disk (set cells/shipped-cells))))))
+  (testing "every shipped name resolves on the classpath"
+    (doseq [r cells/shipped-cells]
+      (is (some? (clojure.java.io/resource r)) (str r " does not resolve")))))
+
+(deftest every-shipped-cell-require-is-reachable-without-load-string
+  ;; A shipped cell is load-stringed, so a namespace it requires that NOTHING
+  ;; in src reaches is absent from a `jolt build` image and the cell dies with
+  ;; "Could not locate … on the source roots". samizdat.cell-prelude exists to
+  ;; pull those onto the compile graph; samizdat.agent.decompose had fallen
+  ;; off it. Walk the requires rather than trusting the list stays current.
+  (let [required (->> cells/shipped-cells
+                      (keep clojure.java.io/resource)
+                      (mapcat #(re-seq #"\[(samizdat\.[a-z0-9.-]+)" (slurp %)))
+                      (map second)
+                      set)]
+    (is (seq required) "the shipped cells were readable")
+    (doseq [ns-name required]
+      (is (some? (find-ns (symbol ns-name)))
+          (str ns-name " is required by a shipped cell but is not loaded — add"
+               " it to samizdat.cell-prelude or it will be missing from a"
+               " built binary")))))
+
 (deftest loads-every-cell-file-in-a-dir
   (let [d (str @tmp "/cells")]
     (cell-file! d :gen/a "(fn [_ data] (assoc data :a 1))")
