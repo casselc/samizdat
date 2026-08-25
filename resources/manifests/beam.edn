@@ -1,0 +1,63 @@
+;; THE BEAM'S ROUND, as data.
+;;
+;; The inner turn is a manifest (`loop`, `critic`, `team`, …) and this is the
+;; outer one: the scheduler that advances every branch, decides which live,
+;; which fork, and when the run ends. It used to be a loop/recur inside
+;; samizdat.agent.beam, which meant the harness's own scheduling policy was the
+;; one thing a project could not change about itself.
+;;
+;; Each node is a cell in cells/beam.clj. The ORDER is the policy — see that
+;; file for what each ordering constraint is protecting — and editing this file
+;; is how a project changes it.
+;;
+;; Dispatch predicates are EDN forms evaluated at compile time. Keep them
+;; trivial readers of explicit keys: the cell computes the decision INTO the
+;; data map, the predicate only reads it.
+{:description "The beam scheduler: one round advances every active branch once, then scores, culls, settles, repopulates and spawns against the settled set. A barrier rather than a pipeline, because a branch deciding whether to fork needs the whole beam's last round rather than whenever its sibling happened to finish."
+
+ :cells {:start      :beam/round-open
+         :directives :beam/directives
+         :advance    :beam/advance
+         :score      :beam/score
+         :cull       :beam/cull
+         :settle     :beam/settle
+         :repopulate :beam/repopulate
+         :spawn      :beam/spawn
+         :tick       :beam/tick
+         :aborted    :beam/abort
+         :completed  :beam/complete
+         :exhausted  :beam/exhaust}
+
+ :edges {;; The top of every round decides whether the round happens.
+         :start      {:continue  :directives
+                      :aborted   :aborted
+                      :completed :completed
+                      :exhausted :exhausted}
+         ;; The round, in the order the cells' docstrings justify.
+         :directives :advance
+         :advance    :score
+         :score      :cull
+         :cull       :settle
+         :settle     :repopulate
+         :repopulate :spawn
+         :spawn      :tick
+         ;; The back edge: one round ends where the next begins.
+         :tick       :start
+         ;; The three endings.
+         :aborted    :end
+         :completed  :end
+         :exhausted  :end}
+
+ :dispatches {:start [[:aborted   (fn [d] (= :aborted (:verdict d)))]
+                      [:completed (fn [d] (= :completed (:verdict d)))]
+                      [:exhausted (fn [d] (= :exhausted (:verdict d)))]
+                      [:continue  (fn [d] true)]]}
+
+ ;; The invariants an edit may not remove, as compile-time errors.
+ ;;
+ ;; A branch's fate is decided on FRESH evidence: scoring always precedes the
+ ;; retention pass. And a branch that stopped is always written down before the
+ ;; beam refills its slot — otherwise the record says a branch is running long
+ ;; after something else took its place.
+ :constraints [{:type :must-follow :if :score :then :cull}
+               {:type :must-follow :if :settle :then :repopulate}]}

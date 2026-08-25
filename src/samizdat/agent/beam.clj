@@ -121,7 +121,7 @@
                   :inherited (some? (:forked-at b))}))))
       b)))
 
-(defn- cull-or-keep
+(defn cull-or-keep
   "Apply the retention rule to a branch that just failed.
 
   A branch that banked something recently is never culled — incremental
@@ -288,7 +288,7 @@
              ;; Tier 2d: the reprieve's prose is prompts/cull-reprieve.md.
              (prompt/render "cull-reprieve" {:failures fails :hard-floor hard-floor}))))))
 
-(defn- ensure-scored
+(defn ensure-scored
   "Fresh critic scores for every active branch, at most one sub-LLM call per
   branch per :critic-every window. A scoring that fails leaves the previous
   scores in place — stale information beats invented information."
@@ -307,7 +307,7 @@
             b))
         branches))
 
-(defn- repopulate
+(defn repopulate
   "Refill the beam when it has fallen below its target width.
 
   This is the blocker that kept the frontier from being a frontier. Culling
@@ -395,7 +395,7 @@
       (let [id (str parent-id "." ix)]
         (recur (inc ix) (cond-> acc (not (taken id)) (conj id)))))))
 
-(defn- spawn-children!
+(defn spawn-children!
   "Turn a branch's pending theses into sibling branches, under the total cap.
 
   Returns [children updated-parent]. The cap is a cost ceiling: every branch is
@@ -465,7 +465,7 @@
   (or (some-> (System/getenv "HARNESS_TURN_DEADLINE_MS") parse-long)
       900000))
 
-(defn- drain-directives!
+(defn drain-directives!
   "Apply pending human directives at the boundary, and record what happened to
   each.
 
@@ -574,7 +574,7 @@
         :else (:branch data)))
     (branch-loop/run-turn ctx b turn)))
 
-(defn- advance-all
+(defn advance-all
   "One turn for every active branch, concurrently, each under a hard deadline.
 
   A branch that throws is abandoned rather than taking the beam down with it:
@@ -629,7 +629,7 @@
   [_b]
   nil)
 
-(defn- record-inactive!
+(defn record-inactive!
   "Write the ending of every branch in `branches` that is no longer active.
 
   One place, keyed on `state/active?` alone, because splitting this by
@@ -650,7 +650,7 @@
     (runs/close-branch! conn run-id (:id b) (:status b) (:inactive-reason b))
     (dispose-branch-engines! b)))
 
-(defn- finish-now?
+(defn finish-now?
   "Should a shipped branch end the run? Returns the winning branch, or nil to
   keep exploring.
 
@@ -688,146 +688,114 @@
                              :winner (:id winner)}}))
     winner))
 
+(def beam-manifest-name
+  "The scheduler manifest a run drives. Config :run :beam overrides it, the
+  same way :run :loop chooses the per-branch turn manifest — the two are
+  different axes, and a project may well want to pair a custom scheduler with
+  the factory turn or the other way round."
+  "beam")
+
+(defn- beam-manifest
+  "The compiled round manifest for this run.
+
+  Loaded through the userspace store like every other manifest, so a project
+  that has evolved its scheduler drives its own version. Compiled fresh per
+  run: a cell edit committed mid-campaign takes effect on the next run, which
+  is the same contract the turn manifest has."
+  [conn config]
+  (:compiled (workflow/load-loop! conn (or (get-in config [:run :beam])
+                                          beam-manifest-name))))
+
+(defn- unwrap-round-error
+  "The exception a cell actually threw, out of mycelium's execution wrapper.
+
+  Two reasons this matters, and both bit on the first manifest-driven run.
+  A caller of `run!` used to see the branch's own exception; wrapped, every
+  failure became the same opaque \"execution error\", which is a worse report
+  and breaks anything matching on the cause. And mycelium's wrapper carries the
+  ENTIRE compiled FSM in its ex-data — pr-str'ing that into the journal writes
+  a row the size of the workflow for every crash.
+
+  So: unwrap for both the record and the rethrow, and record only the small
+  keys. The failing NODE is worth keeping, because \"which step of the round
+  died\" is the first thing anyone asks."
+  [e]
+  ;; Unwrapped to the INNERMOST cell error, not one layer: a nested workflow
+  ;; (the round drives a turn manifest per branch) wraps once per level, and
+  ;; peeling a single layer still reports "execution error" from the level
+  ;; above.
+  (loop [cur e, node nil, depth 0]
+    (let [d (ex-data cur)
+          inner (:error d)
+          node (or (:last-state-id d) node)]
+      (if (and (instance? Throwable inner) (< depth 8))
+        (recur inner node (inc depth))
+        {:throwable cur :node node}))))
+
 (defn run-rounds
-  "The beam's scheduling loop over `branches`, starting at round `start-turn`.
+  "Drive the beam's scheduler manifest from round `start-turn`.
 
-  Split out of `run!` so a resumed run can enter the same loop at the round
-  after its journal's last recorded turn. `max-turns` is read from the ctx,
-  which a resume builds from the runs row — the ORIGINAL budget — so starting
-  at turn N+1 of M is what keeps a crash from re-granting the N turns before
-  it. This is UCLA's persisted run-start anchor: the anchor is the turns
-  table, and the budget is the runs row.
+  THE ROUND IS NOT A LOOP HERE ANY MORE. It is manifests/beam.edn — advance,
+  score, cull, settle, repopulate, spawn, tick, with a back edge — and this
+  function is the driver: it compiles that manifest, hands it the branches and
+  the run context, and owns the two things a manifest cannot own.
 
-  Returns {:status :completed|:aborted|:exhausted :run-id :branches ...}.
-  Teardown lives here rather than in the callers, so every engine session is
-  disposed no matter how the run ended."
-  [{:keys [conn run-id max-turns abort sessions repl-session] :as ctx} branches start-turn]
-  (let [live-branches (atom branches)]
+  The first is the CRASH RECORD. gen-11 threw inside the round and the
+  exception went to the process's stdout — a tty — and nowhere else. The row
+  stayed 'running' with ended_at NULL, so the API, the GUI and every query
+  agreed the run was alive for the nine hours it had been dead. A crash that
+  leaves no trace in the record is indistinguishable from a slow round, which
+  makes the whole journal untrustworthy as a liveness signal. Recorded then
+  rethrown, and the recording is best-effort: a failure to journal the failure
+  must not replace it with a different one.
+
+  The second is TEARDOWN, which must not depend on the round's cooperation —
+  the RAX-manager principle. `live-branches` is the driver's window into a run
+  that may be mid-round when it dies; the advance and tick cells keep it
+  current, because a thrown manifest hands nothing back.
+
+  `max-turns` comes from the ctx, which a resume builds from the runs row — the
+  ORIGINAL budget — so starting at turn N+1 of M is what keeps a crash from
+  re-granting the N turns before it. Returns {:status :run-id :branches …}."
+  [{:keys [conn run-id config repl-session] :as ctx} branches start-turn]
+  (let [live-branches (atom branches)
+        ctx (assoc ctx :live-branches live-branches)]
     (try
-      (loop [branches branches, turn start-turn]
-        ;; Kept current so the finally block can tear down Lean sessions,
-        ;; which tools open lazily on a branch rather than the scheduler
-        ;; opening them up front.
-        (reset! live-branches branches)
-        (let [active (filterv state/active? branches)
-              done-candidates (filterv :final-answer branches)
-              multi-candidate? (< 1 (count done-candidates))
-              ;; A shipped branch always stops working; whether it stops the
-              ;; RUN is the campaign question finish-now? answers.
-              done-branch (finish-now? ctx (select-done-branch ctx done-candidates)
-                                       branches)]
-          (cond
-            ;; Checked at the top of every round. An abort must not need the
-            ;; run's cooperation, so it is a flag the scheduler reads rather
-            ;; than a message a branch has to receive.
-            (and abort @abort)
-            (do (doseq [b active]
-                  (runs/close-branch! conn run-id (:id b) :abandoned "aborted"))
-                {:status :aborted :run-id run-id :branches branches})
-            done-branch
-            (do (doseq [b branches
-                        :when (and (state/active? b) (not= (:id b) (:id done-branch)))]
-                  (runs/close-branch! conn run-id (:id b) :abandoned
-                                      (str (if multi-candidate?
-                                             "outranked by "
-                                             "superseded by ")
-                                           (:id done-branch)
-                                           (when-not multi-candidate?
-                                             " done()"))))
-                (runs/finish-run! conn run-id :completed (:final-answer done-branch))
-                {:status :completed :answer (:final-answer done-branch)
-                 :run-id run-id :branches branches})
-
-            (or (empty? active) (> turn max-turns))
-            (let [residuals (keep state/residual branches)
-                  report (state/build-residual-report
-                          {:branches branches
-                           :failures (failures/recent conn run-id 10)
-                           :gate-tally (journal/gate-tally conn run-id)
-                           :max-turns max-turns})]
-              (doseq [b active]
-                (runs/close-branch! conn run-id (:id b) :exhausted
-                                    (str "turn cap of " max-turns " reached")))
-              (doseq [r residuals]
-                (journal/note! conn run-id :residual {:branch-id (:branch r) :data r}))
-              (journal/note! conn run-id :residual-report {:data report})
-              (runs/finish-run! conn run-id :failed nil)
-              {:status :exhausted
-               :run-id run-id :branches branches :residuals (vec residuals)
-               :report report
-               :report-text (state/render-residual-report report)})
-
-            :else
-            (let [directives (interventions/pending conn run-id)
-                  active (drain-directives! ctx active directives turn)
-                  advanced (advance-all
-                            (assoc ctx :branch-count (count branches))
-                            (filterv state/active? active) turn)
-                  ;; Critic scores refresh on post-turn state, before any
-                  ;; retention decision reads them.
-                  advanced (ensure-scored ctx advanced turn)
-                  ;; Cull before forking, so a branch culled this turn does not
-                  ;; also get to spend the branch budget on children.
-                  ;; A branch is only culled if someone else would still be
-                  ;; running. Evaluated left to right against the count of
-                  ;; branches that survive the decision so far.
-                  culled (first
-                          (reduce (fn [[acc alive] b]
-                                    (let [sibs (keep #(when (and (state/active? %)
-                                                                 (not= (:id %) (:id b)))
-                                                        (get-in % [:critic :scores]))
-                                                     advanced)
-                                          b' (cull-or-keep (assoc ctx :turn turn) b (dec alive) sibs)]
-                                      [(conj acc b')
-                                       (if (state/active? b') alive (dec alive))]))
-                                  [[] (count advanced)]
-                                  advanced))
-                  _ (record-inactive! ctx culled)
-                  inactive (filterv (complement state/active?) branches)
-                  all-now (into (vec inactive) culled)
-                  ;; Grow the frontier where the evidence is: after the cull,
-                  ;; so a freed slot can be refilled the same round.
-                  culled (repopulate ctx culled (count all-now) turn)
-                  [children updated]
-                  (reduce (fn [[acc bs] b]
-                            (if (and (state/active? b) (seq (:pending-branch-theses b)))
-                              (let [[kids parent] (spawn-children!
-                                                   ctx b (+ (count all-now) (count acc)) turn)]
-                                [(into acc kids) (conj bs parent)])
-                              [acc (conj bs b)]))
-                          [[] []]
-                          culled)]
-              (recur (into (into (vec inactive) updated) children) (inc turn))))))
-      ;; A run that dies must say so in the journal it is judged by.
-      ;;
-      ;; gen-11 threw here and the exception went to the process's stdout — a
-      ;; tty — and nowhere else. The row stayed 'running' with ended_at NULL,
-      ;; so the API, the GUI and every query agreed the run was alive for the
-      ;; nine hours it had been dead. A crash that leaves no trace in the
-      ;; record is indistinguishable from a slow round, which makes the whole
-      ;; journal untrustworthy as a liveness signal.
-      ;;
-      ;; Recorded then rethrown: the caller still gets the exception, and the
-      ;; recording is best-effort because a failure to journal the failure
-      ;; must not replace it with a different one.
+      (let [data (myc/run-compiled (beam-manifest conn config) ctx
+                                   {:branches branches :turn start-turn})]
+        (when (myc/error? data)
+          ;; A structural failure in the scheduler is a harness bug, not a run
+          ;; outcome; surface it rather than reporting a half-closed run.
+          (throw (ex-info "the beam scheduler failed structurally"
+                          {:run-id run-id :error (myc/workflow-error data)})))
+        (or (:result data)
+            (throw (ex-info "the beam scheduler ended without a result"
+                            {:run-id run-id :status (:status data)}))))
       (catch Throwable e
-        (try
-          (journal/note! conn run-id :run-error
-                         {:data {:error (ex-message e)
-                                 ;; jolt's Throwable has an empty stack trace,
-                                 ;; so the type and ex-data are all there is.
-                                 :type (some-> (:via (Throwable->map e)) first :type str)
-                                 :ex-data (some-> (ex-data e) pr-str)}})
-          (runs/finish-run! conn run-id :failed nil)
-          (catch Throwable _ nil))
-        (throw e))
+        (let [{:keys [throwable node]} (unwrap-round-error e)]
+          (try
+            (journal/note! conn run-id :run-error
+                           {:data {:error (ex-message throwable)
+                                   ;; jolt's Throwable has an empty stack trace,
+                                   ;; so the type and the failing node are all
+                                   ;; there is. NOT the wrapper's ex-data: it
+                                   ;; holds the whole compiled FSM.
+                                   :type (some-> (:via (Throwable->map throwable))
+                                                 first :type str)
+                                   :node (some-> node str)
+                                   :ex-data (some-> (ex-data throwable) pr-str)}})
+            (runs/finish-run! conn run-id :failed nil)
+            (catch Throwable _ nil))
+          ;; Rethrow what the cell threw, not the wrapper: the callers of run!
+          ;; were written against the branch's own exception.
+          (throw throwable)))
       (finally
         ;; The proof engines' teardown lived here: scheduler-opened sessions
         ;; from the `sessions` atom, plus everything a tool opened via
-        ;; :engine-sessions, disposed no matter how the run ended. Both atoms
-        ;; still collect, and per-branch disposal still runs through
-        ;; dispose-branch-engines!, so the coding tools' sessions (nREPL,
-        ;; subprocesses) plug their disposal back in here.
+        ;; :engine-sessions, disposed no matter how the run ended. Per-branch
+        ;; disposal still runs through dispose-branch-engines!, so the coding
+        ;; tools' sessions (nREPL, subprocesses) plug their disposal back in
+        ;; here.
         (doseq [b @live-branches] (dispose-branch-engines! b))
         ;; The run's eval namespace does not outlive the run
         ;; (code-review-2026-08 #6). Best effort, and only for a session this

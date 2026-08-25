@@ -265,8 +265,8 @@
   silently missing. There is no portable listing for classpath resources, so
   the set is enumerated and `catalog` drops any name that does not resolve —
   a manifest deleted from resources/ falls out rather than 404ing."
-  ["loop" "critic" "orchestrator" "probe" "review" "reviewer" "supervisor"
-   "worker" "team" "feature" "decompose"])
+  ["loop" "beam" "critic" "orchestrator" "probe" "review" "reviewer"
+   "supervisor" "worker" "team" "feature" "decompose"])
 
 (defn catalog
   "The workflows available to select or adapt: every factory manifest and every
