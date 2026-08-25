@@ -7,6 +7,7 @@
   uncovered-tokens, engages-problem? and friends)."
   (:require [clojure.string :as str]
             [samizdat.agent.gitdiff :as gitdiff]
+            [samizdat.agent.gates :as gates]
             [samizdat.agent.tools.base :as base]
             [samizdat.agent.state :as state]
             [samizdat.agent.verify :as verify]
@@ -328,10 +329,12 @@
 
 ;; --- forking ----------------------------------------------------------------
 
-(def max-branch-theses 4)
+;; Tier 1b: the cap is gates.edn :max-branch-theses — data, so a project
+;; retunes its fork budget at runtime without a rebuild.
 
 (defmethod base/run-tool "branch_theses" [{:keys [branch] :as ctx}]
-  (let [proposals (base/arg ctx :theses)]
+  (let [proposals (base/arg ctx :theses)
+        max-branch-theses (gates/threshold :max-branch-theses)]
     (cond
       (or (not (sequential? proposals)) (empty? proposals))
       (base/malformed branch (str "`theses` must be a non-empty array of"

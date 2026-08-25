@@ -161,7 +161,8 @@
       ;; its own looser threshold and with its own reason. Three bad fences is
       ;; a model having a bad turn; twice that is a branch that cannot work the
       ;; protocol, and saying so beats the dead-end line it used to die with.
-      (and (>= mech (* 2 threshold)) (pos? survivors))
+      (and (>= mech (* (gates/threshold :cull-mechanics-multiple) threshold))
+           (pos? survivors))
       (cull (cond
               ;; The mechanics counter also counts policy refusals, so the
               ;; reason has to say which actually happened. gen-30 B3.2 was

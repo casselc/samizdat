@@ -232,6 +232,58 @@
         a skeleton to elaborate from being locked out of verification for the
         whole run."}
 
+ :cull-mechanics-multiple
+ {:value 2 :kind :threshold :capability-tunable? false
+  :doc "Multiple of cull-threshold at which consecutive mechanics failures
+        (malformed tool calls and harness refusals) cull a branch even with
+        survivors to spare. Three bad fences is a model having a bad turn;
+        twice that is a branch that cannot work the protocol."}
+
+ :safe-state-multiple
+ {:value 2 :kind :threshold :capability-tunable? false
+  :doc "Multiple of cull-threshold in consecutive failures before the
+        safe-state rung may fire. Deliberately harder to trigger than a
+        cull: this rung spends a hard-capped abort and, in a non-advisory
+        mode, rebuilds an engine process."}
+
+ :max-branch-theses
+ {:value 4 :kind :cost-ceiling :capability-tunable? false
+  :doc "Most theses one branch_theses call may propose. A cost ceiling:
+        every proposal beyond the first becomes a sibling branch — a
+        concurrent provider call per turn plus its own process."}
+
+ :reflection-cadence
+ {:value 15 :kind :threshold :capability-tunable? false
+  :doc "Turns between reflection nudges. Not capability-tunable: the nudge
+        invites the branch to reshape its own loop (reload_cells), and the
+        tier under observation should not loosen the cadence at which it is
+        invited to mutate the machinery observing it."}
+
+ :critic-objectives
+ {:value [:progress :momentum :distinctness :viability] :kind :threshold
+  :capability-tunable? false
+  :doc "The critic's scoring rubric — all maximize, 1..5. :progress is
+        engine-confirmed work accumulated over the branch's life,
+        :momentum is whether the recent turns are productive, :distinctness
+        is difference from the sibling theses (the beam's diversity lives
+        here), :viability is whether the line has anywhere left to go.
+        Retention reads all but :progress (critic.clj
+        survival-objectives); :fork-invite-floor keys on these same names.
+        The score prompt still names these four in prose until it moves to
+        prompts/ (tier 2a) — until then this list tunes what parse-scores
+        ACCEPTS, not what the prompt asks for."}
+
+ :decompose-max-depth
+ {:value 3 :kind :cost-ceiling :capability-tunable? false
+  :doc "How deep the decompose recursion may go before a stuck unit is a
+        hard failure rather than split again. A cost ceiling: each level
+        multiplies sub-agents, and a unit that still won't pass its tests
+        three levels down is not a size problem."}
+
+ :decompose-max-parts
+ {:value 4 :kind :cost-ceiling :capability-tunable? false
+  :doc "Most sub-units the architect may split one unit into."}
+
  :tool-vocab
  ;; Tier 1a: the tool vocabularies the gates and their settlers read — data
  ;; here, alongside the thresholds, so a vocabulary changes at runtime

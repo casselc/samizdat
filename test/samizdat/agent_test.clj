@@ -276,6 +276,21 @@
     (is (= #{"done"} (:milestone settle-called)))
     (is (= #{"thesis" "done" "give_up"} (:safe-state settle-called)))))
 
+(deftest policy-scalars-are-gates-edn-data
+  ;; Tier 1b: the policy numbers that lived as hard-coded multipliers and defs
+  ;; in src — the beam's mechanics-cull multiple, the safe-state multiple, the
+  ;; thesis fork cap, the reflection cadence, the critic's objective list,
+  ;; decompose's budgets — moved to gates.edn beside the thresholds they
+  ;; parameterize, so a policy number changes at runtime without a rebuild.
+  (is (= 2 (gates/threshold :cull-mechanics-multiple)))
+  (is (= 2 (gates/threshold :safe-state-multiple)))
+  (is (= 4 (gates/threshold :max-branch-theses)))
+  (is (= 15 (gates/threshold :reflection-cadence)))
+  (is (= [:progress :momentum :distinctness :viability]
+         (gates/threshold :critic-objectives)))
+  (is (= 3 (gates/threshold :decompose-max-depth)))
+  (is (= 4 (gates/threshold :decompose-max-parts))))
+
 (deftest a-reframed-branch-settles-stuck-with-a-live-verification
   ;; The stuck gate's compliance clause: a verification the harness ACCEPTED
   ;; while the reframe stood is compliance by construction — the withheld
@@ -818,12 +833,15 @@
                          "no longer reaches"))))
 
   (testing "the rung is harder to trip than a cull"
-    (let [b (state/mark-green (branch-with :turns (vec (repeat 2 {}))))]
-      (is (not (state/safe-state-due? (assoc b :consecutive-failures 3) 3)))
-      (is (state/safe-state-due? (assoc b :consecutive-failures 6) 3))))
+     (let [b (state/mark-green (branch-with :turns (vec (repeat 2 {}))))
+           ;; tier 1b: the multiple is gates.edn :safe-state-multiple
+           [cull multiple] [3 (gates/threshold :safe-state-multiple)]]
+       (is (not (state/safe-state-due? (assoc b :consecutive-failures 3) cull multiple)))
+       (is (state/safe-state-due? (assoc b :consecutive-failures 6) cull multiple))))
 
   (testing "and never trips without a green point at all"
-    (is (not (state/safe-state-due? (branch-with :consecutive-failures 99) 3)))))
+    (is (not (state/safe-state-due? (branch-with :consecutive-failures 99) 3
+                                    (gates/threshold :safe-state-multiple))))))
 
 (deftest green-verify-marks-the-green-point
   ;; No tool on the current surface emits :claim-status artifacts (the proof

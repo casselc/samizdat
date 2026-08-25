@@ -22,15 +22,20 @@
   (attempt, recurse, assemble, depth cap) lives in cells/decompose.clj. Same
   split as planner.clj vs cells/team.clj."
   (:require [clojure.data.json :as json]
-            [clojure.string :as str]))
+            [clojure.string :as str]
+            [samizdat.agent.gates :as gates]))
+
+;; Tier 1b: both budgets are gates.edn data (:decompose-max-depth,
+;; :decompose-max-parts) — cost ceilings, since each level of recursion
+;; multiplies sub-agents.
 
 (def max-depth
   "How deep the split recursion may go before a stuck unit is a hard failure
   rather than split again. Kept shallow: each level multiplies sub-agents, and a
   unit that still won't pass its tests three levels down is not a size problem."
-  3)
+  (gates/threshold :decompose-max-depth))
 
-(def default-max-parts 4)
+(def default-max-parts (gates/threshold :decompose-max-parts))
 
 (defn architect-prompt
   "Ask the architect to diagnose a stuck unit and choose to split it or hint a

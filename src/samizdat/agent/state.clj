@@ -677,7 +677,9 @@
 (defn safe-state-due?
   "Twice the cull threshold's worth of consecutive failures, with a green point
   to fall back to. Deliberately harder to trigger than a cull: this rung spends
-  a hard-capped abort and rebuilds a process."
-  [branch cull-threshold]
+  a hard-capped abort and rebuilds a process. The multiple is passed by the
+  caller (gates.edn :safe-state-multiple), keeping this namespace free of the
+  config layer — the same split as supervisor's shipping vocabulary (tier 1a)."
+  [branch cull-threshold multiple]
   (and (:green-snapshot branch)
-       (>= (:consecutive-failures branch) (* 2 cull-threshold))))
+       (>= (:consecutive-failures branch) (* multiple cull-threshold))))

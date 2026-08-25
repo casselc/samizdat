@@ -109,7 +109,8 @@
           than performing it, because a restore that is not fully covered
           produces a session that never existed."
     :when (fn [{:keys [branch]}]
-            (state/safe-state-due? branch (threshold :cull-threshold)))
+            (state/safe-state-due? branch (threshold :cull-threshold)
+                                   (threshold :safe-state-multiple)))
     :message (fn [{:keys [branch safe-state-coverage]}]
                (str (prompt "safe-state")
                     "\n\nYour last green test run was at turn "
@@ -430,9 +431,10 @@
           never reconsiders its own machinery keeps whatever friction it started
           with. Fires on a cadence, not a condition, which is why it sits below
           every gate that fires because something is wrong."
-    :when (fn [{:keys [branch]}]
-            (let [n (state/turn-count branch)]
-              (and (state/active? branch) (pos? n) (zero? (mod n 15)))))
+     :when (fn [{:keys [branch]}]
+             (let [n (state/turn-count branch)]
+               (and (state/active? branch) (pos? n)
+                    (zero? (mod n (threshold :reflection-cadence))))))
     :message (fn [_]
                (str "**Step back and look at your loop.** You are running inside"
                     " a mycelium workflow of cells. See how it is wired and how"

@@ -36,20 +36,23 @@
   The known cost is permissiveness, which is why the reprieve it grants is
   a loan with a clock (the hard floor in the scheduler), not an exemption."
   (:require [clojure.string :as str]
+            [samizdat.agent.gates :as gates]
             [samizdat.agent.state :as state]
             [samizdat.llm.message :as message]
             [samizdat.llm.client :as llm]
             [samizdat.store.journal :as journal]))
 
 (def objectives
-  "All maximize, 1..5.
+  "All maximize, 1..5. Tier 1b: the list is gates.edn :critic-objectives —
+  data, so the rubric is retunable at runtime. What each objective MEANS is
+  documented beside the value in gates.edn.
 
   :progress      engine-confirmed work accumulated over the branch's life
   :momentum      whether the RECENT turns are productive or flailing
   :distinctness  how different this approach is from the sibling theses —
                  the beam's diversity lives here
   :viability     whether the current line has anywhere left to go"
-  [:progress :momentum :distinctness :viability])
+  (vec (gates/threshold :critic-objectives)))
 
 (defn parse-scores
   "Line-anchored `SCORE <objective>: <1-5>` lines out of a critic response.
