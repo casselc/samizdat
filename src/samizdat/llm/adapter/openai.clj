@@ -62,6 +62,32 @@
   (and (= :deepseek provider-id)
        (str/includes? (str (:base-url config)) "/beta")))
 
+(defn- local-cache-wire
+  "The extra body keys a local llama-server honours for prefix-cache reuse, or
+  an empty map.
+
+  `cache_prompt` asks the server to reuse the longest common prefix it already
+  holds instead of re-prefilling. That is the difference between an inherited
+  fork or a fan of probes off one tape costing a completion each and costing a
+  full prefill each — see docs/llm-repl-port.md LR-5.
+
+  `id_slot` PINS a conversation to a physical KV slot, and is emitted only
+  from an explicit `:slots` table in the provider config ({cache-key -> int}).
+  Absent, the server picks by prefix similarity and LRU, which is the right
+  default: a slot count is a property of how the server was launched, and
+  inventing an index would evict another conversation's warm prefix to serve
+  a guess. A bad pin costs a re-prefill, never a wrong answer.
+
+  Gated on the provider being `:local`, so every hosted provider's body is
+  byte-identical to what it was. The design is llm-repl's `llama-wire`; only
+  the seam differs."
+  [provider-id config cache-key]
+  (if (or (not= :local provider-id) (nil? cache-key))
+    {}
+    (cond-> {:cache_prompt true}
+      (get (:slots config) cache-key)
+      (assoc :id_slot (get (:slots config) cache-key)))))
+
 (defrecord OpenAIAdapter [provider-id label reasoning-key max-tokens-key]
   adapter/Adapter
   (id [_] provider-id)
@@ -82,7 +108,8 @@
       {"Authorization" (str "Bearer " k)}
       {}))
 
-  (chat-body [this config {:keys [messages max-tokens temperature prefill force-tool]}]
+  (chat-body [this config {:keys [messages max-tokens temperature prefill force-tool
+                                  cache-key]}]
    ;; The gate is the protocol method on THIS adapter (review3 #14), so the
    ;; answer a caller can query and the answer chat-body acts on are one
    ;; path and cannot drift apart.
@@ -119,7 +146,12 @@
       (and force-tool (not use-prefill?))
       (assoc :tools [{:type "function" :function force-tool}]
              :tool_choice {:type "function"
-                           :function {:name (:name force-tool)}}))))
+                           :function {:name (:name force-tool)}})
+
+      ;; Local llama-server prefix-cache reuse. Merged LAST and only for
+      ;; :local, so no hosted provider's body changes.
+      :always
+      (merge (local-cache-wire provider-id config cache-key)))))
 
   (prefill-support? [_ config] (supports-prefill? provider-id config))
 

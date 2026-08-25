@@ -30,7 +30,8 @@
             [samizdat.llm.client :as client]
             [samizdat.llm.fence :as fence]
             [samizdat.llm.message :as message]
-            [samizdat.llm.registry :as registry]))
+            [samizdat.llm.registry :as registry]
+            [samizdat.tape :as tape]))
 
 ;; --- fence extraction -------------------------------------------------------
 
@@ -156,12 +157,15 @@
   ;; A 19-turn branch carries ~26KB on the wire against ~1.5KB of digest, and
   ;; the longest branch on record is 86 turns.
   ;;
-  ;; The system prompt and the problem always survive, the recent turns survive
-  ;; verbatim because that is the branch's working memory, and everything older
-  ;; collapses to one line per turn. Details stay in the journal and the
-  ;; artifacts are fetchable by id, so nothing is lost — only unloaded.
-  (let [pair (fn [i] [{:role "assistant" :content (str "long reasoning " i (apply str (repeat 400 "x")))}
-                      {:role "user" :content (str "result " i (apply str (repeat 400 "y")))}])
+  ;; LR-4 changed the MECHANISM, not the goal. The digest used to be appended
+  ;; to the PROBLEM message and the aged-out pairs dropped; now each aged-out
+  ;; message is replaced IN PLACE, so roles, order and count are identical and
+  ;; the shared prefix stops being rewritten on every compaction. The frame
+  ;; and the recent window are as protected as they ever were.
+  (let [pair (fn [i] [{:role "assistant" :turn i
+                       :content (str "long reasoning " i (apply str (repeat 400 "x")))}
+                      {:role "user" :turn i
+                       :content (str "result " i (apply str (repeat 400 "y")))}])
         msgs (into [{:role "system" :content "SYS"}
                     {:role "user" :content "## Problem\n\nsolve it"}]
                    (mapcat pair (range 1 21)))
@@ -170,27 +174,52 @@
                              :error (when (even? i) "boom")})
                     (range 1 21))
         out (message/compact msgs turns {:keep-pairs 4 :threshold-chars 1000})]
-    (testing "the frame survives"
-      (is (= "system" (:role (first out))))
-      (is (= "SYS" (:content (first out))))
-      (is (str/includes? (:content (second out)) "solve it")))
-    (testing "the digest rides on the problem message, so roles stay alternating"
-      (is (= "user" (:role (second out))))
-      (is (= ["assistant" "user" "assistant" "user" "assistant" "user" "assistant" "user"]
-             (mapv :role (drop 2 out)))))
+    (testing "the frame survives untouched — the whole prefix cache rests on it"
+      (is (= (first msgs) (first out)))
+      (is (= (second msgs) (second out))))
+    (testing "the shape is identical, so alternation needs no provider to be forgiving"
+      (is (= (count msgs) (count out)))
+      (is (= (mapv :role msgs) (mapv :role out))))
     (testing "recent turns survive verbatim"
-      (is (str/includes? (:content (nth out 2)) "long reasoning 17"))
+      (is (str/includes? (:content (nth out (- (count out) 8))) "long reasoning 17"))
       (is (str/includes? (:content (last out)) "result 20")))
-    (testing "early turns are gone as prose but present as a digest"
+    (testing "early turns are unloaded as prose but retained as what was tried"
       (let [all (str/join "\n" (map :content out))]
-        (is (not (str/includes? all "long reasoning 3")) "the prose is unloaded")
-        (is (str/includes? all "tool3") "but what it tried is retained")
+        (is (not (str/includes? all "long reasoning 3"))
+            "the prose of an unloaded turn is gone from the wire")
+        (is (str/includes? all "tool3") "what it tried is retained")
         (is (str/includes? all "tool16"))
         (is (not (str/includes? all "tool17"))
             "turns kept verbatim are not also digested")))
+    (testing "a message's own turn stamp is what picks its digest, not its position"
+      ;; The positional guess was unsound: a provider error or a no-call turn
+      ;; appends messages without appending a turn row.
+      (is (str/includes? (:content (nth out 2)) "t1 tool1")))
+    (testing "the original prose is kept on the branch's copy for the record"
+      (is (str/includes? (:original (nth out 2)) "long reasoning 1")))
     (testing "it is smaller"
       (is (< (count (str/join (map :content out)))
              (quot (count (str/join (map :content msgs))) 2))))
+    (testing "compacting twice is idempotent — one attempt per message, ever"
+      (is (= out (message/compact out turns {:keep-pairs 4 :threshold-chars 1000}))))
+    (testing "THE POINT: the prefix before the newest compaction never moves"
+      ;; Two consecutive turns' worth of wire messages. Under the old
+      ;; append-to-the-problem-message scheme, message 1 differed between
+      ;; these two and every cached token after it was invalidated.
+      (let [later (into msgs (mapcat pair [21 22]))
+            turns' (into turns [{:turn 21 :tool "tool21" :category :success}
+                                {:turn 22 :tool "tool22" :category :success}])
+            out' (message/compact later turns' {:keep-pairs 4 :threshold-chars 1000})
+            ;; The region BOTH calls had aged out: everything before the
+            ;; FIRST call's verbatim window. Two more turns move that window
+            ;; forward, so the messages between the old boundary and the new
+            ;; one get compacted for the first time in out' — the boundary
+            ;; advancing is the one place a rewrite is supposed to happen.
+            settled (tape/window-index msgs 4)]
+        (is (= (take settled out) (take settled out'))
+            "everything already compacted is byte-identical between turns")
+        (is (= (take 2 msgs) (take 2 out'))
+            "and the frame is still the frame — the old scheme rewrote index 1 here")))
     (testing "a short history is left exactly alone"
       (let [short-msgs (into [{:role "system" :content "SYS"}
                               {:role "user" :content "P"}]
@@ -468,6 +497,39 @@
         (is (str/includes? (:content p) "\"name\":\"done\""))
         (is (str/includes? (:content p) "shipped the partial")
             "so the loop's fence parser reads it exactly like a normal tool call")))))
+
+(deftest the-local-endpoint-gets-prefix-cache-reuse-and-nobody-else-does
+  ;; LR-5. An inherited fork and a fan of probes off one tape are only cheap if
+  ;; the server reuses the warm prefix instead of re-prefilling it; without
+  ;; cache_prompt that is most of their cost. Design copied from llm-repl's
+  ;; llama-wire: cache_prompt on the local path, id_slot ONLY from an explicit
+  ;; slots table, because a slot count is a property of how the server was
+  ;; launched and a guessed index evicts somebody else's warm prefix.
+  (let [local (registry/adapter-for :local)
+        cfg {:base-url "http://127.0.0.1:8080/v1" :model "local-model"}
+        opts {:messages [{:role "user" :content "x"}] :cache-key "B1"}]
+    (testing "the local endpoint asks for prefix reuse"
+      (is (true? (:cache_prompt (adapter/chat-body local cfg opts)))))
+    (testing "no id_slot without an explicit slots table — the server picks"
+      (is (nil? (:id_slot (adapter/chat-body local cfg opts)))))
+    (testing "a configured slot pins the conversation"
+      (is (= 2 (:id_slot (adapter/chat-body local (assoc cfg :slots {"B1" 2}) opts)))))
+    (testing "a cache key with no matching slot entry still gets reuse, unpinned"
+      (let [body (adapter/chat-body local (assoc cfg :slots {"B9" 0}) opts)]
+        (is (true? (:cache_prompt body)))
+        (is (nil? (:id_slot body)))))
+    (testing "no cache key, no wire change"
+      (is (nil? (:cache_prompt (adapter/chat-body local cfg (dissoc opts :cache-key))))))
+    (testing "every hosted provider's body is byte-identical with or without the key"
+      (doseq [p [:deepseek :glm :openai]]
+        (let [a (registry/adapter-for p)]
+          (is (= (adapter/chat-body a (assoc cfg :api-key "k") (dissoc opts :cache-key))
+                 (adapter/chat-body a (assoc cfg :api-key "k") opts))
+              (str (name p) " must ignore a knob it has nowhere to put")))))
+    (testing "Ollama ignores it too"
+      (let [a (registry/adapter-for :ollama)]
+        (is (= (adapter/chat-body a cfg (dissoc opts :cache-key))
+               (adapter/chat-body a cfg opts)))))))
 
 (deftest adapters-differ-only-where-they-should
   (let [cfg {:base-url "https://api.example.com/v1" :model "m" :api-key "k"}]

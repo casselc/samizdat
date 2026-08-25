@@ -79,6 +79,14 @@ doc({symbol})
 complete({prefix})
     Symbols starting with a prefix — a qualified prefix ("samizdat.lisp/b")
     completes within that namespace, a bare one ("redu") across the core.
+manual({name?})
+    The harness's OWN command surface: the functions worth calling from eval,
+    grouped, one curated line each. `doc` and `complete` answer questions
+    about a name you already have; this is how you find out which names are
+    worth having. With a name (manual({name: "samizdat.agent.infer/bounce"}))
+    you get that one entry's full docstring.
+    The list itself is resources/manual.edn — data, not code. If you build a
+    capability worth other runs knowing about, add it there.
 ```
 
 ### Doing work
@@ -233,6 +241,13 @@ fetch_turn({turn})
     Reopen one of your own earlier turns by its digest handle (t1, t2, ...):
     the call you made, what you said, and what came back.
 ```
+
+Once your history gets long, your older messages are replaced in place by a
+one-line summary marked `[unloaded]` — the shape of the conversation is
+unchanged, but the prose is gone. Nothing is lost: `fetch_turn` with the turn
+number reopens any of them in full, the settled-state block carries what was
+established, and any encoding is one `fetch_artifact` away. Recent turns always
+stay verbatim, so what you are mid-way through is never summarised.
 
 ## Honesty
 

@@ -182,7 +182,8 @@
   loop is bounded in attempts and each attempt is bounded in wall clock, so a
   stuck provider costs a known amount rather than the run."
   ([adapter config messages] (chat adapter config messages nil))
-  ([adapter config messages {:keys [max-tokens temperature max-retries prefill force-tool]}]
+  ([adapter config messages {:keys [max-tokens temperature max-retries prefill force-tool
+                                    cache-key]}]
    (let [request {:messages (message/prepare messages)
                   :max-tokens (or max-tokens (:max-tokens config))
                   :temperature (or temperature (:temperature config))
@@ -194,7 +195,11 @@
                   ;; adapter sends this tool as a native OpenAI function with
                   ;; tool_choice, forcing the call on providers that don't honour
                   ;; assistant prefill (GLM). See samizdat.agent.arbiter.
-                  :force-tool force-tool}
+                  :force-tool force-tool
+                  ;; The stable conversation key an endpoint pins its prefix
+                  ;; cache to — a branch id. Adapters that have nowhere to put
+                  ;; it MUST ignore it; only the local one emits anything.
+                  :cache-key cache-key}
          retries (or max-retries (:max-retries config) default-max-retries)]
      (loop [attempt 0, errors []]
        (let [result (try

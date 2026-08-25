@@ -1,0 +1,65 @@
+;; The factory loop with a non-committing PROBE in front of the model call
+;; (LR-2). Identical to `loop` in every other respect, so the two are a
+;; controlled comparison: same cells, same routing, same constraints, one
+;; extra node.
+;;
+;; The probe asks "what would this branch do next?" against the branch's own
+;; tape, N candidate framings at a time, and throws every answer away except
+;; the steer it derives from the best one. It cannot run a tool — the inference
+;; step it drives has no tool seam — so a probe is inference spend and nothing
+;; else. It only fires when the branch has been producing unusable calls; see
+;; gates.edn :probe for the width and the trigger.
+;;
+;; Dispatch predicates are EDN forms evaluated at compile time. Keep them
+;; trivial readers of explicit keys: the cell computes the decision INTO the
+;; data map, the predicate only reads it.
+{:description "The factory loop plus a non-committing probe: before spending a turn on a branch that has been emitting unusable calls, try several framings of the next step against its own context and steer toward the one that produced a real tool call. Costs inference, never a turn."
+ :cells {:start          :loop/assemble
+         :probe          :probe/next-move
+         :infer          :llm/infer
+         :parse          :llm/parse
+         :provider-error :loop/provider-error
+         :no-call        :loop/no-call
+         :dispatch       :tool/dispatch
+         :journal        :journal/record
+         :arbiter        :gate/arbiter
+         :route          :loop/route
+         :finish         :loop/finish}
+
+ :edges {:start          :probe
+         ;; The probe is a pass-through when it declines to fire, so there is
+         ;; no branch here: either it added a steer message or it did not, and
+         ;; the model call is next either way.
+         :probe          :infer
+         :infer          :parse
+         :parse          {:provider-error :provider-error
+                          :no-call        :no-call
+                          :tool           :dispatch}
+         :provider-error :route
+         :no-call        :route
+         :dispatch       :journal
+         :journal        :arbiter
+         :arbiter        :route
+         ;; The back edge: one turn ends where the next begins.
+         :route          {:continue  :start
+                          :done      :finish
+                          :abandoned :finish
+                          :exhausted :finish}
+         :finish         :end}
+
+ :dispatches {:parse [[:provider-error (fn [d] (not (:ok (:call d))))]
+                      [:no-call (fn [d] (let [p (:parsed d)]
+                                          (or (nil? p)
+                                              (= "__parse_error__" (:name p)))))]
+                      [:tool (fn [d] true)]]
+              :route [[:continue  (fn [d] (= :continue (:verdict d)))]
+                      [:done      (fn [d] (= :done (:verdict d)))]
+                      [:abandoned (fn [d] (= :abandoned (:verdict d)))]
+                      [:exhausted (fn [d] (= :exhausted (:verdict d)))]]}
+
+ ;; The same invariants the factory loop carries: a dispatched tool call is
+ ;; always journalled, and a journalled turn always faces the arbiter. The
+ ;; probe is deliberately NOT under a constraint — it is advisory, and a
+ ;; manifest that drops the node must stay legal.
+ :constraints [{:type :must-follow :if :dispatch :then :journal}
+               {:type :must-follow :if :journal :then :arbiter}]}

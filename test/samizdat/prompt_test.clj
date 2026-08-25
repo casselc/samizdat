@@ -16,7 +16,7 @@
   hand-rolled str/replace chains used, so the move changed the renderer,
   not the templates."
   (:require [clojure.string :as str]
-            [clojure.test :refer [deftest is]]
+            [clojure.test :refer [deftest is testing]]
             [samizdat.agent.loop :as loop]
             [samizdat.agent.tools :as tools]
             [samizdat.prompt :as prompt]))
@@ -88,3 +88,61 @@
   ;; filter in the placeholder would fire, where a replace chain would
   ;; leave it verbatim).
   (is (= "Y" (prompt/render-str "{{v|upper}}" {:v "y"}))))
+
+;; --- the prompt chain (LR-7) -------------------------------------------------
+
+(deftest a-chain-takes-the-first-present-level
+  ;; First-present-wins: a level REPLACES the text, it does not add to it.
+  (is (= "top" (prompt/resolve-chain [{:text "top"} {:text "bottom"}])))
+  (is (= "bottom" (prompt/resolve-chain [{:project "/nonexistent/nope.md"}
+                                         {:text "bottom"}]))
+      "an absent level inherits from the one below"))
+
+(deftest a-blank-level-means-explicitly-none-and-stops-the-walk
+  ;; This is the distinction the whole trichotomy rests on. Collapsing blank
+  ;; into absent would make it impossible to suppress a layer at all.
+  (is (nil? (prompt/resolve-chain [{:text "  "} {:text "bottom"}])))
+  (is (nil? (prompt/resolve-chain [{:text ""} {:file "system"}]))))
+
+(deftest an-exhausted-chain-is-nil-not-an-error
+  (is (nil? (prompt/resolve-chain [])))
+  (is (nil? (prompt/resolve-chain [{:project "/nonexistent/a"}
+                                   {:project "/nonexistent/b"}]))))
+
+(deftest a-file-level-resolves-through-io-resource
+  ;; Not a cwd-relative path: it has to work inside a built binary, where
+  ;; resources/ does not exist on disk.
+  (is (str/includes? (prompt/resolve-chain [{:file "system"}]) "tool call"))
+  (is (nil? (prompt/resolve-chain [{:file "no-such-prompt-anywhere"}]))))
+
+(deftest an-unknown-entry-kind-fails-loud
+  ;; The chain is runtime-editable, so a typo is a live possibility — and a
+  ;; silently dropped layer would look exactly like a suppressed one.
+  (is (thrown-with-msg? Exception #":project, :file or :text"
+                        (prompt/resolve-chain [{:flie "typo"}]))))
+
+(deftest a-project-file-overrides-the-shipped-prompt
+  (let [dir (java.io.File. ".samizdat/prompts")
+        f (java.io.File. dir "chain-test.md")]
+    (try
+      (.mkdirs dir)
+      (spit f "the project's own text")
+      (is (= "the project's own text"
+             (prompt/resolve-chain [{:project (.getPath f)} {:file "system"}])))
+      (testing "and an empty project file suppresses the layer entirely"
+        (spit f "")
+        (is (nil? (prompt/resolve-chain [{:project (.getPath f)} {:file "system"}]))))
+      (finally (.delete f)))))
+
+(deftest the-system-layer-is-declared-and-ends-at-the-shipped-file
+  (let [entries (:system (prompt/chains))]
+    (is (seq entries) "the system prompt goes through the chain")
+    (is (= {:file "system"} (last entries))
+        "the shipped prompt is the floor, so an unconfigured harness is unchanged")
+    (is (str/includes? (prompt/layer :system) "tool call"))))
+
+(deftest an-undeclared-layer-falls-back-to-its-own-prompt-file
+  ;; Adding a layer to prompt-chain.edn is opt-in; a layer with no chain
+  ;; behaves exactly as a plain prompt read.
+  (is (= (str/trim (prompt/prompt "crossover"))
+         (str/trim (prompt/layer :crossover)))))

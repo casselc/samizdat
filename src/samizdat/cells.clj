@@ -104,7 +104,7 @@
   these and wins, and in a source checkout the dir scan reads the very same
   files, so a shipped cell edited in place is picked up from disk."
   ["cells/critic.clj" "cells/decompose.clj" "cells/feature.clj"
-   "cells/loop.clj" "cells/team.clj"])
+   "cells/loop.clj" "cells/probe.clj" "cells/team.clj"])
 
 (defn- shipped-sources
   "The shipped cells as {:id :content} — read from the classpath (embedded or
