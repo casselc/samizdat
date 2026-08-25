@@ -78,7 +78,7 @@
                       "(java.lang.System/exit (if (clojure.core/pos? (+ (:fail s) (:error s))) 1 0)))")]
         ;; single-quote the whole -e expression for sh -c; every namespace in
         ;; it came through ns-from-test-path's whitelist, so the expression
-        ;; genuinely has no single quotes of its own (RFC-000 R3-1).
+        ;; genuinely has no single quotes of its own (provenance R3-1).
         (str (:cmd-prefix (conventions)) expr "'")))))
 
 (defn- tail

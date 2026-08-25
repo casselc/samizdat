@@ -41,11 +41,6 @@
       (is (= t (tape/truncate-at t 99)))
       (is (= t (tape/truncate-at t -1))))))
 
-(deftest assistant-count-is-re-derived-not-inherited
-  (let [t (tape-of 4)]
-    (is (= 4 (tape/assistant-count t)))
-    (is (= 1 (tape/assistant-count (tape/truncate-at t 3)))
-        "truncating drops assistant turns; a fork's counter must agree with its tape")))
 
 ;; --- the band ----------------------------------------------------------------
 
@@ -101,26 +96,10 @@
         t' (tape/compact-at t i (apply str (repeat 5000 "z")))]
     (is (not= i (tape/next-to-compact t' 1))
         "one attempt per message, ever: a false transient costs an unbounded loop")
-    (is (= 1 (tape/declined-count t')))))
+    (is (true? (:declined? (nth t' i))))))
 
-(deftest compacting-twice-touches-each-message-once
-  (let [t (tape-of 5)
-        once (tape/compact-next t 2 "s1")
-        twice (tape/compact-next once 2 "s2")]
-    (is (= 2 (count (filter :compacted? twice))))
-    (is (= ["s1" "s2"] (mapv :content (filter :compacted? twice)))
-        "the backlog drains oldest-first")))
 
-(deftest the-window-protects-recent-turns
-  (let [t (tape-of 4)]
-    (is (= 2 (tape/backlog-count t 2)) "4 assistant turns, 2 in the window, 2 due")
-    (is (= 3 (tape/backlog-count t 1)))
-    (is (not (tape/needs-compaction? (tape-of 1) 2))
-        "a tape inside the window has nothing due")))
 
-(deftest compact-next-is-a-no-op-when-nothing-is-due
-  (let [t (tape-of 1)]
-    (is (= t (tape/compact-next t 2 "unused")))))
 
 ;; --- the session fold --------------------------------------------------------
 
@@ -159,3 +138,26 @@
   (is (= "user: u0\nassistant: a0"
          (tape/fold-input [{:role "user" :content "u0"}
                            {:role "assistant" :content "a0"}]))))
+
+(deftest the-window-protects-recent-turns
+  ;; The due-set is what compaction schedules from, and it is the only
+  ;; scheduler surface this harness keeps — the compactor rewrites every due
+  ;; message in one pass, so there is no "next one" to ask for (RFC-004 F1).
+  (let [t (tape-of 4)]
+    (is (= 2 (count (tape/due-indices t 2)))
+        "4 assistant turns, 2 inside the verbatim window, 2 due")
+    (is (= 3 (count (tape/due-indices t 1))))
+    (is (empty? (tape/due-indices (tape-of 1) 2))
+        "a tape inside the window has nothing due")))
+
+(deftest compacting-every-due-message-touches-each-once
+  ;; What llm.message/compact does: fold compact-at over the whole due set,
+  ;; rather than draining a backlog one summary at a time.
+  (let [t (tape-of 5)
+        due (tape/due-indices t 2)
+        out (reduce (fn [ms i] (tape/compact-at ms i (str "s" i))) t due)]
+    (is (= 3 (count due)) "5 assistant turns, 2 inside the window")
+    (is (= (count t) (count out)) "shape preserved")
+    (is (= 3 (count (filter :compacted? out))))
+    (is (empty? (tape/due-indices out 2))
+        "and nothing is left due, so a second pass is a no-op")))

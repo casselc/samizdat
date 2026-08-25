@@ -50,7 +50,7 @@
   "Drop a session's namespace. Each run gets a fresh namespace so defs
   accumulate across its turns; without this a long-lived serve process kept
   one namespace (plus everything the agent defined in it) per run, forever
-  (RFC-000 CR1-6). Idempotent on an unknown or already-removed name."
+  (provenance CR1-6). Idempotent on an unknown or already-removed name."
   [session]
   (when (find-ns session)
     (remove-ns session))

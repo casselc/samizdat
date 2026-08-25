@@ -1,183 +1,171 @@
-# RFC-001 — The core layer
+# RFC-001 — Base and userspace
 
-## The rule
+**Status:** implemented.
 
-samizdat exists to be modifiable by its own agent at runtime. That single
-requirement decides where every line of code goes.
+## Purpose
 
-**The base is `src/`.** It is compiled into the binary and provides
-capabilities with no opinions: how to talk to a provider, how to run a tool on
-the machine, how to reach the database, how to render a template, how to
-compile and validate a workflow. Nothing in the base decides what the harness
-*does*.
+samizdat's agent modifies the loop it runs in, while it runs, per project. This
+RFC specifies the seam that makes that possible: which half of the system is
+fixed, which half belongs to the project, and how a read resolves.
 
-**Userspace is how those capabilities are assembled into an agentic loop** —
-cells, the manifests that wire them, the policy tables they read, the prompts
-they speak. It belongs to the *project*, not to the harness. See RFC-002.
+## Scope
 
-The test to apply to any change: *could the agent change this about itself, at
-runtime, without a rebuild?* If the answer is no and the thing is a behaviour
-rather than a capability, it is in the wrong place.
+**This layer decides** where a definition comes from — the project's own version
+or the shipped template — and nothing else.
 
-## Why the base has to be small
+**It must not know** what any body means. It moves text keyed by `(kind, name,
+version)`; a cell, a manifest, a threshold table and a prompt are the same thing
+to it.
 
-A capability in the base is available to every project forever. A decision in
-the base is a decision no project can revise. The asymmetry is the whole
-argument: getting a capability slightly wrong costs a rebuild, while getting a
-*decision* wrong costs every project that ever runs the binary, and the agent
-whose job is to improve the loop cannot reach it.
+**It hands** bodies to the loaders (`cells`, `workflow`, `gates`, `phases`,
+`prompt`, `manual`) and rows to nobody else.
 
-That is why the base/userspace line is drawn at "does it decide anything"
-rather than at "is it complicated" or "is it likely to change."
+### The two halves
 
-## The seam
-
-`samizdat.userspace` is the read seam. Every loader in the base goes through
-it rather than reaching for `io/resource`:
-
-```
-userspace/body :cell     "loop"       -> Clojure source
-userspace/body :manifest "beam"       -> EDN
-userspace/body :policy   "gates"      -> EDN
-userspace/body :prompt   "system"     -> markdown
-```
-
-It returns the *project's* current version, seeding the shipped template as
-version 1 on first read. `system/start!` binds it to the project's database
-connection.
-
-**Unbound is a valid state and serves the template.** A test, a bare REPL, or a
-tool with no run behind it gets exactly the behaviour the harness had before
-the store existed. That is what let the store be added without a flag day:
-1104 existing tests did not notice it appear underneath them.
-
-Reads are cached and invalidated wholesale on any write. Coarse on purpose — a
-prompt renders on every gate message and a threshold is read inside compiled
-predicates, so a query per read would put SQLite in the path of string
-interpolation, and a stale cell is the bug that looks like the supervisor's
-edit silently not taking.
-
-## What the base contains
-
-| area | namespaces | what makes it a capability |
+| | Base | Userspace |
 |---|---|---|
-| provider | `llm.client`, `llm.adapter*`, `llm.message`, `llm.fence` | one retry ladder, one wall-clock bound, one message shape, one fence parser — a retry ladder that differs by provider is one nobody can reason about |
-| inference | `agent.infer`, `tape` | the step is `tape -> tape'` with the model call injected; the four drivers (commit, bounce, trampoline, fan) are different ways of applying it |
-| the machine | `agent.tools.*`, `engine.proc`, `security.policy`, `lsp.client` | doing a thing on request; the decision to request it is upstream |
-| durability | `store.*` | rows and SQL, nothing else |
-| scheduling | `agent.beam` | advancing branches, fanning out under a deadline, disposing sessions, closing rows |
-| compilation | `workflow`, `cells`, `mutation` | loading, validating and hot-swapping userspace; the safety around an edit, not the edit |
-| the record | `store.journal`, `events` | append-only, and a live tap that cannot stall the loop |
+| lives in | `src/`, compiled | `resources/` as a template, the project's db at runtime |
+| holds | capabilities | the loop that assembles them |
+| changed by | a rebuild | the agent, at runtime |
+| examples | how to call a provider, run a tool, reach the db, render a template, compile a workflow | cells, manifests, policy tables, prompts |
 
-## The turn, and the one definition of it
+The test for any new code: *could the agent change this about itself, at
+runtime, without a rebuild?* If no, and the thing is a behaviour rather than a
+capability, it is on the wrong side.
 
-`agent.loop` holds the *steps* a turn is made of — assemble, call, absorb,
-dispatch, journal, arbitrate, steer — as public functions with nothing
-composing them. What a turn **is** lives in the loop manifest, whose cells call
-those steps.
+The asymmetry that justifies the rule: a capability in the base is available to
+every project forever, while a **decision** in the base is one no project can
+revise — including the agent whose job is to improve the loop.
 
-There used to be two definitions. `agent.loop/run-turn` composed the steps in
-compiled Clojure while the manifest composed the same steps as cells, so an
-edit to the manifest reached only one of them. `workflow/run-turn` is the single
-composition now, and it is defined *by* compiling the manifest's per-turn slice,
-so it cannot drift from what production runs.
+## Model
 
-The order inside a turn is load-bearing — the tool runs before the arbiter, so a
-gate sees the state the turn produced rather than the state it started from; and
-predictions settle before new gates fire, so a gate cannot be credited with an
-outcome that preceded it. Those are the manifest's constraints to keep. What the
-base guarantees is that each step does one thing and declares what it touched.
+```
+resources/            TEMPLATE          shipped, read-only at runtime
+   │  seed on first read (version 1)
+   ▼
+userspace table       THE PROJECT'S     append-only, versioned
+   │  latest version
+   ▼
+loaders               LIVE IMAGE        cells load-stringed, manifests compiled
+```
 
-## Context is a budget, and it is policy
+Four kinds, one lifecycle — seed, read latest, append on edit, revert by
+re-appending:
 
-Ten numbers decide how much the model gets to see — one tool result, one file
-read, the tail of a failing test run, the judge's view of the rules and the
-transcript, search ranges, inbox lines, verbatim exchanges before compaction,
-the threshold compaction engages at — plus the verification timeout. All are
-`gates.edn :context-budget` and `:verify-timeout-ms`.
+| kind | body | consumed by |
+|---|---|---|
+| `:cell` | Clojure source | `samizdat.cells` → `load-string` |
+| `:manifest` | EDN | `samizdat.workflow` → mycelium compile |
+| `:policy` | EDN | `gates`, `phases`, `wordlists`, `manual`, `prompt-chain` |
+| `:prompt` | markdown | `samizdat.prompt` → selmer |
 
-They are the most project-specific values in the harness. A suite that takes
-twelve minutes and one that takes four seconds are both normal; a codebase of
-200-line namespaces read by a large-context model wants nothing like the same
-values as one with generated files read by a small local model. And they are the
-values most likely to be the real cause of a run going wrong while being hardest
-to diagnose: **a branch that cannot see the line its test failed on looks
-exactly like a branch that cannot read a stack trace.**
+A project is one database. The db path is cwd-relative (`samizdat.sqlite3`), so
+a project *is* a directory, and two projects on one binary diverge without
+either being able to affect the other.
 
-They are `:cost-ceiling`, so the capability tier may not raise them. Every one
-trades context for evidence, and a struggling run is the last one that should be
-handed more context on the harness's own initiative.
+## API
 
-## The tape, and why nothing early may move
+### `samizdat.userspace` — the read seam
 
-A model call is a pure function of the message array, so the array is a
-reduction accumulator: appending is a turn, copying is a fork, applying and
-discarding is a probe.
+Every loader in the base comes through here instead of `io/resource`.
 
-One invariant holds the whole thing up: **nothing early in the message array may
-change between turns.** Prefix caching depends on it. Three designs have run
-into it so far:
+| fn | contract |
+|---|---|
+| `(bind! conn)` | Point reads at this project. Returns the previous binding. Called once, by `system/start!`. |
+| `(unbind!)` | Detach. Reads fall back to the template. |
+| `(bound?)` / `(conn)` | Whether a project is bound, and its connection. |
+| `(body kind name)` | The project's newest version, else the template **seeded as version 1 on the way past**, else `nil`. |
+| `(body! kind name)` | As `body`, throwing when absent. For a caller whose operation is meaningless without it. |
+| `(edn-body kind name)` / `(edn-body! …)` | `body` parsed as EDN. |
+| `(template kind name)` | The shipped body, ignoring the project. `nil` when nothing ships under that name. |
+| `(template-path kind name)` | The classpath resource a template lives at. |
+| `(save! kind name body)` | Append a version. Returns the new version number, or `nil` when unbound. |
+| `(revert! kind name version)` | Re-append an older body as the newest. |
+| `(versions kind name)` / `(names kind)` | History of one; catalogue of a kind. |
+| `(seed-all! kind template-names)` | Seed each named template, return `{name body}` for the kind. |
+| `(invalidate!)` | Drop the read cache. |
 
-- Compaction used to append its digest to the *problem* message, rewriting index
-  1 every time it fired and invalidating the entire conversation behind it. It
-  now rewrites each aged-out message in place, once, so roles, order and count
-  are unchanged and the prefix before the newest rewrite is byte-stable.
-- The current task is appended once on claim and never rewritten, and marked
-  `:pinned?` so compaction leaves it alone. A block held at a fixed early
-  position and rewritten on task change would invalidate everything behind it.
-- The per-turn context block is *appended*, which is where the cache boundary
-  already is, so it costs nothing.
+**Contract — unbound is valid and serves the template.** A test, a REPL session
+or a tool with no run behind it gets exactly the behaviour the harness had
+before this layer existed. This is what allowed the layer to be introduced
+without a flag day, and it is load-bearing: callers must not check `bound?`
+before reading.
 
-## Findings
+**Contract — `save!` returns `nil` rather than throwing when unbound.** Editing
+userspace outside a run is a real situation; the caller should hear that nothing
+was stored.
 
-Writing this exposed the following. `src-audit-2026-08-4.md` asked the same
-question in a previous pass; its open items are resolved or carried here.
+**Contract — seeding never overwrites.** A project that has evolved past version
+1 is untouched by a later read.
 
-### F1 — Two places document a live subsystem as dead
+### `samizdat.store.userspace` — the store
 
-`agent/loop.clj` says, as the justification for how the safe-state trigger is
-keyed:
+Pure SQL over one table. `(kind, name, version)` primary key, `body` TEXT,
+append-only.
 
-> No tool on the current surface emits `:claim-status` artifacts (the proof
-> engines that did are gone), so the old `:confirmed` trigger keyed on a status
-> that never occurred.
+| fn | contract |
+|---|---|
+| `(load-latest conn kind name)` | Newest row, or `nil`. |
+| `(load-version conn kind name version)` | That row, or `nil`. |
+| `(versions conn kind name)` | Oldest first. |
+| `(save! conn kind name body)` | Append; returns the new version. **No content comparison** — an edit that changed nothing is still a fact about what was tried. |
+| `(seed! conn kind name body)` | Install as version 1 iff no version exists. Idempotent; returns the latest row either way. |
+| `(revert! conn kind name version)` | Re-append that version's body as a new version. `nil` when it does not exist. |
+| `(names conn kind)` | `{name, version, versions}` per name. |
+| `(latest-bodies conn kind)` | `{name body}` at the newest version of each — one query for a loader that needs a whole kind. |
 
-`phases.edn` says the same thing about its `:transitions` table. **Both are
-false.** `agent/tools/ship.clj` emits `:claim-status :confirmed` on a green
-ship-verify. Verified consequences:
+`kinds` is `#{:cell :manifest :policy :prompt}`; an unrecognised kind throws
+rather than filing a row nothing will read again.
 
-- Cross-branch artifact sharing is **live** — `loop/shareable?` returns true for
-  a ship artifact under the default `gates.edn :share`. Two comments say the
-  subsystem it feeds is dead.
-- The winner rubric's `confirmed-count` and `engine-diversity` components have
-  data to rank on again, having been constant-zero for the proof-era gap.
+## Protocol
 
-Nothing crashes. The defect is that the next person to read either comment will
-believe a running subsystem is vestigial, and either build a workaround or
-delete it. **Severity: low impact, high misleading potential.** Fix: correct
-both comments and state what does emit the status.
+```
+system/start!
+  ├─ db/open! (project db)         [out] conn
+  └─ userspace/bind! conn          [in]  every later read resolves per-project
 
-### F2 — A dead-key audit over `src/` alone is wrong by 18 keys
+cells/load-cells!         [in] userspace/seed-all! :cell   → load-string
+workflow/load-loop!       [in] store.workflows (shim over :manifest)
+gates/load-config         [in] userspace/edn-body! :policy "gates"
+phases/load-phases        [in] userspace/edn-body! :policy "phases"
+prompt/prompt             [in] userspace/body! :prompt
+manual/entries            [in] userspace/edn-body! :policy "manual"
 
-`R2-13` found five `gates.edn` keys with no reader. Re-running that check today
-reports **eighteen** — and all eighteen are false positives. A threshold's
-reader is frequently *data in the same file*: a gate entry names its budget key
-in `:budget`, and a `:when` form references a threshold by keyword. Scanning
-`src/` alone cannot see either.
+system/stop!
+  └─ userspace/unbind! BEFORE db/close   (a read against a closed handle throws;
+                                          the same read against no handle serves
+                                          the template)
+```
 
-Including `gates.edn` and every resource in the scan, and accepting
-`{:keys [...]}` destructuring as a read, gives **zero** dead keys.
+## Invariants
 
-This is recorded because the next person to audit will write the same naive scan
-and get the same eighteen. The honest check needs three things: search resources
-too, treat gates.edn's own `:budget`/`:when` as readers, and accept destructured
-reads. `agent-test/every-context-budget-key-is-actually-read` does this for one
-map and is the pattern to copy.
+| invariant | enforced by |
+|---|---|
+| A read resolves to the project's version when it has one. | `body`'s `or` chain; `userspace-test`. |
+| The shipped template is never written. | Only `save!`/`seed!` write, and both write to the db. Asserted by `the-project-evolves-and-the-template-does-not-follow`. |
+| Two projects on one binary cannot affect each other. | Separate connections; asserted by `a-second-project-is-unaffected-by-the-first`. |
+| Unbound reads behave as the pre-store harness did. | `read-body`'s `if-let` fallback; asserted by `unbound-reads-the-shipped-template`. |
+| History is append-only; a revert is an edit. | No `UPDATE` in the store. |
+| Nothing in `src/` decides what the harness does. | **Nothing mechanical.** Reviewed by hand; see the audit trail in `docs/provenance.md`. This is a convention, and the RFC set exists partly to keep it visible. |
 
-### F3 — Documentation drift is the failure mode this layer has
+## Performance
 
-F1 and F2 are the same shape: the code was correct and the description was not.
-That is what this layer is prone to, because a comment justifying a design
-decision is written once and the world moves. The mitigation that works is a
-test that asserts the claim — as the context-budget key test does — rather than
-a resolution to keep comments fresh.
+Reads are cached per `(kind, name)` and invalidated wholesale on any write or
+(un)bind. Coarse deliberately: a prompt renders on every gate message and a
+threshold is read inside compiled predicates, so a query per read would put
+SQLite in the path of string interpolation — while a stale cell is the bug that
+looks like the supervisor's edit silently not taking.
+
+`nil` is cached too: an absent optional prompt is looked up on every render, and
+re-querying for a row that is not there costs the same as one that is.
+
+## Known gaps
+
+- The base/userspace rule has no mechanical check. A behaviour added to `src/`
+  will not fail a test.
+- `store/workflows.clj` remains as a shim over `:manifest` so `workflow` and the
+  manifest tool keep their `name`-only signatures. New code should use
+  `samizdat.userspace`.
+- Migration v11 copied the pre-existing `workflows` rows into `userspace` and
+  left the old table in place. Nothing reads it; it is not dropped, so a
+  rollback to a pre-v11 binary still resolves.

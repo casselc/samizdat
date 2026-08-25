@@ -88,7 +88,7 @@
 
   Redirection does not split: it does not start a new command, and a deny glob
   (`.*` spans the rest of the string) already covers the tail of its segment.
-  This is the lexer RFC-000 A-1 asked for — the old regex-only
+  This is the lexer provenance A-1 asked for — the old regex-only
   classification let `echo pwned; rm -rf ~` ride `echo **` because `.*`
   matches `;` too."
   [raw]

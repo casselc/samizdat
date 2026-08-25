@@ -33,7 +33,7 @@
        (catch Throwable _ nil)))
 
 (deftest a-term-trapping-tree-dies-to-the-last-process
-  ;; RFC-000 R3-8. reap!'s escalation was destroyForcibly on the ROOT only, and
+  ;; provenance R3-8. reap!'s escalation was destroyForcibly on the ROOT only, and
   ;; worse: jolt's ProcessHandle.destroy — what destroy-tree signals through —
   ;; silently fails to signal at all, so the tree-wide TERM never landed. A
   ;; child that ignores TERM outlived the reap as an orphan, which is the

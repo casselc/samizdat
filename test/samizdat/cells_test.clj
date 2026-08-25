@@ -133,7 +133,7 @@
 ;; --- the shipped loop cells load from resources -----------------------------
 
 (deftest the-shipped-cells-dir-follows-the-classpath
-  ;; RFC-000 R3-11: default-dirs carried the relative "resources/cells", so a
+  ;; provenance R3-11: default-dirs carried the relative "resources/cells", so a
   ;; built binary started outside the project root found no cells and ran no
   ;; loop — silently, with zero registrations. The shipped entry must be the
   ;; classpath answer (which follows the binary), not a cwd-relative guess.

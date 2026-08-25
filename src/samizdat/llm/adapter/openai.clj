@@ -69,7 +69,7 @@
   `cache_prompt` asks the server to reuse the longest common prefix it already
   holds instead of re-prefilling. That is the difference between an inherited
   fork or a fan of probes off one tape costing a completion each and costing a
-  full prefill each — see docs/llm-repl-port.md LR-5.
+  full prefill each — see docs/RFCS/RFC-005-provider-layer.md.
 
   `id_slot` PINS a conversation to a physical KV slot, and is emitted only
   from an explicit `:slots` table in the provider config ({cache-key -> int}).
@@ -110,7 +110,7 @@
 
   (chat-body [this config {:keys [messages max-tokens temperature prefill force-tool
                                   cache-key]}]
-   ;; The gate is the protocol method on THIS adapter (RFC-000 R3-14), so the
+   ;; The gate is the protocol method on THIS adapter (provenance R3-14), so the
    ;; answer a caller can query and the answer chat-body acts on are one
    ;; path and cannot drift apart.
    (let [use-prefill? (and prefill (adapter/prefill-support? this config))]

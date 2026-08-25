@@ -142,7 +142,7 @@
   the prefix stays stable: each message is rewritten once, ever, and the
   prefix before the newest rewrite is byte-identical from turn to turn. This
   is llm-repl's chat-memory design; see samizdat.tape for the primitives and
-  docs/llm-repl-port.md LR-4 for the argument.
+  docs/RFCS/RFC-004-tape-and-inference.md for the argument.
 
   ONE ATTEMPT PER MESSAGE. A replacement is accepted only inside the
   compression band (|new| ≤ max(|original|, floor)); outside it the message is

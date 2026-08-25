@@ -594,7 +594,7 @@
         ;; here.
         (doseq [b @live-branches] (dispose-branch-engines! b))
         ;; The run's eval namespace does not outlive the run
-        ;; (RFC-000 CR1-6). Best effort, and only for a session this
+        ;; (provenance CR1-6). Best effort, and only for a session this
         ;; ctx actually carries: a resume that entered here without one has
         ;; nothing to close.
         (when repl-session
@@ -661,7 +661,7 @@
         ;; run's file tools resolved against the serve process's cwd, and
         ;; `eval` fell through to repl/default-session — one process-wide
         ;; namespace, never closed, shared by every run on the box. That is
-        ;; the leak RFC-000 CR1-6 fixed on the other driver only.
+        ;; the leak provenance CR1-6 fixed on the other driver only.
         root (or (get-in config [:run :root]) (System/getProperty "user.dir"))
         ctx {:conn conn :run-id run-id :config config :problem problem
              :llm-adapter llm-adapter :llm-config llm-config

@@ -150,7 +150,7 @@
               "another run's claimed tasks are not on this run's board"))))))
 
 (deftest a-claim-race-is-decided-by-the-row
-  ;; a#4 (docs/RFCS/RFC-000-index.md): claim! used to read-then-write with no guard
+  ;; a#4 (docs/provenance.md): claim! used to read-then-write with no guard
   ;; on the write, so two branches whose reads both saw the unclaimed row
   ;; could both "win" — the second silently stealing the task. Simulate the
   ;; interleaved read: the second claim's get-task returns the stale
@@ -299,7 +299,7 @@
       (is (= "done" (:status (tasks/get-task c id)))))))
 
 (deftest update-loses-to-a-write-that-lands-in-its-window
-  ;; RFC-000 R2-1: update! was a read-then-write pair over two lock
+  ;; provenance R2-1: update! was a read-then-write pair over two lock
   ;; acquisitions, so a claim landing between them was silently erased by
   ;; the stale write — the a#4 class one def over from the guarded claim!.
   ;; The UPDATE must carry what the read saw and lose to a row that moved.
@@ -321,7 +321,7 @@
         (is (= "high" (:priority t)) "and the edit still lands")))))
 
 (deftest claim-does-not-resurrect-a-terminal-task
-  ;; RFC-000 R2-14: a closed task with run_id NULL still satisfied
+  ;; provenance R2-14: a closed task with run_id NULL still satisfied
   ;; run_id IS NULL, so a claim flipped done back to in_progress — completed
   ;; work reappearing on the claiming run's board. Claiming is for available
   ;; work; reopening is an explicit status change through update!.
@@ -334,7 +334,7 @@
         (is (some? (:closed_at t)))))))
 
 (deftest create-rethrows-non-collision-failures-instead-of-retrying
-  ;; RFC-000 R2-15: create!'s retry caught Throwable — retrying failures that
+  ;; provenance R2-15: create!'s retry caught Throwable — retrying failures that
   ;; can never succeed by retrying, then reporting them as an id-allocation
   ;; problem. Only a UNIQUE collision is retryable; the real failure must
   ;; propagate.

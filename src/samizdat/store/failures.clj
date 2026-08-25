@@ -85,7 +85,7 @@
                        q run-id limit])
           (catch Throwable e
             ;; Empty stays the contract (a quiet FTS miss must not cost a
-            ;; turn), but a persistent fault must leave a trace (RFC-000 R2-15).
+            ;; turn), but a persistent fault must leave a trace (provenance R2-15).
             (log/warn "failures/similar failed; returning empty:" (ex-message e))
             []))))))
 

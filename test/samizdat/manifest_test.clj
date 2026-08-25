@@ -35,7 +35,7 @@
 (deftest factory-manifest-names-match-what-ships
   ;; wf/catalog used to glob a cwd-relative "resources/manifests", which found
   ;; nothing from a built binary or a process started elsewhere and silently
-  ;; served a catalogue with the factory half missing (the RFC-000 R3-11 bug in
+  ;; served a catalogue with the factory half missing (the provenance R3-11 bug in
   ;; a second place). It now resolves an enumerated list through io/resource,
   ;; which cannot drift on its own — so pin the list against the directory.
   (let [on-disk (->> (file-seq (io/file "resources/manifests"))
@@ -165,7 +165,7 @@
         (is (re-find #":cells" (:result shown)) "shows the manifest as data")))))
 
 (deftest show-and-save-missing-their-name-are-mechanics-complaints
-  ;; RFC-000 CR1-1, same shape as the skill tool: base/missing was
+  ;; provenance CR1-1, same shape as the skill tool: base/missing was
   ;; handed `branch` instead of ctx and its string returned raw, dropping
   ;; :category/:branch from the result map.
   (with-db

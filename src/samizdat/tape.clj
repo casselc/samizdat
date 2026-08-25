@@ -69,7 +69,18 @@
   `llm.message/prepare` projects role and content only.
 
   Ported from llm-repl's `chat-memory` (the compaction band, the due-set, the
-  session fold) and `core` (the fork). See the MIT notice above."
+  session fold) and `core` (the fork). See the MIT notice above.
+
+  NOT KEPT, deliberately: the compaction SCHEDULER — `compact-next`,
+  `needs-compaction?`, `backlog-count`, `declined-count` — and
+  `assistant-count`. The scheduler exists upstream because llm-repl's compactor
+  asks a MODEL for one summary at a time, so something has to ask whether a
+  message is due and how deep the backlog is. samizdat's compactor is
+  deterministic and rewrites every due message in one pass
+  (llm.message/compact), so there is nothing to schedule, and nothing read
+  them. `assistant-count` was written for a fork counter that ended up derived
+  from the `:turn` stamps instead. All five are in llm-repl and in this file's
+  git history if a model-based compactor lands. RFC-004 F1."
   (:require [clojure.string :as str]))
 
 ;; --- the value ---------------------------------------------------------------
@@ -109,14 +120,6 @@
   [messages]
   (count messages))
 
-(defn assistant-count
-  "How many assistant turns the tape carries. A fork RE-DERIVES its turn
-  counter from this rather than copying its parent's: truncating the copy
-  drops assistant turns, and the tape is the ground truth the counter has to
-  agree with. llm-repl found this the direct way — a copied counter made an
-  `:at` fork claim turns it did not have."
-  [messages]
-  (count (filter #(= "assistant" (:role %)) messages)))
 
 (defn truncate-at
   "The tape as it was after its first `n` messages — the fork primitive.
@@ -227,24 +230,8 @@
   ([messages k] (first (due-indices messages k)))
   ([messages k roles] (first (due-indices messages k roles))))
 
-(defn needs-compaction?
-  ([messages k] (some? (next-to-compact messages k)))
-  ([messages k roles] (some? (next-to-compact messages k roles))))
 
-(defn backlog-count
-  "How many messages are due — the compaction backlog depth, for
-  observability. A backlog that never drains is the symptom worth seeing."
-  ([messages k] (count (due-indices messages k)))
-  ([messages k roles] (count (due-indices messages k roles))))
 
-(defn declined-count
-  "How many messages could not be compressed within the band.
-
-  A DECLINE IS AN ALARM, not physics: under the band a short turn is accepted
-  (it may grow up to the floor), so a decline means the replacement blew past
-  the ceiling. One is noise; a RATE means the lens is wrong."
-  [messages]
-  (count (filter :declined? messages)))
 
 (defn within-band?
   "THE COMPRESSION BAND: `|new| <= max(|original|, floor)` — a message may grow
@@ -314,14 +301,6 @@
        :else
        (assoc messages i (assoc m :declined? true))))))
 
-(defn compact-next
-  "Compact the DUE message — the k-window-derived target. Same band and same
-  role restriction as `compact-at`; a no-op when nothing is due."
-  ([messages k replacement] (compact-next messages k replacement nil))
-  ([messages k replacement {:keys [roles] :as opts}]
-   (if-let [i (next-to-compact messages k (or roles default-roles))]
-     (compact-at messages i replacement opts)
-     (vec messages))))
 
 ;; --- the session fold --------------------------------------------------------
 ;;

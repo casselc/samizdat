@@ -103,7 +103,7 @@
   (is (nil? (verify/verify-block {:verify-on? true :result {:green? true :output ""}
                                   :changed nil :require-test? true}))))
 
-;; --- run-verify: the trust boundary (RFC-000 R3-1) ------------------------------
+;; --- run-verify: the trust boundary (provenance R3-1) ------------------------------
 ;;
 ;; The verify child must not inherit the parent's secrets, and its output is
 ;; model-bound: what run-verify returns has to pass the same redaction boundary

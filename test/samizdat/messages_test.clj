@@ -73,7 +73,7 @@
   (is (empty? (messages/thread @conn "no-such-run"))))
 
 (deftest send-rethrows-non-collision-failures-instead-of-retrying
-  ;; RFC-000 R2-15: the id-retry loop caught every Exception, so a disk or
+  ;; provenance R2-15: the id-retry loop caught every Exception, so a disk or
   ;; lock failure was retried five times and then reported as an id
   ;; allocation problem. Only a UNIQUE collision is retryable.
   (let [real-execute db/execute!
@@ -90,7 +90,7 @@
     (is (= 1 @inserts) "a non-collision failure is not retried")))
 
 (deftest the-message-tool-sends-the-branch-id-as-from
-  ;; RFC-000 R2-2: the tool passed the whole branch map as :from and the store
+  ;; provenance R2-2: the tool passed the whole branch map as :from and the store
   ;; str'd it — from_branch held 50-73KB state dumps (confirmed against the
   ;; live DB), and the inbox's from_branch != sender comparison could never
   ;; match, so senders saw their own broadcasts.

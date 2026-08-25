@@ -58,7 +58,7 @@
                 1
                 (catch Exception e
                   ;; Only a UNIQUE collision is an id problem; anything else
-                  ;; (disk, lock) must surface as itself (RFC-000 R2-15).
+                  ;; (disk, lock) must surface as itself (provenance R2-15).
                   (if (db/id-collision? e) 0 (throw e))))]
         (if (pos? n)
           id

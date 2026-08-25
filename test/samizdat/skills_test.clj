@@ -48,7 +48,7 @@
     (is (= :mechanics (:category miss)) "an unknown skill is a malformed call")))
 
 (deftest a-load-without-a-name-is-a-mechanics-complaint-with-a-skeleton
-  ;; RFC-000 CR1-1: base/missing was called with `branch` and its
+  ;; provenance CR1-1: base/missing was called with `branch` and its
   ;; complaint string returned RAW as the tool result — no :category, no
   ;; :branch — so tool-step threaded a nil branch into state/record-outcome,
   ;; which NPE'd on (update nil :turns-since-progress inc).

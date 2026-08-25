@@ -282,7 +282,7 @@
            (str "gate " gate " has no way to be met; it can only expire unmet")))))
 
 (deftest settle-and-tool-vocab-names-are-registered-tools
-  ;; RFC-000 R3-6/#7. The proof-era tool names (verify_template, review, audit,
+  ;; provenance R3-6/#7. The proof-era tool names (verify_template, review, audit,
   ;; sketch, retract_rule, proof_*, octave_eval) outlived the tool surface
   ;; that served them. A settle name the loop can never dispatch is a gate
   ;; whose settle silently narrows — and vf-9bo's every-tool probe above
@@ -363,7 +363,7 @@
                                  :branch-after b})))))
 
 (deftest gates-config-carries-no-keys-for-removed-machinery
-  ;; RFC-000 R3-9: :sketch-duplicate-threshold documented the sketch diversity
+  ;; provenance R3-9: :sketch-duplicate-threshold documented the sketch diversity
   ;; gate (vf-eaw) whose tool left with the proof harness. The code it points
   ;; at hardcodes 0.6 and its query is test-only — the key is doc-rot, the
   ;; same class as the four keys pass 2 deleted.
@@ -550,7 +550,7 @@
       (is (= 1 (:met (first (journal/gate-tally c rid))))))))
 
 (deftest the-fork-invite-floor-gates-repopulation
-  ;; RFC-000 R2-13: :fork-invite-floor documented minimum critic scores for a
+  ;; provenance R2-13: :fork-invite-floor documented minimum critic scores for a
   ;; fork invitation and nothing read it — the scheduler invited the
   ;; strongest survivor even when every survivor sat below the floor,
   ;; spending budget on lines not yet earning it.

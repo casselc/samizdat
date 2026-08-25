@@ -88,7 +88,7 @@
           (cond
             ;; base/missing yields a complaint STRING for malformed to wrap —
             ;; bare, it dropped :category/:branch from the result map
-            ;; (RFC-000 CR1-1).
+            ;; (provenance CR1-1).
             (str/blank? (str name)) (base/malformed branch (base/missing ctx :name))
             :else
             (if-let [row (if v

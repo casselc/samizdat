@@ -35,7 +35,7 @@
           ;; base/missing takes CTX (it reads :tool-name for the skeleton) and
           ;; yields a complaint STRING — wrap it in malformed. Returned raw it
           ;; replaced the whole result map and tool-step threaded a nil branch
-          ;; into state/record-outcome (RFC-000 CR1-1).
+          ;; into state/record-outcome (provenance CR1-1).
           (nil? name) (base/malformed branch (base/missing ctx :name))
           :else
           (if-let [content (skills/load-skill name)]

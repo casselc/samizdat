@@ -44,7 +44,9 @@ Concretely, when adding a capability:
    entry, which is fine — but a decision made in `src/` is a bug.
 4. Add it to `resources/manual.edn` so the next run knows it exists.
 
-`docs/llm-repl-port.md` is a worked example of the split across eight changes.
+`docs/RFCS/` specifies each layer: its purpose and scope, its API, and the
+invariants it holds. `docs/provenance.md` indexes the numbered review findings
+that code comments cite.
 
 ## Issue tracking: beads is the only tracker
 

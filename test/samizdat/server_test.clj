@@ -36,7 +36,7 @@
 (deftest slow-clamps-its-sleep
   ;; /slow exists so the smoke probe can prove /health still answers while a
   ;; handler is busy; its ms parameter is a dial for "briefly busy", not a
-  ;; lease on a connection thread, so it is clamped (RFC-000 R3-4). Resolved at
+  ;; lease on a connection thread, so it is clamped (provenance R3-4). Resolved at
   ;; runtime so the missing var reads as a failing assertion, not a dead file.
   (let [clamp (resolve 'samizdat.server/clamp-slow-ms)]
     (is (some? clamp) "clamp-slow-ms exists")
@@ -175,7 +175,7 @@
         (is (= 16384 (:max-tokens r)))))))
 
 (deftest refusals-carry-their-own-reason-phrase
-  ;; RFC-000 R3-12: status-text knew 409 and 503 not, and the status line fell
+  ;; provenance R3-12: status-text knew 409 and 503 not, and the status line fell
   ;; back to "OK" — a refusal that read as a success on the wire. Both are
   ;; statuses this API actually sends (abort/resume 409, start 503).
   (is (str/starts-with? (#'adapter/response->string
@@ -186,7 +186,7 @@
                         "HTTP/1.1 503 Service Unavailable")))
 
 (deftest a-failed-send-throws-rather-than-truncating
-  ;; RFC-000 R3-12: send-all stopped silently when c-send answered <= 0, so the
+  ;; provenance R3-12: send-all stopped silently when c-send answered <= 0, so the
   ;; client read a body that ended exactly where the socket died while
   ;; Content-Length promised more — a well-formed lie. Throwing hands the
   ;; connection to serve-conn's error path instead.
@@ -199,7 +199,7 @@
       (finally (#'adapter/c-close fd)))))
 
 (deftest query-params-are-percent-decoded
-  ;; RFC-000 R3-12: values arrived raw from the query string, so %XX stayed %XX
+  ;; provenance R3-12: values arrived raw from the query string, so %XX stayed %XX
   ;; and + stayed +. The API's own params are numeric, but a steer or a UI
   ;; search that ever carries text should not have to know the adapter's
   ;; omission.

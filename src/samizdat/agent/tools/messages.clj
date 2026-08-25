@@ -38,7 +38,7 @@
         "send"
         (if (or (nil? body) (str/blank? (str body)))
           (base/malformed branch (str "`message send` needs a `body`. " message-usage))
-           ;; :from is the branch's ID, not the branch map (RFC-000 R2-2): the
+           ;; :from is the branch's ID, not the branch map (provenance R2-2): the
            ;; store str's it, and a str'd 50KB state dump both bloated the
            ;; table and broke the inbox's sender-exclusion comparison.
            (let [id (messages/send! conn {:run-id run-id :from (:id branch) :to to :body body})]

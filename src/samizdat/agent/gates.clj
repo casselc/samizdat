@@ -80,7 +80,7 @@
   "The tool vocabulary `k` (:verification, :shipping, :file-write,
   :settle-called) from gates.edn. The vocabularies the gates read are
   runtime-tunable data, like the thresholds; the vocabulary test in
-  agent-test walks every name against the registered run-tools (RFC-000 R3-6)."
+  agent-test walks every name against the registered run-tools (provenance R3-6)."
   [k]
   (get-in (config) [:tool-vocab k]))
 

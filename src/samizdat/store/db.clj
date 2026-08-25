@@ -130,7 +130,7 @@
 
 (defn change-count
   "Rows affected by the statement just executed on this connection — how a
-  guarded UPDATE reports whether it won (RFC-000 R2-4). Read before anything
+  guarded UPDATE reports whether it won (provenance R2-4). Read before anything
   else runs on the connection."
   [conn]
   (-> (jdbc/fetch-one conn "SELECT changes()") vals first))
@@ -139,14 +139,14 @@
   "Whether e is a UNIQUE-constraint failure — the only insert error that
   retrying with a fresh short id can fix. The id-retry loops used to catch
   everything, converting disk and lock failures into five blind retries and
-  then 'could not allocate an id' (RFC-000 R2-15)."
+  then 'could not allocate an id' (provenance R2-15)."
   [e]
   (str/includes? (str e) "UNIQUE"))
 
 (defn migrate!
   "Apply every migration past the current user_version. Idempotent: running it
   twice is a no-op. Each migration is all-or-nothing with its version bump
-  INSIDE the transaction (RFC-000 R2-3): v2/v4/v5 are non-idempotent ALTERs, and
+  INSIDE the transaction (provenance R2-3): v2/v4/v5 are non-idempotent ALTERs, and
   running them as autocommitted statements with the bump after the last one
   meant a crash in between left user_version stale — every later boot died on
   `duplicate column name` forever. Returns the version now in effect."

@@ -509,7 +509,7 @@
   ;; time. :cmd-prefix is concatenated with the derived expression and a
   ;; closing single quote for sh -c; the expression's namespaces come
   ;; through :ns-whitelist-regex, so the quoted payload genuinely contains
-  ;; no single quotes (RFC-000 R3-1).
+  ;; no single quotes (provenance R3-1).
   {:value
    {:test-file-regex "(?i)(^|/)(test|spec)s?/|[_-](test|spec)\\.[a-z]+$"
     :root-strip-regex "^(test|gui|src)/"
@@ -556,7 +556,7 @@
   ;; Tier 1a: the tool vocabularies the gates and their settlers read — data
  ;; here, alongside the thresholds, so a vocabulary changes at runtime
  ;; without a rebuild. agent-test walks every name against the registered
- ;; run-tools (RFC-000 R3-6): a name the loop cannot dispatch is a gate whose
+ ;; run-tools (provenance R3-6): a name the loop cannot dispatch is a gate whose
  ;; prediction silently narrows to :unmet.
  {:verification #{"eval" "shell"}
   :shipping #{"write_file" "edit_file" "shell" "reload_cells" "manifest"

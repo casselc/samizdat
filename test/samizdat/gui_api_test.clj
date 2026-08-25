@@ -123,7 +123,7 @@
               api/max-backoff-ms)))))
 
 (deftest a-batch-that-lands-after-stop-is-not-delivered
-  ;; RFC-000 CR1-5: an in-flight fetch completing after stop! still
+  ;; provenance CR1-5: an in-flight fetch completing after stop! still
   ;; delivered its callbacks, folding the OLD run's events into whatever the
   ;; UI was now showing. The loop rechecks @running between fetch and delivery.
   (let [delivered (atom 0)

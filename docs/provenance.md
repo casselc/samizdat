@@ -1,29 +1,13 @@
-# RFC-000 — Index and provenance
+# Provenance
 
-The RFCs describe how samizdat is layered and why. They replace the
-review-and-audit documents that used to live in `docs/`, which were a record of
-five review passes rather than a description of the system.
+An index of the numbered review findings that code comments cite. This is NOT a
+specification — the specifications are `docs/RFCS/`, one per layer. It exists
+for one reason: about fifty comments in the code say a guard exists because of a
+specific past failure, and a reader has to be able to look that failure up.
 
-| RFC | Layer |
-|---|---|
-| [RFC-001](RFC-001-core-layer.md) | The core layer — what `src/` is, and the base/userspace seam |
-| [RFC-002](RFC-002-manifests-and-cells.md) | Manifest workflows and cells — the userspace layer |
-| [RFC-003](RFC-003-security-model.md) | The security model — what contains the model, and what does not |
 
-Each RFC ends with **Findings**: bugs and unwired behaviour that writing it
-exposed. That section is the point of the exercise, not a postscript. A document
-that only describes cannot tell you it is describing something broken.
-
-## Provenance
-
-About fifty comments in the code cite a numbered finding from a review pass —
-`(review3 #11)`, `(a#4)`, `(code-review-2026-08 #6)`. Those citations are how a
-later reader learns that a guard exists because of a specific failure rather
-than a general worry, and that is worth more than the review documents
-themselves were.
-
-So the citations were rewritten to point here, and the findings they name are
-listed below with what each one was. The full original write-ups are in git
+The citations read `(provenance R3-11)`, `(provenance A-4)`. The findings they
+name are below, one line each. The full original write-ups are in git
 history (`git log --diff-filter=D -- docs/`) if the one-line summary is not
 enough.
 
@@ -86,10 +70,8 @@ Tags: `A-n` = the 2026-05 review, `CR1-n` = 2026-08 pass 1, `R2-n` = pass 2,
 | R3-13 | `control/watch` hardcoded branch `"B1"`. |
 | R3-14 | `prefill-support?` had zero production callers; `chat-body` consulted a private twin, so the answer a caller could query and the answer acted on could drift. |
 
-## What was removed
+## What these replaced
 
-`docs/code-review.md`, `code-review-2026-08.md`, `-2.md`, `-3.md`, `-4.md`,
-`src-audit-2026-08-4.md`, and `security.md`. The first five were review records
-whose cited findings are above. `src-audit-2026-08-4.md` asked the question
-RFC-001 now answers and its open items are carried into that RFC's findings.
-`security.md` became RFC-003.
+Five review records, an audit, and a security document. The review records are
+above; the audit's question is answered by RFC-001 and the security document
+became RFC-003. Full text: `git log --diff-filter=D -- docs/`.

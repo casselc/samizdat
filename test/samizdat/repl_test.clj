@@ -25,7 +25,7 @@
             [samizdat.repl :as repl]))
 
 (deftest close-session-removes-the-namespace
-  ;; RFC-000 CR1-6: one namespace per run, never removed — unbounded
+  ;; provenance CR1-6: one namespace per run, never removed — unbounded
   ;; growth on a long-lived serve process.
   (let [s (repl/new-session)]
     (repl/eval-code "(def close-session-leak-check 1)" s)
