@@ -9,7 +9,7 @@ gates are evidence gaps, not a decision to replace it.
 ## Baseline
 
 - Samizdat branch: `js1-bounded-samizdat` at
-  `db1226f`, whose recovery base `321661649e174bb748adeb6970dad6c166003343`
+  `8995e113`, whose recovery base `321661649e174bb748adeb6970dad6c166003343`
   was rebased on current upstream `dae78547a66c80f31fa7a78d0f9483186a2b0af9`.
 - Current Jolt evaluator runtime:
   `279bca18bbf50f37b8574a4e6998dee40313cd26` on
@@ -49,15 +49,20 @@ gates are evidence gaps, not a decision to replace it.
   and unavailable or malformed verification fails closed.
 - JS1 with multi-branch execution is refused; the current policy is one
   logical persistent `:main` evaluator.
+- A live bounded-model run completed RED → deliberate SIGKILL → fresh-process
+  resume → persistent-helper proof → repair → GREEN. See
+  [`JS1_LIVE_DOGFOOD.md`](JS1_LIVE_DOGFOOD.md).
+- The frozen bbagent A3c comparison is recorded in
+  [`JS1_A3C_COMPARISON.md`](JS1_A3C_COMPARISON.md). JS1 retains the claimed
+  bounded-programming and no-repeat replay properties, not A3c guest isolation.
 
 ## Remaining PASS Gates
 
-- A real-model JS1 red → repair → green dogfood task.
-- Frozen bbagent A3c comparison.
-- Live controller-owned budget proof.
-- SmolVM guest boot and clean-consumer execution (**unexecuted**: the guest
-  pack remains `:unbuilt`). The checked-in local harness is static/producer
-  evidence only until a pinned guest is built and run.
+- **Controller-budget authority and audit are not safe enough for PASS.** The
+  resume API currently accepts a budget extension without an authenticated
+  trusted principal; the cap update and event are not one durable atomic audit
+  record; a branch timeout stops waiting but does not prove cancellation of the
+  underlying turn. These are implementation blockers, not merely missing tests.
 
 ## Standing Non-Claims
 
@@ -67,8 +72,9 @@ gates are evidence gaps, not a decision to replace it.
   JS2, or controller self-modification was added.
 - SCI is a Jolt runtime dependency; plain-JVM and non-Linux/platform lanes are
   unexecuted.
-- The controlled recovery harness is not a live-model resume loop.
 - No performance or latency claim is made.
+- A3c-style guest execution isolation, `project/run`, and clean-consumer
+  SmolVM execution remain unclaimed; the guest pack is `:unbuilt`.
 - Conversational turns remain separate from authoritative evaluator history;
   `:js1-binding-created` journal records provide resume reconstruction identity,
   but individual turns do not carry evaluator metadata.

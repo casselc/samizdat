@@ -1,9 +1,9 @@
 ;; JS1 closure evidence. Passing deterministic gates do not imply cutover.
 {:js1/decision :revise
- :js1/record-date "2026-08-24"
+ :js1/record-date "2026-08-25"
  :js1/baseline
  {:samizdat {:branch "js1-bounded-samizdat"
-             :revision "db1226f"
+             :revision "8995e113"
              :recovery-base "321661649e174bb748adeb6970dad6c166003343"
              :upstream-base "dae78547a66c80f31fa7a78d0f9483186a2b0af9"
              :closure-changes :committed}
@@ -31,16 +31,32 @@
   "controlled actual OS-process recovery with helper persistence and no repeated observation/edit"
   "fail-closed runtime/spec/pending-history recovery"
   "single-player JS1 multi-branch refusal"
-  "structured verifier with scrubbed environment, bounded streams, redact-before-render, and fail-closed availability"]
+  "structured verifier with scrubbed environment, bounded streams, redact-before-render, and fail-closed availability"
+  "live bounded-model RED/SIGKILL/fresh-resume/helper-reconstruction/repair/GREEN dogfood"
+  "frozen bbagent A3c comparison for bounded programming and no-repeat replay"]
+ :js1/live-dogfood
+ {:provider :local
+  :model "Qwen3.6-27B-MTP-GGUF"
+  :endpoint "http://localhost:13305/v1"
+  :run-id "709e2b2d-c0af-40e6-9d3e-0d9624217a2b"
+  :artifact-dir "~/.local/share/samizdat/js1-dogfood/run-1787629704126-ad047d12-b837-4330-b1ba-7e162c0034f0/artifacts"
+  :red-turn 10
+  :start-exit 137
+  :resume-exit 0
+  :semantic-counts {:project/list 2 :project/search 2 :project/read 4
+                    :project/stat 2 :project/edit 2}}
+ :js1/a3c-comparison
+ {:bbagent "bbagent-a3c / fc5e5b9"
+  :bb4t "bb4t-a3c / 227d3854"
+  :result "bounded programming and no-repeat replay retained; guest isolation unclaimed"}
  :js1/remaining-pass-gates
- ["real-model red-repair-green dogfood"
-  "frozen bbagent A3c comparison"
-  "live controller-owned budget proof"
-  "pinned SmolVM guest boot and clean-consumer execution (unexecuted: guest pack :unbuilt)"]
+ ["trusted authenticated controller budget-extension authority"
+  "atomic durable retained budget-extension audit"
+  "actual cancellation proof for a timed-out controller turn"]
  :js1/non-claims
  ["no self-hosting canary"
   "no project/run, generic shell, network, Git mutation, JS2, or multi-agent evaluator binding"
   "plain-JVM and non-Linux/platform lanes unexecuted"
-  "controlled recovery harness is not a live-model resume loop"
   "no performance claim"
+  "A3c guest execution isolation and clean-consumer SmolVM remain unclaimed (guest pack :unbuilt)"
   "turn rows do not carry evaluator identity; computational history is authoritative in the eval store and binding journal"]}
