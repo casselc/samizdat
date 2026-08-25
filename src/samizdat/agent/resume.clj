@@ -547,6 +547,14 @@
           js1 (reconstruct-run-js1-binding! conn run-id root)
           ctx {:conn conn :run-id run-id :config config :problem (:problem run)
                :llm-adapter llm-adapter :llm-config llm-config
+               ;; The trusted controller root must survive the handoff back
+               ;; into the beam scheduler.  JS1 project operations use the
+               ;; reconstructed binding's root, but done verification reads
+               ;; :root directly from this ctx; omitting it made a resumed
+               ;; GREEN repair call scope-run with an empty cwd.  This comes
+               ;; only from run config (or the controller cwd), never journal
+               ;; text or model data.
+               :root root
                :max-turns max-turns :beam? (> width 1) :beam-width width
                :sessions sessions
                :abort abort

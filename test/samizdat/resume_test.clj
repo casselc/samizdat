@@ -39,8 +39,12 @@
     running again."
   (:require [clojure.data.json :as json]
             [clojure.test :refer [deftest testing is]]
+            [samizdat.agent.beam :as beam]
+            [samizdat.agent.gitdiff :as gitdiff]
             [samizdat.agent.resume :as resume]
             [samizdat.agent.tools.base :as base]
+            [samizdat.agent.tools.ship]
+            [samizdat.engine.proc :as proc]
             [samizdat.store.db :as db]
             [samizdat.store.journal :as journal]
             [samizdat.store.runs :as runs]
@@ -92,6 +96,90 @@
       (let [rid (runs/start-run! c {:problem "p" :max-turns 5 :beam-width 1})]
         (is (nil? (@#'resume/reconstruct-run-js1-binding! c rid "/tmp"))
             "no journal event, no reconstruction, no SCI require")))))
+
+(deftest red-resume-rebuilt-context-done-verifies-in-the-absolute-target-root
+  ;; Regression for the first live dogfood: reconstruction and the GREEN edit
+  ;; succeeded, but resume dropped :root when it handed the rebuilt branch to
+  ;; beam/run-rounds. done therefore reached scope-run with :dir "".  Drive the
+  ;; real done/verify structured boundary from the resumed ctx and capture the
+  ;; primitive request; no provider or process is involved.
+  (with-db
+    (fn [c]
+      (let [target "/home/dogfood-user/.local/share/samizdat/js1-dogfood/run/target"
+            rid (runs/start-run! c {:problem "repair dogfood green"
+                                    :max-turns 5 :beam-width 1})
+            seen (atom nil)
+            green {:pid 1 :exit 0 :timed-out false
+                   :out "GREEN" :out-status :complete
+                   :err "" :err-status :complete}]
+        (runs/open-branch! c rid {:branch-id "B1"})
+        ;; Durable RED is what makes this a recovery path rather than merely a
+        ;; ctx-construction test. resume! below rebuilds the branch solely from
+        ;; the run store/journal; the live dogfood test supplies the OS-process
+        ;; boundary for the same assertion.
+        (journal/note! c rid :ship-verify
+                       {:branch-id "B1"
+                        :data {:green false :blocked true :exit 1
+                               :kind :fallback}})
+        (binding [proc/*scope-run*
+                  (fn [request]
+                    (if (= ["samizdat-scope-capability-probe"] (:cmd request))
+                      {}
+                      (do (reset! seen request) green)))]
+          (with-redefs [gitdiff/changed-files
+                        (fn [root _baseline]
+                          (is (= target root) "git diff receives the resumed target")
+                          ["src/dogfood.clj"])
+                        beam/run-rounds
+                        (fn [ctx branches start-turn]
+                          (let [done (base/run-tool
+                                      (assoc ctx
+                                             :branch (first branches)
+                                             :tool-name "done"
+                                             :turn start-turn
+                                             :args {:answer "repair dogfood green"}))]
+                            (is (:done? done) "the fake GREEN verifier permits done")
+                            {:status :completed :run-id rid}))]
+            (is (= :completed
+                   (:status
+                    (resume/resume!
+                     {:conn c :run-id rid
+                      :config {:run {:root target
+                                     :verify-cmd "./verify-policy"
+                                     :verify-timeout-ms 4321
+                                     :require-test? false}}
+                      :llm-adapter :unused :llm-config {}}))))))
+        (is (some? @seen) "done reached the structured process primitive")
+        (is (= ["sh" "-c" "./verify-policy"] (:cmd @seen)))
+        (is (= target (:dir @seen)))
+        (is (.isAbsolute (java.io.File. (:dir @seen)))
+            "the verifier cwd is the absolute target, not source/model data")))))
+
+(deftest resume-and-beam-roots-come-from-controller-config-with-cwd-default
+  (with-db
+    (fn [c]
+      (let [cwd (System/getProperty "user.dir")
+            configured "/home/operator/persistent-target"
+            roots (atom [])
+            rid (runs/start-run! c {:problem "p" :max-turns 1 :beam-width 1})]
+        (runs/open-branch! c rid {:branch-id "B1"})
+        (with-redefs [beam/run-rounds
+                      (fn [ctx _branches _start-turn]
+                        (swap! roots conj (:root ctx))
+                        {:status :exhausted :run-id (:run-id ctx)})]
+          (resume/resume! {:conn c :run-id rid :config {}
+                           :llm-adapter :unused :llm-config {}})
+          (beam/run! {:conn c :config {}
+                      :llm-adapter :unused :llm-config {}
+                      :problem "p" :max-turns 1 :beam-width 1})
+          (beam/run! {:conn c :config {:run {:root configured}}
+                      :llm-adapter :unused :llm-config {}
+                      ;; Deliberately unrelated model-facing text: it cannot
+                      ;; become the target root.
+                      :problem "model says work somewhere else"
+                      :max-turns 1 :beam-width 1}))
+        (is (= [cwd cwd configured] @roots)
+            "drivers default to controller cwd and honor only trusted run config")))))
 
 (deftest js1-resume-fails-closed-on-sci-unavailability
   (with-db

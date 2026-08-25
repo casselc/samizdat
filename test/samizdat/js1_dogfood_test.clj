@@ -14,14 +14,16 @@
     HARNESS_MODEL=<operator-selected model>
 
   The parent creates a disposable Git repository and a detached target
-  worktree under /tmp, outside this trusted checkout. It drives the real
+  worktree under a retained per-run user-data directory, outside this trusted
+  checkout. It drives the real
   workflow/run! in one pinned-JS1 process, kills that process only after a
   durable red ship-verify event, and drives agent.resume/resume! in a fresh
   pinned-JS1 process. No live REPL fallback exists in this harness.
 
-  Artifacts are retained in a printed /tmp directory: sanitized transcript,
-  run id, SQLite DB, process logs, semantic-operation dispatch counters,
-  journal, artifact rows, and target diff. No environment dump is captured."
+  Worktree, SQLite DB, and artifacts are co-located under one unique retained
+  run directory beneath ~/.local/share/samizdat/js1-dogfood (overridable with
+  SAMIZDAT_JS1_DOGFOOD_DIR). No temporary-directory fallback and no environment
+  dump is used."
   (:require [clojure.data.json :as json]
             [clojure.edn :as edn]
             [clojure.string :as str]
@@ -48,6 +50,51 @@
 
 (defn- env [name] (jolt.host/getenv name))
 (defn- internal-env [name] (env (str "SAMIZDAT_JS1_DOGFOOD_" name)))
+
+(defn- absolute-normal-path [path]
+  (str (.normalize (.toAbsolutePath (.toPath (java.io.File. (str path)))))))
+
+(defn- host-temporary-root?
+  "True for the two conventional host temporary trees.  An explicit override
+  is not permission to scatter a new run there; old artifacts may remain, but
+  every new harness layout is persistent user data."
+  [path]
+  (let [roots [(str "/" "tmp") (str "/" "var" "/" "tmp")]]
+    (some #(or (= path %) (str/starts-with? path (str % "/"))) roots)))
+
+(defn- dogfood-data-root
+  "Persistent root for every dogfood-owned path.  HOME/user.home is the only
+  default; importantly, the Java temporary-directory property is not a fallback."
+  []
+  (let [override (env "SAMIZDAT_JS1_DOGFOOD_DIR")
+        home (or (env "HOME") (System/getProperty "user.home"))
+        configured (if-not (str/blank? override)
+                     override
+                     (when-not (str/blank? home)
+                       (str home "/.local/share/samizdat/js1-dogfood")))]
+    (when (str/blank? configured)
+      (throw (ex-info
+              "JS1 dogfood needs HOME or SAMIZDAT_JS1_DOGFOOD_DIR; refusing a temporary-directory fallback"
+              {:js1-dogfood/error :data-root-unavailable})))
+    (let [root (absolute-normal-path configured)]
+      (when (host-temporary-root? root)
+        (throw (ex-info
+                "JS1 dogfood data root must be persistent and outside host temporary trees"
+                {:js1-dogfood/error :temporary-data-root :root root})))
+      root)))
+
+(defn- new-run-layout
+  "One unique retained directory containing the worktree/control repo, DB,
+  counters, logs, and captured artifacts for a preflight or live run."
+  [kind]
+  (let [run-dir (str (dogfood-data-root) "/" kind "-"
+                     (System/currentTimeMillis) "-" (random-uuid))
+        artifact-dir (str run-dir "/artifacts")]
+    {:run-dir run-dir
+     :workspace-root (str run-dir "/worktree")
+     :artifact-dir artifact-dir
+     :db-path (str run-dir "/run.sqlite3")
+     :counter-path (str artifact-dir "/semantic-operations.edn")}))
 
 (defn- live-requested? []
   (= "1" (env "SAMIZDAT_JS1_DOGFOOD_TEST")))
@@ -205,7 +252,7 @@
      :resolver-alias "-A:js1-dogfood-live"}))
 
 (defn- child-env
-  [{:keys [phase target db-path counter-path run-id]}]
+  [{:keys [phase target db-path counter-path verify-request-path run-id]}]
   (cond-> (assoc (safe-controller-env)
                  "HARNESS_PROVIDER" "local"
                  "HARNESS_BASE_URL" "http://localhost:13305/v1"
@@ -220,6 +267,8 @@
                  "SAMIZDAT_JS1_DOGFOOD_TARGET" target
                  "SAMIZDAT_JS1_DOGFOOD_DB" db-path
                  "SAMIZDAT_JS1_DOGFOOD_COUNTERS" counter-path)
+    verify-request-path
+    (assoc "SAMIZDAT_JS1_DOGFOOD_VERIFY_REQUEST" verify-request-path)
     (= phase "preflight")
     (assoc "SAMIZDAT_JS1_DOGFOOD_PREFLIGHT" "1")
     (not= phase "preflight")
@@ -620,6 +669,22 @@
        :verify-binding! evals/verify-binding!
        :history evals/history}))))
 
+(defn- install-verifier-request-capture!
+  "Capture the actual fresh-process fallback request immediately before the
+  trusted scope primitive receives it.  Persist only structure/cwd/bounds —
+  never the request's environment map."
+  [path]
+  (let [delegate proc/*scope-run*]
+    (alter-var-root
+     #'proc/*scope-run*
+     (constantly
+      (fn [request]
+        (when (= ["sh" "-c" "./verify-policy"] (:cmd request))
+          (safe-spit! path
+                      (select-keys request [:cmd :dir :timeout-ms :term-grace-ms
+                                            :out-bytes :err-bytes])))
+        (delegate request))))))
+
 (defn- dogfood-config [target db-path]
   (require 'samizdat.config)
   (let [load-config (resolve 'samizdat.config/load-config)]
@@ -774,6 +839,7 @@
   (let [target (internal-env "TARGET")
         db-path (internal-env "DB")
         counter-path (internal-env "COUNTERS")
+        verify-request-path (internal-env "VERIFY_REQUEST")
         run-id (internal-env "RUN_ID")
         config (dogfood-config target db-path)
         reconstruct (resolve 'samizdat.agent.resume/reconstruct-js1-binding!)
@@ -783,6 +849,7 @@
         conn (db/open! db-path)]
     (try
       (install-counting-eval-store! counter-path "resume")
+      (install-verifier-request-capture! verify-request-path)
       (let [before (counter-state counter-path)
             info (js1-event-info conn run-id)
             {:keys [binding]} (reconstruct conn info target)
@@ -884,21 +951,50 @@
           (is (:quiescent? (eval-quiescence conn)))))
       (finally (db/close conn)))))
 
+(deftest dogfood-storage-has-one-persistent-default-root
+  (testing "the default is the user's persistent data tree, never a temp fallback"
+    (with-redefs [env (fn [name] (when (= name "HOME") "/home/dogfood-user"))]
+      (is (= "/home/dogfood-user/.local/share/samizdat/js1-dogfood"
+             (dogfood-data-root)))))
+  (testing "the operator override owns the complete tree"
+    (with-redefs [env (fn [name]
+                        (case name
+                          "SAMIZDAT_JS1_DOGFOOD_DIR" "/srv/samizdat-dogfood"
+                          "HOME" "/home/ignored"
+                          nil))]
+      (let [a (new-run-layout "test")
+            b (new-run-layout "test")
+            owned (select-keys a [:workspace-root :artifact-dir
+                                  :db-path :counter-path])]
+        (is (str/starts-with? (:run-dir a) "/srv/samizdat-dogfood/test-"))
+        (is (not= (:run-dir a) (:run-dir b)) "every invocation is retained separately")
+        (is (every? #(str/starts-with? % (str (:run-dir a) "/")) (vals owned))
+            "worktree, DB, logs/counters, and artifacts share one run directory"))))
+  (testing "even an explicit override cannot put a new run in host temp"
+    (with-redefs [env (fn [name]
+                        (when (= name "SAMIZDAT_JS1_DOGFOOD_DIR")
+                          (str "/" "tmp" "/new-dogfood")))]
+      (is (= :temporary-data-root
+             (try (dogfood-data-root) nil
+                  (catch ExceptionInfo e (:js1-dogfood/error (ex-data e))))))))
+  (testing "static harness defaults contain no literal host-temp storage path"
+    (let [src (slurp (str source-dir "/test/samizdat/js1_dogfood_test.clj"))]
+      (is (not (str/includes? src (str "\"" "/" "tmp")))
+          "a new hard-coded host-temp path cannot bypass the layout helper")
+      (is (not (str/includes? src (str "java.io." "tmpdir")))
+          "the Java temporary directory is not a hidden fallback"))))
+
 (deftest no-provider-js1-dogfood-preflight
   (if-not (and (preflight-requested?) (not (live-requested?)))
     (is true "skipped: set SAMIZDAT_JS1_DOGFOOD_PREFLIGHT=1 for no-provider compile preflight")
     (do
       (require-preflight-contract!)
-      (let [id (str (random-uuid))
-            root (str "/tmp/samizdat-js1-dogfood-preflight-" id)
-            db-path (str root "/preflight.sqlite3")
-            counter-path (str root "/preflight-counters.edn")
-            before-source (source-witness)
-            layout (atom nil)]
-        (fs/create-dirs root)
+      (let [{:keys [run-dir workspace-root artifact-dir db-path counter-path]}
+            (new-run-layout "preflight")
+            before-source (source-witness)]
+        (fs/create-dirs artifact-dir)
         (try
-          (let [{:keys [target] :as made} (make-detached-target! root)
-                _ (reset! layout made)
+          (let [{:keys [target]} (make-detached-target! workspace-root)
                 runtime (live-runtime!)
                 result (run-child! runtime "preflight"
                                    {:target target :db-path db-path
@@ -910,35 +1006,29 @@
             (is (not (fs/exists? counter-path))
                 "preflight dispatched no model-facing semantic operation"))
           (finally
-            (when-let [{:keys [control target]} @layout]
-              (try (git! control "worktree" "remove" "--force" target)
-                   (catch Throwable _ nil)))
-            (try (fs/delete-tree root) (catch Throwable _ nil))
             (is (= before-source (source-witness))
-                "no-provider preflight modified the trusted source checkout")))))))
+                "no-provider preflight modified the trusted source checkout")
+            (println "JS1 dogfood preflight retained:" run-dir)))))))
 
 (deftest bounded-opt-in-live-js1-dogfood
   (if-not (live-requested?)
     (is true "skipped: set SAMIZDAT_JS1_DOGFOOD_TEST=1 plus the exact local-provider contract")
     (do
       (require-live-contract!)
-      (let [id (str (random-uuid))
-            root (str "/tmp/samizdat-js1-dogfood-" id)
-            artifact-dir (str "/tmp/samizdat-js1-dogfood-artifacts-" id)
-            db-path (str artifact-dir "/run.sqlite3")
-            counter-path (str artifact-dir "/semantic-operations-live.edn")
-             before-source (source-witness)
-            layout (atom nil)
+      (let [{:keys [run-dir workspace-root artifact-dir db-path counter-path]}
+            (new-run-layout "run")
+            verify-request-path (str artifact-dir "/resume-verifier-request.edn")
+            before-source (source-witness)
             run-data (atom {:artifact-dir artifact-dir :db-path db-path
                             :counter-path counter-path})]
-        (fs/create-dirs root)
         (fs/create-dirs artifact-dir)
         (try
-          (let [{:keys [control target] :as made} (make-detached-target! root)
-                _ (reset! layout made)
+          (let [{:keys [target]}
+                (make-detached-target! workspace-root)
                 _ (swap! run-data assoc :target target)
                 runtime (live-runtime!)
-                paths {:target target :db-path db-path :counter-path counter-path}
+                paths {:target target :db-path db-path :counter-path counter-path
+                       :verify-request-path verify-request-path}
                 preflight (run-child! runtime "preflight" paths)]
             (testing "current APIs form a real JS1 workflow path"
               (is (str/includes? (:out preflight) "JS1-DOGFOOD-PREFLIGHT-OK")))
@@ -999,7 +1089,15 @@
                                      "JS1-DOGFOOD-GREEN-OK"))
                   (is (= "(ns fixture.dogfood)\n\n(def dogfood-state :green)\n"
                          (slurp (str target "/src/dogfood.clj"))))
-                  (is (:exact resume-witness)))
+                  (is (:exact resume-witness))
+                  (let [request (read-edn-file verify-request-path nil)]
+                    (is (= ["sh" "-c" "./verify-policy"] (:cmd request))
+                        "done sent the fixed operator verifier as structured argv")
+                    (is (= target (:dir request))
+                        "the resumed verifier cwd is the detached target")
+                    (is (and (string? (:dir request))
+                             (.isAbsolute (java.io.File. (:dir request))))
+                        "the fresh process sent an absolute verifier cwd")))
                 (let [conn (db/connect db-path)]
                   (try
                     (let [run (runs/get-run conn run-id)
@@ -1038,12 +1136,9 @@
                 (catch Throwable e
                   (safe-spit! (str artifact-dir "/capture-error.txt")
                               (str (ex-message e) "\n")))))
-            (when-let [{:keys [control target]} @layout]
-              (try (git! control "worktree" "remove" "--force" target)
-                   (catch Throwable _ nil)))
-            (try (fs/delete-tree root) (catch Throwable _ nil))
             (is (= before-source (source-witness))
                 "the live dogfood modified the trusted running checkout")
+            (println "JS1 dogfood run retained:" run-dir)
             (println "JS1 dogfood artifacts:" artifact-dir)))))))
 
 (when-let [phase (internal-env "PHASE")]

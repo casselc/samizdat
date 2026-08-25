@@ -763,6 +763,10 @@
         ;; seeds nobody reads would be dead rows.
         config (cond-> config
                  seed-run (assoc-in [:run :share-artifacts?] true))
+        ;; The trusted project root used by file/git/verify tools.  Keep the
+        ;; same controller-owned precedence as workflow/run! and resume!;
+        ;; model data is never a source for this value.
+        root (or (get-in config [:run :root]) (System/getProperty "user.dir"))
         ;; JS1 propagation: a caller (beam/run! wired from the control
         ;; surface) or the run config may ask for a JS1 sandboxed run.
         js1-binding (:js1/binding opts)
@@ -802,6 +806,7 @@
         engine-sessions (atom [])
         ctx {:conn conn :run-id run-id :config config :problem problem
              :llm-adapter llm-adapter :llm-config llm-config
+             :root root
              :max-turns max-turns :beam? (> width 1) :beam-width width
              :sessions sessions
              :engine-sessions engine-sessions
