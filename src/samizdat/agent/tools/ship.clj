@@ -11,6 +11,7 @@
             [samizdat.agent.tools.base :as base]
             [samizdat.agent.state :as state]
             [samizdat.agent.verify :as verify]
+            [samizdat.agent.wordlists :as wordlists]
             [samizdat.store.journal :as journal]))
 
 
@@ -36,71 +37,13 @@
 
 ;; --- the claim-evidence gates -----------------------------------------------
 
-(def ^:private stopwords
-  ;; Grammar plus the vocabulary a model uses to FRAME an answer rather than to
-  ;; assert one. The gate is aimed at specifics — numbers, names, witnesses —
-  ;; because that is where fabrication actually happens; "the answer is" is not
-  ;; a claim about anything. Widening this list weakens the gate, so entries
-  ;; earn their place by being framing rather than content.
-  #{"the" "a" "an" "is" "are" "was" "were" "of" "for" "and" "or" "not" "no"
-    "in" "on" "to" "with" "that" "this" "it" "as" "by" "at" "be" "there"
-    "exists" "all" "any" "we" "have" "has" "can" "so" "if" "then" "thus"
-    "answer" "solution" "solutions" "result" "results" "value" "values"
-    "therefore" "hence" "conclusion" "shows" "show" "proved" "proven"
-    "verified" "confirms" "confirmed" "follows" "given" "which" "where"
-    "does" "do" "did" "follow" "following" "having" "from" "into" "than"
-    "when" "while" "because" "since" "about" "over" "under" "between"
-    "unique" "uniquely" "only" "exactly" "such" "these" "those" "each"
-    "every" "must" "also" "both" "same" "case" "cases" "holds" "true" "false"
+;; Tier 1c: both the framing stopwords and the tool-version pattern are
+;; wordlists.edn data — retunable at runtime without a rebuild. The section
+;; comments recording why words are on the list moved with the words.
+(def ^:private stopwords (wordlists/wordlist :answer-framing))
 
-    ;; Provenance vocabulary: how the answer was checked, not what it claims.
-    ;; These can never appear in an artifact, because an artifact's claim and
-    ;; code are about the problem and say nothing about the engine that ran
-    ;; them. Leaving them in made the gate refuse answers for asserting the
-    ;; word "mathlib", which pushed the model toward stripping every
-    ;; explanatory sentence to get past it — the opposite of what the harness
-    ;; wants its answers to look like. The proof-engine names stay even
-    ;; though the engines left: they are still provenance if they appear.
-    "lean" "mathlib" "prolog" "clpfd" "swipl" "z3" "smt" "smtlib" "octave"
-    "engine" "engines" "harness" "kernel" "kernel-checked" "machine-checked"
-    "theorem" "theorems" "lemma" "lemmas" "proof" "proofs" "tactic" "tactics"
-    "statement" "statements" "universal" "universally" "induction" "inductive"
-    "base" "step" "successor" "encoding" "encodings" "formalisation"
-    "formalization" "independent" "independently" "cross-check" "cross-checked"
-    ;; Generic mathematical prose. "equals" and "numbers" carry no specific
-    ;; content — the specific part is the number or name they connect.
-    "number" "numbers" "equal" "equals" "integer" "integers" "natural"
-    "naturals" "first" "sums" "pairwise" "distinct" "positive"
-
-    ;; The vocabulary of SCOPING an answer: saying what was and was not
-    ;; settled, and how sure of it you are. What you failed to establish is,
-    ;; by construction, not in your evidence; a gate that reads naming it as
-    ;; asserting it makes honesty impossible (vf-w2k).
-    "stated" "states" "fact" "facts" "establish" "establishes" "established"
-    "evidence" "check" "checks" "checked" "unchecked" "found" "finds"
-    "finding" "findings" "showed" "shown" "showing"
-    "prove" "proves" "proving" "support" "supports"
-    "supported" "settle" "settles" "settled" "unsettled" "unresolved"
-    "resolve" "resolves" "resolved" "ask" "asks" "asked" "question"
-    "questions" "answers" "answered" "unanswered" "claim" "claims"
-    "claimed" "assert" "asserts" "asserted" "conclude" "concludes"
-    "remain" "remains" "remaining"
-    "outstanding" "together" "against" "general" "generally" "partial"
-    "partially" "whenever" "conditional" "conditionally" "arbitrary"
-    "computation" "computations" "computed" "search" "searched" "taken"
-    "what" "branch" "branches" "verify" "verifies" "verification"
-    "establishing" "demonstrate" "demonstrates" "demonstrated"
-    ;; Deictics. A word that points at the document rather than at the
-    ;; substance cannot be an assertion about the substance.
-    "here" "above" "below" "within" "throughout"
-    "reach" "reaches" "reached" "give" "gives" "yield" "yields" "open"})
-
-;; A tool name followed by its version. Stripped BEFORE tokenizing, because the
-;; version is a bare number and numbers are the part of this gate that must not
-;; be relaxed — "Python 3" would otherwise assert the number 3 and get refused
-;; for it. Narrow on purpose: only a number directly after a known tool name.
 (def ^:private tool-version-re
-  #"(?i)\b(lean|mathlib|z3|swipl|swi-prolog|prolog|octave|clojure|jolt|python|node|java|deepseek)[\s-]*[0-9]+(\.[0-9]+)*")
+  (re-pattern (wordlists/wordlist :tool-version)))
 
 (defn answer-tokens
   "Substantive tokens from a proposed answer: numbers and words that are not

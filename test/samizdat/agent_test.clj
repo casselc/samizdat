@@ -36,6 +36,7 @@
             [samizdat.agent.state :as state]
             [samizdat.agent.tools :as tools]
             [samizdat.agent.verify :as verify]
+            [samizdat.agent.wordlists :as wordlists]
             [samizdat.agent.gitdiff :as gitdiff]
             [samizdat.llm.client :as llm]
             [clojure.data.json :as json]
@@ -290,6 +291,22 @@
          (gates/threshold :critic-objectives)))
   (is (= 3 (gates/threshold :decompose-max-depth)))
   (is (= 4 (gates/threshold :decompose-max-parts))))
+
+(deftest wordlists-are-resource-data
+  ;; Tier 1c: the curated wordlists — the relevance filter's stopwords
+  ;; (state.clj advances-thesis?) and the answer gate's framing stopwords +
+  ;; tool-version pattern (ship.clj answer-tokens) — moved out of src defs
+  ;; into resources/wordlists.edn, so a list is retuned at runtime without a
+  ;; rebuild. A separate loader from gates.clj because state.clj sits below
+  ;; gates in the require graph and cannot read its accessor.
+  (is (set? (wordlists/wordlist :claim-relevance)))
+  (is (contains? (wordlists/wordlist :claim-relevance) "the"))
+  (is (set? (wordlists/wordlist :answer-framing)))
+  (is (contains? (wordlists/wordlist :answer-framing) "mathlib"))
+  (is (string? (wordlists/wordlist :tool-version)))
+  (is (re-find (re-pattern (wordlists/wordlist :tool-version)) "Python 3.11"))
+  (is (nil? (re-find (re-pattern (wordlists/wordlist :tool-version))
+                     "witness 3"))))
 
 (deftest a-reframed-branch-settles-stuck-with-a-live-verification
   ;; The stuck gate's compliance clause: a verification the harness ACCEPTED

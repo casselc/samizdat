@@ -28,7 +28,8 @@
   are the only parts that cannot be reconstructed from the journal, and the
   session carries its own replay log (see engine/prolog.clj)."
   (:require [clojure.set]
-            [clojure.string :as str]))
+            [clojure.string :as str]
+            [samizdat.agent.wordlists :as wordlists]))
 
 (defn new-branch
   [{:keys [id parent-id problem prolog messages created-at-turn]}]
@@ -208,11 +209,10 @@
        (:truncated signals) (update-in [:mechanics :truncations] inc)
        (:multiple-fences signals) (update-in [:mechanics :multi-fences] inc))))
 
-(def ^:private claim-stopwords
-  #{"the" "a" "an" "is" "are" "and" "or" "of" "for" "with" "that" "this" "it"
-    "to" "in" "on" "all" "any" "can" "has" "have" "was" "were" "be" "by" "as"
-    "clpfd" "prolog" "smt" "lean" "works" "available" "loaded" "basic"
-    "supports" "simple" "test" "check" "verify" "verified" "example"})
+;; Tier 1c: the list is wordlists.edn :claim-relevance — data, retunable at
+;; runtime. A separate loader from gates.clj because this namespace sits
+;; below gates in the require graph.
+(def ^:private claim-stopwords (wordlists/wordlist :claim-relevance))
 
 (defn- singularize
   "Strip one trailing `s`. `flow` and `flows` are the same noun, and a
