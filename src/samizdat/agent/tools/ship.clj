@@ -155,15 +155,52 @@
     (or (empty? terms)
         (boolean (some terms (answer-tokens answer))))))
 
+;; --- the ship rungs as data (drg-4026 #44) -----------------------------------
+;;
+;; The model-free lexical rungs live in gates.edn :ship-gates and are
+;; compiled HERE at load into predicate/message closures — the same pattern
+;; as the steer gates (tier 3): the forms see the evidence keys as plain
+;; locals, fns resolve in this namespace at compile, and the VALUES arrive
+;; at fire time. Adding a rung is a data edit.
+
+(defn- compile-rung-form
+  [form]
+  (eval `(fn [~'ctx]
+           (let [~'answer            (get ~'ctx :answer)
+                 ~'problem           (get ~'ctx :problem)
+                 ~'evidence          (get ~'ctx :evidence)
+                 ~'uncovered-numbers (get ~'ctx :uncovered-numbers)]
+             ~form))))
+
+(def ship-gates
+  "The lexical ship rungs, compiled from gates.edn :ship-gates at load."
+  (mapv (fn [rung]
+          (assoc rung
+                 :when (compile-rung-form (:when rung))
+                 :message (if (:message-form rung)
+                            (compile-rung-form (:message-form rung))
+                            (:message rung))))
+        (gates/threshold :ship-gates)))
+
+(defn ship-gate-block
+  "The first lexical ship rung that fires on this evidence, or nil. Pure —
+  `done` computes the evidence and calls this."
+  [evidence]
+  (some (fn [rung]
+          (when ((:when rung) evidence)
+            (let [m (:message rung)]
+              (if (fn? m) (m evidence) m))))
+        ship-gates))
+
 ;; --- shipping ---------------------------------------------------------------
 
 (defmethod base/run-tool "done" [{:keys [branch] :as ctx}]
   ;; Slimmed from the proof harness's seven-rung ship gate: the audit, review
   ;; and LLM-relevance rungs left with the judge machinery. What remains is
   ;; every rung that runs with no model in the path — an answer must exist,
-  ;; its figures must come from the evidence, and it must engage the problem.
-  ;; The coding loop's ship gate (tests pass, review passed) rebuilds on this
-  ;; seam as data-defined gates.
+  ;; its figures must come from the evidence, and it must engage the problem
+  ;; — now data-defined (gates.edn :ship-gates, drg-4026 #44). The coding
+  ;; loop's ship gate (tests pass, review passed) rebuilds on this seam.
   (let [answer (base/arg ctx :answer)
         confirmed (state/confirmed-artifacts branch)
         own (concat confirmed (state/empirical-artifacts branch))
@@ -180,33 +217,10 @@
         borrowed (when (seq elsewhere)
                    (seq (remove (set uncovered)
                                 (uncovered-tokens answer own [problem]))))
-        block (cond
-                (str/blank? (str answer))
-                "Supply an `answer` to ship."
-
-                ;; Only when the run actually produced evidence to check
-                ;; against. The number-coverage rung guards against a
-                ;; FABRICATED verification report — a figure claimed as proven
-                ;; that no artifact supports. A coding run produces no
-                ;; artifacts (its work is proven by tests passing, which the
-                ;; shell tool reports and the journal records, not by confirmed
-                ;; claims), so with empty evidence EVERY figure reads as
-                ;; uncovered and the gate refuses honest answers like "0
-                ;; failures, 3 tests". Surfaced by the first self-modification
-                ;; run, which did the work correctly and could not ship it.
-                (and (seq evidence) (seq uncovered-numbers))
-                (str "Your answer states figures no artifact supports: "
-                     (str/join ", " (map #(str "`" % "`") (take 8 uncovered-numbers)))
-                     ".\nA number in an answer has to come from something"
-                     " confirmed or measured — that is the difference between a"
-                     " report and a fabricated one. Either verify these or"
-                     " remove them from the answer.")
-
-                (and (not (str/blank? (str problem)))
-                     (not (engages-problem? problem answer)))
-                (str "This answer shares no substantive term with the problem"
-                     " statement. Whatever it establishes, it is not an answer to"
-                     " the question that was asked."))
+         block (ship-gate-block
+                {:answer answer :problem problem
+                 :evidence evidence
+                 :uncovered-numbers uncovered-numbers})
         ;; The test rung — what makes the loop test-driven rather than one-shot.
         ;; `done` is not terminal until the unit's tests actually pass: run the
         ;; unit's tests, and a red / hollow / untested result is fed back so the

@@ -29,6 +29,7 @@
   session carries its own replay log (see engine/prolog.clj)."
   (:require [clojure.set]
             [clojure.string :as str]
+            [samizdat.agent.phases :as phases]
             [samizdat.agent.wordlists :as wordlists]))
 
 (defn new-branch
@@ -71,11 +72,12 @@
    ;; the signal measures (dirge PR 740).
    :mechanics {:calls 0 :parse-errors 0 :auto-repairs 0
                :unknown-tools 0 :truncations 0 :multi-fences 0}
-   ;; The draft/commit split (vf-b25): :explore until the cap, :build
-   ;; after — the phase-valve message tells the branch why. Withholding
-   ;; here is the harness's one reliably-working gate: explore cannot
-   ;; become an endless planning loop.
-   :phase :explore
+  ;; The draft/commit split (vf-b25): :explore until the cap, :build
+  ;; after — the phase-valve message tells the branch why. Withholding
+  ;; here is the harness's one reliably-working gate: explore cannot
+  ;; become an endless planning loop. The phase names themselves are
+  ;; phases.edn data (drg-4026 #34).
+  :phase (phases/initial-phase)
    ;; The turn the CURRENT phase began, not when the branch did. Starts at
    ;; branch creation so a forked branch gets a full explore budget instead
    ;; of inheriting its parent's spent one; reenter-explore moves it.
@@ -145,6 +147,19 @@
                          (>= (:turn %) cutoff))
                    (:artifacts branch)))))
 
+;; --- the winner rubric as data (drg-4026 #30) --------------------------------
+;;
+;; The rubric's component FORMS live in phases.edn :finished-key and compile
+;; here at load — the same compile-once pattern as the steer gates (tier 3):
+;; the forms see `branch` as a local, the fns they call resolve in THIS
+;; namespace at compile, and the branch VALUE arrives at fire time. Retuning
+;; the rubric is a data edit; the compile is the fail-fast for a form that
+;; references something that does not exist.
+
+(def ^:private key-fns
+  (mapv (fn [form] (eval `(fn [~'branch] ~form)))
+        (phases/finished-key-forms)))
+
 (defn finished-key
   "The ranking tuple for a done-eligible branch, best-first component order.
 
@@ -152,7 +167,8 @@
   rigor, then self-consistency, then citation reliability, prefer-the-
   stronger-claim on ties — because nothing about their candidates was
   mechanical. Ours are engine-audited, so the ranking is data and no model
-  sits in the path. Components, most important first:
+  sits in the path. The components live in phases.edn (drg-4026 #30);
+  most important first:
 
   [non-relaxation slow-seen engine-diversity confirmed-count id]
 
@@ -173,11 +189,7 @@
   - id: ascending, a stable arbitrary tie-break so the ranking never
     depends on vector order."
   [branch]
-  [(if (:relaxation? (:last-audit branch)) 0 1)
-   (if (contains? (:tiers-seen branch) :slow) 1 0)
-   (count (distinct (keep :kind (confirmed-artifacts branch))))
-   (count (confirmed-artifacts branch))
-   (:id branch)])
+  (mapv #(% branch) key-fns))
 
 (defn rank-finished
   "Rank done-eligible branches best first, by `finished-key`.
@@ -283,14 +295,28 @@
   (boolean (some #(advances-thesis? branch (:claim %))
                  (confirmed-artifacts branch))))
 
-(defn enter-build
-  "Transition the branch into :build, stamping the turn the phase began.
-
-  A no-op when already there: the stamp means when THIS phase began."
+(defn enter-phase
+  "Advance the branch to the phase the table says follows its current one,
+  stamping the turn the new phase began. A no-op when the current phase has
+  no successor — the stamp means when THIS phase began. The successor is
+  phases.edn data (drg-4026 #34); the name is generic because the machine,
+  not this fn, decides what follows what."
   [branch turn]
-  (if (= :build (:phase branch))
-    branch
-    (assoc branch :phase :build :phase-entered-turn turn)))
+  (if-let [next (phases/next-phase (:phase branch))]
+    (assoc branch :phase next :phase-entered-turn turn)
+    branch))
+
+(defn explore-cap-expired?
+  "Whether the branch's current phase is capped and has spent more than
+  `cap` turns in it. The release valve: a branch that cannot get a skeleton
+  to elaborate must not be locked out of verification for the whole run.
+  Which phases are capped is phases.edn data (drg-4026 #34); build has no
+  clock, and a re-entry restarts the count."
+  [branch cap current-turn]
+  (and (:cap-key (phases/phase (:phase branch)))
+       (> (- current-turn (or (:phase-entered-turn branch)
+                              (:created-at-turn branch)))
+          cap)))
 
 (defn enter-reframe
   "Withhold `claim` from this branch and start the reframe clock.
@@ -358,17 +384,6 @@
       (conj claim)
       (->> (take-last 5))
       vec))
-
-(defn explore-cap-expired?
-  "Whether the branch has spent more than `cap` turns in the current explore
-  entry. The release valve: a branch that cannot get a skeleton to elaborate
-  must not be locked out of verification for the whole run. Only :explore is
-  capped — build has no clock, and reenter-explore restarts the count."
-  [branch cap current-turn]
-  (and (= :explore (:phase branch))
-       (> (- current-turn (or (:phase-entered-turn branch)
-                              (:created-at-turn branch)))
-          cap)))
 
 (defn record-outcome
   "Apply a turn's outcome to the counters the gates read.

@@ -33,6 +33,7 @@
             [clojure.tools.logging :as log]
             [samizdat.agent.arbiter :as arbiter]
             [samizdat.agent.gates :as gates]
+            [samizdat.agent.phases :as phases]
             [samizdat.agent.state :as state]
             [samizdat.agent.tools :as tools]
             [samizdat.llm.client :as llm]
@@ -287,7 +288,7 @@
   [branch turn]
   (cond-> branch
     (state/explore-cap-expired? branch (gates/threshold :explore-cap) turn)
-    (-> (state/enter-build turn)
+    (-> (state/enter-phase turn)
         (state/add-message
          "user"
            ;; "prologue" only for a branch that has never left explore. Once a
@@ -387,6 +388,25 @@
         ;; mechanics failure with the harness doing the reasoning.
         (assoc :prefill "```tool-call\n"))))
 
+(defn apply-transitions
+  "Apply the result-signal transitions the turn's result carries (drg-4026
+  #3) — the claim-first state machine as a declarative table (phases.edn
+  :transitions) instead of cond-> clauses in the executor. A table entry's
+  key is a get-in path into the turn envelope; when it holds a truthy value
+  each named effect applies. Effect names dispatch here to state fns, data
+  cannot mutate the branch."
+  [result artifact branch]
+  (let [envelope {:result result :artifact artifact}]
+    (reduce (fn [b effect]
+              (case effect
+                :mark-green    (state/mark-green b)
+                :clear-reframe (state/clear-reframe b)
+                b))
+            branch
+            (mapcat (fn [[path effects]]
+                      (when (get-in envelope path) effects))
+                    (phases/transitions)))))
+
 (defn tool-step
   "Dispatch the parsed call: phase policy first, then the tool, then the
   branch bookkeeping the outcome demands. Returns {:branch :result :tool}."
@@ -437,11 +457,9 @@
          ;; artifacts (the proof engines that did are gone), so the old
          ;; :confirmed trigger keyed on a status that never occurred. Green
          ;; work also ends a reframe: the withheld approach could not have
-         ;; produced it (vf-9wx).
-         branch (if (:verified-green? result)
-                  (-> (state/mark-green branch)
-                      (state/clear-reframe))
-                  branch)]
+         ;; produced it (vf-9wx). The signal→effect table itself is
+         ;; phases.edn :transitions data (drg-4026 #3).
+         branch (apply-transitions result (:artifact result) branch)]
     ;; A green verify marks the green point the safe-state rung falls back
     ;; to. The snapshot is the turn cursor: the journal is the store
     ;; checkpoint — append-only, and what resume replays from — so the

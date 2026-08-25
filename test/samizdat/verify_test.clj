@@ -7,6 +7,7 @@
   (karamazov-dvz follow-up: the worker loop must be test-driven, not one-shot)."
   (:require [clojure.string :as str]
             [clojure.test :refer [deftest testing is]]
+            [samizdat.agent.gates :as gates]
             [samizdat.agent.verify :as verify]
             [samizdat.engine.proc :as proc]
             [samizdat.security.secrets :as secrets]))
@@ -130,3 +131,19 @@
         (is (:green? r))
         (is (str/includes? (:output r) "[REDACTED]") "the token is redacted")
         (is (not (str/includes? (:output r) token)) "the token itself is gone")))))
+
+(deftest focused-verify-conventions-are-gates-edn-data
+  ;; drg-4026 #47/48: what counts as a test file, how a test path becomes a
+  ;; namespace, and the command shape that runs a focused suite are PROJECT
+  ;; conventions, not kernel code. They live in gates.edn :focused-verify;
+  ;; the derivations stay in verify.clj and read the data at fire time, so
+  ;; a pytest/maven project retunes without a rebuild.
+  (let [cfg (gates/threshold :focused-verify)]
+    (is (re-find (re-pattern (:test-file-regex cfg)) "test/samizdat/foo_test.clj"))
+    (is (not (re-find (re-pattern (:test-file-regex cfg)) "src/samizdat/tools/knowledge.clj")))
+    (is (re-find (re-pattern (:ns-whitelist-regex cfg)) "samizdat.agent.decompose-test"))
+    (is (str/starts-with? (verify/focused-cmd ["test/samizdat/agent_test.clj"])
+                          (:cmd-prefix cfg)))
+    ;; fire-time read: the command prefix is data, swapped without touching src
+    (with-redefs [gates/threshold (fn [_] (assoc cfg :cmd-prefix "pytest {{expr}}"))]
+      (is (str/starts-with? (verify/focused-cmd ["test/x_test.clj"]) "pytest ")))))

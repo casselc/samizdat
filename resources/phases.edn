@@ -1,0 +1,56 @@
+;; samizdat - a self-hosting agentic harness
+;; SPDX-License-Identifier: GPL-3.0-or-later
+;;
+;; The branch phase machine, result transitions, and winner rubric as data
+;; (drg-4026 #3/#30/#34 — audit findings 3, 30, 34). Loaded by
+;; src/samizdat/agent/phases.clj, the wordlists precedent: state.clj sits
+;; below gates.clj in the require graph, so state-level workflow data gets
+;; its own loader rather than reading gates' accessor. Structure compiles
+;; once at load where forms are involved (the rubric); tables are read at
+;; fire time. Every section's WHY lives here beside the data.
+
+{:initial-phase :explore
+
+ ;; #34: the explore/build machine. A phase with a :cap-key is capped: past
+ ;; the gates.edn threshold it names, the branch advances to :next and the
+ ;; valve tells the model why (prompts/explore-cap.md). The cap VALUE stays a
+ ;; gates.edn scalar the loop passes in — this table names which phase is
+ ;; capped and what comes next, not how long it lasts.
+ ;;
+ ;; :withholds is the per-phase tool policy base/phase-refusal consults.
+ ;; Empty today: the proof harness's withheld tools left with its engines,
+ ;; and the coding loop has no phase-locked tools yet. When it does, this is
+ ;; where they go — a refusal from here carries :policy-refusal? true so the
+ ;; cull record can tell a declined call from a malformed fence.
+ :phases {:explore {:cap-key :explore-cap :next :build :withholds #{}}
+          :build {:withholds #{}}}
+
+ ;; #3: tool-result signals → branch-state effects. The claim-first state
+ ;; machine as a declarative table instead of cond-> clauses in the
+ ;; executor. A key is a get-in path into the turn envelope
+ ;; {:result <tool return> :artifact <produced artifact>}; when it holds a
+ ;; truthy value, each named effect applies. Effect names dispatch in
+ ;; loop.clj to state fns — a table cannot mutate the branch. The proof-era
+ ;; artifact-status triggers ([::artifact :claim-status :confirmed] and
+ ;; friends) left with the tools that produced those statuses; the one live
+ ;; transition is the green ship-verify: `done` reports :verified-green?
+ ;; from its ship-verify rung, and green work is the green point the
+ ;; safe-state rung rewinds to (it also ends a reframe — the withheld
+ ;; approach could not have produced it, vf-9wx).
+ :transitions {[:result :verified-green?] [:mark-green :clear-reframe]}
+
+ ;; #30: the winner rubric — the ported UCLA FirstProof selector. EDN forms
+ ;; compiled at load by state.clj into the ranking tuple, best-first
+ ;; component order; the forms see `branch` as a local and the fns resolve
+ ;; in state.clj. Components, most important first:
+ ;; non-relaxation > slow-tier-seen > engine-diversity > confirmed-count >
+ ;; id (a stable arbitrary tie-break so the ranking never depends on vector
+ ;; order). A branch that proved the asked claim beats one that proved a
+ ;; weakening; a cross-checked confirmation beats a one-shot; independent
+ ;; engines compose (one Prolog + one Z3 beats two Z3s).
+ :finished-key
+ [(if (:relaxation? (:last-audit branch)) 0 1)
+  (if (contains? (:tiers-seen branch) :slow) 1 0)
+  (count (distinct (keep :kind (confirmed-artifacts branch))))
+  (count (confirmed-artifacts branch))
+  (:id branch)]}

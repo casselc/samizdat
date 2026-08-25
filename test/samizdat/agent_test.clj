@@ -32,9 +32,12 @@
             [samizdat.agent.critic :as critic]
             [samizdat.agent.gates :as gates]
             [samizdat.agent.loop :as aloop]
+            [samizdat.agent.phases :as phases]
             [samizdat.agent.resume :as resume]
             [samizdat.agent.state :as state]
             [samizdat.agent.tools :as tools]
+            [samizdat.agent.tools.base :as tools-base]
+            [samizdat.agent.tools.ship :as ship]
             [samizdat.agent.verify :as verify]
             [samizdat.agent.wordlists :as wordlists]
             [samizdat.agent.gitdiff :as gitdiff]
@@ -98,7 +101,7 @@
     ;; so the fixture would otherwise be a state the loop never produces. The
     ;; phase is now part of the precondition; see the gate's own note and
     ;; prologue-cap-is-silent-while-a-branch-is-re-planning.
-    (let [b (state/enter-build
+    (let [b (state/enter-phase
              (branch-with :any-progress? false :turns (vec (repeat 8 {}))) 6)]
       (is (= :prologue-cap (:gate (arbiter/decide {:branch b :max-turns 40}))))))
 
@@ -539,11 +542,11 @@
         "the phase clock starts at branch creation, so a forked branch gets
          a full explore budget instead of inheriting its parent's spent one")))
 
-(deftest enter-build-stamps-the-phase-once
-  (let [b (state/enter-build (state/new-branch {:id "B1" :problem "p"}) 3)]
+(deftest enter-phase-stamps-the-phase-once
+  (let [b (state/enter-phase (state/new-branch {:id "B1" :problem "p"}) 3)]
     (is (= :build (:phase b)))
     (is (= 3 (:phase-entered-turn b)))
-    (is (= 3 (:phase-entered-turn (state/enter-build b 9)))
+    (is (= 3 (:phase-entered-turn (state/enter-phase b 9)))
         "already in build: the phase did not begin again, so the stamp does
          not move")))
 
@@ -552,7 +555,7 @@
     (is (not (state/explore-cap-expired? b 5 5))
         "turns 1-5 are the five explore turns the cap allows")
     (is (state/explore-cap-expired? b 5 6))
-    (is (not (state/explore-cap-expired? (state/enter-build b 3) 5 20))
+    (is (not (state/explore-cap-expired? (state/enter-phase b 3) 5 20))
         "only the explore phase is capped")))
 
 (deftest steer-prose-lives-in-prompt-files
@@ -732,7 +735,7 @@
   ;; more: sketch immediately and you get the full build allowance before the
   ;; nudge; burn the whole prologue and you get what is left.
   (let [replanning (branch-with :any-progress? false :turns (vec (repeat 12 {})))
-        building (state/enter-build replanning 6)]
+        building (state/enter-phase replanning 6)]
     (is (= :explore (:phase replanning)) "the fixture is what it claims to be")
     (is (not-any? #{:prologue-cap}
                   (map :gate (arbiter/eligible {:branch replanning :max-turns 40})))
@@ -1872,3 +1875,91 @@
                    :notified-fractions))
     (is (= b (aloop/apply-effects nil 7 40 b))
         "no decision, no effect")))
+
+(deftest ship-gate-rungs-are-gates-edn-data
+  ;; drg-4026 #44: the lexical ship rungs — an answer must exist, its figures
+  ;; must come from the evidence, it must engage the problem — moved from a
+  ;; cond in ship.clj to gates.edn :ship-gates, compiled at load into
+  ;; predicate/message closures fired on the computed evidence. Adding a rung
+  ;; is a data edit; the evidence computation stays in src.
+  (let [rungs (gates/threshold :ship-gates)]
+    (is (= 3 (count rungs)))
+    (is (= [:answer-exists :figure-coverage :engages-problem]
+           (mapv :name rungs))))
+  (is (= "Supply an `answer` to ship."
+         (ship/ship-gate-block {:answer nil})))
+  (let [figures-msg (ship/ship-gate-block {:answer "the count is 42 and 7"
+                                           :problem "count things"
+                                           :evidence [{:claim "count is 40"}]
+                                           :uncovered-numbers ["42" "7"]})]
+    (is (str/includes? (str figures-msg) "figures no artifact supports"))
+    (is (str/includes? (str figures-msg) "`42`")))
+  (is (nil? (ship/ship-gate-block {:answer "the count is 40"
+                                   :problem "count things"
+                                   :evidence [{:claim "count is 40"}]
+                                   :uncovered-numbers []})))
+  ;; engages-problem still gates: an answer sharing no term with the problem
+  (is (string? (ship/ship-gate-block {:answer "xyzzy plugh"
+                                      :problem "count the odd numbers"
+                                      :evidence [{:claim "odd numbers"}]
+                                      :uncovered-numbers []}))))
+
+(deftest phase-machine-is-resource-data
+  ;; drg-4026 #34: the explore/build machine — which phase starts, which is
+  ;; capped and by what threshold key, what follows, what each withholds —
+  ;; moved from hard-coded :explore/:build literals in state.clj to
+  ;; phases.edn. state.clj reads structure only; the cap VALUE stays a
+  ;; gates.edn scalar the loop passes in.
+  (is (= :explore (phases/initial-phase)))
+  (is (= :build (phases/next-phase :explore)))
+  (is (= :explore-cap (:cap-key (phases/phase :explore))))
+  (is (nil? (phases/next-phase :build)) "build has no clock")
+  (is (= :explore (:phase (state/new-branch {:id "B" :problem "p"}))))
+  (let [b {:phase :explore :phase-entered-turn 0 :turns (range 12)}]
+    (is (state/explore-cap-expired? b 10 12))
+    (is (not (state/explore-cap-expired? (assoc b :phase :build) 10 12)))
+    (is (= :build (:phase (state/enter-phase b 12))))))
+
+(deftest phase-refusal-reads-the-phase-table
+  ;; drg-4026 #34: phase-refusal consults the table's :withholds — the seam
+  ;; the audit called inert. Empty today (the withheld proof tools left),
+  ;; and a refusal from it must carry :policy-refusal? true so the cull
+  ;; record can tell a declined call from a malformed fence.
+  (is (nil? (tools-base/phase-refusal {:branch {:phase :explore}
+                                       :tool-name "eval"})))
+  (with-redefs [phases/withholds (fn [_] #{"eval"})]
+    (let [r (tools-base/phase-refusal {:branch {:phase :explore}
+                                       :tool-name "eval"})]
+      (is (map? r))
+      (is (true? (:policy-refusal? r)))
+      (is (str/includes? (str (:result r)) "explore")))))
+
+(deftest result-transitions-are-resource-data
+  ;; drg-4026 #3: the claim-first state machine as a declarative table —
+  ;; tool-result signals map to branch effects, applied generically, not
+  ;; cond-> clauses in the executor. The one live row: a green ship-verify
+  ;; stamps the green point and ends any reframe.
+  (is (= [:mark-green :clear-reframe]
+         (get (phases/transitions) [:result :verified-green?])))
+  (let [b (assoc (branch-with) :reframe-entered-turn 3 :reframe-claim "c")
+        out (aloop/apply-transitions {:verified-green? true} nil b)]
+    (is (= (count (:turns out)) (:green-snapshot out)))
+    (is (nil? (:reframe-entered-turn out)))
+    (is (= b (aloop/apply-transitions {:verified-green? false} nil b))
+        "no signal, no transition")))
+
+(deftest winner-rubric-is-resource-data
+  ;; drg-4026 #30: the finished-key rubric (non-relaxation > slow-tier >
+  ;; engine-diversity > confirmed-count > id) moved from a tuple literal in
+  ;; state.clj to phases.edn forms compiled at load. Behavior is unchanged;
+  ;; retuning the rubric is a data edit.
+  (is (= 5 (count (phases/finished-key-forms))))
+  (let [strong (assoc (branch-with)
+                      :artifacts [{:claim-status :confirmed :kind :z3 :turn 1}])
+        weak   (-> (branch-with)
+                   (assoc :artifacts [{:claim-status :confirmed :kind :z3 :turn 1}])
+                   (assoc :last-audit {:relaxation? true}))]
+    (is (= [1 0 1 1 "B1"] (state/finished-key strong)))
+    (is (= [0 0 1 1 "B1"] (state/finished-key weak))
+        "a relaxation ranks below a direct proof")
+    (is (= [strong weak] (state/rank-finished [weak strong])))))

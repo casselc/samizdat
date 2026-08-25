@@ -22,7 +22,8 @@
   missing-argument complaints, the :default method, tool-names, and the
   per-phase refusal the branch loop consults before dispatch. Tool groups
   require this namespace; nothing here requires a group back."
-  (:require [clojure.string :as str]))
+  (:require [clojure.string :as str]
+            [samizdat.agent.phases :as phases]))
 
 (defmulti run-tool
   (fn [ctx] (:tool-name ctx)))
@@ -85,14 +86,20 @@
   BEFORE run-tool dispatch. Returns a result map refusing the call, or nil
   when it may proceed.
 
-  The proof harness's explore/build policy (withhold Lean until a sketch,
-  withhold sketch once building) left with its tool surface. The seam stays —
-  the loop still asks — and the coding loop's phase policy plugs back in here
-  when the loop-as-manifest work defines it. Any refusal returned from here
-  must carry `:policy-refusal? true` so the cull record can tell a declined
-  call from a malformed fence."
-  [_ctx]
-  nil)
+  The policy is phases.edn data (drg-4026 #34): each phase's :withholds set.
+  Empty today — the proof harness's explore/build policy (withhold Lean until
+  a sketch, withhold sketch once building) left with its tool surface — but
+  the table is consulted, so the coding loop's phase policy plugs back in as
+  a data edit rather than new code. Any refusal returned from here carries
+  `:policy-refusal? true` so the cull record can tell a declined call from a
+  malformed fence."
+  [{:keys [branch tool-name] :as _ctx}]
+  (when (contains? (phases/withholds (:phase branch)) tool-name)
+    (fail branch
+          (str "`" tool-name "` is not available in the "
+               (name (:phase branch))
+               " phase. The phase-valve message says when that changes.")
+          :policy-refusal? true)))
 
 
 ;; --- unknown ----------------------------------------------------------------

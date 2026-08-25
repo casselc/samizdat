@@ -320,13 +320,65 @@
    "Your answer claims the work was tested or verified, but the run shows no test was run. Run it and confirm, or drop the claim."
    :outside-message
    "Your answer attributes a claim to something outside the repo (a URL or a secondary source). samizdat's registered tools work on the local repo; nothing in this run could have checked that source. Cite evidence from the repo, or from your own verified work in it."}
-  :kind :threshold :capability-tunable? false
-  :doc "Deterministic finalization rules for the judge's free blocks. The
-        detection engine lives in judge.clj; the vocabulary it matches on
-        lives here, so it retunes per project at runtime."}
+   :kind :threshold :capability-tunable? false
+   :doc "Deterministic finalization rules for the judge's free blocks. The
+         detection engine lives in judge.clj; the vocabulary it matches on
+         lives here, so it retunes per project at runtime."}
 
- :tool-vocab
- ;; Tier 1a: the tool vocabularies the gates and their settlers read — data
+  :focused-verify
+  ;; drg-4026 #47/48: the focused-verify conventions — which changed paths
+  ;; count as test files, how a test path maps to its namespace, and the
+  ;; command that runs just those namespaces. Project conventions, not
+  ;; kernel code: a pytest or maven project retunes these without a
+  ;; rebuild. The derivations live in verify.clj and read these at fire
+  ;; time. :cmd-prefix is concatenated with the derived expression and a
+  ;; closing single quote for sh -c; the expression's namespaces come
+  ;; through :ns-whitelist-regex, so the quoted payload genuinely contains
+  ;; no single quotes (review3 #1).
+  {:value
+   {:test-file-regex "(?i)(^|/)(test|spec)s?/|[_-](test|spec)\\.[a-z]+$"
+    :root-strip-regex "^(test|gui|src)/"
+    :ext-strip-regex "\\.cljc?$"
+    :ns-whitelist-regex "[a-zA-Z0-9.*-]+"
+    :cmd-prefix "jolt -A:test -e '"}
+   :kind :threshold :capability-tunable? false
+   :doc "The focused-verify conventions as data (see the comment above)."}
+
+  :ship-gates
+  ;; drg-4026 #44: the model-free ship rungs as data, compiled at load by
+  ;; ship.clj into predicate/message closures fired on the computed
+  ;; evidence (answer, problem, evidence, uncovered-numbers — the symbols
+  ;; the forms below reference). Vector order is the cond order it
+  ;; replaces. The number-coverage rung guards against a fabricated
+  ;; verification report but only fires when the run produced evidence to
+  ;; check against: a coding run's proof is its test run, not confirmed
+  ;; claims, so empty evidence must not refuse every figure (the first
+  ;; self-modification run did the work correctly and could not ship it).
+  {:value
+   [{:name :answer-exists
+     :when (str/blank? (str answer))
+     :message "Supply an `answer` to ship."}
+    {:name :figure-coverage
+     :when (and (seq evidence) (seq uncovered-numbers))
+     :message-form (str "Your answer states figures no artifact supports: "
+                        (str/join ", " (map (fn [x] (str "`" x "`"))
+                                            (take 8 uncovered-numbers)))
+                        ".\nA number in an answer has to come from something"
+                        " confirmed or measured — that is the difference between a"
+                        " report and a fabricated one. Either verify these or"
+                        " remove them from the answer.")}
+    {:name :engages-problem
+     :when (and (not (str/blank? (str problem)))
+                (not (engages-problem? problem answer)))
+     :message-form (str "This answer shares no substantive term with the problem"
+                        " statement. Whatever it establishes, it is not an answer to"
+                        " the question that was asked.")}]
+   :kind :threshold :capability-tunable? false
+   :doc "The lexical ship rungs (drg-4026 #44) — adding a rung is a data
+         edit; the evidence computation stays in ship.clj."}
+
+  :tool-vocab
+  ;; Tier 1a: the tool vocabularies the gates and their settlers read — data
  ;; here, alongside the thresholds, so a vocabulary changes at runtime
  ;; without a rebuild. agent-test walks every name against the registered
  ;; run-tools (review3 #6): a name the loop cannot dispatch is a gate whose

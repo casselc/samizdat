@@ -17,14 +17,21 @@
   derivation (`focused-cmd`) are pure, so the gate is testable without spawning a
   process. Same split as planner.clj vs cells/team.clj."
   (:require [clojure.string :as str]
+            [samizdat.agent.gates :as gates]
             [samizdat.engine.proc :as proc]
             [samizdat.security.secrets :as secrets]))
 
+(defn- conventions []
+  "The focused-verify conventions, from gates.edn :focused-verify (drg-4026
+  #47/48) — read at fire time so a project retunes them at runtime."
+  (gates/threshold :focused-verify))
+
 (defn test-file?
   "Whether a changed path is a test/spec file — the evidence that a change was
-  pinned by a test, which the TDD ship gate requires."
+  pinned by a test, which the TDD ship gate requires. The path shape is
+  project data (:test-file-regex)."
   [path]
-  (boolean (re-find #"(?i)(^|/)(test|spec)s?/|[_-](test|spec)\.[a-z]+$" (str path))))
+  (boolean (re-find (re-pattern (:test-file-regex (conventions))) (str path))))
 
 (defn ns-from-test-path
   "The Clojure namespace a test file defines: strip the leading source root
@@ -35,24 +42,27 @@
   The derived namespace is embedded in a shell command (focused-cmd), and the
   path is model-controlled — a file name crafted to close the sh -c quoting
   (`test/foo'; CMD; echo '.clj`) must yield NO namespace, so the result is
-  whitelisted to plain namespace characters and anything else is dropped."
+  whitelisted to plain namespace characters (:ns-whitelist-regex, project
+  data) and anything else is dropped."
   [path]
-  (let [p (str path)]
-    (when (re-find #"\.cljc?$" p)
+  (let [p (str path)
+        c (conventions)]
+    (when (re-find (re-pattern (:ext-strip-regex c)) p)
       (let [ns (-> p
-                   (str/replace #"^(test|gui|src)/" "")
-                   (str/replace #"\.cljc?$" "")
+                   (str/replace (re-pattern (:root-strip-regex c)) "")
+                   (str/replace (re-pattern (:ext-strip-regex c)) "")
                    (str/replace "_" "-")
                    (str/replace "/" ".")
                    not-empty)]
-        (when (and ns (re-matches #"[a-zA-Z0-9.*-]+" ns))
+        (when (and ns (re-matches (re-pattern (:ns-whitelist-regex c)) ns))
           ns)))))
 
 (defn focused-cmd
   "A test command that runs ONLY the test namespaces among `changed`, with an
   exit code that reflects pass/fail (jolt's bare -e does not exit non-zero on a
   failed assertion, so the expression sets the code itself). nil when no test
-  namespace changed — the caller then falls back to the configured :verify-cmd."
+  namespace changed — the caller then falls back to the configured :verify-cmd.
+  The command shape is project data (:cmd-prefix)."
   [changed]
   (let [nses (->> changed (filter test-file?) (keep ns-from-test-path) distinct vec)]
     (when (seq nses)
@@ -65,7 +75,7 @@
         ;; single-quote the whole -e expression for sh -c; every namespace in
         ;; it came through ns-from-test-path's whitelist, so the expression
         ;; genuinely has no single quotes of its own (review3 #1).
-        (str "jolt -A:test -e '" expr "'")))))
+        (str (:cmd-prefix (conventions)) expr "'")))))
 
 (defn- tail
   "The last n non-blank lines of s — enough of a failure to act on without
