@@ -17,16 +17,24 @@
             [clojure.java.io :as io]
             [clojure.string :as str]
             [selmer.parser :as selmer]
-            [selmer.util :as selmer-util]))
+            [selmer.util :as selmer-util]
+            [samizdat.userspace :as userspace]))
 
 (selmer-util/turn-off-escaping!)
 
 (defn prompt
-  "Raw text of resources/prompts/<name>.md — the same io/resource seam the
-  hand-rolled readers used, so paths work interpreted and inside an AOT
-  binary."
+  "The text of prompt `name` for the current project.
+
+  Through the userspace seam rather than straight at io/resource: a prompt is
+  userspace like a cell is, so this project's version is what the model sees
+  and the shipped file is only where the project started. With no project
+  bound (a test, a bare REPL) this is exactly the resource read it always was.
+
+  Fails loud on a name that neither the project nor the harness has — a prompt
+  seam rendering an empty string is how a whole instruction block goes missing
+  without anyone noticing."
   [name]
-  (slurp (io/resource (str "prompts/" name ".md"))))
+  (userspace/body! :prompt name))
 
 ;; system.md documents {{env/NAME}} as RUNTIME syntax the shell tool
 ;; resolves at spawn — it must reach the model verbatim. Selmer would parse
@@ -59,15 +67,13 @@
 ;; The chain itself is resources/prompt-chain.edn — data, so which layers exist
 ;; and in what order is editable at runtime.
 
-(def chain-resource "prompt-chain.edn")
-
 (defn chains
   "The declared chains, {layer-key [entry …]}. Read fresh so an edit takes
   effect without a restart; nil when the resource is absent, which callers
   treat as 'no chain declared' rather than an error — a harness with no
   prompt-chain.edn still has its shipped prompts."
   []
-  (some-> (io/resource chain-resource) slurp edn/read-string))
+  (userspace/edn-body :policy "prompt-chain"))
 
 (defn- entry-value
   "One chain entry's value, or `::absent`.
@@ -83,9 +89,9 @@
       (if (.exists f) (slurp f) ::absent))
 
     (contains? entry :file)
-    (if-let [url (io/resource (str "prompts/" file ".md"))]
-      (slurp url)
-      ::absent)
+    ;; The project's prompt, not the shipped file: a chain level naming a
+    ;; prompt must resolve to whatever this project has made of it.
+    (or (userspace/body :prompt file) ::absent)
 
     (contains? entry :text)
     text
@@ -118,4 +124,4 @@
   [k]
   (if-let [entries (get (chains) k)]
     (resolve-chain entries)
-    (some-> (io/resource (str "prompts/" (name k) ".md")) slurp)))
+    (userspace/body :prompt (name k))))

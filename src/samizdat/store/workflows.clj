@@ -17,52 +17,58 @@
 ;; SPDX-License-Identifier: GPL-3.0-or-later
 
 (ns samizdat.store.workflows
-  "Workflow definitions as durable, versioned rows.
+  "Manifest definitions — a THIN SHIM over samizdat.store.userspace.
 
-  Append-only on purpose: every save! is a new version, a rollback is a
-  pointer to an older row, and the edit history — including every edit the
-  agent makes to its own loop — stays readable in one query. This is the
-  hivemind version-bump pattern applied to the harness's own behavior."
+  Manifests were the one userspace layer that already worked the right way:
+  seeded from the shipped template into the project's db, versioned
+  append-only, and rewritten by the agent without touching the harness. The
+  userspace table generalised that to cells, policy tables and prompts, so
+  manifests moved onto it (migration v11 copies every existing row across).
+
+  This namespace stays because samizdat.workflow and the manifest tool are
+  written against it, and because `name` alone is the right signature for a
+  caller that only ever deals in manifests. Every function here is
+  `(userspace/... :manifest ...)` with the rows shaped as they were — `:edn`
+  rather than `:body` — so nothing above it had to change.
+
+  New code should prefer samizdat.userspace, which reads the project's version
+  or seeds the template without the caller knowing which happened."
   (:require [clojure.java.io :as io]
-            [samizdat.store.db :as db]))
+            [samizdat.store.userspace :as us]))
+
+(defn- ->row
+  "A userspace row in the shape this namespace has always returned: the body
+  under :edn, because every caller destructures it that way."
+  [row]
+  (when row
+    (-> row (assoc :edn (:body row)) (dissoc :body :kind))))
 
 (defn load-latest
-  "The newest version of the named workflow, or nil."
+  "The newest version of the named manifest, or nil."
   [conn name]
-  (db/fetch-one conn ["SELECT * FROM workflows WHERE name = ?
-                       ORDER BY version DESC LIMIT 1" name]))
+  (->row (us/load-latest conn :manifest name)))
 
 (defn load-version [conn name version]
-  (db/fetch-one conn ["SELECT * FROM workflows WHERE name = ? AND version = ?"
-                      name version]))
+  (->row (us/load-version conn :manifest name version)))
 
 (defn versions [conn name]
-  (db/fetch conn ["SELECT version, created_at FROM workflows
-                   WHERE name = ? ORDER BY version" name]))
+  (us/versions conn :manifest name))
 
 (defn save!
-  "Append the EDN text as the next version of the named workflow. Returns the
+  "Append the EDN text as the next version of the named manifest. Returns the
   new version number."
   [conn name edn-text]
-  (db/with-writer
-    (let [v (inc (or (:version (load-latest conn name)) 0))]
-      (db/execute! conn ["INSERT INTO workflows (name, version, edn, created_at)
-                          VALUES (?, ?, ?, ?)"
-                         name v edn-text (db/now)])
-      v)))
+  (us/save! conn :manifest name edn-text))
 
 (defn seed!
-  "Install the resource at `resource-path` as version 1 of the named workflow
-  when no version exists yet. Returns the latest row either way, so callers
-  can seed-and-load in one motion."
+  "Install the resource at `resource-path` as version 1 of the named manifest
+  when the project has no version yet. Returns the latest row either way, so
+  callers can seed-and-load in one motion."
   [conn name resource-path]
-  (when-not (load-latest conn name)
-    (save! conn name (slurp (io/resource resource-path))))
-  (load-latest conn name))
+  (->row (us/seed! conn :manifest name (slurp (io/resource resource-path)))))
 
 (defn names
-  "Every distinct manifest name in the store, with its latest version and how
-  many versions it has — the catalogue the manifest tool lists."
+  "Every manifest name the project holds, with its latest version and how many
+  versions it has — the catalogue the manifest tool lists."
   [conn]
-  (db/fetch conn ["SELECT name, MAX(version) AS version, COUNT(*) AS versions
-                   FROM workflows GROUP BY name ORDER BY name"]))
+  (us/names conn :manifest))

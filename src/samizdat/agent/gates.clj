@@ -38,13 +38,19 @@
             [samizdat.agent.state :as state]
             [samizdat.agent.supervisor :as supervisor]
             [samizdat.prompt :as sp]
+            [samizdat.userspace :as userspace]
             [samizdat.util :as util]))
 
 (defn load-config
-  "Gate thresholds from resources/gates.edn. Read through io/resource so the
-  path works interpreted and inside an AOT binary."
+  "The gate thresholds for the current project.
+
+  Through the userspace seam: gates.edn is a policy TABLE, which is userspace —
+  a project that learned its cull threshold is too tight should be able to move
+  it for itself without moving it for every other project on the same binary.
+  The shipped file is the template a project seeds from. Unbound (a test, a
+  bare REPL) this is the resource read it always was."
   []
-  (edn/read-string (slurp (io/resource "gates.edn"))))
+  (userspace/edn-body! :policy "gates"))
 
 (defonce ^:private config-cache (atom nil))
 

@@ -15,11 +15,12 @@
   a list weakens its gate. The comments recording why each section exists
   live beside the words in the resource file."
   (:require [clojure.edn :as edn]
+            [samizdat.userspace :as userspace]
             [clojure.java.io :as io]))
 
 (defn- load-wordlists
   []
-  (edn/read-string (slurp (io/resource "wordlists.edn"))))
+  (userspace/edn-body! :policy "wordlists"))
 
 (def ^:private cache (atom (load-wordlists)))
 

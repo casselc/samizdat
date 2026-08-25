@@ -327,6 +327,50 @@
 
    "CREATE INDEX IF NOT EXISTS idx_messages_run ON messages(run_id, read_at)"])
 
+(def ^:private v11
+  ;; THE USERSPACE LAYER, per project.
+  ;;
+  ;; The harness ships a userspace TEMPLATE in resources/ — the cells, the
+  ;; manifests, the policy tables, the prompts. A project seeds its own copy
+  ;; from that template on first use and then evolves it: every edit the
+  ;; supervisor makes is a new version HERE, in this project's database, and
+  ;; the shipped files are never written. That is what lets two projects
+  ;; running the same harness diverge in how they work, which is the whole
+  ;; point of the split — src/ is capability, userspace is the loop that
+  ;; assembles capabilities, and the loop belongs to the project.
+  ;;
+  ;; One table, four kinds ('cell', 'manifest', 'policy', 'prompt'), because
+  ;; the lifecycle is identical for all of them: seed from the template, load
+  ;; the latest version, append a version on edit, roll back by pointing at an
+  ;; older row. Append-only for the same reason the workflows table was — the
+  ;; edit history of a system that rewrites itself is the most valuable thing
+  ;; in the database.
+  ;;
+  ;; `body` is TEXT for every kind: Clojure source for a cell, EDN for a
+  ;; manifest or a policy table, markdown for a prompt. The kind says how to
+  ;; read it; nothing here parses it.
+  ["CREATE TABLE IF NOT EXISTS userspace (
+      kind       TEXT NOT NULL,
+      name       TEXT NOT NULL,
+      version    INTEGER NOT NULL,
+      body       TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      PRIMARY KEY (kind, name, version)
+    )"
+
+   ;; Manifests were the one layer that already worked this way. Fold them in
+   ;; rather than leaving two mechanisms: the workflows table keeps its rows
+   ;; (nothing is dropped, and a rollback to a pre-migration version still
+   ;; resolves), and store/workflows.clj becomes a thin shim over this table
+   ;; so samizdat.workflow and the manifest tool keep their call sites.
+   "INSERT OR IGNORE INTO userspace (kind, name, version, body, created_at)
+      SELECT 'manifest', name, version, edn, created_at FROM workflows"
+
+   ;; Reads are always 'the newest version of this name' — the index the
+   ;; loader hits on every compile.
+   "CREATE INDEX IF NOT EXISTS idx_userspace_latest
+      ON userspace(kind, name, version DESC)"])
+
 (def migrations
   "Ordered. Index 0 is migration 1; PRAGMA user_version holds the count applied."
-  [v1 v2 v3 v4 v5 v6 v7 v8 v9 v10])
+  [v1 v2 v3 v4 v5 v6 v7 v8 v9 v10 v11])

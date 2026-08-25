@@ -39,7 +39,8 @@
             [mycelium.cell :as cell]
             [mycelium.core :as myc]
             [samizdat.cells :as cells]
-            [samizdat.store.journal :as journal]))
+            [samizdat.store.journal :as journal]
+            [samizdat.userspace :as userspace]))
 
 (def ^:private soak-timeout-ms 10000)
 
@@ -165,3 +166,62 @@
         (rollback! opts checkpoint
                    (str "reload: the edited cell file did not load — "
                         (or (ex-message e) (str e))))))))
+
+;; --- the store-backed edit (per-project userspace) ---------------------------
+;;
+;; The file-based protocol above edits resources/cells — the harness's own
+;; template, shared by every project. That was never userspace: a supervisor
+;; "changing its cells" was changing the harness for everybody. `propose-cell!`
+;; is the same protocol against the PROJECT's copy in the userspace store.
+;;
+;; And it inverts the order. The file path had to save first (the agent had
+;; already written the file) and undo on failure; here nothing is written until
+;; the candidate has survived, so a bad edit never enters the project's
+;; version history at all. The ATTEMPT is still recorded — in the journal,
+;; with the reason — which is the right split: the store holds versions that
+;; were live, the journal holds every attempt and its verdict.
+
+(defn propose-cell!
+  "Validate a candidate cell body, and commit it as a new version of this
+  project's cell only if it survives.
+
+  opts:
+    :name       — the cell's userspace name (the template basename, e.g. loop)
+    :body       — the candidate Clojure source
+    :loop-def   — the workflow definition to validate and soak against
+    :soak-input — the initial data map the soak dry-run starts from
+    :compile-fn — how to compile+validate (default mycelium pre-compile)
+    :conn :run-id — to journal the outcome (optional)
+
+  Returns {:status :committed :version n} or
+  {:status :rolled-back :reason ...} with the registry restored and nothing
+  written to the store."
+  [{:keys [name body loop-def soak-input compile-fn conn run-id]}]
+  (let [compile-fn (or compile-fn myc/pre-compile)
+        snapshot (cell/registry-snapshot)
+        fail (fn [reason]
+               (cell/registry-restore! snapshot)
+               (when (and conn run-id)
+                 (journal/note! conn run-id :mutation-rolled-back
+                                {:data {:cell name :reason reason}}))
+               (log/warn "cell proposal rejected:" name reason)
+               {:status :rolled-back :reason reason})]
+    (try
+      ;; INSTALL the candidate into the live image, on top of the project's
+      ;; other cells. Syntax errors surface here.
+      (binding [*ns* *ns*]
+        (load-string body))
+      (if-let [reason (validate compile-fn loop-def)]
+        (fail reason)
+        (if-let [reason (soak loop-def soak-input)]
+          (fail reason)
+          ;; COMMIT. The candidate is already live; this is what makes it
+          ;; survive a restart and what another run will load.
+          (let [v (userspace/save! :cell name body)]
+            (when (and conn run-id)
+              (journal/note! conn run-id :mutation-committed
+                             {:data {:cell name :version v}}))
+            (log/info "cell" name "committed as version" v)
+            {:status :committed :version v})))
+      (catch Throwable e
+        (fail (str "the candidate did not load — " (or (ex-message e) (str e))))))))

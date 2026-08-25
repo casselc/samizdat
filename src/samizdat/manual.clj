@@ -48,17 +48,20 @@
   apply to their own data."
   (:require [clojure.edn :as edn]
             [clojure.java.io :as io]
-            [clojure.string :as str]))
+            [clojure.string :as str]
+            [samizdat.userspace :as userspace]))
 
 (def resource-name "manual.edn")
 
 (defn- read-manual
-  "The curated groups, straight off the resource. Read through io/resource so
-  it works from a built binary, like every other resource the harness ships."
+  "The curated groups for the current project, through the userspace seam.
+
+  Which capabilities the agent is told it has is the most userspace thing in
+  the harness: a project that built itself a capability should be able to add
+  it to its OWN manual, and a project that never uses one should be able to
+  drop it. The shipped manual.edn is the template that seeds a project."
   []
-  (if-let [url (io/resource resource-name)]
-    (edn/read-string (slurp url))
-    (throw (ex-info (str "no manual resource at " resource-name) {}))))
+  (userspace/edn-body! :policy "manual"))
 
 (defn- resolve-entry
   "Resolve one entry's var, requiring its namespace if it is not loaded yet.

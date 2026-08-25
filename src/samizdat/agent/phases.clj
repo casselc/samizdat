@@ -12,11 +12,15 @@
   accessor, while the phase table and the winner rubric are consumed down
   there. system.clj calls reload! on every start."
   (:require [clojure.edn :as edn]
+            [samizdat.userspace :as userspace]
             [clojure.java.io :as io]))
 
 (defn- load-phases
+  "The phase table for the current project, through the userspace seam. Like
+  gates.edn this is a policy table: a project whose work does not divide into
+  an explore prologue and a build phase should be able to say so for itself."
   []
-  (edn/read-string (slurp (io/resource "phases.edn"))))
+  (userspace/edn-body! :policy "phases"))
 
 (def ^:private cache (atom (load-phases)))
 

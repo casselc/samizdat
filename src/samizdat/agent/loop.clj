@@ -82,7 +82,9 @@
   than a slurp inline so the digest can be attributable to it; re-read per
   digest, which is per run."
   []
-  (slurp (io/resource "prompts/judge-exemptions.md")))
+  ;; Through the prompt seam, so a project can tune what its judges must not
+  ;; flag without editing the harness for everyone.
+  (prompt/prompt "judge-exemptions"))
 
 (defn prompt-digest
   "A cheap fingerprint of the prompt and gate set a run used. AHE component

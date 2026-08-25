@@ -52,6 +52,7 @@
             [samizdat.agent.gitdiff :as gitdiff]
             [samizdat.agent.loop :as branch-loop]
             [samizdat.repl :as repl]
+            [samizdat.userspace :as userspace]
             [samizdat.agent.state :as state]
             [samizdat.store.journal :as journal]
             [samizdat.store.runs :as runs]
@@ -247,7 +248,10 @@
   there is no such resource. The shared reader behind manifest :prompt injection
   and the team-worker roster."
   [name]
-  (some-> (io/resource (str "prompts/" name ".md")) slurp))
+  ;; Through the userspace seam: a workflow's prompt is this project's prompt.
+  ;; nil-tolerant, unlike prompt/prompt — a manifest declaring no :prompt and a
+  ;; :prompt naming nothing are both "no suffix", not errors.
+  (userspace/body :prompt name))
 
 (def ^:private factory-manifest-names
   "The manifests that ship with the harness.

@@ -42,7 +42,8 @@
             [samizdat.llm.registry :as registry]
             [samizdat.lsp.client :as lsp-client]
             [samizdat.store.db :as db]
-            [samizdat.store.runs :as runs]))
+            [samizdat.store.runs :as runs]
+            [samizdat.userspace :as userspace]))
 
 (defonce system (atom nil))
 
@@ -92,6 +93,14 @@
          ;; all bring the system up through start! without going through -main.
          _ (platform/set-max-response-ms! (get-in cfg [:llm :max-response-ms]))
          c (db/open! (get-in cfg [:db :path]))
+         ;; Point the userspace reads at THIS project's store. From here on a
+         ;; cell, manifest, policy table or prompt resolves to the project's
+         ;; own version — seeded from the shipped template on first read — so
+         ;; two projects running this binary can evolve different loops and
+         ;; neither can edit the other's. Unbound (a bare REPL, a unit test)
+         ;; the same reads fall back to the templates, which is what the
+         ;; harness did before the store existed.
+         _ (userspace/bind! c)
          server (adapter/run-server handler {:port (get-in cfg [:http :port])})]
      (reset! system {:config cfg :conn c :server server})
      (log/info "samizdat up on port" (get-in cfg [:http :port])
@@ -114,6 +123,10 @@
   (when-let [s @system]
     (doseq [[label f] [["http server" #(adapter/stop-server (:server s))]
                        ["lsp clients" #(lsp-client/shutdown-all!)]
+                       ;; Unbind BEFORE the connection closes: a userspace read
+                       ;; against a closed handle would throw where the same
+                       ;; read against no handle simply serves the template.
+                       ["userspace" #(userspace/unbind!)]
                        ["database" #(db/close (:conn s))]]]
       (try (f) (catch Throwable e (log/warn "stopping" label "failed:" (ex-message e)))))
     (reset! system nil)

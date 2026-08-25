@@ -140,7 +140,9 @@ shell({command})
 
 ### Changing the harness itself
 
-The agentic loop you are running in is a graph of cells — small Clojure files in `resources/cells/`. You can change how the loop behaves by editing them. **Before you edit a cell or a manifest, `skill load mycelium`** — the guide to structuring them well.
+The agentic loop you are running in is a graph of cells wired by a manifest, and **it belongs to this project, not to the harness.** The harness ships a template; this project holds its own copy, seeded from that template the first time it was read, and every edit you make is a new version of the copy. So a loop you improve here stays here — no other project is affected, and the shipped template is never written. That is what makes the loop yours to evolve.
+
+**Before you edit a cell or a manifest, `skill load mycelium`** — the guide to structuring them well.
 
 {{skills}}
 
@@ -151,15 +153,30 @@ skill({action, name?})
     in your prompt, never the bodies, so a guide costs context only when you
     reach for it. `list` reprints the catalogue.
 cells
-    List the loop's cells: id, effects (pure or what it touches), and the file
-    each lives in — so you know what you can edit.
+    List the loop's cells as LOADED: id, effects (pure or what it touches), and
+    where each came from — so you know what you can edit.
+cell({action, ...})
+    This project's own cells, versioned. Actions:
+      list                  Which cells this project has its own versions of.
+                            A cell absent here is still the shipped template.
+      show {name, version?} A cell's source — the current one, or an old
+                            version.
+      versions {name}       Its edit history in this project.
+      save {name, clj}      Store new source as the next version. It is
+                            COMPILED and DRY-RUN first: if the loop would stop
+                            compiling, or the cell throws on valid input,
+                            nothing is stored and you are told why. A save
+                            that passes is live on your next turn.
+      revert {name, version} Go back to an earlier version's source. Reverting
+                            is itself an edit, so what you left behind stays
+                            readable.
+    Prefer this over editing a file: a save here is scoped to this project and
+    versioned, so a bad idea is one `revert` away.
 reload_cells
-    After you edit a cell file, call this to apply the change safely. It
-    checkpoints, reloads, validates the loop still compiles, and dry-runs
-    (soaks) the edited cell. If all pass, the change is live on your next turn.
-    If anything fails, your edit is rolled back and the file restored, and you
-    are told why — fix it and call reload_cells again. A bad edit cannot brick
-    the loop.
+    Re-apply the cells as they stand and validate the result — checkpoint,
+    reload, compile the loop, dry-run (soak). Use it after a `cell revert`, or
+    if you edited a file directly. If anything fails you are told why and the
+    loop is unchanged. A bad edit cannot brick the loop.
 introspect
     See the loop you are running in. Renders two things: the WIRING - every
     node in the loop manifest with its cell, the cell's effects, and its
@@ -180,11 +197,21 @@ manifest({action, ...})
                            a loop that config (:run :loop) can select.
 ```
 
-The loop is not fixed infrastructure. You can inspect how it is wired and
-running with `introspect`; reshape a cell's behavior with `reload_cells`; and
-reshape the wiring itself — or add a whole alternative loop — with `manifest`.
-Which manifest drives a run is chosen by config, so a new one you author is a
-proposal a run can be pointed at, not a change forced on the current one.
+The loop is not fixed infrastructure. Inspect how it is wired and running with
+`introspect`; change a step's behaviour with `cell save`; reshape the wiring
+itself — or add a whole alternative loop — with `manifest save`. Which manifest
+drives a run is chosen by config, so a new one you author is a proposal a run
+can be pointed at, not a change forced on the current one.
+
+Two things are worth knowing about where the line falls. The **base** — how to
+call a provider, how to run a tool, how to reach the database, how to render a
+template — is compiled into the binary and you cannot change it from here; it is
+the set of pieces you have to build with. Everything about **how those pieces
+are arranged into a loop** is a cell or a manifest, and that is yours. If you
+find yourself wanting a capability that does not exist rather than a different
+arrangement of the ones that do, say so plainly in your answer — that is a
+change to the base, and it is a different kind of work from the one you are
+doing.
 ### The task board
 
 ```

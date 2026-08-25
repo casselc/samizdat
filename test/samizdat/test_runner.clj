@@ -99,6 +99,7 @@
             [samizdat.fork-test]
             [samizdat.probe-test]
             [samizdat.manual-test]
+            [samizdat.userspace-test]
             [samizdat.security.policy-test]
             [samizdat.llm-test]
             [samizdat.prompt-test]
@@ -194,6 +195,7 @@
     samizdat.fork-test
     samizdat.probe-test
     samizdat.manual-test
+    samizdat.userspace-test
     samizdat.security.policy-test
     samizdat.prompt-test
     samizdat.server-test

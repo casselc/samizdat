@@ -22,11 +22,21 @@
             [samizdat.prompt :as prompt]))
 
 (deftest every-tool-is-documented
+  ;; Matched as a WORD at the start of a documentation line, not as a
+  ;; substring. `str/includes?` counted a tool named `cell` as documented
+  ;; because the prompt contains the word `cells` — so a whole tool could be
+  ;; added, be invisible to the model, and this test would pass.
   (let [prompt (loop/system-prompt)
-        undocumented (remove #(str/includes? prompt %) (tools/tool-names))]
+        documented? (fn [nm]
+                      (re-find (re-pattern
+                                (str "(?m)^\\s*"
+                                     (java.util.regex.Pattern/quote (str nm))
+                                     "\\b"))
+                               prompt))
+        undocumented (remove documented? (tools/tool-names))]
     (is (empty? undocumented)
-        (str "these tools are dispatched by run-tool but never mentioned in the"
-             " prompt, so the model cannot call them: "
+        (str "these tools are dispatched by run-tool but are not documented on a"
+             " line of their own in the prompt, so the model cannot call them: "
              (str/join ", " undocumented)))))
 
 (deftest every-documented-tool-exists
