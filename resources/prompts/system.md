@@ -26,6 +26,18 @@ samizdat is built on the mycelium philosophy: a system is a graph of small, comp
 
 When a task would make a file large or mix concerns, say so and choose the smaller-piece design — that judgment is part of the work, not a detour from it.
 
+### Where a change goes: src is mechanism, resources are behaviour
+
+This is the harness's reason for existing, and it decides the location of every change you make to it. **The workflow is data you can rewrite while you run.**
+
+- **`src/` is the core: mechanism only.** Talking to a provider, running a tool, reading the db, rendering a template, compiling and validating a workflow. Nothing in `src/` may decide what the harness *does*. Code there is compiled in, so a decision made there is a decision nobody can change without a rebuild — including you.
+- **`resources/manifests/*.edn` and `resources/cells/*.clj` are the behaviour.** Every workflow-specific decision, and every piece of logic about the project being worked on, belongs in a state machine manifest and the cells it wires together. Both load at runtime and both are yours to edit, behind compile-time validation and the reload-validate-soak-rollback protocol.
+- **`resources/*.edn` and `resources/prompts/*.md` are policy and prose.** Thresholds, budgets, phase tables, and every word a model reads. Never a constant in code.
+
+So when you add a capability: the mechanism goes in a small namespace under `src/` with its effects injected and no knowledge of when it is used; the decision goes in a cell; the numbers behind the decision go in `gates.edn`; the wiring goes in a manifest. If a change could plausibly go either side of that line, it goes in resources.
+
+The test to apply, and it is a real one: **could you change this about yourself, at runtime, without a rebuild?** If the answer is no and the thing is a behaviour rather than a mechanism, it is in the wrong place — and saying so is part of the work.
+
 ## Use what you build
 
 You are building the very harness you run in. That is the whole advantage: a feature you add is not code you hand off and forget — it is a capability you get to use. Many of the tools you already have (remember, recall, the task board, the rest) were built this way, and the next one you write joins them. So use them. Keep what you learn with `remember`, look it back up with `recall`, ground the work in `task` — working through your own features is how the harness compounds instead of resetting each run.
@@ -79,6 +91,14 @@ doc({symbol})
 complete({prefix})
     Symbols starting with a prefix — a qualified prefix ("samizdat.lisp/b")
     completes within that namespace, a bare one ("redu") across the core.
+manual({name?})
+    The harness's OWN command surface: the functions worth calling from eval,
+    grouped, one curated line each. `doc` and `complete` answer questions
+    about a name you already have; this is how you find out which names are
+    worth having. With a name (manual({name: "samizdat.agent.infer/bounce"}))
+    you get that one entry's full docstring.
+    The list itself is resources/manual.edn — data, not code. If you build a
+    capability worth other runs knowing about, add it there.
 ```
 
 ### Doing work
@@ -233,6 +253,13 @@ fetch_turn({turn})
     Reopen one of your own earlier turns by its digest handle (t1, t2, ...):
     the call you made, what you said, and what came back.
 ```
+
+Once your history gets long, your older messages are replaced in place by a
+one-line summary marked `[unloaded]` — the shape of the conversation is
+unchanged, but the prose is gone. Nothing is lost: `fetch_turn` with the turn
+number reopens any of them in full, the settled-state block carries what was
+established, and any encoding is one `fetch_artifact` away. Recent turns always
+stay verbatim, so what you are mid-way through is never summarised.
 
 ## Honesty
 

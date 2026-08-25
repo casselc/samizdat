@@ -271,6 +271,61 @@
         own branch a turn, exported it becomes every branch's context
         (vf-8fl). require-relevance? off admits any confirmed artifact."}
 
+ :fork-inherit
+ {:value {:inherit? true :depth nil}
+  :kind :threshold :capability-tunable? false
+  :doc "What a forked child inherits from its parent (LR-1).
+
+        :inherit? — whether the child opens on its parent's CONVERSATION or
+        on a fresh [system, problem] tape. Fresh was the old behaviour and it
+        was not a decision anyone made: a fork discarded everything its
+        parent had learned and re-derived it from the problem statement,
+        while the crossover block's own prose claimed the child carried its
+        parent's history. Inheriting is nearly free — the tape is an
+        immutable value, so a child shares structure with its parent — and on
+        a local endpoint the shared prefix is also a warm KV cache
+        (:cache_prompt, LR-5).
+
+        :depth — how many MESSAGES of the parent to carry, nil for all of
+        them. Two per exchange, so 8 is four exchanges. This is the
+        branch-an-older-turn knob: when a parent went wrong at turn 6, a
+        child forked at depth 10 retries from before the mistake instead of
+        from zero. Only the gate counters are reset either way — a child is
+        never culled for its parent's failures.
+
+        A depth past the parent's own length cannot lengthen the tape, so a
+        stale number degrades to a full inherit rather than an error."}
+
+ :probe
+ {:value {:width 3 :on-mechanics-failures 2 :variants []}
+  :kind :cost-ceiling :capability-tunable? false
+  :doc "The non-committing probe's budget (LR-2, LR-3).
+
+        :width — how many candidate framings :probe/next-move tries against
+        the branch's current tape before the real turn. Each is one
+        completion, so this is spend: 0 turns the probe off entirely. On a
+        local endpoint every bounce reuses the same warm prefix
+        (:cache_prompt), so a scan costs N completions and ONE prefill;
+        against a metered provider it costs N calls, which is why the default
+        is small.
+
+        :on-mechanics-failures — how many consecutive malformed or unusable
+        calls a branch must have produced before probing is worth it. A branch
+        emitting well-formed calls needs no help, and probing it is pure
+        spend. This is a :cost-ceiling, so it is never scaled UP for a
+        struggling run — a branch in trouble is the last one to spend more on.
+
+        :variants — the role keys :probe/ab-model fans one question across,
+        resolved through config :run :role-models. Empty turns the A/B off.
+        Recording the comparison is the point; nothing routes on it yet.
+
+        NOT capability-tunable, even though both knobs are keyed on tool-call
+        mechanics and the tier's remit is exactly that. It is a cost ceiling,
+        and the tier could only ever want to raise :width — which is spending
+        MORE on the branch already in trouble, the one thing the cost-ceiling
+        kind exists to forbid (dirge PR 740). gate-config-is-coherent asserts
+        it, and caught this entry claiming otherwise."}
+
  :critic-objectives
  {:value [:progress :momentum :distinctness :viability] :kind :threshold
   :capability-tunable? false

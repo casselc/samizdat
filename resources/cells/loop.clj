@@ -43,11 +43,11 @@
         signals, append what the assistant actually said. On a provider failure
         this passes the data through untouched for the error route."
    :pure true}
-  (fn [_ctx {:keys [branch call] :as data}]
+  (fn [_ctx {:keys [branch call turn] :as data}]
     (if-not (:ok call)
       data
       (let [{:keys [branch parsed signals said]}
-            (turn/absorb-response branch (:response call))]
+            (turn/absorb-response branch (:response call) turn)]
         (assoc data :branch branch :parsed parsed :signals signals :said said)))))
 
 (cell/defcell :loop/provider-error

@@ -21,7 +21,8 @@
 
   Two jobs, both of which have to happen the same way for every provider or
   the harness's context management differs by which model it is talking to."
-  (:require [clojure.string :as str]))
+  (:require [clojure.string :as str]
+            [samizdat.tape :as tape]))
 
 (defn strip-think-blocks
   "Remove <think>…</think> from content.
@@ -70,28 +71,85 @@
 (defn- digest-line
   "One line for a turn that has been unloaded: what was tried, how it came out.
 
-  The minimum a branch needs about its own distant past. Anything more —  the
+  The minimum a branch needs about its own distant past. Anything more — the
   encoding, the engine's full output, the reasoning — is in the journal, and
   confirmed results are in the settled-state block with ids to fetch."
   [{:keys [turn tool category error]}]
-  (str "  t" turn " " (or tool "?") " → " (name (or category :neutral))
+  (str "t" turn " " (or tool "?") " → " (name (or category :neutral))
        (when (seq error)
          (let [e (first (str/split-lines (str error)))]
            (str ": " (if (> (count e) 90) (str (subs e 0 90) "…") e))))))
 
+(def ^:private compactable-roles
+  "The roles compaction may rewrite here. Both, unlike llm-repl's
+  assistant-only default, because a \"user\" message in this harness is a tool
+  result rather than a human prompt — and tool results are the bulk of a long
+  branch's context. The FRAME (system prompt, problem statement) is excluded
+  by index, not by role."
+  #{"assistant" "user"})
+
+(def ^:private unloaded-tail
+  "The marker every compacted message carries, so the model can tell a summary
+  from something that was actually said.
+
+  Deliberately TERSE. It is repeated on every compacted message, so a long
+  sentence here is a per-message tax on the very context compaction exists to
+  shrink — sixty compacted messages would carry sixty copies of it. Where the
+  detail went, and how to get it back with `fetch_turn`, belongs in the system
+  prompt, which says it once. Constant, so a compacted message never changes
+  again once written."
+  " [unloaded]")
+
+(defn- self-summary
+  "A message summarised from its OWN content: the first non-blank line,
+  bounded, plus the pointer.
+
+  The fallback when no turn record can be attributed to the message. It is
+  never a lie about which turn a message was — which is the failure mode the
+  positional guess had, since a provider error or a no-call turn appends
+  messages without appending a turn row, so the k-th message is not the k-th
+  turn."
+  [{:keys [content]}]
+  (let [line (or (first (remove str/blank? (str/split-lines (str content)))) "")
+        line (str/trim line)]
+    (str (if (> (count line) 90) (str (subs line 0 90) "…") line)
+         unloaded-tail)))
+
+(defn- replacement-for
+  "What an unloaded message becomes: its turn's digest where the message
+  carries a turn stamp and that turn is on the log, else a summary of its own
+  content."
+  [m turns-by-number]
+  (if-let [t (get turns-by-number (:turn m))]
+    (str (digest-line t) unloaded-tail)
+    (self-summary m)))
+
 (defn compact
-  "Replace a branch's older turns with a digest of what they tried.
+  "Compact a branch's older turns IN PLACE, so the array's shape never changes.
 
   A branch's context is its own narrative, and past a certain length most of
   it is prose it will never consult again — while the part it genuinely needs,
   which approaches are already spent, is buried in that prose. This inverts
   that: recent turns stay whole, older ones become one line each.
 
-  The frame is preserved exactly. The system prompt survives, the problem
-  survives, and the digest is appended to the PROBLEM message rather than
-  inserted as its own turn, so the conversation stays strictly alternating
-  after it — a run of two user messages is tolerated by some providers and
-  rejected by others, and this needs no provider to be forgiving.
+  WHY IN PLACE. The previous version appended its digest to the PROBLEM
+  message, to keep the conversation strictly alternating after it. That works,
+  but it rewrites message 1 every time compaction fires, so the shared prefix
+  changes on every turn and the upstream prompt cache is invalidated from
+  index 1 onward — every turn re-prefills the whole conversation. Replacing
+  each aged-out message's content in place keeps roles, order and count
+  identical, so alternation holds with no provider needing to be forgiving AND
+  the prefix stays stable: each message is rewritten once, ever, and the
+  prefix before the newest rewrite is byte-identical from turn to turn. This
+  is llm-repl's chat-memory design; see samizdat.tape for the primitives and
+  docs/llm-repl-port.md LR-4 for the argument.
+
+  ONE ATTEMPT PER MESSAGE. A replacement is accepted only inside the
+  compression band (|new| ≤ max(|original|, floor)); outside it the message is
+  marked declined and left verbatim, and it never returns to the due set.
+  Every outcome changes the array, which is what makes a loop impossible — a
+  rejection that marked nothing decremented no measure, and llm-repl logged 31
+  attempts against one message before finding that out.
 
   Nothing is lost, only unloaded: every turn is in the journal, every
   confirmed and refuted artifact is in the settled-state block, and the
@@ -99,30 +157,38 @@
   the branch's own history is untouched and a resume replays what was really
   sent at the time."
   ([messages turns] (compact messages turns nil))
-  ([messages turns {:keys [keep-pairs threshold-chars]}]
-   (let [keep-pairs (or keep-pairs default-keep-pairs)
+  ([messages turns {:keys [keep-pairs threshold-chars floor]}]
+   (let [messages (vec messages)
+         keep-pairs (or keep-pairs default-keep-pairs)
          threshold (or threshold-chars default-compaction-threshold)
-         total (reduce + 0 (map (comp count str :content) messages))
-         [frame body] (split-at 2 (vec messages))
-         pairs (partition-all 2 body)
-         drop-n (- (count pairs) keep-pairs)]
-     (if (or (< total threshold) (<= drop-n 0) (< (count frame) 2))
-       (vec messages)
-       (let [kept (apply concat (drop drop-n pairs))
-             ;; The digest covers exactly the turns being unloaded, so a turn
-             ;; kept verbatim is never also summarised.
-             lines (keep digest-line (take drop-n turns))]
-         (vec (concat [(first frame)
-                       (update (second frame) :content
-                               #(str % "\n\n## Earlier turns on this branch"
-                                     " (unloaded — full detail is in the run journal)\n\n"
-                                     (str/join "\n" lines)
-                                     "\n\nReopen any of these in full with"
-                                     " `fetch_turn` and its number. What they"
-                                     " established or ruled out is in the"
-                                     " settled-state block, and any encoding is"
-                                     " one `fetch_artifact` away."))]
-                      kept)))))))
+         total (reduce + 0 (map (comp count str :content) messages))]
+     (if (or (< total threshold) (< (count messages) 3))
+       messages
+       ;; The frame is never a candidate: the system prompt and the problem
+       ;; statement are the two things whose stability the whole prefix cache
+       ;; rests on, and they are also the two a branch cannot do without.
+       (let [turns-by-number (into {} (map (juxt :turn identity)) (or turns []))
+             ;; Everything past the last `keep-pairs` exchanges, counted in
+             ;; ASSISTANT turns — the tape's own definition of a turn, and one
+             ;; that does not shift when the harness inserts a message of its
+             ;; own.
+             ;; Both roles: in samizdat a "user" message is usually a TOOL
+             ;; RESULT, and those are the bulk of a long branch's context.
+             ;; Compacting assistant turns alone would leave almost all of it
+             ;; verbatim.
+             opts {:floor (or floor tape/default-floor) :roles compactable-roles}
+             ;; Indices 0 and 1 are the frame — the system prompt and the
+             ;; problem. tape/due-indices deliberately knows nothing about
+             ;; which leading messages are load-bearing, so the frame is
+             ;; protected here, by the caller that owns it.
+             due (remove #(< % 2)
+                         (tape/due-indices messages keep-pairs compactable-roles))]
+         (reduce (fn [ms i]
+                   (tape/compact-at ms i
+                                    (replacement-for (nth ms i) turns-by-number)
+                                    opts))
+                 messages
+                 due))))))
 
 (def ledger-open "<!--settled-state-->")
 (def ledger-close "<!--/settled-state-->")

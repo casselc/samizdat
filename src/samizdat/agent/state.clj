@@ -31,6 +31,7 @@
             [clojure.string :as str]
             [samizdat.agent.phases :as phases]
             [samizdat.agent.wordlists :as wordlists]
+            [samizdat.tape :as tape]
             [samizdat.util :as util]))
 
 (defn new-branch
@@ -106,6 +107,50 @@
    ;; cross-checked template or a review-plus-audit pass.
    :tiers-seen #{}
    :final-answer nil})
+
+(defn fork-branch
+  "A child of `parent` carrying its CONVERSATION — the fork llm-repl's tape
+  makes cheap, and the one samizdat was not taking.
+
+  Every child used to open on `initial-messages problem`: a fresh two-message
+  tape, so a fork discarded everything its parent had learned and re-derived
+  it from the problem statement. The parent's own docstring for the crossover
+  block already assumed otherwise ('the child already carries them in its
+  inherited history'). Now it does.
+
+  What is INHERITED is the conversation: the messages up to `depth` (nil ≡ all
+  of them), and the slice of the turn log those messages cover, so compaction
+  and the turn-window predicates still have a history to read. What is NOT
+  inherited is every gate counter — consecutive failures, the mechanics tally,
+  the stall clock, the phase, the artifacts, the abandoned log. A child gets a
+  clean slate as a BRANCH while carrying the conversation, because the
+  counters are a record of how the PARENT was doing and culling a newborn for
+  its parent's failures is the mistake the reprieve machinery exists to
+  prevent.
+
+  `:turns` is RE-DERIVED from the inherited tape rather than copied, the way
+  llm-repl re-derives its turn count: truncating a copy drops assistant turns,
+  and the tape is the ground truth the counter has to agree with. `:forked-at`
+  records the branch point, without which an `{:at N}` fork's tree edge is
+  lossy — the depth is the only thing that says where the child left the
+  parent's line."
+  [parent {:keys [id depth turn thesis problem]}]
+  (let [messages (tape/truncate-at (:messages parent) depth)
+        ;; The turn records the inherited messages actually cover — matched by
+        ;; the stamps add-message writes, not by position. A turn whose
+        ;; messages were truncated away is not this child's history.
+        kept-turns (let [stamped (set (keep :turn messages))]
+                     (if (seq stamped)
+                       (vec (filter #(contains? stamped (:turn %)) (:turns parent)))
+                       []))]
+    (assoc (new-branch {:id id
+                        :parent-id (:id parent)
+                        :problem (or problem (:problem parent))
+                        :created-at-turn turn
+                        :messages messages})
+           :turns kept-turns
+           :forked-at (count messages)
+           :thesis thesis)))
 
 (defn active? [branch] (= :active (:status branch)))
 
@@ -542,8 +587,22 @@
                   (same? (peek turns))
                   (same? (peek (pop turns)))))))
 
-(defn add-message [branch role content]
-  (update branch :messages conj {:role role :content content}))
+(defn add-message
+  "Append a message. `meta` is optional per-message provenance merged onto it —
+  `{:turn n}` is the one that earns its keep: compaction needs to know which
+  turn a message belongs to in order to replace it with that turn's digest,
+  and the positional guess it used before is not sound (a provider error or a
+  no-call turn appends messages without appending a turn row, so the k-th
+  message is not the k-th turn). Stamping at creation, where the turn number
+  is actually known, makes the correspondence a fact rather than an inference.
+
+  Absent for the many call sites with no turn in scope; compaction falls back
+  to summarising a message from its own content, which is never a lie about
+  which turn it was."
+  ([branch role content] (add-message branch role content nil))
+  ([branch role content meta]
+   (update branch :messages conj
+           (merge {:role role :content content} (not-empty meta)))))
 
 (defn turn-count [branch] (count (:turns branch)))
 

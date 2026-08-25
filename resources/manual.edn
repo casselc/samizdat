@@ -1,0 +1,95 @@
+;; THE OPERATOR MANUAL — the harness's own command surface, as data.
+;;
+;; The agent develops at the REPL inside this image, so the functions it can
+;; usefully call are part of its tool surface whether or not anything documents
+;; them. Without a curated list the only way to find them is to guess a
+;; namespace and read `complete` output, which is how a whole capability stays
+;; invisible.
+;;
+;; llm-repl solves this by tagging vars with ^{:manual "sentence"} and
+;; compiling the manual from ns-publics. That is the right shape and the wrong
+;; PLACE for us: metadata lives in src, and src is the half of this system the
+;; supervisor cannot edit at runtime. So the curation lives here instead —
+;; which entries exist, and the one-sentence summary each gets. The mechanism
+;; that resolves and renders it is samizdat.manual.
+;;
+;; TWO AUDIENCES, TWO TEXTS, ONE SEAM. The docstring on the var stays
+;; maintainer-dense; :summary is the operator sentence. `samizdat.manual/render`
+;; shows the summaries, `entries` returns both as data, and anything that wants
+;; the full docstring reads :doc off the resolved var.
+;;
+;; Every :name must resolve. A name that does not is a loud failure, not a hole
+;; in the rendering: a manual that quietly lists nothing is worse than no
+;; manual, because it reads as "there is nothing here".
+;;
+;; Adding an entry needs no rebuild. Removing one hides a capability, so remove
+;; only what has actually gone away.
+[{:group "The tape"
+  :entries
+  [{:name samizdat.tape/truncate-at
+    :summary "The tape as it was after its first N messages — the fork primitive."}
+   {:name samizdat.tape/append-user
+    :summary "Append a user turn, returning a new tape. The old one is untouched."}
+   {:name samizdat.tape/due-indices
+    :summary "Which messages have aged out of the verbatim window and are still compaction candidates."}
+   {:name samizdat.tape/within-band?
+    :summary "Whether a replacement is small enough to accept: |new| <= max(|original|, floor)."}
+   {:name samizdat.tape/apply-fold
+    :summary "Collapse a finished conversation into one block plus a verbatim tail, or reject it."}]}
+
+ {:group "Probing without committing"
+  :entries
+  [{:name samizdat.agent.infer/of-branch
+    :summary "Project a branch onto its tape: everything a model call depends on, and nothing else."}
+   {:name samizdat.agent.infer/complete-fn
+    :summary "Build the one effect — a function from tape to model reply. Pass a stub to drive a turn offline."}
+   {:name samizdat.agent.infer/step
+    :summary "One inference step: tape in, advanced tape out. Pure given the completion function."}
+   {:name samizdat.agent.infer/bounce
+    :summary "Ask what the model would do next off a fixed tape. Nothing is appended and no tool runs."}
+   {:name samizdat.agent.infer/trampoline
+    :summary "Bounce many candidate inputs off the same fixed tape, independently. The tape never moves."}
+   {:name samizdat.agent.infer/ab
+    :summary "Ask one question of several model configs off one tape, and keep every answer."}]}
+
+ {:group "Branches"
+  :entries
+  [{:name samizdat.agent.state/fork-branch
+    :summary "A child carrying its parent's conversation — optionally truncated to an earlier turn."}
+   {:name samizdat.agent.state/add-message
+    :summary "Append a message, optionally stamped with the turn it belongs to."}
+   {:name samizdat.agent.state/describe
+    :summary "One line about a branch: status, turns, artifacts, why it stopped."}]}
+
+ {:group "Changing the harness"
+  :entries
+  [{:name samizdat.cells/loaded
+    :summary "Which cells are registered and which file each came from."}
+   {:name samizdat.cells/load-cells!
+    :summary "Reload every cell from resources. Transactional — a broken edit rolls the registry back."}
+   {:name samizdat.mutation/apply-cell-edit!
+    :summary "The safety around editing a cell: checkpoint, reload, validate, soak, commit or roll back."}
+   {:name samizdat.workflow/catalog
+    :summary "Every workflow available to select or adapt, with its description."}
+   {:name samizdat.workflow/compile-loop
+    :summary "Compile a workflow definition through mycelium's static checks. Throws on any violation."}
+   {:name samizdat.workflow/turn-manifest
+    :summary "A whole-run manifest reduced to one turn — the slice the beam schedules."}]}
+
+ {:group "Policy as data"
+  :entries
+  [{:name samizdat.agent.gates/threshold
+    :summary "Read one tunable from gates.edn. Every gate budget in the harness is a value here."}
+   {:name samizdat.agent.phases/withholds
+    :summary "Which tools a phase refuses, from phases.edn."}
+   {:name samizdat.prompt/render
+    :summary "Render a prompt resource through selmer. Every harness message the model sees comes through here."}]}
+
+ {:group "The record"
+  :entries
+  [{:name samizdat.store.journal/note!
+    :summary "Append a note to the run's journal. The durable record a later run reads back."}
+   {:name samizdat.store.journal/artifacts
+    :summary "Every artifact this run banked, across all branches."}
+   {:name samizdat.events/subscribe
+    :summary "A channel of every event published from now on, for watching a run without polling."}]}]

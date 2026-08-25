@@ -94,6 +94,11 @@
             [samizdat.cells-test]
             [samizdat.mutation-test]
             [samizdat.repl-test]
+            [samizdat.tape-test]
+            [samizdat.infer-test]
+            [samizdat.fork-test]
+            [samizdat.probe-test]
+            [samizdat.manual-test]
             [samizdat.security.policy-test]
             [samizdat.llm-test]
             [samizdat.prompt-test]
@@ -184,6 +189,11 @@
     samizdat.cells-test
     samizdat.mutation-test
     samizdat.repl-test
+    samizdat.tape-test
+    samizdat.infer-test
+    samizdat.fork-test
+    samizdat.probe-test
+    samizdat.manual-test
     samizdat.security.policy-test
     samizdat.prompt-test
     samizdat.server-test

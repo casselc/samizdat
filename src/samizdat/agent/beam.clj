@@ -77,26 +77,48 @@
                                      (str "- [" (:branch_id a) " " (:kind a) "] "
                                           (:claim a))))})))))
 
+(defn- seed-branch
+  "The child's opening state: its parent's conversation when there is a parent
+  to inherit from and the policy says take it, else a fresh tape.
+
+  `gates.edn :fork-inherit` owns the decision, so switching a run back to
+  fresh-tape forks — or forking from an older turn — is a data edit and not a
+  rebuild. See `state/fork-branch` for what is and is not inherited."
+  [{:keys [problem]} parent id thesis turn]
+  (let [{:keys [inherit? depth]} (gates/threshold :fork-inherit)]
+    (if (and parent inherit?)
+      (state/fork-branch parent {:id id :depth depth :turn turn
+                                 :thesis thesis :problem problem})
+      (cond-> (state/new-branch
+               {:id id :parent-id (:id parent) :problem problem
+                :created-at-turn turn
+                :messages (branch-loop/initial-messages problem)})
+        thesis (assoc :thesis thesis)))))
+
 (defn- open-branch!
-  [{:keys [conn run-id problem]} id parent-id thesis turn]
-  (let [b (state/new-branch
-           {:id id :parent-id parent-id :problem problem
-            :created-at-turn turn
-            :messages (branch-loop/initial-messages problem)})]
+  [{:keys [conn run-id] :as ctx} id parent thesis turn]
+  (let [parent-id (:id parent)
+        b (seed-branch ctx parent id thesis turn)]
     (runs/open-branch! conn run-id {:branch-id id :parent-id parent-id
                                     :created-at-turn turn})
     (if thesis
       (do (runs/set-thesis! conn run-id id thesis)
           (-> b
               (assoc :thesis thesis)
+              ;; The nudge is prompts/fork-thesis.md — runtime-editable, the
+              ;; same seam every other harness message reads through, and it
+              ;; has to say something different to a child that inherited its
+              ;; parent's history than to one starting the problem over.
               (state/add-message
                "user"
-               (str "You were forked from " parent-id " to pursue one specific"
-                    " approach:\n\n**" (:goal thesis) "**"
-                    (when (:technique thesis) (str "\nTechnique: " (:technique thesis)))
-                    (crossover-block conn run-id parent-id)
-                    "\n\nOther branches are pursuing the alternatives, so commit to"
-                    " this one rather than hedging. Issue your first tool call."))))
+               (prompt/render "fork-thesis"
+                 {:parent parent-id
+                  :goal (:goal thesis)
+                  :technique (:technique thesis)
+                  :crossover (crossover-block conn run-id parent-id)
+                  ;; :forked-at is stamped only by state/fork-branch, so its
+                  ;; presence IS the answer to "did this child inherit?".
+                  :inherited (some? (:forked-at b))}))))
       b)))
 
 (defn- cull-or-keep
@@ -405,7 +427,9 @@
             ids (child-ids taken (:id parent) (count spawning))
             ;; mapv, not map: these INSERT. A lazy seq of side effects is only
             ;; correct for as long as every caller keeps realising it.
-            children (mapv (fn [id t] (open-branch! ctx id (:id parent) t turn))
+            ;; The parent VALUE, not just its id: a child inherits its
+            ;; conversation from it (LR-1, gates.edn :fork-inherit).
+            children (mapv (fn [id t] (open-branch! ctx id parent t turn))
                            ids spawning)
             parent (cond-> parent
                      (< take-n (count pending))

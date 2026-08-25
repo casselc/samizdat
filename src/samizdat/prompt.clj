@@ -13,7 +13,8 @@
   surface to defend — the output feeds a model, not a browser. One semantic
   difference from str/replace chains, accepted: a missing key renders empty
   instead of surfacing a literal {{...}} to the model."
-  (:require [clojure.java.io :as io]
+  (:require [clojure.edn :as edn]
+            [clojure.java.io :as io]
             [clojure.string :as str]
             [selmer.parser :as selmer]
             [selmer.util :as selmer-util]))
@@ -46,3 +47,75 @@
   "Render resources/prompts/<name>.md with selmer against `ctx`."
   [name ctx]
   (render-str (prompt name) ctx))
+
+;; --- prompt chains (LR-7) ----------------------------------------------------
+;;
+;; Ported from llm-repl's roster/resolve-preamble, MIT licensed, (c) 2026
+;; Michael Whitford — full notice in src/samizdat/tape.clj. The rule is
+;; FIRST-PRESENT-WINS: a level REPLACES the text rather than adding to it, an
+;; absent level inherits from the one below, and a level that is present but
+;; blank means explicitly NONE and stops the walk.
+;;
+;; The chain itself is resources/prompt-chain.edn — data, so which layers exist
+;; and in what order is editable at runtime.
+
+(def chain-resource "prompt-chain.edn")
+
+(defn chains
+  "The declared chains, {layer-key [entry …]}. Read fresh so an edit takes
+  effect without a restart; nil when the resource is absent, which callers
+  treat as 'no chain declared' rather than an error — a harness with no
+  prompt-chain.edn still has its shipped prompts."
+  []
+  (some-> (io/resource chain-resource) slurp edn/read-string))
+
+(defn- entry-value
+  "One chain entry's value, or `::absent`.
+
+  `::absent` ≡ inherit from the next level down. A present-but-blank value is
+  NOT absent: it is the explicit \"none\", which is the distinction the whole
+  trichotomy rests on, and collapsing the two would make it impossible to
+  suppress a layer at all."
+  [{:keys [project file text] :as entry}]
+  (cond
+    (contains? entry :project)
+    (let [f (io/file project)]
+      (if (.exists f) (slurp f) ::absent))
+
+    (contains? entry :file)
+    (if-let [url (io/resource (str "prompts/" file ".md"))]
+      (slurp url)
+      ::absent)
+
+    (contains? entry :text)
+    text
+
+    :else
+    (throw (ex-info (str "unknown prompt-chain entry — want :project, :file or"
+                         " :text") {:entry entry}))))
+
+(defn resolve-chain
+  "Walk `entries` and return the first PRESENT value's text, or nil.
+
+  nil means one of two different things, and the caller does not need to tell
+  them apart: either a level said \"explicitly none\", or no level was present.
+  Both mean this layer contributes no text."
+  [entries]
+  (reduce (fn [_ entry]
+            (let [v (entry-value entry)]
+              (if (= ::absent v)
+                nil                        ; inherit — keep walking
+                (reduced (not-empty (str/trim (str v)))))))
+          nil
+          entries))
+
+(defn layer
+  "The text for the named chain layer, e.g. `(layer :system)`.
+
+  Falls back to the prompt resource of the same name when no chain is declared
+  for it, so adding a layer to prompt-chain.edn is opt-in and a harness with no
+  chain file behaves exactly as it did before."
+  [k]
+  (if-let [entries (get (chains) k)]
+    (resolve-chain entries)
+    (some-> (io/resource (str "prompts/" (name k) ".md")) slurp)))

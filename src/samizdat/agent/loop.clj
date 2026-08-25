@@ -33,13 +33,11 @@
             [clojure.tools.logging :as log]
             [samizdat.agent.arbiter :as arbiter]
             [samizdat.agent.gates :as gates]
+            [samizdat.agent.infer :as infer]
             [samizdat.agent.phases :as phases]
             [samizdat.agent.state :as state]
             [samizdat.agent.tools :as tools]
-            [samizdat.llm.client :as llm]
-            [samizdat.llm.fence :as fence]
             [samizdat.agent.skills :as skills]
-            [samizdat.llm.message :as message]
             [samizdat.prompt :as prompt]
             [samizdat.store.artifacts :as artifacts]
             [samizdat.store.failures :as failures]
@@ -69,7 +67,13 @@
   ;; the prompt but cheap — names and trigger descriptions only, never
   ;; bodies — so the model knows what it can `skill load` and WHEN,
   ;; without spending a turn to discover them.
-  (prompt/render "system"
+  ;;
+  ;; The TEXT comes through the :system chain (prompt-chain.edn, LR-7), so a
+  ;; project can replace the shipped prompt outright or suppress it entirely.
+  ;; First-present-wins: a level replaces, never concatenates. A suppressed
+  ;; base is legitimate — a workflow's own :prompt then IS the instruction
+  ;; set — so this renders empty rather than falling back to the shipped file.
+  (prompt/render-str (or (prompt/layer :system) "")
     {:templates ""
      :skills (skills/render-catalog)}))
 
@@ -187,77 +191,16 @@
 
 ;; --- one turn ---------------------------------------------------------------
 
-(def ^:private max-call-attempts
-  "One retry, then the turn is spent. Unbounded escalation here would let a
-  single turn eat a branch's whole budget, and a model that has not reached a
-  tool call in twice its cap is not one token short."
-  2)
-
-(defn- truncated-without-call?
-  "The response ran out of tokens before it emitted a usable tool call.
-
-  fence/signals already separates this from `:no-fence` and its docstring says
-  what to do about it — 'the fix is more tokens, not more steering' — but the
-  loop steered anyway and forfeited the turn. gen-12 opened with three of these
-  in a single round; gen-11 spent 12% of its turns this way against gen-10's
-  4%. Truncation that still carried a call is a complete turn and is left
-  alone.
-
-  Takes the prefill for the same reason the parser does: a prefilled response
-  begins mid-fence, so parsing it without the opener finds no call and would
-  bill the branch a retry for a turn that had in fact issued one."
-  [response prefill]
-  (let [parsed (fence/parse-tool-call (:content response) {:prefill prefill})]
-    (and (:truncated (fence/signals response parsed))
-         (or (nil? parsed) (= "__parse_error__" (:name parsed))))))
-
 (defn call-model
-  "One model call, retried once at a doubled budget when the first response hit
-  the token cap before emitting a tool call.
+  "One model call for `branch`, through the injected inference seam.
 
-  Same sizing as the judge's: double the configured budget rather than repeat
-  it, since a response that ran out of room needs room, and repeating the call
-  at the same cap reproduces the same truncation."
+  The mechanism moved to samizdat.agent.infer, where the tape is a value and
+  `complete` is an argument — this is the branch-shaped wrapper the cells and
+  the beam call. Same behaviour as before: one retry at a doubled budget when
+  the response hit the token cap before emitting a tool call, and a provider
+  failure returned as {:ok false :error} rather than thrown."
   [ctx branch]
-  (loop [attempt 1]
-    (let [budget (when-let [base (:max-tokens (:llm-config ctx))]
-                   (* base (bit-shift-left 1 (dec attempt))))
-          r (try
-              {:ok true
-               :response (llm/chat (:llm-adapter ctx) (:llm-config ctx)
-                                   ;; Older turns go as a digest of what they
-                                   ;; tried once the history is long; the
-                                   ;; branch's own message list is untouched,
-                                   ;; so the journal and a resume still hold
-                                   ;; everything. Below the threshold this
-                                   ;; returns the messages unchanged.
-                                   (message/compact (:messages branch)
-                                                    (:turns branch))
-                                   (cond-> {}
-                                     budget (assoc :max-tokens budget)
-                                     ;; Set by the previous turn's steer. The
-                                     ;; adapter drops it if the provider cannot
-                                     ;; continue a trailing assistant message,
-                                     ;; so this is a hint, never a requirement.
-                                     (:prefill branch)
-                                     (assoc :prefill (:prefill branch))
-                                     ;; A gate forcing a specific tool: sent as a
-                                     ;; native tool_choice, honoured on every
-                                     ;; OpenAI-compatible provider (GLM included).
-                                     (:force-tool branch)
-                                     (assoc :force-tool (:force-tool branch))))}
-              (catch Throwable e
-                {:ok false :error (ex-message e)}))]
-      (if (and (:ok r)
-               (< attempt max-call-attempts)
-               (truncated-without-call? (:response r) (:prefill branch)))
-        (do (when (and (:conn ctx) (:run-id ctx))
-              (journal/note! (:conn ctx) (:run-id ctx) :turn-retry
-                             {:branch-id (:id branch)
-                              :data {:reason "truncated before any tool call"
-                                     :budget budget}}))
-            (recur (inc attempt)))
-        r))))
+  ((infer/complete-fn ctx) (infer/of-branch branch)))
 
 (defn- settle-predictions!
   "Close out any prediction whose window has passed or whose expectation the
@@ -301,7 +244,8 @@
                   {:lead (if (:reframe-entered-turn branch)
                            "Your re-planning budget is spent: "
                            "The explore prologue is over: ")
-                   :cap (gates/threshold :explore-cap)}))))))
+                   :cap (gates/threshold :explore-cap)}))
+         {:turn turn}))))
 
 (defn provider-error-step
   "A provider failure is not the branch's fault and must not count against it
@@ -314,34 +258,28 @@
                          :category "neutral"})
   (state/add-message branch "user"
                      (str "[harness] The provider call failed: " error
-                          " Try again.")))
+                          " Try again.")
+                     {:turn turn}))
 
 (defn absorb-response
-  "Fold the model's response into the branch: parse the fence, record the
-  mechanics signals, and append what the assistant actually said — opener
-  included, because storing the bare completion would leave a turn beginning
-  mid-fence in the transcript, misrepresenting the format back to the model
-  on every later turn."
-  [branch response]
-  (let [content (:content response)
-        ;; The prefill the request ended with, if any. Without it the response
-        ;; starts mid-fence and parses as a no-call — the very failure the
-        ;; prefill exists to prevent.
-        prefill (:prefill branch)
-        parsed (fence/parse-tool-call content {:prefill prefill})
-        signals (fence/signals response parsed)
-        said (fence/reattach content prefill)]
-    {:parsed parsed
-     :signals signals
-     :said said
-     :branch (-> branch
-                 ;; Cleared here, not where it was set: one steer forecloses
-                 ;; prose on one turn. Leaving it would make every later turn
-                 ;; start inside a fence — or, for force-tool, force the same
-                 ;; terminal call every turn after.
-                 (dissoc :prefill :force-tool)
-                 (state/add-message "assistant" said)
-                 (state/record-mechanics signals))}))
+  "Fold the model's response into the branch.
+
+  Two layers, deliberately separate. The TAPE half — parse the fence, append
+  what the assistant actually said, clear the per-turn knobs — is
+  `infer/absorb`, a pure function of a tape value that a probe drives without
+  a branch anywhere in sight. The BRANCH half is the mechanics tally, which is
+  bookkeeping about the branch rather than about the conversation, and which a
+  probe deliberately does not touch: a bounce that parsed badly is not a
+  branch that called badly."
+  ([branch response] (absorb-response branch response nil))
+  ([branch response turn]
+   (let [{:keys [tape parsed signals said]}
+         (infer/absorb (infer/of-branch branch) response turn)]
+     {:parsed parsed
+      :signals signals
+      :said said
+      :branch (-> (infer/into-branch branch tape)
+                  (state/record-mechanics signals))})))
 
 (defn no-call-step
   "No usable call. Say exactly what was wrong; a bare \"try again\" produces
@@ -378,7 +316,7 @@
                            :usage (:usage response)})
     (-> branch
         (state/record-outcome {:category :mechanics :progress? false})
-        (state/add-message "user" msg)
+        (state/add-message "user" msg {:turn turn})
         ;; And make the next request end mid-fence, so prose is not an
         ;; available reply. Telling the model to emit a fence is the
         ;; suggesting form; this is the withholding form, which is the one
@@ -553,7 +491,7 @@
         branch (settle-predictions! conn branch turn [tool] before branch)
         branch (drain-directives! conn run-id branch turn)]
     (if (:done? result)
-      (state/add-message branch "user" (truncate (:result result)))
+      (state/add-message branch "user" (truncate (:result result)) {:turn turn})
       ;; Coverage answers whether the safe-state rung's fallback is honest:
       ;; the green cursor still points into a turn log the journal can
       ;; replay up to.
@@ -596,7 +534,7 @@
          (apply-effects decision turn max-turns
            (cond-> (-> branch
                      (dissoc :pending-directive)
-                     (state/add-message "user" body))
+                     (state/add-message "user" body {:turn turn}))
            decision (update :gate-history (fnil conj [])
                             {:gate (:gate decision) :turn turn})
            decision (update :open-predictions (fnil conj [])
@@ -629,7 +567,7 @@
         {:keys [ok response error]} (call-model ctx branch)]
     (if-not ok
       (provider-error-step ctx branch turn error)
-      (let [{:keys [branch parsed signals said]} (absorb-response branch response)]
+      (let [{:keys [branch parsed signals said]} (absorb-response branch response turn)]
         (if (or (nil? parsed) (= "__parse_error__" (:name parsed)))
           (no-call-step ctx branch turn {:parsed parsed :signals signals
                                          :said said :response response})
