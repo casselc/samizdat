@@ -327,6 +327,37 @@
       (assoc ctx :llm-adapter (registry/adapter-for provider) :llm-config llm))
     ctx))
 
+(defn run-turn
+  "Advance one branch by one turn, through the manifest.
+
+  THE ONE DEFINITION OF A TURN. samizdat.agent.loop composed the same steps in
+  compiled Clojure until this replaced it, which meant there were two
+  definitions and an edit to the loop manifest reached only one of them. That
+  is the drift karamazov-ioo.20 found the first time — the beam called the
+  compiled composition while the manifest driver ran the same steps as cells,
+  and nothing in the production path ever reached the manifest, so four
+  workflows existed only under the test suite. Unifying the call site left the
+  duplicate standing; this removes it.
+
+  Lives here rather than in samizdat.agent.loop because a turn is now defined
+  by a manifest, and loading a manifest is this namespace's job — agent.loop
+  cannot require it without a cycle.
+
+  For a caller that wants one turn rather than a whole run: the benches, and
+  the tests that assert what a single turn does to a branch. Compiles the named
+  manifest's per-turn slice fresh, so a cell or manifest edit is picked up."
+  ([ctx branch turn] (run-turn ctx branch turn loop-name))
+  ([ctx branch turn manifest-name]
+   (let [wf (compile-loop (turn-manifest
+                           (read-definition
+                            (:edn (workflows/seed! (:conn ctx) manifest-name
+                                                   (manifest-resource manifest-name))))))
+         data (myc/run-compiled wf ctx {:branch branch :turn turn})]
+     (when (myc/error? data)
+       (throw (ex-info "the turn manifest failed structurally"
+                       {:error (myc/workflow-error data)})))
+     (:branch data))))
+
 (defn run!
   "Run one branch to completion under the stored loop definition.
   Returns {:status :answer :branch :run-id (:residual)}."

@@ -17,17 +17,23 @@
 ;; SPDX-License-Identifier: GPL-3.0-or-later
 
 (ns samizdat.agent.loop
-  "The branch loop: one turn is one model call, one tool call, one arbiter
-  decision, and a journal append.
+  "WHAT A TURN IS MADE OF. The steps — assemble, call, absorb, dispatch,
+  journal, arbitrate, steer — as public functions with nothing composing them.
 
-  Phase 3 runs a single branch. The beam in Phase 4 schedules many of these;
-  nothing here assumes it is alone, which is why every write already carries a
-  branch id.
+  What a turn IS lives in the loop manifest, whose cells call these. This
+  namespace held a `run-turn` that composed them itself, which meant there were
+  two definitions of a turn and an edit to the manifest reached only one; see
+  samizdat.workflow/run-turn, which is now the only composition.
 
-  The order inside a turn is load-bearing. The tool runs before the arbiter, so
-  a gate sees the state the turn produced rather than the state it started
-  from. Predictions settle before new gates fire, so a gate cannot be credited
-  with an outcome that preceded it."
+  Nothing here assumes it is running alone — every write carries a branch id —
+  because the beam schedules many branches through the same steps.
+
+  THE ORDER IS LOAD-BEARING, and the manifest is where it is now written down.
+  The tool runs before the arbiter, so a gate sees the state the turn produced
+  rather than the state it started from. Predictions settle before new gates
+  fire, so a gate cannot be credited with an outcome that preceded it. Those
+  constraints are the manifest's to keep; what this namespace guarantees is
+  that each step does one thing and says what it touched."
   (:require [clojure.java.io :as io]
             [clojure.string :as str]
             [clojure.tools.logging :as log]
@@ -562,26 +568,3 @@
            ;; default. A bare steer just prefills the fence.
            decision (assoc :force-tool (arbiter/force-tool-for decision)
                            :prefill (arbiter/prefill-for decision))))))))
-
-(defn run-turn
-  "Advance one branch by one turn. Returns the updated branch.
-
-  A composition of the named steps above, in the load-bearing order the ns
-  docstring states. The loop manifest composes the same steps as cells, so
-  the beam (which calls this directly, see karamazov-ioo.20) and the
-  manifest-driven driver share one implementation of every step."
-  [ctx branch turn]
-  (let [before branch
-        branch (phase-valve branch turn)
-        {:keys [ok response error]} (call-model ctx branch)]
-    (if-not ok
-      (provider-error-step ctx branch turn error)
-      (let [{:keys [branch parsed signals said]} (absorb-response branch response turn)]
-        (if (or (nil? parsed) (= "__parse_error__" (:name parsed)))
-          (no-call-step ctx branch turn {:parsed parsed :signals signals
-                                         :said said :response response})
-          (let [{:keys [branch result tool]} (tool-step ctx branch turn parsed)]
-            (journal-step! ctx branch turn {:parsed parsed :result result
-                                            :tool tool :said said
-                                            :response response})
-            (steer-step ctx before branch turn {:parsed parsed :result result})))))))

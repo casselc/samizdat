@@ -25,6 +25,7 @@
             [clojure.test :refer [deftest testing is]]
             [jolt.fs :as fs]
             [samizdat.agent.loop :as aloop]
+            [samizdat.workflow :as wf]
             [samizdat.agent.state :as state]
             [samizdat.agent.tools :as tools]
             [samizdat.llm.client :as llm]
@@ -289,12 +290,12 @@
                                                       :args {:action "create"
                                                              :title "prove the loop"
                                                              :contract "task rows appear"}}))]
-               (aloop/run-turn ctx b 1))
+               (wf/run-turn ctx b 1))
           id (:id (first (tasks/board c {:run-id rid})))]
       (is (some? id) "the scripted turn created a task")
       (with-redefs [llm/chat (fn [& _] (fence {:name "task"
                                                :args {:action "close" :id id}}))]
-        (aloop/run-turn ctx b1 2))
+        (wf/run-turn ctx b1 2))
       (is (= "done" (:status (tasks/get-task c id)))))))
 
 (deftest update-loses-to-a-write-that-lands-in-its-window

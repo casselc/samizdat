@@ -32,6 +32,7 @@
             [samizdat.agent.critic :as critic]
             [samizdat.agent.gates :as gates]
             [samizdat.agent.loop :as aloop]
+            [samizdat.workflow :as wf]
             [samizdat.agent.phases :as phases]
             [samizdat.agent.resume :as resume]
             [samizdat.agent.state :as state]
@@ -811,7 +812,7 @@
                                                      :subClaims ["the box bound holds"]}})
                                             "\n```")
                               :finish-reason "stop"})]
-      (let [after (aloop/run-turn {:conn c :run-id rid :max-turns 40
+      (let [after (wf/run-turn {:conn c :run-id rid :max-turns 40
                                    :llm-adapter :a :llm-config {:max-tokens 16384}}
                                   b (inc cap))]
         (is (= :build (:phase after)))
@@ -1484,7 +1485,7 @@
     (runs/open-branch! c rid {:branch-id "B1" :created-at-turn 0})
     (with-redefs [llm/chat (fn [& _] {:content "Let me confirm a#712 first."
                                       :finish-reason "stop"})]
-      (let [after (aloop/run-turn {:conn c :run-id rid :max-turns 40
+      (let [after (wf/run-turn {:conn c :run-id rid :max-turns 40
                                    :llm-adapter :a :llm-config {:max-tokens 16384}}
                                   b 1)]
         (is (= "```tool-call\n" (:prefill after))
@@ -1510,7 +1511,7 @@
                                                      :subClaims ["the box bound holds"]}})
                                             "\n```")
                               :finish-reason "stop"})]
-      (let [after (aloop/run-turn {:conn c :run-id rid :max-turns 40
+      (let [after (wf/run-turn {:conn c :run-id rid :max-turns 40
                                    :llm-adapter :a :llm-config {:max-tokens 16384}}
                                   b 1)]
         (is (nil? (:prefill after)))))))
@@ -1526,7 +1527,7 @@
                  :prefill "```tool-call\n")]
     (runs/open-branch! c rid {:branch-id "B1" :created-at-turn 0})
     (with-redefs [llm/chat (fn [& _] {:content "{\"name\": " :finish-reason "length"})]
-      (let [after (aloop/run-turn {:conn c :run-id rid :max-turns 40
+      (let [after (wf/run-turn {:conn c :run-id rid :max-turns 40
                                    :llm-adapter :a :llm-config {:max-tokens 16384}}
                                   b 1)]
         (is (= "```tool-call\n" (:prefill after)))))))

@@ -333,8 +333,15 @@
   (workflow/turn-manifest), which for the factory loop composes exactly the
   steps run-turn composed.
 
-  run-turn remains the fallback for a ctx carrying no workflow — the benches
-  and any caller that wants the bare composition.
+  There is no fallback any more, and that is the point. This used to drop to
+  branch-loop/run-turn when the ctx carried no workflow, which meant a SECOND
+  composition of a turn existed in compiled code — the very shape whose last
+  appearance is described above. Its stated justification (the benches) had
+  outlived the benches: there is no bench directory, and both production paths
+  always set :turn-workflow, so the fallback was dead in production and alive
+  only for the tests. A path production never exercises is exactly how a
+  duplicate rots unnoticed. `workflow/run-turn` is the one composition now, and
+  it is the manifest.
 
   A structural failure is this branch's problem, not the beam's: it abandons
   the branch with the reason, the same shape as a throw. The manifest driver
@@ -356,7 +363,10 @@
         ;; surface several rounds later as an NPE on somebody else's turn.
         (nil? (:branch data)) (fail "the turn returned no :branch")
         :else (:branch data)))
-    (branch-loop/run-turn ctx b turn)))
+    ;; Loud rather than a quiet second path: every caller that reaches here in
+    ;; production sets this, so its absence is a wiring bug and not a mode.
+    (throw (ex-info "the beam was handed no :turn-workflow — a turn is defined by a manifest, and the scheduler cannot advance a branch without one"
+                    {:branch (:id b) :turn turn}))))
 
 (defn advance-all
   "One turn for every active branch, concurrently, each under a hard deadline.

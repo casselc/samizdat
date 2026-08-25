@@ -30,6 +30,7 @@
             [samizdat.control :as control]
             [samizdat.system :as system]
             [samizdat.agent.loop :as aloop]
+            [samizdat.workflow :as wf]
             [samizdat.agent.state :as state]
             [samizdat.api.control :as api-control]
             [samizdat.api.runs :as api-runs]
@@ -103,7 +104,7 @@
       (with-redefs [llm/chat (fn [& _]
                                {:content "```tool-call\n{\"name\": \"task\", \"args\": {\"action\": \"list\"}}\n```"
                                 :finish-reason "stop"})]
-        (let [after (aloop/run-turn ctx b 1)
+        (let [after (wf/run-turn ctx b 1)
               last-msg (last (:messages after))]
           (testing "the directive text is injected into the next-turn message"
             (is (str/includes? (:content last-msg) "human has intervened"))
