@@ -72,8 +72,13 @@
 ;;
 ;; Priority is ascending: 0 is highest. The order encodes what matters when two
 ;; conditions hold at once, and it is the whole content of the arbiter.
+;;
+;; Tier 3a: the table below is the hand-written half. Gates that have moved
+;; to data live in gates.edn under :gates, compiled by compile-gate into
+;; this same closure shape (:reflection and :prologue-cap are the pilots);
+;; the merge happens below the vector.
 
-(def gates
+(def ^:private closure-gates
   [{:gate :human-directive
     :priority 0
     :budget nil
@@ -327,34 +332,6 @@
     :prediction (fn [_] "the branch retracts, decomposes, or changes technique")
     :window 3}
 
-   {:gate :prologue-cap
-    :priority 9
-    :budget nil
-    :doc "The branch has produced nothing at all. Every other guard is
-          principled-blind here: the stall counter arms on a progress event, the
-          stuck gate needs failures, and a branch making successful, varied,
-          useless calls trips neither."
-    ;; Build phase only (vf-9wx). A banked sketch is deliberately :neutral
-    ;; with progress? false — a plan is not progress — so a branch dropped
-    ;; back into :explore by a reframe accrues nothing while it re-plans, and
-    ;; without this guard is told at turn 41 that it is 41 turns in with
-    ;; nothing verified. True, and useless to a branch doing exactly what the
-    ;; harness just asked of it. The ordering is right by construction: a
-    ;; branch that sketches at once gets the full build allowance before the
-    ;; nudge, one that burns its whole explore budget gets what is left, so
-    ;; the flailing branch gets LESS rope rather than more. (Counting from
-    ;; build entry instead would invert that, which is why it is not done.)
-    :when (fn [{:keys [branch]}]
-            (and (= :build (:phase branch))
-                 (not (:any-progress? branch))
-                 (>= (state/turn-count branch) (threshold :prologue-cap))))
-    :message (fn [{:keys [branch]}]
-               (str (prompt "prologue-cap")
-                    "\n\nYou are " (state/turn-count branch)
-                    " turns in with nothing verified."))
-    :prediction (fn [_] "the branch produces its first artifact")
-    :window 3}
-
    {:gate :progress-stalled
     :priority 10
     :budget :max-stall-nudges
@@ -419,30 +396,55 @@
                     " of " max-turns " turns. Land what you can verify rather"
                     " than opening a new line of attack."))
     :prediction (fn [_] "the branch converges rather than starting something new")
-    :window 3}
+    :window 3}])
 
-   {:gate :reflection
-    :priority 13
-    :budget nil
-    :doc "A quiet-turn nudge to reflect on the loop itself. Lowest priority, so
-          it is passed over whenever any real steer holds and surfaces only on a
-          turn where nothing else does. The loop is a mycelium workflow the
-          branch can see (introspect) and reshape (reload_cells); a run that
-          never reconsiders its own machinery keeps whatever friction it started
-          with. Fires on a cadence, not a condition, which is why it sits below
-          every gate that fires because something is wrong."
-     :when (fn [{:keys [branch]}]
-             (let [n (state/turn-count branch)]
-               (and (state/active? branch) (pos? n)
-                    (zero? (mod n (threshold :reflection-cadence))))))
-    :message (fn [_]
-               (str "**Step back and look at your loop.** You are running inside"
-                    " a mycelium workflow of cells. See how it is wired and how"
-                    " this run is going with `introspect`; if a cell mis-routes,"
-                    " a gate nags too hard, or a step is missing, reshape it with"
-                    " `reload_cells`. Then carry on."))
-    :prediction (fn [_] "the branch inspects or reshapes its loop")
-    :window 1}])
+;; --- data-driven gates (tier 3a) ---------------------------------------------
+;;
+;; The steer policy as data: gates.edn :gates entries carry :when as EDN
+;; forms, compiled HERE at load into the closure shape above — the manifest
+;; :dispatches are the precedent (EDN predicates evaluated at compile time).
+;; The form sees exactly the context keys the loop passes; anything else
+;; fails to compile at load, which is the fail-fast. Inside the compiled fn
+;; the accessors are ordinary calls, so (threshold k) reads the config atom
+;; at FIRE time — tuning a threshold stays runtime-editable; only the form
+;; structure compiles at load.
+
+(defn- compile-when
+  [form]
+  (eval `(fn [~'ctx]
+           (let [~'directive            (get ~'ctx :directive)
+                 ~'done-block           (get ~'ctx :done-block)
+                 ~'branch               (get ~'ctx :branch)
+                 ~'max-turns            (get ~'ctx :max-turns)
+                 ~'branch-count         (get ~'ctx :branch-count)
+                 ~'safe-state-coverage  (get ~'ctx :safe-state-coverage)]
+             ~form))))
+
+(defn- compile-message
+  "A prompts/ file plus an optional suffix, with {{turn-count}} and
+  {{max-turns}} interpolated at fire time — the same {{...}} convention as
+  every other prompt seam."
+  [{:keys [message-file message-suffix]}]
+  (fn [{:keys [branch max-turns]}]
+    (let [subst (fn [s] (-> (str s)
+                            (str/replace "{{turn-count}}"
+                                         (str (state/turn-count branch)))
+                            (str/replace "{{max-turns}}" (str max-turns))))]
+      (str (some-> message-file prompt subst)
+           (some-> message-suffix subst)))))
+
+(defn- compile-gate
+  [entry]
+  (assoc entry
+         :when (compile-when (:when entry))
+         :message (compile-message entry)
+         :prediction (let [p (:prediction entry)] (fn [_] p))))
+
+(def gates
+  "The full table: the hand-written closures plus the data-driven gates from
+  gates.edn, one arbiter-visible shape. Priorities, not table order, decide
+  arbitration."
+  (into [] (concat closure-gates (mapv compile-gate (:gates (config))))))
 
 (def by-name (into {} (map (juxt :gate identity)) gates))
 

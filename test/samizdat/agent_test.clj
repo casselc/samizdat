@@ -1734,3 +1734,32 @@
       (is (str/includes? msg "y"))
       (is (str/includes? msg "z") "the withheld claim is still shown too"))))
 
+
+(deftest pilot-gates-are-config-data
+  ;; Tier 3a: :reflection and :prologue-cap moved from closures in gates.clj
+  ;; to :gates entries in gates.edn with EDN :when forms — the steer policy
+  ;; as data, the same direction as the manifest dispatches. The forms are
+  ;; compiled once at load into the closure shape the arbiter reads, and
+  ;; call the same accessors the closures did: (threshold k) reads the
+  ;; config atom at fire time, so tuning stays runtime-editable.
+  (let [refl (gates/by-name :reflection)
+        pro (gates/by-name :prologue-cap)]
+    (is (= 13 (:priority refl)) "the data entry replaces the closure")
+    (is (= 9 (:priority pro)))
+    (is (fn? (:when refl)) "the EDN form compiled into a predicate fn")
+    (let [b15 (assoc (branch-with) :turns (vec (repeat 15 {})))
+          b14 (assoc (branch-with) :turns (vec (repeat 14 {})))]
+      (is ((:when refl) {:branch b15}) "fires on the cadence")
+      (is (not ((:when refl) {:branch b14}))))
+    (let [pro-b (-> (branch-with :phase :build :any-progress? false)
+                    (assoc :turns (vec (repeat 8 {}))))]
+      (is ((:when pro) {:branch pro-b}))
+      (is (not ((:when pro) {:branch (assoc pro-b :phase :explore)}))
+          "explore is deliberately exempt — a reframe sends one back there")
+      (is (not ((:when pro) {:branch (assoc pro-b :any-progress? true)}))))
+    (is (str/includes? ((:message refl) {}) "introspect")
+        "the reflection prose moved to a prompt file")
+    (is (str/includes? ((:message pro) {:branch (assoc (branch-with)
+                                                       :turns (vec (repeat 8 {})))})
+                       "8 turns in")
+        "the turn count is interpolated")))
