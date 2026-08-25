@@ -1999,3 +1999,29 @@
     (is (= [0 0 1 1 "B1"] (state/finished-key weak))
         "a relaxation ranks below a direct proof")
     (is (= [strong weak] (state/rank-finished [weak strong])))))
+
+(deftest every-context-budget-key-is-actually-read
+  ;; A knob that is documented, parsed, and read by nothing is worse than no
+  ;; knob: `:run :loop` was exactly that for a whole phase — configured in
+  ;; three places and consulted by no live code — so the critic, team, feature
+  ;; and decompose loops could not run outside the suite. These numbers decide
+  ;; how much the model sees, which makes a dead one invisible in the same way.
+  (let [src (->> (file-seq (java.io.File. "src"))
+                 (filter #(.isFile %))
+                 (filter #(str/ends-with? (.getName %) ".clj"))
+                 (map slurp)
+                 (str/join "\n"))
+        declared (keys (gates/threshold :context-budget))]
+    (is (seq declared))
+    (doseq [k declared]
+      ;; Either spelling counts: the explicit keyword, or the bare name as a
+      ;; {:keys [...]} destructuring binding. Matching only the keyword failed
+      ;; on the first key that was read idiomatically, and a test that dictates
+      ;; destructuring style to avoid a false positive is the wrong trade.
+      (is (or (str/includes? src (str k))
+              (re-find (re-pattern (str ":keys \\[[^\\]]*\\b"
+                                        (java.util.regex.Pattern/quote (name k))
+                                        "\\b"))
+                       src))
+          (str k " is declared in gates.edn :context-budget but nothing in src"
+               " reads it — either wire it or drop it")))))

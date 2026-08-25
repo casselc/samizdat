@@ -121,7 +121,8 @@
          "Narrow it down — run a smaller piece at the REPL — then call done again.")
 
     (and result (not (:green? result)))
-    (str "Your tests are not green yet:\n\n" (tail (:output result) 25)
+    (str "Your tests are not green yet:\n\n" (tail (:output result)
+                (:test-output-lines (gates/threshold :context-budget)))
          "\n\nYou are NOT done until they pass. Read the failure, change the code, "
          "re-run the test, and call done again only once it is green.")
 
@@ -142,7 +143,7 @@
   is model-bound, so it passes the redaction boundary before it is returned."
   [root cmd timeout-ms]
   (try
-    (let [r (proc/run {:timeout-ms (or timeout-ms 600000)
+    (let [r (proc/run {:timeout-ms (or timeout-ms (gates/threshold :verify-timeout-ms))
                        :env (secrets/scrubbed-process-env)}
                       "sh" "-c" (str "cd " (util/sh-quote root) " && " cmd))
           known (secrets/known-values (into {} (System/getenv)))]

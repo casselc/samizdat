@@ -182,12 +182,12 @@
   "The judge's user message: the agent's rules, the evidence, the transcript,
   the diff of what the run changed, and the answer under review."
   [{:keys [rules transcript evidence answer diff]}]
-  (str "## The agent's rules\n\n" (one-line rules 6000)
+  (str "## The agent's rules\n\n" (one-line rules (:judge-rules-chars (gates/threshold :context-budget)))
        "\n\n## Evidence (deterministic facts about the run)\n\n" evidence
        (when (seq (str diff))
          (str "\n\n## Diff of what this run changed\n\n```diff\n"
               (str diff) "\n```"))
-       "\n\n## Transcript\n\n" (one-line transcript 12000)
+       "\n\n## Transcript\n\n" (one-line transcript (:judge-transcript-chars (gates/threshold :context-budget)))
        "\n\n## The answer it wants to ship\n\n" (str answer)
        "\n\nIs this task complete and correct? " (preamble)))
 

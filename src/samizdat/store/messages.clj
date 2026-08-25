@@ -125,6 +125,10 @@ action to consume them):")
   "The bounded inbox preview for the context block: a preamble plus one
   line per unread message, capped at 3 lines, or nil when this branch has
   no unread mail — the context block's keep identity drops it."
+  ;; The cap is gates.edn :context-budget :inbox-lines — the caller supplies it
+  ;; rather than this namespace reading policy, because the store owns nothing
+  ;; but SQL. The literal remains as the floor for a caller with no policy in
+  ;; reach (a test, a REPL).
   ([conn run-id branch] (render-inbox conn run-id branch 3))
   ([conn run-id branch cap]
    (let [rows (inbox conn run-id branch)]

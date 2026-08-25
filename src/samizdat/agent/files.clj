@@ -27,7 +27,8 @@
   Ordinary edit tools, deliberately not shell redirection: an agent that has to
   write files through `cat > f <<EOF` fights the tool surface, and the point of
   the dogfood is to see it change code, not wrestle heredocs."
-  (:require [clojure.string :as str]
+  (:require [samizdat.agent.gates :as gates]
+            [clojure.string :as str]
             [jolt.fs :as fs]
             [samizdat.lisp :as lisp]))
 
@@ -36,7 +37,16 @@
 (defn- clojure-file? [path]
   (contains? clojure-exts (last (str/split (str path) #"\."))))
 
-(def ^:private max-read-chars 60000)
+(defn- max-read-chars
+  "How much of a file one `read` returns, from gates.edn :context-budget."
+  []
+  (:file-read-chars (gates/threshold :context-budget)))
+
+(defn- grep-ranges
+  "How many distinct line ranges a search reports before it says '… and N
+  more', from gates.edn :context-budget."
+  []
+  (:grep-ranges (gates/threshold :context-budget)))
 
 (defn- resolve-under-root
   "Canonicalize `path` under `root`; return the resolved absolute path string,
@@ -65,9 +75,9 @@
       (if-let [abs (resolve-under-root (or root ".") path)]
         (if (fs/exists? abs)
           (let [content (slurp abs)
-                shown (subs content 0 (min (count content) max-read-chars))]
+                shown (subs content 0 (min (count content) (max-read-chars)))]
             {:result (str path ":\n" shown
-                          (when (> (count content) max-read-chars)
+                          (when (> (count content) (max-read-chars))
                             "\n… [truncated]"))
              :category :neutral :progress? false :branch branch})
           (miss branch (str "No file " path " under the project root.")))
@@ -169,10 +179,10 @@
               (miss branch
                     (str "old_text matched " (count ranges) " times in " path ":\n"
                          (str/join "\n"
-                                   (for [[s _] (take 20 ranges)]
+                                   (for [[s _] (take (grep-ranges) ranges)]
                                      (str "  Line " (line-of starts s))))
-                         (when (> (count ranges) 20)
-                           (str "\n  … and " (- (count ranges) 20) " more"))
+                         (when (> (count ranges) (grep-ranges))
+                           (str "\n  … and " (- (count ranges) (grep-ranges)) " more"))
                          "\n\nAdd surrounding context to old_text to narrow it, or pass"
                          " replace_all: true to change every occurrence."))
 

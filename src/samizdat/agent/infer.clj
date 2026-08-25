@@ -54,6 +54,7 @@
   probe, how to score the results or whether to commit a winner — that is a
   cell's job, in resources, where the supervisor can rewrite it."
   (:require [clojure.tools.logging :as log]
+            [samizdat.agent.gates :as gates]
             [samizdat.llm.client :as llm]
             [samizdat.llm.fence :as fence]
             [samizdat.llm.message :as message]
@@ -93,9 +94,16 @@
 (defn render
   "The tape as it goes to the wire: older turns compacted, recent ones
   verbatim. The tape's own array is untouched, so the journal and a resume
-  still hold everything that was really said."
+  still hold everything that was really said.
+
+  The compaction budget is read HERE rather than inside the compactor:
+  llm.message is pure message shaping and stays that way, so the numbers that
+  decide how much history survives are supplied by the caller that knows about
+  policy. gates.edn :context-budget owns them."
   [{:keys [messages turns]}]
-  (message/compact messages turns))
+  (let [{:keys [keep-pairs compaction-chars]} (gates/threshold :context-budget)]
+    (message/compact messages turns {:keep-pairs keep-pairs
+                                     :threshold-chars compaction-chars})))
 
 ;; --- the effect seam --------------------------------------------------------
 

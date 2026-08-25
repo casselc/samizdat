@@ -366,6 +366,65 @@
         :limit bounds how many, newest first, because this lands in the child's
         opening context and an unbounded block would crowd out its own thesis."}
 
+ :verify-timeout-ms
+ {:value 600000 :kind :cost-ceiling :capability-tunable? false
+  :doc "Wall-clock bound on one verification run — the project's own test
+        command. Was a 600000 default inside verify.clj, which is the wrong
+        place for it twice over: it is the single most project-specific number
+        in the harness (a suite that takes twelve minutes and one that takes
+        four seconds are both normal), and a branch whose verification is
+        guillotined reads as a branch that cannot get its tests green.
+
+        Never scaled UP for a struggling run: a run in trouble spending longer
+        per check is how a turn budget disappears into one command."}
+
+ :context-budget
+ {:value {:tool-result-chars   4000
+          :file-read-chars     60000
+          :test-output-lines   25
+          :judge-rules-chars   6000
+          :judge-transcript-chars 12000
+          :grep-ranges         20
+          :inbox-lines         3
+          :keep-pairs          10
+          :compaction-chars    50000}
+  :kind :cost-ceiling :capability-tunable? false
+  :doc "HOW MUCH THE MODEL GETS TO SEE. Every one of these was a constant in
+        code, and together they are the most project-specific numbers in the
+        harness: a codebase of 200-line namespaces read by a 200k-context model
+        wants nothing like the same values as one with generated files read by a
+        small local model.
+
+        They are also the numbers most likely to be the real cause of a run
+        going wrong, and the hardest to diagnose from the outside — a branch
+        that cannot see the line its test failed on looks exactly like a branch
+        that cannot read a stack trace.
+
+        :tool-result-chars      one tool result, before it is truncated
+        :file-read-chars        one `read` of a file
+        :test-output-lines      the TAIL of a failing test run a branch is
+                                shown; the tail rather than the head because a
+                                failure names itself at the end
+        :judge-rules-chars      the harness's own rules, as the judge sees them
+        :judge-transcript-chars the transcript under judgement
+        :grep-ranges            distinct line ranges a search reports
+        :inbox-lines            unread messages previewed in the context block
+        :keep-pairs             recent exchanges kept VERBATIM before
+                                compaction unloads them (LR-4)
+        :compaction-chars       total content before compaction engages at all
+
+        The ANSWER under judgement is deliberately absent from this list: it is
+        the thing being judged, and truncating it could hide the very flaw the
+        judge is looking for. A key here that nothing reads would be worse than
+        no key at all — `:run :loop` was documented, parsed from an env var and
+        read by no live code for a whole phase — so a test asserts every key in
+        this map is referenced somewhere in src.
+
+        A :cost-ceiling, so the capability tier may not raise them: every one
+        trades context for evidence, and a struggling run is the last one that
+        should be handed more context on the harness's own initiative. A
+        PROJECT raising them deliberately is a different act."}
+
  :critic-objectives
  {:value [:progress :momentum :distinctness :viability] :kind :threshold
   :capability-tunable? false

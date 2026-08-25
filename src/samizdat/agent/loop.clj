@@ -47,7 +47,12 @@
             [samizdat.store.messages :as messages]
             [samizdat.store.runs :as runs]))
 
-(def max-result-chars 4000)
+(defn max-result-chars
+  "How much of one tool result the branch is shown, from gates.edn
+  :context-budget. A project reading generated files needs a different number
+  from one reading hand-written namespaces, which is why it is not a constant."
+  []
+  (:tool-result-chars (gates/threshold :context-budget)))
 
 (defn system-prompt
   "The system prompt, with the template catalogue substituted in.
@@ -108,8 +113,8 @@
 
 (defn- truncate [s]
   (let [s (str s)]
-    (if (> (count s) max-result-chars)
-      (str (subs s 0 max-result-chars) "\n… [truncated]")
+    (if (> (count s) (max-result-chars))
+      (str (subs s 0 (max-result-chars)) "\n… [truncated]")
       s)))
 
 (defn initial-messages
@@ -185,7 +190,9 @@
                                  ;; a bounded preview; nil when the inbox is
                                  ;; empty. Surfacing does not consume — the
                                  ;; message tool's inbox action marks read.
-                                 (messages/render-inbox conn run-id (:id branch))
+                                 (messages/render-inbox
+                                  conn run-id (:id branch)
+                                  (:inbox-lines (gates/threshold :context-budget)))
                                  (failures/render fhits)
                                  (artifacts/render ahits)])]
       {:block (when (seq blocks) (str/join "\n\n" blocks))
