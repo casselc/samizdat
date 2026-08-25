@@ -29,16 +29,12 @@
 
   Everything here is pure and unit-testable; the cell that calls the model and
   routes on the verdict lives in resources/cells/critic.clj."
-  (:require [clojure.java.io :as io]
-            [clojure.string :as str]
-            [samizdat.agent.gates :as gates]))
+  (:require [clojure.string :as str]
+            [samizdat.agent.gates :as gates]
+            [samizdat.prompt :as prompt]))
 
-(defn- prompt
-  "A prompt file from resources/prompts — the same seam every gate message
-  reads through (gates.clj). Tier 2b: the judge's standing instructions are
-  runtime-editable data, not src prose."
-  [name]
-  (slurp (io/resource (str "prompts/" name ".md"))))
+;; The judge's prompt files read through the shared samizdat.prompt seam
+;; (tier 2b) — every gate message reads through the same one.
 
 (def verdicts #{:complete :incomplete :abstain})
 
@@ -168,7 +164,7 @@
   "The judge's standing instructions, from resources/prompts/judge.md (tier
   2b — runtime-editable). Calibrated, not trigger-happy. A unified judge:
   it decides completeness AND reviews the run's own diff for defects."
-  (prompt "judge"))
+  (prompt/prompt "judge"))
 
 (defn critic-prompt
   "The judge's user message: the agent's rules, the evidence, the transcript,

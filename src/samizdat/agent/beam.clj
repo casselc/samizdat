@@ -35,13 +35,13 @@
   branches against one branch at five times the turn budget, and
   `samizdat.bench.beam` is the comparison."
   (:require [clojure.data.json :as json]
-            [clojure.java.io :as io]
             [clojure.string :as str]
             [clojure.tools.logging :as log]
             [samizdat.agent.critic :as critic]
             [samizdat.agent.gates :as gates]
             [samizdat.agent.loop :as branch-loop]
             [samizdat.agent.state :as state]
+            [samizdat.prompt :as prompt]
             [samizdat.store.artifacts :as artifacts]
             [samizdat.store.failures :as failures]
             [samizdat.store.interventions :as interventions]
@@ -67,13 +67,11 @@
       ;; Tier 2d: the header prose is prompts/crossover.md — runtime-editable,
       ;; the same seam every gate message reads through.
       (str "\n\n"
-           (-> (slurp (io/resource "prompts/crossover.md"))
-               (str/replace
-                "{{artifacts}}"
-                (str/join "\n"
-                          (for [a (take-last 8 confirmed)]
-                            (str "- [" (:branch_id a) " " (:kind a) "] "
-                                 (:claim a))))))))))
+           (prompt/render "crossover"
+             {:artifacts (str/join "\n"
+                                   (for [a (take-last 8 confirmed)]
+                                     (str "- [" (:branch_id a) " " (:kind a) "] "
+                                          (:claim a))))})))))
 
 (defn- open-branch!
   [{:keys [conn run-id problem]} id parent-id thesis turn]
@@ -240,11 +238,10 @@
             (journal/note! conn run-id :cull-spared
                            {:branch-id (:id branch)
                             :data {:scores scores :failures fails :juvenile? true}}))
-           (state/add-message
-            branch "user"
-            ;; Tier 2d: the spare's prose is prompts/juvenile-grace.md.
-            (-> (slurp (io/resource "prompts/juvenile-grace.md"))
-                (str/replace "{{failures}}" (str fails)))))
+            (state/add-message
+             branch "user"
+             ;; Tier 2d: the spare's prose is prompts/juvenile-grace.md.
+             (prompt/render "juvenile-grace" {:failures fails})))
 
       (nil? scores)
       (cull-fail (str "culled after " fails
@@ -260,12 +257,10 @@
             (journal/note! conn run-id :cull-spared
                            {:branch-id (:id branch)
                             :data {:scores scores :failures fails}}))
-           (state/add-message
-            branch "user"
-            ;; Tier 2d: the reprieve's prose is prompts/cull-reprieve.md.
-            (-> (slurp (io/resource "prompts/cull-reprieve.md"))
-                (str/replace "{{failures}}" (str fails))
-                (str/replace "{{hard-floor}}" (str hard-floor))))))))
+            (state/add-message
+             branch "user"
+             ;; Tier 2d: the reprieve's prose is prompts/cull-reprieve.md.
+             (prompt/render "cull-reprieve" {:failures fails :hard-floor hard-floor}))))))
 
 (defn- ensure-scored
   "Fresh critic scores for every active branch, at most one sub-LLM call per

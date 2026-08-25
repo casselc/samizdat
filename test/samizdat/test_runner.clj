@@ -68,6 +68,7 @@
             [samizdat.tasks-test]
             [samizdat.knowledge-test]
             [samizdat.messages-test]
+            [samizdat.prompt-test]
             [samizdat.workflow-test]
             [samizdat.manifest-test]
             [samizdat.judge-test]
@@ -157,6 +158,7 @@
     samizdat.tasks-test
     samizdat.knowledge-test
     samizdat.messages-test
+    samizdat.prompt-test
     samizdat.workflow-test
     samizdat.manifest-test
     samizdat.judge-test

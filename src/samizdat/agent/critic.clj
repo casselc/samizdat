@@ -35,20 +35,16 @@
   still want, so a struggling branch with any unique strength survives.
   The known cost is permissiveness, which is why the reprieve it grants is
   a loan with a clock (the hard floor in the scheduler), not an exemption."
-  (:require [clojure.java.io :as io]
-            [clojure.string :as str]
+  (:require [clojure.string :as str]
             [samizdat.agent.gates :as gates]
             [samizdat.agent.state :as state]
             [samizdat.llm.message :as message]
             [samizdat.llm.client :as llm]
+            [samizdat.prompt :as prompt]
             [samizdat.store.journal :as journal]))
 
-(defn- prompt
-  "A prompt file from resources/prompts — the same seam every gate message
-  reads through (gates.clj). Tier 2a: the score prompt is runtime-editable
-  data, not src prose."
-  [name]
-  (slurp (io/resource (str "prompts/" name ".md"))))
+;; The score prompt is resources/prompts/critic.md (tier 2a), rendered by
+;; selmer — the shared samizdat.prompt seam every gate message reads through.
 
 (def objectives
   "All maximize, 1..5. Tier 1b: the list is gates.edn :critic-objectives —
@@ -148,7 +144,7 @@
   caller falls back to the scalar rule rather than inventing a vector. A
   usable score is journaled so retention decisions are auditable."
   [{:keys [llm-adapter llm-config conn run-id]} branch siblings turn]
-  (let [p (str/replace (prompt "critic") "{{summary}}" (summary branch siblings))
+  (let [p (prompt/render "critic" {:summary (summary branch siblings)})
         scores (try
                  (parse-scores
                   (:content (llm/chat llm-adapter llm-config

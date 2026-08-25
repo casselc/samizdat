@@ -1,32 +1,25 @@
 ;; samizdat - a self-hosting agentic harness
-;; Copyright (C) 2026 Dmitri Sotnikov
-;;
-;; This program is free software: you can redistribute it and/or modify
-;; it under the terms of the GNU General Public License as published by
-;; the Free Software Foundation, either version 3 of the License, or
-;; (at your option) any later version.
-;;
-;; This program is distributed in the hope that it will be useful,
-;; but WITHOUT ANY WARRANTY; without even the implied warranty of
-;; MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-;; GNU General Public License for more details.
-;;
-;; You should have received a copy of the GNU General Public License
-;; along with this program.  If not, see <https://www.gnu.org/licenses/>.
-;;
 ;; SPDX-License-Identifier: GPL-3.0-or-later
 
 (ns samizdat.prompt-test
-  "The prompt-to-dispatch contract.
+  "The prompt seams, both halves.
 
-  The two directions drift independently: a tool dispatched but undocumented
-  is invisible to the model, and a tool documented but not dispatched burns
-  turns on the :default method while the model reads the failure as its own
-  mistake. Both are asserted so neither survives an edit."
-  (:require [clojure.test :refer [deftest is]]
-            [clojure.string :as str]
+  The prompt-to-dispatch contract: the two directions drift independently —
+  a tool dispatched but undocumented is invisible to the model, and a tool
+  documented but not dispatched burns turns on the :default method while the
+  model reads the failure as its own mistake. Both are asserted so neither
+  survives an edit.
+
+  The renderer contract: selmer renders every prompt template (gates'
+  message files and suffixes, the beam's steer prose, the loop's valve
+  message, the domain prompts). Template files keep the {{...}} spelling the
+  hand-rolled str/replace chains used, so the move changed the renderer,
+  not the templates."
+  (:require [clojure.string :as str]
+            [clojure.test :refer [deftest is]]
             [samizdat.agent.loop :as loop]
-            [samizdat.agent.tools :as tools]))
+            [samizdat.agent.tools :as tools]
+            [samizdat.prompt :as prompt]))
 
 (deftest every-tool-is-documented
   (let [prompt (loop/system-prompt)
@@ -60,3 +53,38 @@
                    (remove #(str/starts-with? % "env/")))]
     (is (empty? holes)
         (str "unfilled template placeholders: " (str/join ", " holes)))))
+
+(deftest env-syntax-survives-selmer
+  ;; selmer parses {{env/NAME}} as a nested lookup and renders it empty;
+  ;; samizdat.prompt sentinel-wraps it so the documented shell-tool syntax
+  ;; reaches the model verbatim. Without this, the secret-reference docs
+  ;; silently vanish from the system prompt.
+  (is (str/includes? (loop/system-prompt) "{{env/NAME}}"))
+  (is (= "ref {{env/FOO}} end"
+         (prompt/render-str "ref {{env/FOO}} end" {}))))
+
+(deftest prompts-render-through-selmer
+  ;; Placeholders interpolate: hyphenated keys (gates' {{turn-count}}),
+  ;; numbers without pre-str-ing, values raw — no HTML escaping, because a
+  ;; prompt full of code must not have < > & quoted into entities.
+  (is (str/includes? (prompt/render "explore-cap" {:lead "L: " :cap 5})
+                     "L: 5 turns"))
+  (is (= "v=(->> xs (map inc)) & <plain>"
+         (prompt/render-str "v={{v}}" {:v "(->> xs (map inc)) & <plain>"})))
+  ;; A missing key renders empty rather than surfacing a literal {{...}} to
+  ;; the model. The str/replace chains left the placeholder visible; the
+  ;; content pins (what the message must contain) carry the load now.
+  (is (= "a  b" (prompt/render-str "a {{absent}} b" {})))
+  ;; Single braces are not template syntax — architect.md's JSON decision
+  ;; block passes through untouched, and a value containing {{...}} is
+  ;; inserted as text, never re-parsed.
+  (is (= "{\"decision\": \"decompose\"} 1"
+         (prompt/render-str "{\"decision\": \"decompose\"} {{n}}" {:n 1})))
+  (is (= "a {{inner}} b"
+         (prompt/render-str "a {{v}} b" {:v "{{inner}}"}))))
+
+(deftest selmer-replaces-the-str-replace-seams
+  ;; The renderer is selmer, not str/replace: the parser is selmer's (a
+  ;; filter in the placeholder would fire, where a replace chain would
+  ;; leave it verbatim).
+  (is (= "Y" (prompt/render-str "{{v|upper}}" {:v "y"}))))

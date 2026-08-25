@@ -29,9 +29,14 @@
         {:git/url "https://github.com/jolt-lang/jolt-crypto"
          :git/sha "1ab72aa5f73be7ec41f01086953ffb43ecd3d84e"}
 
-        org.clojure/data.json
-        {:git/url "https://github.com/clojure/data.json"
-         :git/sha "94463ffb54482427fd9b31f264b06bff6dcfd557"}
+         org.clojure/data.json
+         {:git/url "https://github.com/clojure/data.json"
+          :git/sha "94463ffb54482427fd9b31f264b06bff6dcfd557"}
+
+         ;; Selmer renders every prompt template ({{...}} placeholders). Its
+         ;; java.time FormatStyle use needs jolt-lang/time (below); prompts
+         ;; carry code, so escaping is off (samizdat.prompt).
+         selmer/selmer {:mvn/version "1.13.5"}
 
         ;; vendor/mycelium — schema contracts and validation. malli.generator
         ;; hard-requires test.check at namespace load, and mycelium.dev loads

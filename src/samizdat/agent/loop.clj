@@ -39,6 +39,7 @@
             [samizdat.llm.fence :as fence]
             [samizdat.agent.skills :as skills]
             [samizdat.llm.message :as message]
+            [samizdat.prompt :as prompt]
             [samizdat.store.artifacts :as artifacts]
             [samizdat.store.failures :as failures]
             [samizdat.store.interventions :as interventions]
@@ -62,14 +63,14 @@
   `tools/tool-names` appears here, so a new tool cannot be added without being
   documented — that is what kept the whole Lean surface unreachable."
   []
-  (-> (slurp (io/resource "prompts/system.md"))
-      ;; The SMT template catalogue left with the proof engines; the seam
-      ;; stays until the coding prompt replaces this file outright.
-      (str/replace "{{templates}}" "")
-      ;; The skill catalogue is always in the prompt but cheap — names and
-      ;; trigger descriptions only, never bodies — so the model knows what it
-      ;; can `skill load` and WHEN, without spending a turn to discover them.
-      (str/replace "{{skills}}" (skills/render-catalog))))
+  ;; Tier 2d-era seam, now selmer: {{templates}} stays until the coding
+  ;; prompt replaces system.md outright; the skill catalogue is always in
+  ;; the prompt but cheap — names and trigger descriptions only, never
+  ;; bodies — so the model knows what it can `skill load` and WHEN,
+  ;; without spending a turn to discover them.
+  (prompt/render "system"
+    {:templates ""
+     :skills (skills/render-catalog)}))
 
 (defn judge-exemptions
   "The DO-NOT-FLAG list shipped to the audit and review judges. A var rather
@@ -289,17 +290,17 @@
     (-> (state/enter-build turn)
         (state/add-message
          "user"
-          ;; "prologue" only for a branch that has never left explore. Once a
-          ;; reframe can send one back (vf-9wx) the same message on a re-entry
-          ;; would be describing something that is not happening.
-          ;; Tier 2d: the prose is prompts/explore-cap.md — runtime-editable,
-          ;; the same seam every gate message reads through.
-          (str "[harness] "
-               (-> (slurp (io/resource "prompts/explore-cap.md"))
-                   (str/replace "{{lead}}" (if (:reframe-entered-turn branch)
-                                             "Your re-planning budget is spent: "
-                                             "The explore prologue is over: "))
-                   (str/replace "{{cap}}" (str (gates/threshold :explore-cap)))))))))
+           ;; "prologue" only for a branch that has never left explore. Once a
+           ;; reframe can send one back (vf-9wx) the same message on a re-entry
+           ;; would be describing something that is not happening.
+           ;; Tier 2d: the prose is prompts/explore-cap.md — runtime-editable,
+           ;; the same seam every gate message reads through.
+           (str "[harness] "
+                (prompt/render "explore-cap"
+                  {:lead (if (:reframe-entered-turn branch)
+                           "Your re-planning budget is spent: "
+                           "The explore prologue is over: ")
+                   :cap (gates/threshold :explore-cap)}))))))
 
 (defn provider-error-step
   "A provider failure is not the branch's fault and must not count against it

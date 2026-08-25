@@ -36,7 +36,8 @@
             [clojure.java.io :as io]
             [clojure.string :as str]
             [samizdat.agent.state :as state]
-            [samizdat.agent.supervisor :as supervisor]))
+            [samizdat.agent.supervisor :as supervisor]
+            [samizdat.prompt :as sp]))
 
 (defn load-config
   "Gate thresholds from resources/gates.edn. Read through io/resource so the
@@ -63,7 +64,7 @@
   (get-in (config) [:tool-vocab k]))
 
 (defn- prompt [name]
-  (slurp (io/resource (str "prompts/" name ".md"))))
+  (sp/prompt name))
 
 (defn- fired-count [branch gate]
   (count (filter #(= gate (:gate %)) (:gate-history branch))))
@@ -101,17 +102,14 @@
   (compile-form form))
 
 (defn- compile-message
-  "A prompts/ file plus an optional suffix, with {{turn-count}} and
-  {{max-turns}} interpolated at fire time — the same {{...}} convention as
+  "A prompts/ file plus an optional suffix, selmer-rendered at fire time —
+  the same {{...}} convention and the same engine (samizdat.prompt) as
   every other prompt seam."
   [{:keys [message-file message-suffix]}]
   (fn [{:keys [branch max-turns]}]
-    (let [subst (fn [s] (-> (str s)
-                            (str/replace "{{turn-count}}"
-                                         (str (state/turn-count branch)))
-                            (str/replace "{{max-turns}}" (str max-turns))))]
-      (str (some-> message-file prompt subst)
-           (some-> message-suffix subst)))))
+    (let [ctx {:turn-count (state/turn-count branch) :max-turns max-turns}]
+      (str (some-> message-file sp/prompt (sp/render-str ctx))
+           (some-> message-suffix (sp/render-str ctx))))))
 
 (defn- compile-gate
   [entry]
