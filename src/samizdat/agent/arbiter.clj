@@ -91,20 +91,11 @@
       "```tool-call\n")))
 
 (def ^:private forceable
-  "Schemas for the tools a gate may FORCE via native tool_choice. Only the
-  terminal tools — forcing a mid-task tool would be the harness deciding rather
-  than steering. Minimal: enough for the provider to accept the function."
-  {"done" {:name "done"
-           :description "Finish the task and return the final answer."
-           :parameters {:type "object"
-                        :properties {:answer {:type "string"
-                                              :description "The final answer, or the best partial result so far."}}
-                        :required ["answer"]}}
-   "give_up" {:name "give_up"
-              :description "Abandon the task, stating why it cannot be finished."
-              :parameters {:type "object"
-                           :properties {:reason {:type "string"}}
-                           :required ["reason"]}}})
+  "Schemas for the tools a gate may FORCE via native tool_choice, from
+  gates.edn :forceable-tools (tier 3b: data). Only the terminal tools —
+  forcing a mid-task tool would be the harness deciding rather than
+  steering. Minimal: enough for the provider to accept the function."
+  (:forceable-tools (gates/config)))
 
 (defn force-tool-for
   "The native-tool spec to FORCE for a decision naming a forceable tool, or nil.

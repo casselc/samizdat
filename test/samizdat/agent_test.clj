@@ -1763,3 +1763,32 @@
                                                        :turns (vec (repeat 8 {})))})
                        "8 turns in")
         "the turn count is interpolated")))
+
+(deftest plain-gates-are-config-data
+  ;; Tier 3b tranche 1: the seven gates whose messages are a prompts/ file
+  ;; plus {{turn-count}}/{{max-turns}} interpolation moved from closures to
+  ;; gates.edn :gates entries — no new compiler machinery, the tier-3a path.
+  ;; Behavior is pinned by the existing suite (coherence, settle, message
+  ;; tests); this pins the move itself. The five message-builder gates
+  ;; (done-blocked, human-directive, safe-state, stuck, studying,
+  ;; progress-stalled) remain closures pending message-form compilation.
+  (let [data (set (map :gate (:gates (gates/config))))]
+    (doseq [g [:emergency-review :milestone :repopulate :branch-out
+               :last-call :wind-down :turn-budget]]
+      (is (contains? data g) (str g " is a gates.edn entry")))
+    (is (= 4 (:priority (gates/by-name :emergency-review))))
+    (is (= 2.5 (:priority (gates/by-name :last-call))) "fractional slots survive")
+    (is (= "branch_theses" (:tool (gates/by-name :branch-out))))
+    (is (= "done" (:tool (gates/by-name :last-call))))
+    (let [b (assoc (branch-with) :turns (vec (repeat 30 {})))
+          msg ((:message (gates/by-name :turn-budget)) {:branch b :max-turns 40})]
+      (is (str/includes? msg "used 30 of 40 turns")))
+    (let [b (assoc (branch-with) :turns (vec (repeat 36 {})))
+          msg ((:message (gates/by-name :wind-down)) {:branch b :max-turns 40})]
+      (is (str/includes? msg "at turn 36 of 40")))
+    (is (not (str/includes? ((:message (gates/by-name :emergency-review)) {})
+                            "{{")))
+    ;; forceable-tools is data too: the arbiter's force schemas come from
+    ;; gates.edn, not a src def.
+    (is (contains? (gates/config) :forceable-tools))
+    (is (= "done" (:name (get-in (gates/config) [:forceable-tools "done"]))))))
