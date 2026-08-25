@@ -3,9 +3,23 @@
 
 (ns samizdat.decompose-test
   "The pure decompose-on-stuck core: the architect prompt and decision parsing."
-  (:require [clojure.string :as str]
+  (:require [clojure.java.io :as io]
+            [clojure.string :as str]
             [clojure.test :refer [deftest testing is]]
             [samizdat.agent.decompose :as dec]))
+
+(deftest architect-prompt-is-a-prompt-file
+  ;; Tier 2c: the architect prompt moved from src prose to
+  ;; resources/prompts/architect.md — runtime-editable, same seam as every
+  ;; gate message. parse-decision is coupled to the JSON decision format,
+  ;; so that format survives the move pinned.
+  (let [file (slurp (io/resource "prompts/architect.md"))]
+    (is (str/includes? file "{{problem}}"))
+    (is (str/includes? file "DECOMPOSE"))
+    (is (str/includes? file "FRESH_APPROACH"))
+    (is (str/includes? file "\"decision\": \"decompose\" | \"fresh_approach\""))
+    (is (str/includes? (dec/architect-prompt {:problem "the pin problem"} {})
+                       "the pin problem"))))
 
 (deftest architect-prompt-carries-the-evidence
   (let [p (dec/architect-prompt {:problem "gate the remember tool"

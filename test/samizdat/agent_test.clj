@@ -555,19 +555,56 @@
     (is (not (state/explore-cap-expired? (state/enter-build b 3) 5 20))
         "only the explore phase is capped")))
 
-(deftest explore-cap-prose-names-the-current-surface
-  ;; The valve's message survived the proof-engine removal still telling
-  ;; branches to prove claims with Lean — instructions for a surface that
-  ;; no longer exists. Pin it to the current vocabulary.
+(deftest steer-prose-lives-in-prompt-files
+  ;; Tier 2d: the scheduler's steer prose — the explore→build valve message,
+  ;; the juvenile-grace spare, the Pareto reprieve, the crossover context —
+  ;; moved from loop/beam string literals to resources/prompts/, the same
+  ;; seam every gate message reads through. End-to-end where the public
+  ;; seam is cheap: an unsubstituted {{...}} placeholder reaching the model
+  ;; is the failure mode the pins exclude.
   (with-redefs [gates/threshold (fn [_] 5)]
     (let [b (state/new-branch {:id "B1" :problem "p" :created-at-turn 0})
           out (aloop/phase-valve b 6)
-          msg (:content (peek (:messages out)))]
-      (is (some? msg) "the valve fired and left a message")
-      (is (not (re-find #"(?i)lean|sketch" msg))
-          "no removed-tool vocabulary survives in the prose")
-      (is (re-find #"(?i)build" msg)
-          "the phase change is still named"))))
+          msg (-> out :messages peek :content)]
+      (is (str/includes? msg "BUILD phase"))
+      (is (str/includes? msg "green test run"))
+      (is (not (str/includes? msg "{{")))))
+  (with-db [c]
+    (let [rid (runs/start-run! c {:problem "p"})
+          ctx {:conn c :run-id rid}
+          juvenile (-> (branch-with :id "B1.2" :consecutive-failures 3
+                                    :created-at-turn 15
+                                    :critic {:scores {:progress 1 :momentum 2
+                                                      :distinctness 5 :viability 4}
+                                             :turn 16})
+                       (assoc :turns (vec (repeat 3 {}))))
+          spared (#'beam/cull-or-keep ctx juvenile 2
+                                      [{:progress 5 :momentum 5
+                                        :distinctness 5 :viability 4}])
+          jm (-> spared :messages peek :content)]
+      (is (state/active? spared))
+      (is (str/includes? (str/replace jm #"\s+" " ")
+                         "A branch this new is not culled for it"))
+      (is (not (str/includes? jm "{{"))))
+    (let [rid (runs/start-run! c {:problem "p"})
+          ctx {:conn c :run-id rid}
+          reprieved (-> (branch-with :id "B2" :consecutive-failures 3
+                                     :created-at-turn 0
+                                     :critic {:scores {:progress 2 :momentum 2
+                                                       :distinctness 4 :viability 3}
+                                              :turn 20})
+                        (assoc :turns (vec (repeat 20 {}))))
+          kept (#'beam/cull-or-keep ctx reprieved 2 [])
+          rm (-> kept :messages peek :content)]
+      (is (state/active? kept) "no dominating sibling, so the reprieve holds")
+      (is (str/includes? rm "reprieve ends unconditionally at"))
+      (is (str/includes? rm (str (* (gates/threshold :cull-hard-multiple)
+                                    (gates/threshold :cull-threshold))))
+          "the hard floor is interpolated from the config numbers")
+      (is (not (str/includes? rm "{{"))))
+    (let [file (slurp (clojure.java.io/resource "prompts/crossover.md"))]
+      (is (str/includes? file "**Confirmed by other lineages in this run**"))
+      (is (str/includes? file "{{artifacts}}")))))
 
 ;; --- the forced reframe (vf-9wx, vf-31m, vf-49o) -----------------------------
 ;;
@@ -1081,6 +1118,25 @@
     (with-redefs [llm/chat (fn [& _] (throw (ex-info "provider down" {})))]
       (is (nil? (critic/score! {} b [] 7))
           "a dead provider must not take the beam down"))))
+
+(deftest critic-score-prompt-is-a-prompt-file
+  ;; Tier 2a: the critic's score prompt moved from src prose to
+  ;; resources/prompts/critic.md — runtime-editable, and no longer
+  ;; proof-domain ("parallel proof attempts") on a coding surface.
+  (let [captured (atom nil)
+        b (branch-with :thesis {:goal "g" :technique "t" :subClaims []})]
+    (with-redefs [llm/chat (fn [_ _ msgs _]
+                             (reset! captured (-> msgs peek :content))
+                             {:content (str "SCORE progress: 4\nSCORE momentum: 3\n"
+                                            "SCORE distinctness: 5\nSCORE viability: 4")})]
+      (critic/score! {} b [] 7)
+      (let [p (or @captured "")]
+        (is (str/includes? p "research director"))
+        (is (str/includes? p "BRANCH") "the deterministic summary is substituted in")
+        (is (str/includes? p "SCORE progress: <n>")
+            "the SCORE line format the parser is coupled to survives the move")
+        (is (not (str/includes? p "proof attempts"))
+            "the coding loop is not a proof surface")))))
 
 (deftest a-juvenile-branch-is-not-culled-against-its-elders
   ;; Gen-9 forked for the first time and every child died within twelve

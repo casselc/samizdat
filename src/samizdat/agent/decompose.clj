@@ -22,8 +22,16 @@
   (attempt, recurse, assemble, depth cap) lives in cells/decompose.clj. Same
   split as planner.clj vs cells/team.clj."
   (:require [clojure.data.json :as json]
+            [clojure.java.io :as io]
             [clojure.string :as str]
             [samizdat.agent.gates :as gates]))
+
+(defn- prompt
+  "A prompt file from resources/prompts — the same seam every gate message
+  reads through (gates.clj). Tier 2c: the architect prompt is
+  runtime-editable data, not src prose."
+  [name]
+  (slurp (io/resource (str "prompts/" name ".md"))))
 
 ;; Tier 1b: both budgets are gates.edn data (:decompose-max-depth,
 ;; :decompose-max-parts) — cost ceilings, since each level of recursion
@@ -41,47 +49,40 @@
   "Ask the architect to diagnose a stuck unit and choose to split it or hint a
   fresh approach. Fed the EVIDENCE — the contract, the tests, the last attempt,
   the failure, how many tries and how deep — so the choice is grounded in why it
-  failed, not a guess about its size."
+  failed, not a guess about its size. The skeleton is
+  resources/prompts/architect.md (tier 2c); the section builders below carry
+  their own newlines, so an absent section collapses cleanly."
   [{:keys [problem contract tests]}
    {:keys [attempts last-answer last-failure depth fresh-failed force-split]}]
-  (str
-   "You are an architect diagnosing a stuck implementation. A unit of work has "
-   "been attempted " (or attempts "several") " times and still cannot pass its "
-   "tests. Decide how to recover.\n\n"
-   "## The unit\n\n" problem "\n"
-   (when (seq (str contract)) (str "\n### Its contract\n" contract "\n"))
-   (when (seq (str tests)) (str "\n### Its tests (the spec it must satisfy)\n" tests "\n"))
-   (when (seq (str last-answer)) (str "\n### The most recent attempt\n" last-answer "\n"))
-   (when (seq (str last-failure)) (str "\n### Why it failed\n" last-failure "\n"))
-   (when (or fresh-failed force-split)
-     (str "\n### A different angle was already tried and also failed\n"
-          "Retrying with a hint did not work. Do NOT ask for another retry — the "
-          "unit must be SPLIT into smaller sub-units now. Even a unit that looks "
-          "like 'one thing' can be broken down (e.g. a focused test that pins the "
-          "contract, plus the smallest change that makes it pass). Choose "
-          "DECOMPOSE and list 2 or more sub-units.\n"))
-   "\n## Your choice\n\n"
-   "Pick ONE:\n\n"
-   "1. DECOMPOSE — the unit is doing MORE THAN ONE distinct thing. List its "
-   "responsibilities; if there is more than one, split it into 2 to "
-   default-max-parts " single-responsibility sub-units. Each sub-unit is small "
-   "(a function or two, testable on its own) and does exactly one thing. The "
-   "parent will become a thin piece that composes them, so the sub-units must "
-   "cover the whole job between them.\n"
-   "2. FRESH_APPROACH — the unit does ONE thing, but the attempts keep taking a "
-   "wrong strategy. Give a one-paragraph hint at a different angle; the next "
-   "attempt sees it and starts over. Use this when splitting would not actually "
-   "reduce the complexity.\n\n"
-   (when (>= (or depth 0) (dec max-depth))
-     (str "This is the LAST recovery round — the depth budget is nearly spent, "
-          "so further splitting will be rejected. You MUST choose "
-          "FRESH_APPROACH.\n\n"))
-   "Return ONLY this JSON, nothing else:\n"
-   "{\"decision\": \"decompose\" | \"fresh_approach\",\n"
-   " \"reason\": \"one sentence\",\n"
-   " \"subtasks\": [ {\"name\": \"a-short-kebab-name\",\n"
-   "                 \"description\": \"one paragraph: what this sub-unit must do\"} ],\n"
-   " \"hint\": \"one paragraph (only for fresh_approach)\"}"))
+  (-> (prompt "architect")
+      (str/replace "{{attempts}}" (str (or attempts "several")))
+      (str/replace "{{problem}}" (str problem "\n"))
+      (str/replace "{{contract}}"
+                   (if (seq (str contract))
+                     (str "\n### Its contract\n" contract "\n") ""))
+      (str/replace "{{tests}}"
+                   (if (seq (str tests))
+                     (str "\n### Its tests (the spec it must satisfy)\n" tests "\n") ""))
+      (str/replace "{{last-answer}}"
+                   (if (seq (str last-answer))
+                     (str "\n### The most recent attempt\n" last-answer "\n") ""))
+      (str/replace "{{last-failure}}"
+                   (if (seq (str last-failure))
+                     (str "\n### Why it failed\n" last-failure "\n") ""))
+      (str/replace "{{force-split}}"
+                   (if (or fresh-failed force-split)
+                     (str "\n### A different angle was already tried and also failed\n"
+                          "Retrying with a hint did not work. Do NOT ask for another retry — the "
+                          "unit must be SPLIT into smaller sub-units now. Even a unit that looks "
+                          "like 'one thing' can be broken down (e.g. a focused test that pins the "
+                          "contract, plus the smallest change that makes it pass). Choose "
+                          "DECOMPOSE and list 2 or more sub-units.\n") ""))
+      (str/replace "{{max-parts}}" (str default-max-parts))
+      (str/replace "{{last-round}}"
+                   (if (>= (or depth 0) (dec max-depth))
+                     (str "This is the LAST recovery round — the depth budget is nearly spent, "
+                          "so further splitting will be rejected. You MUST choose "
+                          "FRESH_APPROACH.\n\n") ""))))
 
 (defn- normalize-subtask [m]
   (let [name (some-> (or (get m "name") (get m :name)) str str/trim not-empty)

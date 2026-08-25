@@ -20,6 +20,7 @@
   "The finalization critic: the pure judge core, and the block-then-ship loop
   behavior on the `critic` manifest."
   (:require [clojure.data.json]
+            [clojure.java.io :as io]
             [clojure.string :as str]
             [clojure.test :refer [deftest testing is]]
             [samizdat.agent.judge :as judge]
@@ -114,6 +115,22 @@
   (testing "deterministic-block returns the first gate that fires"
     (is (judge/deterministic-block "done" [{:tool_name "edit_file" :args {:path "a.clj"}}]))
     (is (nil? (judge/deterministic-block "done" [{:tool_name "eval" :args {}}])))))
+
+(deftest judge-preamble-is-a-prompt-file
+  ;; Tier 2b: the judge's standing instructions moved from a src def to
+  ;; resources/prompts/judge.md — runtime-editable, same seam as every gate
+  ;; message. The verdict/findings parsers are coupled to the VERDICT:/
+  ;; FINDINGS:/severity-tag formats, so the move pins them: the def IS the
+  ;; file's contents.
+  (let [file (slurp (io/resource "prompts/judge.md"))]
+    (is (= file judge/preamble))
+    (is (str/includes? file "VERDICT: COMPLETE"))
+    (is (str/includes? file "FINDINGS:"))
+    (is (str/includes? file "[critical]")))
+  (let [p (judge/critic-prompt {:rules "R" :transcript "T" :evidence "E"
+                               :answer "A" :diff nil})]
+    (is (str/includes? p "## The agent's rules"))
+    (is (str/includes? p "Is this task complete and correct?"))))
 
 (deftest diff-review-blocks-on-severity
   (testing "a critical or high finding blocks; a low one does not"

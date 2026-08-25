@@ -29,8 +29,16 @@
 
   Everything here is pure and unit-testable; the cell that calls the model and
   routes on the verdict lives in resources/cells/critic.clj."
-  (:require [clojure.string :as str]
+  (:require [clojure.java.io :as io]
+            [clojure.string :as str]
             [samizdat.agent.gates :as gates]))
+
+(defn- prompt
+  "A prompt file from resources/prompts — the same seam every gate message
+  reads through (gates.clj). Tier 2b: the judge's standing instructions are
+  runtime-editable data, not src prose."
+  [name]
+  (slurp (io/resource (str "prompts/" name ".md"))))
 
 (def verdicts #{:complete :incomplete :abstain})
 
@@ -157,29 +165,10 @@
   (or (verifier-block rows) (claim-block answer rows) (source-block answer rows)))
 
 (def preamble
-  "The judge's standing instructions. Calibrated, not trigger-happy. A unified
-  judge: it decides completeness AND reviews the run's own diff for defects."
-  (str "You are a reviewer deciding whether an agent's work on a task is "
-       "actually complete and correct. You are given the agent's own rules, a "
-       "transcript of what it did, a deterministic evidence block, the diff of "
-       "what it changed, and the answer it wants to ship. Do two things: judge "
-       "COMPLETENESS, and REVIEW THE DIFF for defects.\n\n"
-       "Rules:\n"
-       "- Respect the agent's own instructions. Never demand something they "
-       "forbid (e.g. pushing or committing if they say not to).\n"
-       "- Block only on a concrete, in-scope gap or a real defect you can point "
-       "at. Check the answer's claims against the EVIDENCE block and flag any "
-       "the run did not actually do.\n"
-       "- Review the DIFF for bugs, not style: a wrong result, a broken edge "
-       "case, a resource leak, a security hole. Tag each finding with a "
-       "severity: [critical], [high], [medium], or [low].\n"
-       "- A run that ends by asking the user a question is a correct stop, not "
-       "incompleteness.\n"
-       "- When unsure, PASS or ABSTAIN. A false block wastes a whole turn.\n\n"
-       "Answer with a first line exactly `VERDICT: COMPLETE`, "
-       "`VERDICT: INCOMPLETE`, or `VERDICT: ABSTAIN`, then optionally a "
-       "`FINDINGS:` section, one finding per line, each prefixed with its "
-       "severity tag."))
+  "The judge's standing instructions, from resources/prompts/judge.md (tier
+  2b — runtime-editable). Calibrated, not trigger-happy. A unified judge:
+  it decides completeness AND reviews the run's own diff for defects."
+  (prompt "judge"))
 
 (defn critic-prompt
   "The judge's user message: the agent's rules, the evidence, the transcript,

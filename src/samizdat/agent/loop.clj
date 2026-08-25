@@ -289,17 +289,17 @@
     (-> (state/enter-build turn)
         (state/add-message
          "user"
-         ;; "prologue" only for a branch that has never left explore. Once a
-         ;; reframe can send one back (vf-9wx) the same message on a re-entry
-         ;; would be describing something that is not happening.
-         (str "[harness] "
-              (if (:reframe-entered-turn branch)
-                "Your re-planning budget is spent: "
-                "The explore prologue is over: ")
-              (gates/threshold :explore-cap)
-              " turns without banked work. You are in the"
-              " BUILD phase — the prologue is over. The way forward is"
-              " concrete edits and a green test run, not more reading.")))))
+          ;; "prologue" only for a branch that has never left explore. Once a
+          ;; reframe can send one back (vf-9wx) the same message on a re-entry
+          ;; would be describing something that is not happening.
+          ;; Tier 2d: the prose is prompts/explore-cap.md — runtime-editable,
+          ;; the same seam every gate message reads through.
+          (str "[harness] "
+               (-> (slurp (io/resource "prompts/explore-cap.md"))
+                   (str/replace "{{lead}}" (if (:reframe-entered-turn branch)
+                                             "Your re-planning budget is spent: "
+                                             "The explore prologue is over: "))
+                   (str/replace "{{cap}}" (str (gates/threshold :explore-cap)))))))))
 
 (defn provider-error-step
   "A provider failure is not the branch's fault and must not count against it

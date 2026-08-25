@@ -35,6 +35,7 @@
   branches against one branch at five times the turn budget, and
   `samizdat.bench.beam` is the comparison."
   (:require [clojure.data.json :as json]
+            [clojure.java.io :as io]
             [clojure.string :as str]
             [clojure.tools.logging :as log]
             [samizdat.agent.critic :as critic]
@@ -63,11 +64,16 @@
                        (journal/artifacts conn run-id))
         confirmed (filter #(= "confirmed" (:claim_status %)) others)]
     (when (seq confirmed)
-      (str "\n\n**Confirmed by other lineages in this run** — engine-verified,"
-           " and yours to build on or combine with:\n"
-           (str/join "\n"
-                     (for [a (take-last 8 confirmed)]
-                       (str "- [" (:branch_id a) " " (:kind a) "] " (:claim a))))))))
+      ;; Tier 2d: the header prose is prompts/crossover.md — runtime-editable,
+      ;; the same seam every gate message reads through.
+      (str "\n\n"
+           (-> (slurp (io/resource "prompts/crossover.md"))
+               (str/replace
+                "{{artifacts}}"
+                (str/join "\n"
+                          (for [a (take-last 8 confirmed)]
+                            (str "- [" (:branch_id a) " " (:kind a) "] "
+                                 (:claim a))))))))))
 
 (defn- open-branch!
   [{:keys [conn run-id problem]} id parent-id thesis turn]
@@ -234,13 +240,11 @@
             (journal/note! conn run-id :cull-spared
                            {:branch-id (:id branch)
                             :data {:scores scores :failures fails :juvenile? true}}))
-          (state/add-message
-           branch "user"
-           (str "[harness] " fails " consecutive verifications have failed."
-                " A branch this new is not culled for it — you were forked to"
-                " explore a distinct line and have not had the turns to show"
-                " what it is worth yet. Change something concrete and keep"
-                " going.")))
+           (state/add-message
+            branch "user"
+            ;; Tier 2d: the spare's prose is prompts/juvenile-grace.md.
+            (-> (slurp (io/resource "prompts/juvenile-grace.md"))
+                (str/replace "{{failures}}" (str fails)))))
 
       (nil? scores)
       (cull-fail (str "culled after " fails
@@ -256,14 +260,12 @@
             (journal/note! conn run-id :cull-spared
                            {:branch-id (:id branch)
                             :data {:scores scores :failures fails}}))
-          (state/add-message
-           branch "user"
-           (str "[harness] " fails " consecutive verifications have failed,"
-                " which normally culls a branch, but no sibling dominates"
-                " your line on the critic's objectives — it survives on its"
-                " distinct strengths. Change something concrete about the"
-                " approach; the reprieve ends unconditionally at " hard-floor
-                " consecutive failures."))))))
+           (state/add-message
+            branch "user"
+            ;; Tier 2d: the reprieve's prose is prompts/cull-reprieve.md.
+            (-> (slurp (io/resource "prompts/cull-reprieve.md"))
+                (str/replace "{{failures}}" (str fails))
+                (str/replace "{{hard-floor}}" (str hard-floor))))))))
 
 (defn- ensure-scored
   "Fresh critic scores for every active branch, at most one sub-LLM call per

@@ -35,12 +35,20 @@
   still want, so a struggling branch with any unique strength survives.
   The known cost is permissiveness, which is why the reprieve it grants is
   a loan with a clock (the hard floor in the scheduler), not an exemption."
-  (:require [clojure.string :as str]
+  (:require [clojure.java.io :as io]
+            [clojure.string :as str]
             [samizdat.agent.gates :as gates]
             [samizdat.agent.state :as state]
             [samizdat.llm.message :as message]
             [samizdat.llm.client :as llm]
             [samizdat.store.journal :as journal]))
+
+(defn- prompt
+  "A prompt file from resources/prompts — the same seam every gate message
+  reads through (gates.clj). Tier 2a: the score prompt is runtime-editable
+  data, not src prose."
+  [name]
+  (slurp (io/resource (str "prompts/" name ".md"))))
 
 (def objectives
   "All maximize, 1..5. Tier 1b: the list is gates.edn :critic-objectives —
@@ -140,22 +148,7 @@
   caller falls back to the scalar rule rather than inventing a vector. A
   usable score is journaled so retention decisions are auditable."
   [{:keys [llm-adapter llm-config conn run-id]} branch siblings turn]
-  (let [p (str "You are the research director over parallel proof attempts on"
-               " one problem. Score the branch below on four objectives,"
-               " 1 (worst) to 5 (best):\n\n"
-               "progress: engine-confirmed results accumulated so far, plus"
-               " measurements banked. A measurement is not a proof and does not"
-               " weigh as one, but a branch that has located a phenomenon"
-               " empirically is further along than a branch with neither.\n"
-               "momentum: are the RECENT turns productive, or flailing?\n"
-               "distinctness: how different is this approach from the sibling"
-               " theses? The beam's diversity is worth protecting.\n"
-               "viability: does the current line have anywhere left to go, or"
-               " is it a dead end regardless of effort?\n\n"
-               (summary branch siblings)
-               "\n\nEnd your response with exactly four lines:\n"
-               "SCORE progress: <n>\nSCORE momentum: <n>\n"
-               "SCORE distinctness: <n>\nSCORE viability: <n>")
+  (let [p (str/replace (prompt "critic") "{{summary}}" (summary branch siblings))
         scores (try
                  (parse-scores
                   (:content (llm/chat llm-adapter llm-config
