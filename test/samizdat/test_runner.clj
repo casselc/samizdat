@@ -69,6 +69,7 @@
             [samizdat.js1-boundary-test]
             [samizdat.js1-wrapper-test]
             [samizdat.js1-harness-test]
+            [samizdat.js1-dogfood-test]
             [samizdat.tasks-test]
             [samizdat.knowledge-test]
             [samizdat.messages-test]
@@ -163,6 +164,7 @@
       samizdat.js1-boundary-test
       samizdat.js1-wrapper-test
       samizdat.js1-harness-test
+      samizdat.js1-dogfood-test
       samizdat.tasks-test
     samizdat.knowledge-test
     samizdat.messages-test

@@ -1,0 +1,7 @@
+#!/bin/sh
+set -eu
+
+# Fixture-owned policy. The trusted controller config supplies only the fixed
+# command "./verify-policy"; no model text, changed path, or environment value
+# is interpolated into this executable or its argv.
+exec ./test/focused_test.sh

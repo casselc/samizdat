@@ -44,6 +44,8 @@
 (def ^:private lock-rel "ci/js1-smolvm/runtime-lock.edn")
 (def ^:private recipe-rel "ci/js1-smolvm/guest-recipe.edn")
 (def ^:private fixtures-rel "test/fixtures/js1/fixtures.edn")
+(def ^:private dogfood-contract-rel
+  "test/fixtures/js1-dogfood/contract.edn")
 
 (def ^:private harness-scripts
   ["ci/js1-smolvm/lib-lock.sh" "ci/js1-smolvm/preflight.sh"
@@ -62,6 +64,8 @@
 (def ^:private lock (edn/read-string (slurp-rel lock-rel)))
 (def ^:private recipe (edn/read-string (slurp-rel recipe-rel)))
 (def ^:private fixtures (edn/read-string (slurp-rel fixtures-rel)))
+(def ^:private dogfood-contract
+  (edn/read-string (slurp-rel dogfood-contract-rel)))
 (def ^:private wrapper-src (slurp-rel "bin/js1"))
 (def ^:private deps-src (slurp-rel "deps.edn"))
 
@@ -218,6 +222,143 @@
       (doseq [[_ marker] (:guest-markers fixtures)]
         (is (str/includes? gs marker)
             (str "guest-setup.sh never prints " marker))))))
+
+;; ── bounded live dogfood fixture (static only; NEVER calls a provider) ─────
+
+(deftest dogfood-contract-is-explicitly-opted-in-and-bounded
+  (let [suite (slurp-rel "test/samizdat/js1_dogfood_test.clj")
+        task (slurp-rel "test/fixtures/js1-dogfood/TASK.md")]
+    (testing "all three operator choices are exact and the model is explicit"
+      (is (= "SAMIZDAT_JS1_DOGFOOD_TEST"
+             (get-in dogfood-contract [:opt-in :flag])))
+      (is (= "SAMIZDAT_JS1_DOGFOOD_PREFLIGHT"
+             (get-in dogfood-contract [:opt-in :preflight-flag])))
+      (is (= {"HARNESS_PROVIDER" "local"
+              "HARNESS_BASE_URL" "http://localhost:13305/v1"}
+             (get-in dogfood-contract [:opt-in :required])))
+      (is (= "HARNESS_MODEL"
+             (get-in dogfood-contract [:opt-in :operator-model-env])))
+      (doseq [literal ["SAMIZDAT_JS1_DOGFOOD_TEST=1"
+                       "HARNESS_PROVIDER=local"
+                       "HARNESS_BASE_URL=http://localhost:13305/v1"
+                       "HARNESS_MODEL=<operator-selected model>"]]
+        (is (str/includes? suite literal) (str "suite lacks " literal))))
+    (testing "turn, player, phase, and shared live-run wall-clock bounds are data"
+      (is (= 14 (get-in dogfood-contract [:bounds :max-turns])))
+      (is (= 1 (get-in dogfood-contract [:bounds :beam-width])))
+      (is (<= (get-in dogfood-contract [:bounds :phase-timeout-ms]) 900000))
+      (is (<= (get-in dogfood-contract [:bounds :total-timeout-ms]) 1800000))
+      (is (= ["preflight" "start" "resume"] (:phases dogfood-contract)))
+      (is (str/includes? suite ":max-turns max-turns"))
+      (is (str/includes? suite ":beam-width 1")))
+    (testing "the task itself names the required discovery and phase boundary"
+      (doseq [marker ["complete" "project/" "doc" "project/edit"
+                      "symbol `map`"
+                      "project/list" "project/search" "project/read"
+                      "dogfood-helper" "project/stat" "first anchored edit"
+                      "ship-verify" "fresh-process resume"
+                      "red-evidence.txt" "second anchored edit"]]
+        (is (str/includes? task marker) (str "task lacks " marker))))))
+
+(deftest dogfood-fixture-markers-and-verifier-are-coherent
+  (let [suite (slurp-rel "test/samizdat/js1_dogfood_test.clj")
+        policy (slurp-rel "test/fixtures/js1-dogfood/verify-policy")
+        focused (slurp-rel "test/fixtures/js1-dogfood/test/focused_test.sh")]
+    (testing "every declared file exists"
+      (doseq [rel (:fixture-files dogfood-contract)]
+        (is (fs/exists? (p (str "test/fixtures/js1-dogfood/" rel)))
+            (str "dogfood fixture missing " rel))))
+    (testing "phase and red/green markers are source facts"
+      (doseq [marker (:phase-markers dogfood-contract)]
+        (is (str/includes? suite marker) (str "suite lacks marker " marker)))
+      (doseq [marker [(get-in dogfood-contract [:verify :red-marker])
+                      (get-in dogfood-contract [:verify :green-marker])]]
+        (is (str/includes? focused marker) (str "focused test lacks " marker))))
+    (testing "trusted policy is fixed fixture argv, never model-derived"
+      (is (= "./verify-policy"
+             (get-in dogfood-contract [:verify :operator-command])))
+      (is (= ["sh" "-c" "./verify-policy"]
+             (get-in dogfood-contract [:verify :hardened-argv])))
+      (is (str/includes? policy "exec ./test/focused_test.sh"))
+      (is (str/includes? suite ":verify-cmd \"./verify-policy\""))
+      (is (str/includes? suite ":verify-focused? false")))
+    (testing "the deterministic policy owns both RED evidence and GREEN"
+      (is (str/includes? focused "cat > red-evidence.txt"))
+      (is (str/includes? focused "exit 1"))
+      (is (str/includes? focused "exit 0")))))
+
+(deftest dogfood-live-suite-stays-outside-the-trusted-checkout
+  (let [suite (slurp-rel "test/samizdat/js1_dogfood_test.clj")]
+    (testing "target is a disposable detached worktree and source status is pinned"
+      (is (str/includes? suite "worktree\" \"add\" \"--detach"))
+      (is (str/includes? suite "target must be outside the trusted source checkout"))
+      (is (str/includes? suite "before-source"))
+      (is (str/includes? suite "the live dogfood modified the trusted running checkout"))
+      (is (str/includes? suite ":unstaged"))
+      (is (str/includes? suite ":staged"))
+      (is (str/includes? suite ":fenced-bytes")))
+    (testing "actual public workflow and resume APIs run in fresh pinned processes"
+      (is (str/includes? suite "samizdat.workflow/run!"))
+      (is (str/includes? suite "samizdat.agent.resume/resume!"))
+      (is (str/includes? suite "bin/js1 path"))
+      (is (str/includes? suite "\"-Sdeps\""))
+      (is (str/includes? suite "-A:js1-dogfood-live"))
+      (is (str/includes? suite "refusing live REPL fallback"))
+      (is (not (str/includes? suite "samizdat.repl"))))
+    (testing "B0 composes normal dependencies with pin-checked SCI roots"
+      (is (str/includes? suite ":production-classpath"))
+      (is (str/includes? suite ":js1-classpath"))
+      (is (str/includes? suite "distinct-classpath [combined]"))
+      (is (str/includes? suite ":local/root sci-root"))
+      (is (str/includes? suite "A bare\n  -Scp union is not sufficient"))
+      (is (str/includes? suite "data.json, jdbc/db, HTTP"))
+      (is (str/includes? suite "bin/js1 path")))
+    (testing "B1 separates trusted workflow resolution from target authority"
+      (is (str/includes? suite "\"JOLT_PWD\" (str (fs/canonicalize source-dir))"))
+      (is (str/includes? suite ":root target"))
+      (is (str/includes? suite "child JOLT_PWD is not the trusted source checkout"))
+      (is (str/includes? suite "sandbox-root=target")))
+    (testing "preflight really compiles and resolves the used API set"
+      (is (str/includes? suite "preflight-api-symbols"))
+      (doseq [api ["samizdat.workflow/load-loop!"
+                   "samizdat.workflow/run!"
+                   "samizdat.agent.resume/resume!"
+                   "samizdat.agent.resume/reconstruct-js1-binding!"
+                   "samizdat.agent.sandbox/evaluate!"
+                   "samizdat.agent.sandbox/evaluate-recorded!"
+                   "samizdat.store.evals/unsettled-effects"]]
+        (is (str/includes? suite api) (str "preflight/harness lacks " api)))
+      (is (str/includes? suite "workflow=compiled"))
+      (is (str/includes? suite "SAMIZDAT_JS1_DOGFOOD_PREFLIGHT")))
+    (testing "N1 freezes at RED and refuses any unsafe durable history"
+      (is (str/includes? suite "signal-child! child \"STOP\""))
+      (is (str/includes? suite "evals/pending"))
+      (is (str/includes? suite "evals/unsettled-effects"))
+      (is (str/includes? suite ":unsafe-red-history"))
+      (is (str/includes? suite "require-quiescent-db!"))
+      (is (str/includes? suite "JS1-DOGFOOD-RED-QUIESCENT")))
+    (testing "N2/N3 cleanup and reaping are bounded"
+      (is (str/includes? suite "finally (db/close conn)"))
+      (is (str/includes? suite ".waitFor p 2000"))
+      (is (str/includes? suite ".waitFor p 3000"))
+      (is (str/includes? suite ":reap-timeout true"))
+      (is (str/includes? suite ":out out-path :err err-path"))
+      (is (not (str/includes? suite "assoc @child")))
+      (is (str/includes? suite "require-reaped!")))
+    (testing "no push, remote provider, source write, or environment dump"
+      (is (not (re-find #"git[^\n]*push" suite)))
+      (is (not (re-find #"https://(api|open)\." suite)))
+      (is (not (str/includes? suite "System/getenv)")))
+      (is (not (str/includes? suite "spit source-dir"))))
+    (testing "direct semantic counters bracket replay and enforce no repeats"
+      (is (= [:project/list :project/search
+              :project/read :project/read :project/read
+              :project/stat :project/edit]
+             (get-in dogfood-contract [:semantic-operations :before-resume])))
+      (is (= [:project/read :project/stat :project/edit]
+             (get-in dogfood-contract [:semantic-operations :after-resume])))
+      (is (str/includes? suite "record-intent! is called"))
+      (is (str/includes? suite "when-not (= before after)")))))
 
 ;; ── shell harness discipline ─────────────────────────────────────────────
 

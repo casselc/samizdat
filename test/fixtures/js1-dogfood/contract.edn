@@ -1,0 +1,39 @@
+{:contract/version 1
+ :opt-in {:flag "SAMIZDAT_JS1_DOGFOOD_TEST"
+          :preflight-flag "SAMIZDAT_JS1_DOGFOOD_PREFLIGHT"
+          :required {"HARNESS_PROVIDER" "local"
+                     "HARNESS_BASE_URL" "http://localhost:13305/v1"}
+          :operator-model-env "HARNESS_MODEL"}
+ :bounds {:max-turns 14
+          :beam-width 1
+          :phase-timeout-ms 900000
+          :total-timeout-ms 1800000}
+ :phases ["preflight" "start" "resume"]
+ :phase-markers ["JS1-DOGFOOD-PREFLIGHT-OK"
+                 "JS1-DOGFOOD-RED-QUIESCENT"
+                 "JS1-DOGFOOD-RED-CHECKPOINT"
+                 "JS1-DOGFOOD-RESUME-HELPER-OK"
+                 "JS1-DOGFOOD-GREEN-OK"]
+ :fixture-files ["TASK.md"
+                 "src/dogfood.clj"
+                 "test/dogfood_test.clj"
+                 "test/focused_test.sh"
+                 "verify-policy"]
+ :verify {:operator-command "./verify-policy"
+          :hardened-argv ["sh" "-c" "./verify-policy"]
+          :red-marker "JS1-DOGFOOD-FOCUSED-RED"
+          :green-marker "JS1-DOGFOOD-FOCUSED-GREEN"
+          :evidence-path "red-evidence.txt"}
+ :semantic-operations
+ {:before-resume [:project/list :project/search
+                  :project/read :project/read :project/read
+                  :project/stat :project/edit]
+  :after-resume [:project/read :project/stat :project/edit]}
+ :safety {:target-must-be-detached true
+          :target-must-be-outside-source true
+          :child-jolt-pwd-must-be-source true
+          :sandbox-root-must-be-target true
+          :red-checkpoint-must-be-quiescent true
+          :source-status-must-not-change true
+          :push-forbidden true
+          :live-repl-fallback-forbidden true}}
