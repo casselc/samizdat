@@ -23,7 +23,9 @@
             [clojure.java.io :as io]
             [clojure.string :as str]
             [clojure.test :refer [deftest testing is]]
+            [samizdat.agent.gates :as gates]
             [samizdat.agent.judge :as judge]
+            [samizdat.agent.tools :as tools]
             [samizdat.llm.client :as llm]
             [samizdat.store.db :as db]
             [samizdat.workflow :as workflow]))
@@ -106,15 +108,15 @@
     (is (nil? (judge/claim-block "here is the plan" [{:tool_name "eval" :args {}}]))
         "no test claim, nothing to check"))
   (testing "source: an answer citing an external source the run could not check blocks"
-    (is (judge/source-block "According to the docs, X is true" [{:tool_name "eval"}]))
-    (is (judge/source-block "see https://example.com/spec" [{:tool_name "grep"}]))
-    (is (nil? (judge/source-block "I built and tested X" [{:tool_name "eval"}]))
+    (is (judge/source-block "According to the docs, X is true" [{:tool_name "eval"}] ["eval"]))
+    (is (judge/source-block "see https://example.com/spec" [{:tool_name "grep"}] ["eval"]))
+    (is (nil? (judge/source-block "I built and tested X" [{:tool_name "eval"}] ["eval"]))
         "no external citation, nothing to check")
-    (is (nil? (judge/source-block "the docs say X" [{:tool_name "web_fetch"}]))
+    (is (nil? (judge/source-block "the docs say X" [{:tool_name "web_fetch"}] ["eval"]))
         "a web-ish tool was used, so the citation could have been checked"))
   (testing "deterministic-block returns the first gate that fires"
-    (is (judge/deterministic-block "done" [{:tool_name "edit_file" :args {:path "a.clj"}}]))
-    (is (nil? (judge/deterministic-block "done" [{:tool_name "eval" :args {}}])))))
+    (is (judge/deterministic-block "done" [{:tool_name "edit_file" :args {:path "a.clj"}}] ["eval"]))
+    (is (nil? (judge/deterministic-block "done" [{:tool_name "eval" :args {}}] ["eval"])))))
 
 (deftest judge-preamble-is-a-prompt-file
   ;; Tier 2b: the judge's standing instructions moved from a src def to
@@ -178,3 +180,35 @@
                 (map #(update % :data (fn [d] (clojure.data.json/read-str (str d) :key-fn keyword)))
                      (db/fetch conn ["SELECT data FROM events WHERE kind='critic'"])))
           "at least one critic firing recorded a block on the diff"))))
+
+(deftest verifier-rules-are-gates-edn-data
+  ;; drg-4026 #55: what counts as a test run, a code edit, and the suite
+  ;; invocation named in the refusal moved from judge.clj regexes to
+  ;; gates.edn :judge-rules — a fixed test-runner ecosystem is project data,
+  ;; not kernel code.
+  (let [rules (gates/threshold :judge-rules)]
+    (is (re-find (re-pattern (:test-run-regex rules)) "jolt -M:test"))
+    (is (re-find (re-pattern (:test-run-regex rules)) "cargo test"))
+    (is (not (re-find (re-pattern (:test-run-regex rules)) "ls -la")))
+    (is (re-find (re-pattern (:code-ext-regex rules)) "src/foo.clj"))
+    (is (not (re-find (re-pattern (:code-ext-regex rules)) "README.md")))
+    (is (str/includes? (:verifier-message rules) "jolt -M:test")))
+  ;; the detection engine stays in src; the rules come from data
+  (is (some? (judge/verifier-block [{:tool_name "edit_file"
+                                      :args {:path "a.clj"}}])))
+  (is (nil? (judge/verifier-block [{:tool_name "edit_file" :args {:path "a.clj"}}
+                                   {:tool_name "shell"
+                                    :args {:command "jolt -M:test"}}]))))
+
+(deftest outside-reach-comes-from-the-registry
+  ;; drg-4026 #56: source-block asserted "no web or fetch tool" as a
+  ;; hard-coded premise. The premise is now an argument the caller supplies
+  ;; from the REGISTERED tool surface (the cells pass tools/tool-names): a
+  ;; project that adds a web tool must not inherit a false refusal, because
+  ;; its run COULD have checked the claim.
+  (let [rows [{:tool_name "read_file" :args {:path "x.clj"}}]
+        answer "According to the docs at https://example.com it works."]
+    (is (some? (judge/source-block answer rows (tools/tool-names)))
+        "today's registered surface has no outside-reach tool, so the block fires")
+    (is (nil? (judge/source-block answer rows ["read_file" "web_fetch"]))
+        "a registered outside-reach tool means the claim could have been checked")))

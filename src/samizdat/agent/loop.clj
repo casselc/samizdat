@@ -88,16 +88,16 @@
 (defn shareable?
   "Whether a just-produced artifact belongs in the run's shared pool.
 
-  Engine-confirmed is the entry condition that separates this from UCLA's
-  self-reported results, and relevance is the second one. An artifact that
-  engages neither the branch's thesis nor the problem cost its own branch a
-  turn and nothing more; exported, it becomes every branch's context. Run
-  0d0c3560 shipped `Diagnostic: between(-1,1,X) succeeds for X = -1,0,1.` to
-  three siblings four turns in (vf-8fl)."
+  The policy is gates.edn :share (drg-4026 #5) — which claim statuses count
+  and whether relevance gates export — read at fire time, so a project
+  retunes its sharing entry condition without a rebuild. The on/off flag
+  stays in the run config: it is the diversity trade-off's off switch."
   [branch artifact share?]
-  (boolean (and share?
-                (= :confirmed (:claim-status artifact))
-                (state/advances-thesis? branch (:claim artifact)))))
+  (let [{:keys [statuses require-relevance?]} (gates/threshold :share)]
+    (boolean (and share?
+                  (contains? statuses (:claim-status artifact))
+                  (or (not require-relevance?)
+                      (state/advances-thesis? branch (:claim artifact)))))))
 
 (defn- truncate [s]
   (let [s (str s)]
@@ -508,6 +508,23 @@
      branch
      (interventions/pending conn run-id (:id branch)))))
 
+(defn apply-effects
+  "Apply the fired gate's branch-state effects (drg-4026 #4).
+
+  A gate is data and cannot mutate the branch, so the small set of effect
+  IMPLEMENTATIONS lives here; WHICH gate carries which effect is the gate's
+  own :effect key in gates.edn, carried through the decision. Naming the
+  effect rather than the gate means adding or renaming a state-changing
+  gate is a data edit — loop.clj is not a dispatch table of gate names."
+  [decision turn max-turns branch]
+  (cond-> branch
+    (= :notified-fractions (:effect decision))
+    (assoc :notified-fractions (gates/crossed-fractions branch max-turns))
+
+    (= :begin-reframe (:effect decision))
+    (state/begin-reframe turn
+                         (:last-failed-claim branch))))
+
 (defn steer-step
   "Predictions settle, pending human directives drain, then the single
   boundary: at most one steer, chosen in priority (a human directive outranks
@@ -555,38 +572,31 @@
           (log/debug "branch" (:id branch) "turn" turn
                      "gate" (:gate decision)
                      "passed over" (:passed-over decision)))
-        (cond-> (-> branch
-                    (dissoc :pending-directive)
-                    (state/add-message "user" body))
-          decision (update :gate-history (fnil conj [])
-                           {:gate (:gate decision) :turn turn})
-          decision (update :open-predictions (fnil conj [])
-                           {:id firing-id
-                            :gate (:gate decision)
-                            :prediction (:prediction decision)
-                            :window (:window decision)
-                            :turn turn})
-          ;; Consumed by the NEXT call-model and cleared there, so a steer
-          ;; forecloses prose on exactly the turn it steers and no later one. A
-          ;; gate naming a forceable tool sets BOTH a prefill and a force-tool
-          ;; spec; the adapter uses the prefill where the provider continues a
-          ;; trailing assistant message (DeepSeek /beta) and falls back to native
-          ;; tool_choice only where it does not (GLM) — tool_choice is rejected
-          ;; by some providers' thinking mode, so it is the fallback, not the
-          ;; default. A bare steer just prefills the fence.
-          decision (assoc :force-tool (arbiter/force-tool-for decision)
-                          :prefill (arbiter/prefill-for decision))
-          ;; Record which budget notices have been delivered, or the gate
-          ;; cannot tell "happened" from "happened and I already reacted".
-          (= :turn-budget (:gate decision))
-          (assoc :notified-fractions
-                 (gates/crossed-fractions branch max-turns))
-          ;; The stuck gate is the only one that changes branch state rather
-          ;; than only speaking (vf-49o). A gate is data and cannot mutate the
-          ;; branch, so its effect is applied here.
-          (= :stuck (:gate decision))
-          (state/begin-reframe turn
-                               (:last-failed-claim branch)))))))
+         ;; drg-4026 #4: any branch-state effect the fired gate carries is
+         ;; keyed by the gate's own :effect (gates.edn data), applied by
+         ;; apply-effects — not by gate names hard-coded here.
+         (apply-effects decision turn max-turns
+           (cond-> (-> branch
+                     (dissoc :pending-directive)
+                     (state/add-message "user" body))
+           decision (update :gate-history (fnil conj [])
+                            {:gate (:gate decision) :turn turn})
+           decision (update :open-predictions (fnil conj [])
+                            {:id firing-id
+                             :gate (:gate decision)
+                             :prediction (:prediction decision)
+                             :window (:window decision)
+                             :turn turn})
+           ;; Consumed by the NEXT call-model and cleared there, so a steer
+           ;; forecloses prose on exactly the turn it steers and no later one. A
+           ;; gate naming a forceable tool sets BOTH a prefill and a force-tool
+           ;; spec; the adapter uses the prefill where the provider continues a
+           ;; trailing assistant message (DeepSeek /beta) and falls back to native
+           ;; tool_choice only where it does not (GLM) — tool_choice is rejected
+           ;; by some providers' thinking mode, so it is the fallback, not the
+           ;; default. A bare steer just prefills the fence.
+           decision (assoc :force-tool (arbiter/force-tool-for decision)
+                           :prefill (arbiter/prefill-for decision))))))))
 
 (defn run-turn
   "Advance one branch by one turn. Returns the updated branch.

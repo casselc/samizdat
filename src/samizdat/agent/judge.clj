@@ -97,68 +97,74 @@
 
 ;; --- deterministic finalization gates (run before the LLM judge) -----------
 
+(defn- rules [] (gates/threshold :judge-rules))
+
 (defn- tool-used? [rows pred]
   (boolean (some (fn [r] (and (:tool_name r) (pred r))) rows)))
 
 (defn- ran-tests? [rows]
   (tool-used? rows
               (fn [r] (and (= "shell" (:tool_name r))
-                           (re-find #"(?i)-M:test|-A:test|run-tests|\bjolt\s+test\b|\bpytest\b|\bcargo\s+test\b|\bnpm\s+test\b"
+                           (re-find (re-pattern (:test-run-regex (rules)))
                                     (str (get-in r [:args :command])))))))
 
 (defn- edited-code? [rows]
   (tool-used? rows
               (fn [r] (and (contains? (gates/tool-vocab :file-write) (:tool_name r))
-                           (re-find #"(?i)\.(clj|cljc|cljs|edn|py|ts|js|rs|go)$"
+                           (re-find (re-pattern (:code-ext-regex (rules)))
                                     (str (get-in r [:args :path])))))))
+
+(defn- outside-tool? [name]
+  (re-find (re-pattern (:outside-reach-regex (rules))) (str name)))
 
 (defn verifier-block
   "A concrete, LLM-free finalization gate (dirge's verifier rung): the run
   edited code but never ran a test. Returns a critique message, or nil when
-  there is nothing to say. Deterministic, so it fires before the paid judge."
+  there is nothing to say. Deterministic, so it fires before the paid judge.
+  The vocabulary is gates.edn :judge-rules (drg-4026 #55) — what counts as
+  a test run is project data, not kernel code."
   [rows]
   (when (and (edited-code? rows) (not (ran-tests? rows)))
-    (str "You changed code but never ran a test. Run the suite (`jolt -M:test`)"
-         " or the focused test, confirm it passes, then finish.")))
+    (:verifier-message (rules))))
 
 (defn claim-block
   "A finalization gate for an unsupported claim: the answer says it tested,
   ran, or verified something, but the evidence shows no test ran. Returns a
-  message or nil."
+  message or nil. Same gates.edn rules."
   [answer rows]
-  (when (and (re-find #"(?i)\b(tested|all tests pass|passing|verified|ran the (tests|suite))\b"
-                      (str answer))
+  (when (and (re-find (re-pattern (:claim-regex (rules))) (str answer))
              (not (ran-tests? rows)))
-    (str "Your answer claims the work was tested or verified, but the run shows"
-         " no test was run. Run it and confirm, or drop the claim.")))
+    (:claim-message (rules))))
 
 (defn source-block
   "A finalization gate for an uncheckable source: the answer attributes a
   claim to something outside the repo — a URL, or phrasing like 'according
   to', 'the docs say', 'the spec says', 'the API returns' — but the run used
-  no tool that reaches outside it. samizdat has read_file/grep/lsp for the
-  LOCAL repo and no web or fetch tool, so such a claim could not have been
-  checked. Returns a message or nil. Note the outside-test matches tool
-  names only loosely: the local journal readers (fetch_artifact,
-  fetch_turn) contain neither web- nor http-family words, so they do not
-  count as reaching out."
-  [answer rows]
-  (when (and (re-find #"(?i)(https?://|www\.|according to|the docs say|the spec says|the api returns)"
-                      (str answer))
-             (not (some #(re-find #"(?i)(web|browse|curl|wget|http)"
-                                  (str (:tool_name %)))
-                        rows)))
-    (str "Your answer cites an external source — a URL or a quoted authority —"
-         " that nothing in this run could have checked: the toolset reads the"
-         " local repo (read_file/grep/lsp) and has no web access. Back the"
-         " claim with something the run actually did — a file it read, a"
-         " command it ran — or drop the claim.")))
+  no tool that reaches outside it. Returns a message or nil.
+
+  drg-4026 #56: the premise is CHECKED, not assumed. The caller passes the
+  registered tool surface; the outside-reach pattern (gates.edn) is matched
+  against it and the run's own rows, and the block fires only when nothing
+  that could have checked the claim exists — a project that registers a web
+  tool disables this block by existing. fetch_artifact / fetch_turn contain
+  no web-family words, so the local journal readers never count as reaching
+  out. The surface is an argument, not a require, so this ns stays pure and
+  free of the aggregator."
+  [answer rows tool-surface]
+  (when (and (re-find (re-pattern (:outside-claim-regex (rules))) (str answer))
+             (not (some outside-tool? tool-surface))
+             (not (some (comp outside-tool? :tool_name) rows)))
+    (:outside-message (rules))))
 
 (defn deterministic-block
   "The first deterministic finalization gate that fires, or nil. These are
-  cheap and specific, so they run before the LLM judge and outrank it."
-  [answer rows]
-  (or (verifier-block rows) (claim-block answer rows) (source-block answer rows)))
+  cheap and specific, so they run before the LLM judge and outrank it.
+  `tool-surface` is the registered tool names — source-block checks the
+  run's reach against it (drg-4026 #56)."
+  [answer rows tool-surface]
+  (or (verifier-block rows)
+      (claim-block answer rows)
+      (source-block answer rows tool-surface)))
 
 (def preamble
   "The judge's standing instructions, from resources/prompts/judge.md (tier

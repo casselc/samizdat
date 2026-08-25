@@ -1819,3 +1819,56 @@
                          "**Withheld**"))
       (is (str/includes? ((:message (gates/by-name :stuck)) {:branch b})
                          "- x")))))
+
+(deftest share-policy-is-gates-edn-data
+  ;; drg-4026 #5: the shared-pool entry condition (which claim statuses
+  ;; count, whether relevance gates export) moved from hard-coded clauses in
+  ;; shareable? to gates.edn :share — project policy, runtime-tunable, the
+  ;; same shape as every other policy scalar.
+  (is (= {:statuses #{:confirmed} :require-relevance? true}
+         (gates/threshold :share)))
+  (let [b (assoc (branch-with) :thesis {:goal "count the odd numbers"})
+        relevant {:claim-status :confirmed
+                  :claim "the set of odd numbers has size 23"}
+        irrelevant {:claim-status :confirmed :claim "the graph is 4-colorable"}
+        sketch {:claim-status :sketch
+                :claim "the set of odd numbers has size 23"}]
+    (is (aloop/shareable? b relevant true))
+    (is (not (aloop/shareable? b irrelevant true)) "relevance still gates export")
+    (is (not (aloop/shareable? b sketch true)) "only :confirmed enters the pool")
+    (is (not (aloop/shareable? b relevant false)) "the run's off switch still wins")
+    (with-redefs [gates/threshold (fn [_] {:statuses #{:confirmed}
+                                           :require-relevance? false})]
+      (is (aloop/shareable? b irrelevant true)
+          "relevance off in config turns the filter off — read at fire time"))))
+
+(deftest gate-effects-are-gate-data
+  ;; drg-4026 #4: the two gates that change branch state (not just speak) had
+  ;; their effects keyed by hard-coded gate names in the steer-step. The
+  ;; effect is now a key on the gate's own data (gates.edn :effect), carried
+  ;; through arbiter/decide, and applied by loop/apply-effects dispatching on
+  ;; :effect — so adding or renaming a state-changing gate is a data edit,
+  ;; and loop.clj owns only the effect implementations (data cannot mutate
+  ;; the branch).
+  (is (= :begin-reframe (:effect (gates/by-name :stuck))))
+  (is (= :notified-fractions (:effect (gates/by-name :turn-budget))))
+  (is (every? (complement :effect)
+              (remove #(contains? #{:stuck :turn-budget} (:gate %)) gates/gates))
+      "no other gate claims a branch effect")
+  ;; decide carries :effect from the chosen gate's data
+  (with-redefs [gates/gates [{:gate :test-gate :priority 0 :effect :e
+                              :when (fn [_] true)
+                              :message (fn [_] "m")
+                              :prediction (fn [_] nil)}]]
+    (is (= :e (:effect (arbiter/decide {})))))
+  ;; apply-effects dispatches on :effect, not the gate's name
+  (let [b (branch-with)]
+    (is (= 7 (:reframe-entered-turn
+              (aloop/apply-effects {:gate :stuck :effect :begin-reframe} 7 40 b))))
+    (is (nil? (:reframe-entered-turn (aloop/apply-effects {:gate :stuck} 7 40 b)))
+        "a stuck-shaped decision without the effect key does not reframe")
+    (is (contains? (aloop/apply-effects {:gate :turn-budget
+                                         :effect :notified-fractions} 30 40 b)
+                   :notified-fractions))
+    (is (= b (aloop/apply-effects nil 7 40 b))
+        "no decision, no effect")))

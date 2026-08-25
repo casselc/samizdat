@@ -259,6 +259,18 @@
         tier under observation should not loosen the cadence at which it is
         invited to mutate the machinery observing it."}
 
+ :share
+ {:value {:statuses #{:confirmed} :require-relevance? true}
+  :kind :threshold :capability-tunable? false
+  :doc "The shared-pool entry condition (drg-4026 #5): which claim statuses
+        an artifact must carry to export to sibling branches, and whether the
+        relevance filter (advances-thesis?) additionally gates it. Engine-
+        confirmed is the entry condition that separates this from
+        self-reported results; relevance is the second one — an artifact
+        that engages neither the branch's thesis nor the problem cost its
+        own branch a turn, exported it becomes every branch's context
+        (vf-8fl). require-relevance? off admits any confirmed artifact."}
+
  :critic-objectives
  {:value [:progress :momentum :distinctness :viability] :kind :threshold
   :capability-tunable? false
@@ -283,6 +295,35 @@
  :decompose-max-parts
  {:value 4 :kind :cost-ceiling :capability-tunable? false
   :doc "Most sub-units the architect may split one unit into."}
+
+ :judge-rules
+ ;; drg-4026 #55: the judge's deterministic finalization rules — what counts
+ ;; as a test run, a code edit, an outside claim — as data. A fixed
+ ;; test-runner ecosystem is project policy, not kernel code: a Python or
+ ;; Rust project retunes :test-run-regex and :verifier-message without
+ ;; touching src. Regexes are stored as strings (EDN has no regex literal);
+ ;; re-pattern at read.
+ {:value
+  {:test-run-regex
+   "(?i)-M:test|-A:test|run-tests|\\bjolt\\s+test\\b|\\bpytest\\b|\\bcargo\\s+test\\b|\\bnpm\\s+test\\b"
+   :code-ext-regex "(?i)\\.(clj|cljc|cljs|edn|py|ts|js|rs|go)$"
+   :claim-regex "(?i)\\b(tested|all tests pass|passing|verified|ran the (tests|suite))\\b"
+   :outside-claim-regex "(?i)(https?://|www\\.|according to|the docs say|the spec says|the api returns)"
+   ;; #56: matched against the REGISTERED tool names (and the run's rows).
+   ;; fetch_artifact / fetch_turn contain no web-family words, so they never
+   ;; count as reaching out; a project that registers a web tool disables
+   ;; the block by existing — its runs COULD have checked the claim.
+   :outside-reach-regex "(?i)(web|browse|curl|wget|http)"
+   :verifier-message
+   "You changed code but never ran a test. Run the suite (`jolt -M:test`) or the focused test, confirm it passes, then finish."
+   :claim-message
+   "Your answer claims the work was tested or verified, but the run shows no test was run. Run it and confirm, or drop the claim."
+   :outside-message
+   "Your answer attributes a claim to something outside the repo (a URL or a secondary source). samizdat's registered tools work on the local repo; nothing in this run could have checked that source. Cite evidence from the repo, or from your own verified work in it."}
+  :kind :threshold :capability-tunable? false
+  :doc "Deterministic finalization rules for the judge's free blocks. The
+        detection engine lives in judge.clj; the vocabulary it matches on
+        lives here, so it retunes per project at runtime."}
 
  :tool-vocab
  ;; Tier 1a: the tool vocabularies the gates and their settlers read — data
@@ -509,6 +550,11 @@
   {:gate :turn-budget
    :priority 12
    :budget nil
+   ;; drg-4026 #4: the effect this gate has on branch state, applied by
+   ;; loop/apply-effects — the fraction notices it has delivered are folded
+   ;; into the branch so the gate stops re-firing (the comment above the
+   ;; entry is the story of forgetting to do exactly that).
+   :effect :notified-fractions
    :doc "The turn cap was enforced but invisible to the model, so it could not
          budget against it (dirge PR 738)."
    :when (let [used (/ (double (state/turn-count branch)) (max 1 max-turns))
@@ -575,6 +621,9 @@
   {:gate :stuck
    :priority 8
    :budget :max-stuck-hints
+   ;; drg-4026 #4: the effect this gate has on branch state, applied by
+   ;; loop/apply-effects — the reframe that withholds the failing claim.
+   :effect :begin-reframe
    :doc "Consecutive failed or repetitive verifications. Keyed on failure,
          which is why the progress gate below exists as well.
 

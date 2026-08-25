@@ -26,6 +26,7 @@
             [samizdat.agent.loop :as turn]
             [samizdat.agent.state :as state]
             [samizdat.agent.telemetry :as telemetry]
+            [samizdat.agent.tools :as tools]
             [samizdat.engine.proc :as proc]
             [samizdat.llm.client :as llm]
             [samizdat.store.journal :as journal]
@@ -138,7 +139,7 @@
               ;; LLM judge is even paid for.
               det (or (when (hollow? ctx)
                         "no files were changed — the implementors called done but the working tree is unchanged, so nothing was actually built")
-                      (judge/deterministic-block answer rows))
+                      (judge/deterministic-block answer rows (tools/tool-names)))
               decision
               (if det
                 :revise

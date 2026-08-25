@@ -18,6 +18,7 @@
             [samizdat.agent.judge :as judge]
             [samizdat.agent.loop :as turn]
             [samizdat.agent.state :as state]
+            [samizdat.agent.tools :as tools]
             [samizdat.llm.client :as llm]
             [samizdat.store.journal :as journal]))
 
@@ -64,7 +65,8 @@
       (if (>= attempts max-critic-attempts)
         (ship data)
         (let [rows (map parse-args (journal/turns conn run-id))
-              det (judge/deterministic-block (:final-answer branch) rows)]
+              det (judge/deterministic-block (:final-answer branch) rows
+                                              (tools/tool-names))]
           (if det
             ;; A cheap, specific gate fired — block without paying for the judge.
             (do (note! {:verdict :deterministic :blocked true})

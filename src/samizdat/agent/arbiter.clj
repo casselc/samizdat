@@ -58,15 +58,18 @@
   [ctx]
   (let [candidates (eligible ctx)]
     (when-let [chosen (first candidates)]
-      {:gate (:gate chosen)
-       :priority (:priority chosen)
-       :message ((:message chosen) ctx)
-       :prediction ((:prediction chosen) ctx)
-       ;; The tool this gate's prediction names, when it names exactly one.
-       ;; Carried so the steer can be prefilled instead of merely asked for.
-       :tool (:tool chosen)
-       :window (:window chosen)
-       :passed-over (mapv :gate (rest candidates))})))
+       {:gate (:gate chosen)
+        :priority (:priority chosen)
+        :message ((:message chosen) ctx)
+        :prediction ((:prediction chosen) ctx)
+        ;; The tool this gate's prediction names, when it names exactly one.
+        ;; Carried so the steer can be prefilled instead of merely asked for.
+        :tool (:tool chosen)
+        ;; drg-4026 #4: the gate's branch-state effect, if any — a key on the
+        ;; gate's own data, applied by loop/apply-effects.
+        :effect (:effect chosen)
+        :window (:window chosen)
+        :passed-over (mapv :gate (rest candidates))})))
 
 (defn prefill-for
   "The partial assistant text that forecloses a prose answer on the steered
