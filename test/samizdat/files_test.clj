@@ -97,3 +97,40 @@
       (is (str/includes? (:result (files/read-file (ctx root "read_file" {:path "round.clj"})))
                          "(+ 1 2)"))
       (finally (fs/delete-tree root)))))
+
+(deftest a-long-file-pages-instead-of-dead-ending
+  ;; The truncation marker used to be `… [truncated]` and nothing else. Live,
+  ;; against a 7KB brief, that had the model read the same file six times
+  ;; through four different tools, get the identical first 4014 characters
+  ;; every time, and then spend four more turns writing a chunked reader in
+  ;; `eval` — ten turns of forty to read the file it was told to start from.
+  (let [dir (str (fs/create-temp-dir))
+        big (str/join "\n" (map #(str "line " % " " (apply str (repeat 60 \x)))
+                                (range 400)))
+        _ (spit (str dir "/big.txt") big)
+        read #(files/read-file {:branch {:id "B1"} :root dir :args %})
+        p1 (:result (read {:path "big.txt"}))]
+    (testing "the first page names the call that continues it"
+      (is (str/includes? p1 "read_file"))
+      (is (str/includes? p1 "offset")))
+    (testing "that call returns DIFFERENT content, not the same first page"
+      (let [next-line (Integer/parseInt (second (re-find #"\"offset\": (\d+)" p1)))
+            p2 (:result (read {:path "big.txt" :offset next-line}))]
+        (is (pos? next-line))
+        (is (not= p1 p2))
+        (is (str/includes? p2 (str "line " next-line " ")))
+        (is (not (str/includes? p2 "line 0 ")))))
+    (testing "paging reaches the end, where nothing more is offered"
+      (let [last-page (:result (read {:path "big.txt" :offset 395}))]
+        (is (str/includes? last-page "line 399"))
+        (is (not (str/includes? last-page "Continue with")))))
+    (testing "limit bounds the page in lines"
+      (let [r (:result (read {:path "big.txt" :offset 10 :limit 3}))]
+        (is (str/includes? r "line 10 "))
+        (is (str/includes? r "line 12 "))
+        (is (not (str/includes? r "line 13 ")))))
+    (testing "a short file still comes back whole and offers no continuation"
+      (spit (str dir "/small.txt") "a\nb\nc")
+      (let [r (:result (read {:path "small.txt"}))]
+        (is (str/includes? r "c"))
+        (is (not (str/includes? r "Continue with")))))))

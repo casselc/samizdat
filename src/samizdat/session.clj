@@ -456,7 +456,23 @@
            (when (>= green (:min-green-runs p))
              {:kind :verification-working :severity :good
               :detail (detail p :verification-working {})
-              :evidence {:green green}}))]
+              :evidence {:green green}}))
+         ;; ACROSS ALL GATES, not one of them. `gate-dead` needs a single gate
+         ;; to fire :min-gate-firings times, and a branch ignoring five
+         ;; different gates twice each trips none of them. That is the shape a
+         ;; live run actually took: 38 turns, five gates, eight firings, not
+         ;; one file written, and no finding — because the harness counted the
+         ;; nags separately and the branch was ignoring all of them equally.
+         ;; The distinction matters to the reader: one dead gate is a bad
+         ;; gate, and every gate dead is a bad loop.
+         (let [gs (vals (:gates snap))
+               fired (reduce + 0 (map #(or (:fired %) 0) gs))
+               met (reduce + 0 (map #(+ (or (:met %) 0) (or (:met-late %) 0)) gs))]
+           (when (and (>= fired (:min-total-gate-firings p))
+                      (<= (rate met fired) (:gate-met-rate p)))
+             {:kind :steering-ignored :severity :high
+              :detail (detail p :steering-ignored {:fired fired :met met})
+              :evidence {:fired fired :met met :turns turns}}))]
         (keep tool-fail (:tools snap))
         (keep gate-dead (:gates snap))))))))
 

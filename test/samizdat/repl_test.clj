@@ -110,3 +110,18 @@
           r (repl/eval-code "(do (Thread/sleep 150) :slow-but-ok)" s 3000)]
       (is (:ok r))
       (is (= ":slow-but-ok" (:value r))))))
+
+(deftest a-root-that-is-not-the-working-directory-is-reported
+  ;; The seam's worst failure is a plausible wrong answer: source roots make
+  ;; the project requirable, but a relative path inside `eval` still resolves
+  ;; against the harness's own directory, and jolt has no chdir to fix that
+  ;; with. Live, that had the agent read samizdat's README, list samizdat's
+  ;; directory, and slurp samizdat's deps.edn believing all three were the
+  ;; project's. Nothing in the process notices, so the harness has to say so.
+  (testing "a root elsewhere is a mismatch, reported with both directories"
+    (let [m (repl/warn-if-not-cwd! "/tmp")]
+      (is (some? m))
+      (is (= "/tmp" (:root m)))
+      (is (not= (:root m) (:cwd m)))))
+  (testing "the ordinary self-hosting case is silent"
+    (is (nil? (repl/warn-if-not-cwd! ".")))))

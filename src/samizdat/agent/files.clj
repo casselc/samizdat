@@ -51,9 +51,22 @@
   (contains? clojure-exts (last (str/split (str path) #"\."))))
 
 (defn- max-read-chars
-  "How much of a file one `read` returns, from gates.edn :context-budget."
+  "How much of a file one `read` returns: the SMALLER of :file-read-chars and
+  :tool-result-chars, both gates.edn :context-budget.
+
+  The minimum, not :file-read-chars alone, because every tool result passes
+  through the loop's own clip on its way to the model. :file-read-chars was
+  60000 and :tool-result-chars 4000, so this tool's budget never bound
+  anything — the outer clip did, and it lands AFTER the page marker is
+  written. Paging against a budget that is not the effective one produces a
+  `continue from line N` the model never sees, which is the dead end it was
+  meant to fix, one layer further in."
   []
-  (:file-read-chars (gates/threshold :context-budget)))
+  (let [{:keys [file-read-chars tool-result-chars]} (gates/threshold :context-budget)]
+    ;; No fallback numbers: repeating gates.edn's values here is how the table
+    ;; stops being the one place they live. A budget missing from the table is
+    ;; a broken table, and throwing says so.
+    (apply min (keep identity [file-read-chars tool-result-chars]))))
 
 (defn- grep-ranges
   "How many distinct line ranges a search reports before it says '… and N
@@ -74,24 +87,64 @@
 (defn- miss [branch msg]
   {:result msg :category :mechanics :progress? false :branch branch})
 
+(defn- page
+  "The lines of `content` from `offset` (0-based) that fit in the char budget,
+  as {:text :from :next :total}. `next` is the line to ask for to continue, or
+  nil at the end.
+
+  Lines rather than characters because a line number is something the model
+  can hold and act on; a character offset into a file it has only seen part of
+  is not. A single line longer than the whole budget is emitted anyway rather
+  than dropped — a page that can return nothing would never advance."
+  [content offset budget limit]
+  (let [lines (str/split-lines content)
+        total (count lines)
+        from (max 0 (min offset total))]
+    (loop [i from, taken [], used 0]
+      (if (or (>= i total)
+              (and limit (>= (count taken) limit))
+              (and (seq taken) (> (+ used (count (nth lines i)) 1) budget)))
+        {:text (str/join "\n" taken) :from from :total total
+         :next (when (< i total) i)}
+        (recur (inc i) (conj taken (nth lines i))
+               (+ used (count (nth lines i)) 1))))))
+
 (defn read-file
-  "Return the contents of a file under the root. :neutral — reading establishes
-  nothing. A missing file or an escaping path is :mechanics (a call made
-  wrong), never :failure."
+  "Return the contents of a file under the root, a page at a time. :neutral —
+  reading establishes nothing. A missing file or an escaping path is
+  :mechanics (a call made wrong), never :failure.
+
+  `offset` is a 0-based LINE to start from and `limit` a maximum number of
+  lines; both are optional and the char budget still bounds the result.
+
+  IT PAGES BECAUSE WITHOUT PAGING IT LOOPED. The result was clipped at the
+  budget and marked `… [truncated]`, which names a problem and no way out of
+  it. Live, against a 7KB brief: the model read the same file six times
+  through `read_file`, `cat`, `wc && sed` and `sed`, got the identical first
+  4014 characters every time, and then spent four more turns writing a chunked
+  reader in `eval` — ten turns of a forty-turn budget to read one file it had
+  been told to start from. A truncation marker has to end with the call that
+  continues it, or it is a dead end the model can only walk into again."
   [{:keys [branch root args]}]
-  (let [path (str (:path args))]
+  (let [path (str (:path args))
+        offset (or (some-> (:offset args) str parse-long) 0)
+        limit (some-> (:limit args) str parse-long)]
     (cond
       (str/blank? path)
-      (miss branch "read_file needs a `path`.")
+      (miss branch (msg {:needs-path true :tool "read_file"}))
 
       :else
       (if-let [abs (resolve-under-root (or root ".") path)]
         (if (fs/exists? abs)
           (let [content (slurp abs)
-                shown (subs content 0 (min (count content) (max-read-chars)))]
-            {:result (str path ":\n" shown
-                          (when (> (count content) (max-read-chars))
-                            "\n… [truncated]"))
+                {:keys [text from next total]}
+                (page content offset (max-read-chars) limit)]
+            {:result (str path
+                          (when (pos? from) (str " (from line " from ")"))
+                          ":\n" text
+                          (when next
+                            (str "\n" (msg {:more true :path path :next next
+                                            :shown next :total total}))))
              :category :neutral :progress? false :branch branch})
           (miss branch (msg {:no-file true :path path})))
         (miss branch (msg {:outside-root true :path path :verb "read"}))))))

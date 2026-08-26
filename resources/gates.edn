@@ -578,6 +578,8 @@
           :tool-failure-rate 0.5
           :min-tool-calls 4
           :min-gate-firings 3
+          :min-total-gate-firings 5
+          :gate-met-rate 0.2
           :min-green-runs 2
           :min-culled-with-evidence 2
           :provider-trouble-rate 0.2
@@ -589,6 +591,7 @@
            :verification-working "the ship gate is running the tests and they are passing"
            :tool-failing "`{{tool}}` fails more often than it works"
            :gate-ignored "the `{{gate}}` gate has fired {{fired}} times and nothing it asked for has happened"
+           :steering-ignored "the branch is not responding to steering AT ALL — {{fired}} gate firings across the run and {{met}} of them got what they asked for. More nagging will not help; the loop itself, or the model, is the thing to change"
            :provider-empty-replies "the provider keeps returning replies with neither content nor reasoning — the model is spending its whole output budget thinking and never reaching a tool call. The fix is MORE TOKENS or reasoning turned off for this endpoint, not more steering: raise :context-budget, or set :thinking? false if this is a local llama.cpp endpoint"
            :provider-unreliable "provider calls are failing or needing retries often. This is the endpoint, not the loop — no prompt or manifest change will help, and turns spent here are turns the run does not get back"
            :selection-losing-evidence "branches are being culled while holding CONFIRMED artifacts — the beam found evidence and the retention rule threw it away. This is a SHARPENING failure, not an expansion one: widening the beam will not help, and the fix is the critic rubric or the cull thresholds"}}
@@ -655,6 +658,24 @@
         fires with :ran false and a reason whether or not the tests ran, so a
         run that shipped unverified is no longer indistinguishable in the
         record from one that shipped green."}
+
+ :tool-clip
+ {:value
+  {:message "\n… [{{shown}} of {{total}} chars shown — the rest was clipped. Ask for the part you still need (a narrower command, a `read_file` with an `offset`, or a filter), not the same call again.]"}
+  :kind :policy :capability-tunable? false
+  :doc "WHAT A CLIPPED TOOL RESULT SAYS AT ITS CUT.
+
+        It used to say `… [truncated]` and stop. That names a problem and no
+        way out of it, and a model that cannot see a way out repeats the call.
+        Live, against a 7KB file: six reads through four different tools, the
+        same first 4014 characters every time, then four more turns spent
+        writing a chunked reader by hand — ten turns of forty.
+
+        So the line carries the two numbers that let a reader decide what to
+        do (how much it got, how much exists) and says plainly that repeating
+        the call is not the move. `read_file` does better than this and pages
+        properly; this is the floor for every other tool, where the harness
+        cannot know what a narrower request would look like."}
 
  :project-facts
  {:value

@@ -107,8 +107,12 @@ manual({name?})
 ### Doing work
 
 ```
-read_file({path})
-    Read a file in the project, by a path relative to the project root.
+read_file({path, offset, limit})
+    Read a file in the project, by a path relative to the project root. Long
+    files come back a page at a time; the page ends by telling you the exact
+    call that continues it. `offset` is a 0-based line to start from, `limit`
+    a maximum number of lines. If a file looks cut off, page on — re-reading
+    from the start returns the same first page again.
 grep({pattern})
     Search the project's Clojure source for a regex; returns matching lines as
     path:line: text. Faster than reading whole files to find where something

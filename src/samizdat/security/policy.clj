@@ -80,8 +80,14 @@
 
 (defn- shell-split
   "One quote-aware pass over a command string, yielding its shell STRUCTURE:
-  the statement segments (split at unquoted `;`, `|`, `&`, and newline) and
-  whether an unquoted redirection (`<` or `>`) appears anywhere.
+  the statement segments (split at unquoted `;`, `|`, `&`, and newline), WHICH
+  of those separators it actually saw, and whether an unquoted redirection
+  (`<` or `>`) appears anywhere.
+
+  The separator set is reported because they are not equally dangerous. A `|`
+  feeds one allowed command into the next and runs nothing an allow rule
+  cannot see; a `;` or `&` starts a statement that has nothing to do with the
+  first. `decide` uses the distinction to stop refusing `grep x | head`.
 
   Quote semantics follow bash: single quotes are literal (nothing inside is
   an operator, not even backslash), double quotes honor backslash escapes, and
@@ -96,33 +102,34 @@
   [raw]
   (let [n (count raw)
         sep? #{\; \| \& \newline}]
-    (loop [i 0, state :code, cur [], segs [], redirect? false]
+    (loop [i 0, state :code, cur [], segs [], redirect? false, seps #{}]
       (if (>= i n)
         {:segments (->> (conj segs (apply str cur))
                         (map str/trim)
                         (remove str/blank?)
                         vec)
+         :separators seps
          :redirection? redirect?}
         (let [c (nth raw i)]
           (case state
             :code (cond
                     (= c \\) (if (< (inc i) n)
-                                (recur (+ i 2) :code (into cur [c (nth raw (inc i))]) segs redirect?)
-                                (recur (inc i) :code (conj cur c) segs redirect?))
-                    (= c \') (recur (inc i) :single (conj cur c) segs redirect?)
-                    (= c \") (recur (inc i) :double (conj cur c) segs redirect?)
-                    (sep? c) (recur (inc i) :code [] (conj segs (apply str cur)) redirect?)
-                    (or (= c \<) (= c \>)) (recur (inc i) :code (conj cur c) segs true)
-                    :else (recur (inc i) :code (conj cur c) segs redirect?))
+                                (recur (+ i 2) :code (into cur [c (nth raw (inc i))]) segs redirect? seps)
+                                (recur (inc i) :code (conj cur c) segs redirect? seps))
+                    (= c \') (recur (inc i) :single (conj cur c) segs redirect? seps)
+                    (= c \") (recur (inc i) :double (conj cur c) segs redirect? seps)
+                    (sep? c) (recur (inc i) :code [] (conj segs (apply str cur)) redirect? (conj seps c))
+                    (or (= c \<) (= c \>)) (recur (inc i) :code (conj cur c) segs true seps)
+                    :else (recur (inc i) :code (conj cur c) segs redirect? seps))
             :single (if (= c \')
-                      (recur (inc i) :code (conj cur c) segs redirect?)
-                      (recur (inc i) :single (conj cur c) segs redirect?))
+                      (recur (inc i) :code (conj cur c) segs redirect? seps)
+                      (recur (inc i) :single (conj cur c) segs redirect? seps))
             :double (cond
                       (and (= c \\) (< (inc i) n))
-                      (recur (+ i 2) :double (into cur [c (nth raw (inc i))]) segs redirect?)
+                      (recur (+ i 2) :double (into cur [c (nth raw (inc i))]) segs redirect? seps)
 
-                      (= c \") (recur (inc i) :code (conj cur c) segs redirect?)
-                      :else (recur (inc i) :double (conj cur c) segs redirect?))))))))
+                      (= c \") (recur (inc i) :code (conj cur c) segs redirect? seps)
+                      :else (recur (inc i) :double (conj cur c) segs redirect? seps))))))))
 
 (defn- exec-prefix-stripped
   "The command with leading `VAR=val` assignments and exec wrappers
@@ -158,9 +165,18 @@
   rest of what would run."
   [command]
   (let [raw (str/trim (str command))
-        {:keys [segments redirection?]} (shell-split raw)]
+        {:keys [segments separators redirection?]} (shell-split raw)]
     {:raw raw
      :head (command-head raw)
+     :segments segments
+     ;; A PIPELINE and nothing else: no substitution, no redirection, and the
+     ;; only separator was `|`. Every segment is then a command an allow rule
+     ;; can see in full, which is what lets `decide` stop refusing a pipe
+     ;; between two allowed reads.
+     :pipeline-only? (boolean (and (> (count segments) 1)
+                                   (= #{\|} separators)
+                                   (not redirection?)
+                                   (not (some #(re-find % raw) complex-markers))))
      :complex? (boolean (or (some #(re-find % raw) complex-markers)
                             redirection?
                             (> (count segments) 1)))}))
@@ -178,6 +194,12 @@
    ["which **" :allow] ["type **" :allow] ["cat **" :allow] ["head **" :allow]
    ["tail **" :allow] ["wc **" :allow] ["sort **" :allow] ["uniq **" :allow]
    ["cut **" :allow] ["diff **" :allow] ["grep **" :allow] ["rg **" :allow]
+   ;; sed and awk sit with the other text tools rather than with the mutators:
+   ;; `sed -i` does write, but so do `mv`, `cp`, `touch` and `chmod` below it,
+   ;; and the agent already has an unrestricted `write_file`. Refusing them
+   ;; protected nothing and cost a turn every time a run reached for the most
+   ;; ordinary way to read part of a file.
+   ["sed **" :allow] ["awk **" :allow]
    ["find **" :allow] ["file **" :allow] ["stat **" :allow] ["env" :allow]
    ["date **" :allow] ["whoami" :allow] ["hostname" :allow]
    ;; benign shell builtins
@@ -238,7 +260,7 @@
 
   `session` is {:grants [pattern ...]} from the grants table (empty is fine)."
   [session command]
-  (let [{:keys [raw head complex?]} (classify command)
+  (let [{:keys [raw head complex? pipeline-only? segments]} (classify command)
         ;; Allow matching sees the command RAW — a wrapper prefix changes what
         ;; runs and must not ride an allow. Deny matching sees EVERY statement
         ;; segment (each is a command the shell would run on its own) plus its
@@ -258,11 +280,27 @@
                  deny-hit :deny
                  grant-hit :allow
                  :else (or base-hit default-effect))
-        ;; A complex command cannot ride an allow: downgrade allow → ask, but a
-        ;; deny still stands.
-        promoted? (and complex? (= :allow (or base-hit default-effect))
+        ;; A PIPELINE of independently-allowed commands is allowed. The blanket
+        ;; downgrade refused `find . -type f | sort` and `grep x | head` —
+        ;; both segments on the list, nothing hidden from a rule — and a run
+        ;; spends a turn on each refusal it meets. The reasoning that makes a
+        ;; compound command opaque does not apply here: `|` starts no
+        ;; statement of its own, so every command the shell will run is one
+        ;; the allow rules just matched. `;`, `&`, substitution and
+        ;; redirection are all still opaque and still downgrade.
+        piped-allow? (and pipeline-only?
+                          (not deny-hit)
+                          (seq segments)
+                          (every? #(= :allow (last-match base-rules [%])) segments))
+        ;; A complex command cannot otherwise ride an allow: downgrade
+        ;; allow → ask, but a deny still stands.
+        promoted? (and complex? (not piped-allow?)
+                       (= :allow (or base-hit default-effect))
                        (not deny-hit) (not grant-hit))
-        effect (if (and complex? (= :allow effect)) :ask effect)]
+        effect (cond
+                 (and piped-allow? (not= :deny effect)) :allow
+                 (and complex? (= :allow effect)) :ask
+                 :else effect)]
     ;; `:promoted?` — this command WOULD have been allowed on its head and was
     ;; downgraded for being compound. Returned because the refusal has to be
     ;; able to say so: without it the message reads "`ls` is not on the allow

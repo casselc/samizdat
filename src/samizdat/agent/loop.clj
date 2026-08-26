@@ -118,10 +118,17 @@
                   (or (not require-relevance?)
                       (state/advances-thesis? branch (:claim artifact)))))))
 
-(defn- truncate [s]
-  (let [s (str s)]
-    (if (> (count s) (max-result-chars))
-      (str (subs s 0 (max-result-chars)) "\n… [truncated]")
+(defn- truncate
+  "Clip a tool result to the budget, ending with what the model can DO about
+  it. See gates.edn :tool-clip for why the marker carries the sizes and the
+  instruction rather than the bare word `truncated`."
+  [s]
+  (let [s (str s)
+        cap (max-result-chars)]
+    (if (> (count s) cap)
+      (str (subs s 0 cap)
+           (prompt/render-str (:message (gates/threshold :tool-clip))
+                              {:shown cap :total (count s)}))
       s)))
 
 (defn initial-messages

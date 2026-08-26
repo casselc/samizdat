@@ -384,3 +384,29 @@
   (dotimes [_ 8] (session/observe-turn! {:tool "eval" :category :mechanics
                                          :signals {:parse-error true}}))
   (is (seq (session/findings (session/run-window "never-marked")))))
+
+(deftest steering-ignored-counts-across-gates-not-within-one
+  ;; gate-dead needs ONE gate to fire :min-gate-firings times. A branch
+  ;; ignoring five different gates twice each trips none of them, which is the
+  ;; shape a live run took: 38 turns, five gates, eight firings, not one file
+  ;; written, and no finding at all — the harness counted the nags separately
+  ;; while the branch ignored them equally.
+  (testing "the live shape now raises a finding"
+    (let [fs (session/findings
+              {:turns 38
+               :gates {:progress-stalled {:fired 2} :reflection {:fired 2}
+                       :turn-budget {:fired 2} :wind-down {:fired 1}
+                       :last-call {:fired 1}}})
+          f (first (filter #(= :steering-ignored (:kind %)) fs))]
+      (is (some? f))
+      (is (= :high (:severity f)))
+      (is (= {:fired 8 :met 0 :turns 38} (:evidence f)))))
+  (testing "a branch that acts on what it is told raises nothing"
+    (is (empty? (filter #(= :steering-ignored (:kind %))
+                        (session/findings {:turns 20 :gates {:a {:fired 6 :met 5}}})))))
+  (testing "met-late still counts as met — acting a turn later is acting"
+    (is (empty? (filter #(= :steering-ignored (:kind %))
+                        (session/findings {:turns 20 :gates {:a {:fired 6 :met-late 5}}})))))
+  (testing "below the firing floor nothing is claimed either way"
+    (is (empty? (filter #(= :steering-ignored (:kind %))
+                        (session/findings {:turns 8 :gates {:a {:fired 2}}}))))))

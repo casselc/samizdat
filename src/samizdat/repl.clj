@@ -53,6 +53,37 @@
                         (catch Throwable _ nil)))]
     (distinct (or (seq declared) ["src" "test"]))))
 
+(defn- cwd
+  "The process working directory, absolute. What a RELATIVE path inside `eval`
+  resolves against — jolt resolves against the real cwd, not `user.dir`, which
+  is why setting that property does not move it."
+  []
+  (str (.getCanonicalFile (io/file "."))))
+
+(defn warn-if-not-cwd!
+  "Say so, loudly, when the run root is not the directory the harness is
+  running in. Returns the mismatch as data, or nil.
+
+  The source roots above make the project REQUIRABLE from `eval`; they do
+  nothing about relative FILE paths, and jolt offers no chdir to fix that
+  with. So an `eval` of `(slurp \"README.md\")` reads the harness's own README
+  and answers plausibly — observed live, turn 4, where the agent read
+  samizdat's README, listed samizdat's directory at turn 5, and went on to
+  slurp samizdat's deps.edn believing all three were the project's.
+
+  A wrong answer that looks right is the worst failure this seam has, and the
+  fix is not in code: run the harness FROM the project root. The warning names
+  both directories so the operator can, because nothing else in the process
+  will ever notice."
+  [root]
+  (let [root* (str (.getCanonicalFile (io/file root)))
+        here (cwd)]
+    (when (not= root* here)
+      (log/warn "run root is not the working directory —"
+                "`eval` requires from" root* "but resolves relative FILE paths against" here
+                "— start the harness from the project root, or use absolute paths in eval")
+      {:root root* :cwd here})))
+
 (defn ensure-project-roots!
   "Make the project at `root` loadable from `eval`, and return the paths added.
 
@@ -76,6 +107,7 @@
   costs a stat."
   [root]
   (when root
+    (warn-if-not-cwd! root)
     (let [added (mapv #(str (io/file root %)) (project-paths root))
           current (vec (host/source-roots))
           missing (remove (set current) added)]
