@@ -90,6 +90,8 @@
    "team-worker"
    "turn-deadline"
    "verify-red"
+   "workflow-select"
+   "workflow-select-system"
    "verify-timeout"
    "verify-unknown"
    "watch-intervention"

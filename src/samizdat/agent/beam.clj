@@ -68,6 +68,7 @@
             [samizdat.agent.gates :as gates]
             [samizdat.agent.gitdiff :as gitdiff]
             [samizdat.agent.loop :as branch-loop]
+            [samizdat.agent.select :as select]
             [samizdat.agent.state :as state]
             [samizdat.prompt :as prompt]
             [samizdat.session :as session]
@@ -789,7 +790,16 @@
         ;; the request rather than surface as a dead run. It costs one cell
         ;; load and one manifest compile — well under the open-branch! cost
         ;; the comment below is about.
-        loop-nm (workflow/active-loop-name config)
+        ;; A run that named no workflow gets one chosen for it from the
+        ;; catalogue (samizdat.agent.select). Before the compile, because the
+        ;; choice decides which manifest is compiled; after nothing else,
+        ;; because it is one small model call and a run must not fail to start
+        ;; over it — `pick!` answers nil on every uncertainty and the
+        ;; precedence in `active-loop-name` falls back to the factory loop.
+        selected (select/pick! {:conn conn :llm-adapter llm-adapter
+                                :llm-config llm-config}
+                               problem)
+        loop-nm (workflow/active-loop-name config selected)
         {loop-version :version turn-wf :compiled iterating? :iterating?}
         (workflow/compile-turn-loop conn loop-nm)
         ;; A non-iterating manifest (team, feature, decompose) is a whole-run
@@ -876,13 +886,32 @@
     (journal/note! conn run-id :loop-workflow
                    {:data {:name loop-nm :version loop-version
                            :iterating? iterating?
+                           ;; How this run came to be driven by that manifest:
+                           ;; the caller pinned it, selection chose it, or
+                           ;; nothing did and it is the factory default. A run
+                           ;; read back later is otherwise indistinguishable
+                           ;; from one somebody configured by hand.
+                           :chosen-by (cond (get-in config [:run :loop]) "config"
+                                            (= selected loop-nm) "selection"
+                                            :else "default")
                            :beam-width width
                            :requested-beam-width requested-width}})
     (when (not= width requested-width)
       (log/info "loop" loop-nm "is a whole-run workflow; beam width forced to 1"
                 "(asked for" (str requested-width ")")))
-    (let [initial (mapv #(open-branch! ctx (str "B" (inc %)) nil nil 0) (range width))]
-      (run-rounds ctx initial 1))))
+    (let [initial (mapv #(open-branch! ctx (str "B" (inc %)) nil nil 0) (range width))
+          result (run-rounds ctx initial 1)]
+      ;; HOW THIS WORKFLOW WENT, for the next run's choice. A run only ever
+      ;; sees its own attempt, so `direct attempts on this project keep getting
+      ;; stuck` is not something any single run can notice — it has to be
+      ;; written down. samizdat.agent.select reads it back.
+      ;;
+      ;; Here rather than in run-rounds' finally because this is the only place
+      ;; that knows both which manifest drove the run and whether it shipped.
+      (knowledge/record-workflow-outcome!
+       conn {:workflow loop-nm :run-id run-id
+             :shipped? (boolean (:answer result))})
+      result)))
 
 (defn summary
   "One line per branch, for logs and the run response."

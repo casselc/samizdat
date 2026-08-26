@@ -697,10 +697,53 @@
         properly; this is the floor for every other tool, where the harness
         cannot know what a narrower request would look like."}
 
+ :workflow-selection
+ {:value
+  {:enabled?          true
+   :candidates        #{"loop" "decompose" "team" "critic"}
+   :fallback          "loop"
+   :min-problem-chars 120}
+  :kind :policy :capability-tunable? false
+  :doc "WHICH WORKFLOW DRIVES A RUN THAT DID NOT ASK FOR ONE.
+
+        `workflow/catalog` was written as the menu the self-healing loop
+        chooses from, and nothing chose from it — every caller was in test/. A
+        run read :run :loop once from config and nothing ever wrote it, so
+        `decompose`, whose whole name is decompose-on-stuck, could only be
+        picked BEFORE anything was stuck. Four consecutive live runs of a task
+        with obvious separable parts exhausted the factory loop's budget with
+        both alternatives sitting unreachable in the catalogue.
+
+        :candidates is a WHITELIST, not the whole catalogue. Several manifests
+        say in their own descriptions that they are components — `worker`,
+        `reviewer` and `supervisor` are pieces of the feature loop — and a menu
+        offering those invites a run driven by half a workflow. `beam`,
+        `probe`, `review`, `orchestrator` and `feature` are left off for now
+        not because they are wrong but because nothing has yet measured them
+        against the four that are on: widening this list is a claim about
+        which workflow suits which task, and it should be made on evidence.
+
+        :fallback is what a run uses when selection is off, the call fails, or
+        the reply names nothing on the menu. It is the factory loop — what the
+        run would have used anyway — so a failure to choose costs nothing.
+
+        An explicit :run :loop (HARNESS_LOOP, or a project's config.edn) always
+        wins over selection. This fills the gap where a caller said nothing; it
+        never overrides one who did.
+
+        :min-problem-chars is the floor below which no call is made. A one-line
+        problem is the factory loop's case by definition — nothing to split,
+        nothing to decompose — and being told so is not worth a round trip. At
+        0 every run is chosen for.
+
+        Not capability-tunable: the tier under observation should not widen
+        the set of machinery it may be driven by."}
+
  :project-facts
  {:value
   {:cmd-works   "In this project `{{cmd}}` works."
-   :cmd-refused "In this project `{{cmd}}` is refused by the shell policy — do not spend a turn on it."}
+   :cmd-refused "In this project `{{cmd}}` is refused by the shell policy — do not spend a turn on it."
+   :workflow    "The `{{cmd}}` workflow has driven a run on this project."}
   :kind :policy :capability-tunable? false
   :doc "THE WORDS A DERIVED PROJECT MEMORY IS WRITTEN IN.
 
@@ -713,7 +756,13 @@
         what they are: a command that ran clean here is a property of this
         checkout, and the next run should read it as one. The refusal line
         carries its own instruction because a refusal the reader does not
-        recognise as final is a refusal they will spend a turn re-testing."}
+        recognise as final is a refusal they will spend a turn re-testing.
+
+        :workflow is the row that carries a workflow's record on this project.
+        Its own text barely matters — what a reader acts on is the success and
+        failure counts behind it, which samizdat.agent.select renders as
+        `shipped N of M runs`. It is here rather than compiled for the same
+        reason as the other two: it is a sentence the model reads."}
 
  :reflection
  {:value

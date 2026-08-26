@@ -73,10 +73,23 @@
   (str "manifests/" name ".edn"))
 
 (defn active-loop-name
-  "Which manifest a run should drive: the configured name, or the factory
-  default. HARNESS_LOOP or a project's .samizdat/config.edn set :run :loop."
-  [config]
-  (or (get-in config [:run :loop]) loop-name))
+  "Which manifest a run should drive, in precedence order: the name the caller
+  configured, then what selection chose, then the factory default.
+  HARNESS_LOOP or a project's .samizdat/config.edn set :run :loop.
+
+  THE CONFIGURED NAME ALWAYS WINS. `selected` is what samizdat.agent.select
+  picked from the catalogue for a run that named no workflow of its own; a run
+  that did name one is never overridden, because a caller who pinned a loop
+  asked a question this has no business re-answering.
+
+  Kept as one function with the precedence in it — rather than resolved at the
+  call site — because it is the ONLY place a run decides what drives it, and
+  that is worth having somewhere a reader can find."
+  ([config] (active-loop-name config nil))
+  ([config selected]
+   (or (get-in config [:run :loop])
+       selected
+       loop-name)))
 
 (defn read-definition
   "Parse a workflow definition from EDN text. Dispatch predicates stay as

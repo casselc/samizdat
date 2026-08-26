@@ -67,6 +67,7 @@
             [samizdat.agent-test]
             [samizdat.base-test]
             [samizdat.boundary-test]
+            [samizdat.select-test]
             [samizdat.session-test]
             [samizdat.reflect-test]
             [samizdat.watch-test]
@@ -170,6 +171,7 @@
     samizdat.agent-test
     samizdat.base-test
     samizdat.boundary-test
+    samizdat.select-test
     samizdat.session-test
     samizdat.reflect-test
     samizdat.watch-test

@@ -486,6 +486,58 @@
                                :pattern-key key :confidence 0.8})
           :fact key :repeat? false})))))
 
+(defn record-workflow-outcome!
+  "Note that `workflow` drove a run on this project and whether it shipped.
+
+  ONE ROW PER WORKFLOW, pattern-keyed, with the success and failure counts
+  doing the accumulating — the same axis a memory earns its salience on. After
+  a few runs the store holds a fitness signal on the workflow CHOICE itself:
+  the factory loop went 0 for 4 on one project while decompose went 1 for 1,
+  and that is precisely the evidence a run should have before deciding how to
+  drive itself.
+
+  This is what makes decompose-on-stuck real at the granularity the harness
+  operates at. The recursive solver inside the decompose manifest already
+  splits a unit that will not pass its tests; what nothing did was notice that
+  DIRECT ATTEMPTS ON THIS PROJECT KEEP GETTING STUCK and choose differently
+  next time. A run cannot learn that within itself — it only ever sees its own
+  attempt — so it has to be written down for the next one.
+
+  Best effort: a failure to record how a run went must not change how it went."
+  [conn {:keys [workflow run-id shipped?]}]
+  (try
+    (when-not (str/blank? (str workflow))
+      (let [key (str "workflow:" workflow)
+            row (by-pattern conn key)
+            id (if row
+                 (do (corroborate! conn (:id row) run-id) (:id row))
+                 (remember! conn {:content (fact :workflow workflow)
+                                  :kind "procedural" :run-id run-id
+                                  :pattern-key key :confidence 0.5}))]
+        (record-outcome! conn id (boolean shipped?))
+        id))
+    (catch Throwable e
+      (log/warn "recording the workflow outcome failed:" (ex-message e))
+      nil)))
+
+(defn workflow-record
+  "What this project knows about how each workflow has gone: a seq of
+  {:workflow :shipped :failed :runs}, best first.
+
+  Read by samizdat.agent.select, so a run choosing how to drive itself sees
+  the evidence rather than only the problem text."
+  [conn]
+  (->> (db/fetch conn ["SELECT pattern_key, success_count, failure_count, corroborations
+                          FROM knowledge WHERE pattern_key LIKE 'workflow:%'"])
+       (keep (fn [r]
+               (when-let [nm (second (str/split (str (:pattern_key r)) #":" 2))]
+                 {:workflow nm
+                  :shipped (or (:success_count r) 0)
+                  :failed (or (:failure_count r) 0)
+                  :runs (+ (or (:success_count r) 0) (or (:failure_count r) 0))})))
+       (sort-by (juxt (comp - :shipped) :failed))
+       vec))
+
 (defn distil-session!
   "Write everything this session concluded into long-term memory: the patterns
   it measured, and the verdicts on the changes the supervisor made.
