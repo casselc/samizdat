@@ -5,6 +5,9 @@
 JS1 is **PASS** at the coordinates below. The first self-hosting canary was
 executed on 2026-08-26 and recorded **FAIL / HARNESS** in
 [`../artifacts/self-hosting-canary.edn`](../artifacts/self-hosting-canary.edn).
+The bounded-prompt correction then received a second attempt, recorded
+**FAIL / OPERATIONAL** in
+[`../artifacts/self-hosting-canary-attempt-2.edn`](../artifacts/self-hosting-canary-attempt-2.edn).
 No canary PASS is claimed. This handoff is historical staging material, not
 authorization to retry without a separate decision.
 

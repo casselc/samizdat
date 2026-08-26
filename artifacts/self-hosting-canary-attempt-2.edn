@@ -1,0 +1,51 @@
+;; Second actual self-hosting canary attempt. The first prompt-orientation
+;; failure remains recorded separately in self-hosting-canary.edn.
+{:self-hosting-canary/attempt 2
+ :self-hosting-canary/decision :fail
+ :self-hosting-canary/failure-class :operational
+ :self-hosting-canary/record-date "2026-08-26"
+ :coordinates
+ {:samizdat "3edd85357ce66ed93527cd83271841e6514450e5"
+  :jolt "4af2362176160f2ed0e366689d7232b1a38adfec"
+  :sci "32d62a5136ad3dc148588752f5bcc4cc30b14752"
+  :sci-version "0.13.53"}
+ :preconditions
+ {:bin-js1-check :pass
+  :js1-smoke "32 tests / 286 assertions / 0 failures / 0 errors"
+  :full-suite "1107 tests / 4179 assertions / 0 failures / 0 errors"
+  :prompt-regression "bounded prompt authority-drift and live SCI boundary tests pass"}
+ :controller
+ {:path "/home/chuck/opencode/src/samizdat-controller-canary-2"
+  :revision "3edd85357ce66ed93527cd83271841e6514450e5"
+  :unchanged true}
+ :target
+ {:path "/home/chuck/opencode/src/samizdat-canary-target-2"
+  :base "3edd85357ce66ed93527cd83271841e6514450e5"
+  :changed-files ["src/samizdat/store/evals.clj"]
+  :test-changes []
+  :preserved true}
+ :provider {:kind :local
+            :endpoint "http://localhost:13305/v1"
+            :model "Qwen3.6-27B-MTP-GGUF"}
+ :task :js1-evaluator-history-diagnostic
+ :run
+ {:id "4b707706-a3bb-4cf9-adfe-c1ebc62bf58d"
+  :database "/home/chuck/.local/share/samizdat/self-hosting-canary/run-3edd853-live.sqlite3"
+  :binding-id "bind:main:4b707706-a3bb-4cf9-adfe-c1ebc62bf58d"
+  :instance-id "inst:main"
+  :max-turns 1000
+  :terminal-status :interrupted
+  :eval-statuses {:completed 57 :failed 7}
+  :semantic-operation-counts {:project/edit 3 :project/list 13 :project/read 40 :project/stat 5}
+  :unsettled-intents []
+  :persistent-helper {:evaluator-state-persistent true :reused-evidence :not-complete}
+  :done-green false}
+ :failure
+ {:summary "The operator execution environment terminated the active production run at one hour before it reached done or trusted verification."
+  :evidence ["Unlike attempt 1, the model discovered and used the bounded project surface."
+             "The target has a source-only diagnostic change but no focused test change."
+             "No done/verification GREEN occurred, so this is not a canary PASS."
+             "No runtime, authority, capability, provider/model, task, verifier, or budget change was made during the attempt."]}
+ :nonclaims ["SELF-HOSTING CANARY: PASS is not claimed."
+             "The preserved target patch was not merged or manually repaired."
+             "Attempt 1 remains a separate HARNESS failure record."]}
