@@ -107,9 +107,11 @@
             [samizdat.agent.gitdiff :as gitdiff]
             [samizdat.agent.loop :as branch-loop]
             [samizdat.agent.state :as state]
+            [samizdat.agent.tools.tasks :as task-tool]
             [samizdat.repl :as repl]
             [samizdat.store.journal :as journal]
             [samizdat.store.runs :as runs]
+            [samizdat.store.tasks :as tasks]
             [samizdat.workflow :as workflow]))
 
 (defn- parse-json [s]
@@ -182,18 +184,34 @@
                                                    :turn (:turn f)})
                                                 (remove #(:outcome %)
                                                         (get firings branch-id [])))))
-        ;; The counters, replayed through the same function the live loop
-        ;; uses. progress? is approximated from the category because the
-        ;; tool's own progress? flag is not journalled.
+        ;; The counters, replayed through the same functions the live loop
+        ;; uses — WITH the live loop's call discipline, not one of our own
+        ;; (karamazov-blt.22): a provider-error row is journalled but the live
+        ;; loop applies NEITHER add-turn nor record-outcome to it (the branch
+        ;; never got an answer to be wrong about — replaying it as :neutral
+        ;; DECREMENTED consecutive-failures and reset the mechanics
+        ;; counters), and a no-call/parse-error row records the outcome but
+        ;; appends no :turns entry. progress? is approximated from the
+        ;; category because the tool's own progress? flag is not journalled.
         branch (reduce (fn [b t]
-                         (let [cat (some-> (:category t) keyword)]
-                           (-> b
-                               (state/add-turn {:turn (:turn t)
-                                                :tool (:tool_name t)
-                                                :category cat})
-                               (state/record-outcome {:category cat
-                                                      :progress? (= :success cat)
-                                                      :policy-refusal? (pos? (or (:policy_refusal t) 0))}))))
+                         (let [cat (some-> (:category t) keyword)
+                               tool (:tool_name t)]
+                           (cond
+                             (= "__provider_error__" tool)
+                             b
+
+                             (contains? #{"__no_call__" "__parse_error__"} tool)
+                             (state/record-outcome b {:category cat
+                                                      :progress? false})
+
+                             :else
+                             (-> b
+                                 (state/add-turn {:turn (:turn t)
+                                                  :tool tool
+                                                  :category cat})
+                                 (state/record-outcome {:category cat
+                                                        :progress? (= :success cat)
+                                                        :policy-refusal? (pos? (or (:policy_refusal t) 0))})))))
                        base
                        branch-turns)
         branch (assoc branch
@@ -285,8 +303,21 @@
                :sessions sessions
                :abort abort}
           branches (mapv (fn [row]
-                           (rebuild-branch run row turns artifacts firings
-                                           max-turns))
+                           (let [b (rebuild-branch run row turns artifacts
+                                                   firings max-turns)
+                                 ;; The task claim survives the crash on its
+                                 ;; ROW; without restoring it here the branch
+                                 ;; came back reading "No task claimed", could
+                                 ;; claim a second task, and left the old one
+                                 ;; in_progress and attributed to it forever
+                                 ;; (karamazov-blt.21). The pinned statement
+                                 ;; is re-appended through the same renderer
+                                 ;; the claim used.
+                                 held (tasks/held-by conn run-id (:id b))]
+                             (cond-> b
+                               held (assoc :task {:id (:id held)
+                                                  :title (:title held)})
+                               held (task-tool/task-statement held))))
                          (runs/branches conn run-id))
           ;; The anchor: rounds completed are the max turn in the journal, so
           ;; the loop continues one past it. max-turns is the ORIGINAL budget.

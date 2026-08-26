@@ -32,10 +32,12 @@
             [samizdat.agent.loop :as aloop]
             [samizdat.workflow :as wf]
             [samizdat.agent.state :as state]
+            [samizdat.agent.resume :as resume]
             [samizdat.api.control :as api-control]
             [samizdat.api.openai :as openai]
             [samizdat.api.runs :as api-runs]
             [samizdat.cells :as cells]
+            [samizdat.store.tasks :as tasks]
             [mycelium.cell :as cell]
             [samizdat.llm.client :as llm]
             [samizdat.security.policy :as policy]
@@ -520,3 +522,48 @@
         (let [[r3] (beam/advance-all ctx [b] 3)]
           (is (true? (:fast r3)) "once the dangling turn completes, the branch advances")
           (is (not (contains? @in-flight "B1")) "and the memory is released"))))))
+
+(deftest a-resumed-branch-still-holds-its-task
+  ;; karamazov-blt.21: the claim survives the crash on its ROW, but the
+  ;; rebuilt branch came back with no :task — told "No task claimed", free to
+  ;; claim a SECOND task, with the old row in_progress and attributed to it
+  ;; forever: RFC-008's named worst state for a shared board.
+  (with-db [c]
+    (let [rid (runs/start-run! c {:problem "p" :max-turns 10 :beam-width 1})]
+      (runs/open-branch! c rid {:branch-id "B1"})
+      (let [t-id (tasks/create! c {:title "the part" :body "do it" :run-id rid})]
+        (is (some? (tasks/claim! c t-id rid "B1")))
+        (with-redefs [beam/run-rounds (fn [_ branches _] {:branches branches})]
+          (let [r (resume/resume! {:conn c :config {} :llm-adapter :a
+                                   :llm-config {} :run-id rid})
+                b (first (:branches r))]
+            (is (= t-id (get-in b [:task :id]))
+                "the branch knows what it holds again")
+            (is (some :pinned? (:messages b))
+                "and the pinned task statement is back in its context")))))))
+
+(deftest replay-applies-the-live-loops-call-discipline
+  ;; karamazov-blt.22: replay pushed EVERY journalled row through add-turn +
+  ;; record-outcome, but the live loop applies neither to a provider-error row
+  ;; and only record-outcome to a no-call row — so each provider error
+  ;; DECREMENTED consecutive-failures on replay and the resumed branch's
+  ;; counters diverged from the ones the run actually had.
+  (with-db [c]
+    (let [rid (runs/start-run! c {:problem "p" :max-turns 10 :beam-width 1})]
+      (runs/open-branch! c rid {:branch-id "B1"})
+      (journal/record-turn! c rid {:branch-id "B1" :turn 1 :tool-name "eval"
+                                   :args {} :result "boom" :category "failure"})
+      (journal/record-turn! c rid {:branch-id "B1" :turn 2
+                                   :tool-name "__provider_error__"
+                                   :result "timeout" :category "neutral"})
+      (journal/record-turn! c rid {:branch-id "B1" :turn 3
+                                   :tool-name "__no_call__"
+                                   :result "no fence" :category "mechanics"})
+      (with-redefs [beam/run-rounds (fn [_ branches _] {:branches branches})]
+        (let [r (resume/resume! {:conn c :config {} :llm-adapter :a
+                                 :llm-config {} :run-id rid})
+              b (first (:branches r))]
+          (is (= 1 (:consecutive-failures b))
+              "the provider error neither decrements nor resets the counter")
+          (is (= 1 (count (:turns b)))
+              "and only the real tool turn entered the branch's own log"))))))

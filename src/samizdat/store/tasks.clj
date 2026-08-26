@@ -230,3 +230,19 @@
   (db/fetch conn [(str "SELECT * FROM tasks
                         WHERE run_id IS NULL
                           AND status NOT IN ('done','cancelled')" board-order)]))
+
+(defn held-by
+  "The non-terminal task a branch currently holds on this run, or nil.
+
+  The claim a resume must restore: the row survives the crash with its
+  branch_id set, but the rebuilt branch used to come back with no :task —
+  telling the model 'No task claimed', letting it claim a SECOND task (the
+  one-task rule reads the branch), and leaving the old row in_progress and
+  attributed to it forever, which is RFC-008's named worst state for a
+  shared board (karamazov-blt.21)."
+  [conn run-id branch-id]
+  (db/fetch-one conn ["SELECT * FROM tasks
+                        WHERE run_id = ? AND branch_id = ?
+                          AND status NOT IN ('done','cancelled')
+                        LIMIT 1"
+                      run-id branch-id]))

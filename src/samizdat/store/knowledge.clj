@@ -333,10 +333,21 @@
                pattern (str "finding:" (name kind))
                existing (by-pattern conn pattern)]]
      (if existing
-       (do (record-outcome! conn (:id existing) (= :good (keyword severity)))
+       ;; A recurring finding is a RE-OBSERVATION, and corroborate! is its
+       ;; record. It is NOT an outcome: `record-outcome! (= :good severity)`
+       ;; here conflated "this finding is bad news" with "acting on this
+       ;; memory failed", so every re-observation of a persistent problem
+       ;; added a failure_count and the most persistent problems progressively
+       ;; ranked below trivia (karamazov-blt.25). Only acting on a memory
+       ;; earns it an outcome — the verdict path below.
+       ;;
+       ;; The content refresh goes through restate! so the FTS mirror follows
+       ;; the wording — the raw UPDATE left the memory recallable only by its
+       ;; FIRST phrasing (same bead).
+       (do (restate! conn (:id existing) content)
            (db/with-writer
-             (db/execute! conn ["UPDATE knowledge SET content = ?, run_id = ? WHERE id = ?"
-                                content run-id (:id existing)]))
+             (db/execute! conn ["UPDATE knowledge SET run_id = ? WHERE id = ?"
+                                run-id (:id existing)]))
            {:id (:id existing) :kind kind :repeat? true
             :corroborations (corroborate! conn (:id existing) run-id)})
        {:id (remember! conn {:content content :kind "episodic" :run-id run-id
@@ -383,10 +394,14 @@
                existing (by-pattern conn pattern)
                worked? (= :better verdict)]]
      (if existing
+       ;; Here the outcome IS earned: the lever was pulled and measured.
+       ;; Content refresh through restate! so the FTS mirror follows the new
+       ;; wording (karamazov-blt.25).
        (do (record-outcome! conn (:id existing) worked?)
+           (restate! conn (:id existing) content)
            (db/with-writer
-             (db/execute! conn ["UPDATE knowledge SET content = ?, run_id = ? WHERE id = ?"
-                                content run-id (:id existing)]))
+             (db/execute! conn ["UPDATE knowledge SET run_id = ? WHERE id = ?"
+                                run-id (:id existing)]))
            {:id (:id existing) :lever change :verdict verdict :repeat? true})
        (let [id (remember! conn {:content content :kind "procedural" :run-id run-id
                                  :pattern-key pattern :confidence 0.7})]

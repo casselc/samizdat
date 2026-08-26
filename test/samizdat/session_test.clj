@@ -410,3 +410,20 @@
   (testing "below the firing floor nothing is claimed either way"
     (is (empty? (filter #(= :steering-ignored (:kind %))
                         (session/findings {:turns 8 :gates {:a {:fired 2}}}))))))
+
+(deftest run-end-distillation-reads-the-run-window-not-the-process-tally
+  ;; karamazov-blt.24: both drivers passed (session/findings) — the whole-
+  ;; process snapshot — to distil-session!, so run 1's parse-error rate kept
+  ;; a finding above threshold at the end of clean runs 2..n, and each end-of-
+  ;; run distillation corroborated it with a DISTINCT run-id, defeating the
+  ;; distinct-run guard. They pass (session/run-window run-id) now; this pins
+  ;; the window semantics that fix relies on.
+  (session/reset!)
+  (dotimes [_ 10]
+    (session/observe-turn! {:tool "eval" :category :mechanics
+                            :signals {:parse-error true}}))
+  (is (seq (session/findings))
+      "the whole-process tally reports the bad old run's pattern")
+  (session/mark-run! "clean-run")
+  (is (empty? (session/findings (session/run-window "clean-run")))
+      "a clean later run inherits none of it"))

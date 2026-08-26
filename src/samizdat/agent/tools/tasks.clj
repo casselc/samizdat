@@ -54,7 +54,7 @@
 ;; Pinned means compaction never unloads it: the task matters MORE the longer
 ;; it runs, so ageing it out is exactly backwards.
 
-(defn- task-statement
+(defn task-statement
   "The pinned message a claimed task appends. Marked :pinned? so compaction
   leaves it alone, and stamped with the task id so a later turn can tell which
   statement belongs to which task."
