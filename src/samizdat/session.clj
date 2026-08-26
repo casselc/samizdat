@@ -367,7 +367,14 @@
   full-session tally stays for the supervisor's cross-run view, where dilution
   is the point rather than the problem."
   [run-id]
-  (or (since (str "run:" run-id)) (snapshot)))
+  (let [k (str "run:" run-id)]
+    (if (get-in @tally [:marks k])
+      ;; The mark exists; a nil diff means NOTHING happened in the run — an
+      ;; empty window, not license to fall back to the whole-process tally.
+      ;; Conflating the two re-served run 1's patterns at the end of a
+      ;; perfectly quiet run (the karamazov-blt.24 edge).
+      (or (since k) {})
+      (snapshot))))
 
 (defn mark-run!
   "Stamp the start of a run, so findings can be evaluated over it."

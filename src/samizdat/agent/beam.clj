@@ -790,7 +790,17 @@
         (try
           (let [{:keys [findings verdicts]}
                 (knowledge/distil-session! conn {:run-id run-id
-                                                 :findings (session/findings)
+                                                 :findings (session/findings
+                                                            ;; THIS RUN's window, not the
+                                                            ;; whole-process tally: counters
+                                                            ;; never reset between runs, so
+                                                            ;; run 1's parse-error rate kept
+                                                            ;; "corroborating" a finding at
+                                                            ;; the end of clean runs 2..n,
+                                                            ;; each with a distinct run-id
+                                                            ;; that defeated the guard
+                                                            ;; (karamazov-blt.24).
+                                                            (session/run-window run-id))
                                                  :experiments (session/experiments)})]
             (when (or (seq findings) (seq verdicts))
               (log/info "distilled" (count findings) "finding(s) and"

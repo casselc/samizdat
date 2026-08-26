@@ -58,3 +58,22 @@
     (is (map? (:branch r)) "the branch rides along")
     (is (str/includes? (:result r) "Missing required argument(s): name"))
     (is (str/includes? (:result r) "\"skill\"") "the skeleton names the tool")))
+
+(deftest shipped-skills-resolve-off-the-classpath-from-any-cwd
+  ;; karamazov-blt.33: the loader scanned cwd-relative "resources/skills", so
+  ;; from any other project (and from a built binary, where the dir does not
+  ;; exist on disk) every implementor silently lost the REPL/TDD guidance and
+  ;; the catalogue rendered empty — the classpath-has-no-listing trap
+  ;; cells/shipped-cells enumerates around, in a fourth place.
+  (let [cat (skills/catalog ["/no/such/dir"])]
+    (is (some #(= "repl-workflow" (:name %)) cat)
+        "the bundled skills survive a foreign cwd"))
+  (is (str/includes? (str (skills/load-skill ["/no/such/dir"] "repl-workflow"))
+                     "eval")
+      "and load by name with no overlay directory present")
+  (let [on-disk (->> (file-seq (java.io.File. "resources/skills"))
+                     (filter #(str/ends-with? (.getName ^java.io.File %) ".md"))
+                     (map #(str/replace (.getName ^java.io.File %) #"\.md$" ""))
+                     set)]
+    (is (= on-disk (set skills/shipped-skills))
+        "the enumerated list is pinned against the directory")))

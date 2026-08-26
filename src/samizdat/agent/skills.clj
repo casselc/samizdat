@@ -26,7 +26,26 @@
   (:require [clojure.java.io :as io]
             [clojure.string :as str]))
 
-(def default-dirs ["resources/skills" ".samizdat/skills"])
+(def shipped-skills
+  "Basenames of the skills that ship, ENUMERATED not globbed — a classpath has
+  no directory listing and an embedded resource has no filesystem path, so a
+  dir scan found nothing inside a built binary or from any cwd but the
+  samizdat repo itself: every implementor silently lost the REPL/TDD guidance
+  and the catalogue rendered empty (karamazov-blt.33). Same reasoning as
+  cells/shipped-cells; pinned against resources/skills by skills-test."
+  ["mycelium" "repl-workflow"])
+
+(def default-dirs
+  "The project-overlay directories scanned in addition to the shipped
+  resources. Relative to the process cwd; a caller working on another project
+  passes `(project-dirs root)` instead."
+  [".samizdat/skills"])
+
+(defn project-dirs
+  "Where a project's own skills live, under the RUN's root — not the
+  harness's cwd (karamazov-blt.33)."
+  [root]
+  [(str (io/file (str (or root ".")) ".samizdat/skills"))])
 
 (defn- md-files [dir]
   (let [d (io/file dir)]
@@ -60,10 +79,27 @@
                (str/trim %))
             (str/split-lines (:body fm)))))
 
+(defn- shipped-entries
+  "The bundled skills, read off the classpath so they resolve from a built
+  binary and from any cwd."
+  []
+  (into {}
+        (keep (fn [nm]
+                (try
+                  (when-let [r (io/resource (str "skills/" nm ".md"))]
+                    (let [fm (parse-frontmatter (slurp r))
+                          nm' (or (not-empty (str (get-in fm [:meta :name]))) nm)]
+                      [nm' {:path (str "classpath:skills/" nm ".md")
+                            :description (describe fm nm')
+                            :body (:body fm)}]))
+                  (catch Throwable _ nil))))
+        shipped-skills))
+
 (defn discover
-  "skill-name -> {:path :description :body}. A skill in a later dir overrides an
-  earlier one, so .samizdat/skills wins over resources/skills. Malformed files
-  are skipped, never fatal."
+  "skill-name -> {:path :description :body}. The shipped skills come off the
+  classpath; `dirs` overlay them in order, so a project's .samizdat/skills
+  wins over a bundled skill of the same name. Malformed files are skipped,
+  never fatal."
   ([] (discover default-dirs))
   ([dirs]
    (reduce
@@ -78,7 +114,8 @@
                                  :body (:body fm)}))
                   (catch Throwable _ m)))
               acc (md-files dir)))
-    {} dirs)))
+    (shipped-entries)
+    dirs)))
 
 (defn catalog
   "The always-on catalogue the agent sees: [{:name :description} ...], sorted.

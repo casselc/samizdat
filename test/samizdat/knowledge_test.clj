@@ -315,3 +315,28 @@
         (let [again (knowledge/distil-project! c {:run-id rid2})]
           (is (every? :repeat? again))
           (is (= 2 (:corroborations (knowledge/by-pattern c "cmd-works:cat deps.edn")))))))))
+
+(deftest a-recurring-finding-is-corroborated-not-penalised
+  ;; karamazov-blt.25: the outcome axis means "did ACTING on this memory
+  ;; work" (RFC-010), and nothing on the distillation path measures that. The
+  ;; old record-outcome! call turned every re-observation of a persistent
+  ;; problem into a failure_count, sinking exactly the memories that matter
+  ;; most below trivia. And the raw content UPDATE skipped the FTS mirror, so
+  ;; the memory answered only to its FIRST wording.
+  (let [c @conn]
+    (let [rid1 (runs/start-run! c {:problem "p1"})
+          rid2 (runs/start-run! c {:problem "p2"})]
+      (knowledge/distill! c [{:kind :tool-failing :severity :bad
+                              :detail "eval keeps failing" :evidence {:rate 0.5}}]
+                          {:run-id rid1})
+      (knowledge/distill! c [{:kind :tool-failing :severity :bad
+                              :detail "shell keeps failing" :evidence {:rate 0.6}}]
+                          {:run-id rid2})
+      (let [row (knowledge/by-pattern c "finding:tool-failing")]
+        (is (= 2 (:corroborations row)) "recurrence is corroboration")
+        (is (zero? (or (:failure_count row) 0))
+            "a re-observation is not a failed outcome")
+        (is (str/includes? (str (:content row)) "shell keeps failing")
+            "the content follows the newest evidence")
+        (is (some #(= (:id row) (:id %)) (knowledge/recall c "shell"))
+            "and the memory answers to its NEW wording, not just its first")))))
