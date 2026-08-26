@@ -138,12 +138,15 @@
 (defn- read-body
   [kind name]
   (if-let [c (conn)]
-    (or (:body (store/load-latest c kind name))
-        (when-let [t (template kind name)]
-          (:body (store/seed! c kind name t)))
-        ;; Bound but absent from both: a name the project has never held and
-        ;; the harness never shipped.
-        nil)
+    (if-let [t (template kind name)]
+      ;; Through seed! even when the project already has a row: seed! is what
+      ;; carries a harness upgrade into a project whose copy is still the
+      ;; factory one. Reading the row first and returning early is what pinned
+      ;; a project to whatever shipped the day it first ran.
+      (:body (store/seed! c kind name t))
+      ;; No template — a cell or manifest the supervisor wrote, which has one
+      ;; by definition only if the project holds it.
+      (:body (store/load-latest c kind name)))
     (template kind name)))
 
 (defn body

@@ -237,6 +237,35 @@
           (inc (or (:corroborations row) 1)))
       (or (:corroborations row) 1))))
 
+(defn restate!
+  "Replace a memory's CONTENT in place, keeping its id, salience, use record
+  and corroboration count. Returns true when the text actually changed.
+
+  For a memory that describes a moving target rather than a standing fact.
+  The project overview is the one: it says what the codebase IS, and a run
+  that adds a namespace makes the previous wording wrong without making the
+  memory wrong to hold. Corroborating it — which is what happened — counts
+  agreement about a description that no longer matches, and the store had no
+  way to say a project had moved on.
+
+  Not a new row: the id is what a reader cites when it flags the memory as
+  stale, and the history of how often this project has been described is
+  worth more than a pile of past descriptions of it."
+  [conn id content]
+  (let [row (get-by-id conn id)]
+    (when (and row (not= (str content) (str (:content row))))
+      (db/with-writer
+        (db/execute! conn ["UPDATE knowledge SET content = ? WHERE id = ?"
+                           (str content) id])
+        ;; The FTS mirror is rowid-keyed and insert-only, so the stale row has
+        ;; to go before the new one lands — otherwise the old wording stays
+        ;; searchable and the memory can be recalled by text it no longer says.
+        (try (db/execute! conn ["DELETE FROM knowledge_fts
+                                  WHERE rowid IN (SELECT rowid FROM knowledge WHERE id = ?)" id])
+             (catch Throwable _ nil)))
+      (index! conn id (str content))
+      true)))
+
 (defn corroborated?
   "Whether a memory has been seen in enough distinct runs to act on.
 

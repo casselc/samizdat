@@ -89,29 +89,62 @@
   No content comparison: saving a body identical to the current version still
   appends. An edit that turned out to be a no-op is itself a fact about what
   the supervisor tried, and suppressing it would make the history lie by
-  omission."
-  [conn kind name body]
-  (let [k (kind-str kind)]
-    (db/with-writer
-      (let [v (inc (or (:version (load-latest conn k name)) 0))]
-        (db/execute! conn ["INSERT INTO userspace (kind, name, version, body, created_at)
-                            VALUES (?, ?, ?, ?, ?)"
-                           k (str name) v (str body) (db/now)])
-        v))))
+  omission.
+
+  `source` marks WHOSE copy the row is — \"project\" for anyone editing, which
+  is everyone but `seed!`. It is what lets a harness upgrade refresh a
+  factory copy without ever touching the supervisor's work; the version
+  number cannot say, because a save of a name that was never seeded also
+  writes version 1."
+  ([conn kind name body] (save! conn kind name body "project"))
+  ([conn kind name body source]
+   (let [k (kind-str kind)]
+     (db/with-writer
+       (let [v (inc (or (:version (load-latest conn k name)) 0))]
+         (db/execute! conn ["INSERT INTO userspace (kind, name, version, body, created_at, source)
+                             VALUES (?, ?, ?, ?, ?, ?)"
+                            k (str name) v (str body) (db/now) (str source)])
+         v)))))
 
 (defn seed!
-  "Install `body` as version 1 of `name` when the project has no version yet.
+  "Install `body` as version 1 of `name` when the project has no version yet,
+  and REFRESH version 1 in place when the shipped template has moved on.
   Returns the latest row either way, so a caller can seed-and-load in one
   motion.
 
   Idempotent by construction and cheap enough to call on every load: seeding
   is how a project acquires its copy of the template, and the only way to be
-  sure it has one is to try. A project that has already evolved past version 1
-  is untouched — the template never overwrites what the supervisor has done."
+  sure it has one is to try. A project that has edited the entry is untouched
+  — the template never overwrites what the supervisor has done.
+
+  WITHOUT THE REFRESH A HARNESS UPGRADE CANNOT REACH AN EXISTING PROJECT. The
+  seeded row was authoritative from the moment it was written, so a project
+  stayed on whatever shipped the day it first ran. Live: a project seeded
+  gates.edn on its first read, a threshold added to the harness afterwards was
+  missing from that project's table, and the rule reading it threw rather than
+  finding the key absent. Because entries seed lazily at first USE, a
+  long-lived project ends up running on a sediment of whatever harness version
+  happened to touch each one first.
+
+  In place rather than as version 2, because appending would make the entry
+  look edited and stop it following the next upgrade. Keyed on `source`
+  rather than on the version number: `save!` of a name that was never seeded
+  also writes a version 1, and mistaking that for a factory copy would
+  overwrite the supervisor's work with the template — the one thing userspace
+  exists to prevent."
   [conn kind name body]
-  (when-not (load-latest conn kind name)
-    (save! conn kind name body))
-  (load-latest conn kind name))
+  (let [row (load-latest conn kind name)]
+    (cond
+      (nil? row)
+      (save! conn kind name body "factory")
+
+      (and (= "factory" (:source row)) (not= (str body) (str (:body row))))
+      (db/with-writer
+        (db/execute! conn ["UPDATE userspace SET body = ?, created_at = ?
+                             WHERE kind = ? AND name = ? AND version = ?"
+                           (str body) (db/now)
+                           (kind-str kind) (str name) (long (:version row))])))
+    (load-latest conn kind name)))
 
 (defn revert!
   "Re-append the body of `version` as a NEW latest version — the rollback.

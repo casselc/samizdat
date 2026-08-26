@@ -195,6 +195,22 @@
          ;; Run on its own thread and wait with a deadline. The eval catches its
          ;; own throwable and returns a result map, so deref yields a map or the
          ;; ::timeout sentinel — never a re-thrown exception.
+         ;; READER FEATURES ARE PROCESS-WIDE AND THE AGENT SETS THEM. The
+         ;; documented way to load a library that reads its :clj branches is
+         ;; set, require, set back — and when the require throws, as it will
+         ;; while the agent is still working out which features it needs, the
+         ;; set-back never runs. Live: one such eval dropped "bb" from the
+         ;; image, `honey.sql` failed on `::wrapper` from that turn onward,
+         ;; every later attempt failed the same way, and the run reflected the
+         ;; damage into long-term memory as a fact about the library. The
+         ;; corruption outlives the branch, the run, and — through the
+         ;; memories it explains — the process.
+         ;;
+         ;; So the seam restores them, the way it already scopes *ns* and
+         ;; *out*. Features matter at READ time, so a namespace loaded under
+         ;; the agent's features stays loaded after they are put back; what
+         ;; does not survive is the ability to break every later read.
+         features (__reader-features)
          fut (future
                (try
                  (let [value (binding [*ns* ns* *out* out]
@@ -205,7 +221,10 @@
                    {:ok false
                     :error (or (ex-message e) (str e))
                     :error-type (str (type e))
-                    :out (str out)})))
+                    :out (str out)})
+                 (finally
+                   (try (__reader-features-set! features)
+                        (catch Throwable _ nil)))))
          result (deref fut timeout ::timeout)]
      (if (= result ::timeout)
        (do (future-cancel fut)

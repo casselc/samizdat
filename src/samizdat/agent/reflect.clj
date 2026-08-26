@@ -109,7 +109,16 @@
 
   OVERVIEW is capped at one per project by construction: it carries a fixed
   pattern key, so a new one replaces the old rather than accumulating. That is
-  what makes it the orientation note rather than a pile of them."
+  what makes it the orientation note rather than a pile of them.
+
+  And REPLACES is literal for the overview, where it used to be a corroborate
+  like any other. The overview describes a moving target — what the codebase
+  IS — so a run that adds a namespace makes the previous wording wrong without
+  making the memory wrong to hold. Live: the first run wrote `nothing is
+  implemented yet`, the second run created src/todomvc/db.clj and then
+  corroborated that description rather than correcting it, and the same run
+  flagged the memory it had just agreed with as WRONG. A standing fact
+  corroborates; a description restates."
   [conn {:keys [run-id]} sections]
   (let [written
         (vec (for [[section lines] sections
@@ -123,6 +132,8 @@
                          existing (knowledge/by-pattern conn key)]]
                (if existing
                  (do (knowledge/corroborate! conn (:id existing) run-id)
+                     (when (= "OVERVIEW" section)
+                       (knowledge/restate! conn (:id existing) line))
                      {:id (:id existing) :kind kind :repeat? true})
                  {:id (knowledge/remember! conn {:content line :kind kind
                                                  :run-id run-id :pattern-key key

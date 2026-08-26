@@ -89,3 +89,29 @@
 
 (deftest a-correction-naming-an-unknown-id-is-ignored
   (is (some? (reflect/record! @conn {:run-id "r1"} {"WRONG" ["k-nosuch — invented"]}))))
+
+(deftest the-overview-is-restated-not-agreed-with
+  ;; The overview describes a moving target — what the codebase IS — so a run
+  ;; that adds a namespace makes the previous wording wrong without making the
+  ;; memory wrong to hold. Live: run one wrote "nothing is implemented yet",
+  ;; run two created src/todomvc/db.clj, corroborated that description rather
+  ;; than correcting it, and then flagged the memory it had just agreed with
+  ;; as WRONG in the same breath.
+  (let [conn (db/open! ":memory:")]
+    (reflect/record! conn {:run-id "r1"}
+                     {"OVERVIEW" ["nothing is implemented yet"]
+                      "FACTS" ["tests run with jolt -M:test"]})
+    (reflect/record! conn {:run-id "r2"}
+                     {"OVERVIEW" ["src/todomvc/db.clj holds the storage layer"]
+                      "FACTS" ["tests run with jolt -M:test"]})
+    (let [rows (knowledge/recent conn 20)
+          overviews (filter #(= "overview" (:kind %)) rows)
+          facts (filter #(= "semantic" (:kind %)) rows)]
+      (testing "still exactly one overview, and it says what is true now"
+        (is (= 1 (count overviews)))
+        (is (= "src/todomvc/db.clj holds the storage layer" (:content (first overviews)))))
+      (testing "restating does not cost it its record — the id and count survive"
+        (is (= 2 (:corroborations (first overviews)))))
+      (testing "a standing fact still corroborates rather than being rewritten"
+        (is (= 1 (count facts)))
+        (is (= 2 (:corroborations (first facts))))))))

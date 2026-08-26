@@ -495,6 +495,35 @@
   ["ALTER TABLE knowledge ADD COLUMN pattern_key TEXT"
    "CREATE INDEX IF NOT EXISTS idx_knowledge_pattern ON knowledge(pattern_key)"])
 
+(def ^:private v17
+  ;; WHOSE COPY IS THIS. A project seeds its own row for every shipped
+  ;; template on first read, and that row was authoritative from then on — so
+  ;; a harness upgrade could never reach a project again. Live: a project
+  ;; seeded gates.edn on its first read, a threshold added afterwards was
+  ;; missing from that project's table, and the rule reading it threw rather
+  ;; than finding the key absent. Because entries seed lazily at first USE, a
+  ;; long-lived project ends up on a sediment of whatever harness version
+  ;; happened to touch each one first.
+  ;;
+  ;; The fix needs to tell `the factory copy, untouched` from `the
+  ;; supervisor's own work`, and the version number cannot: `seed!` writes
+  ;; version 1, but so does a `save!` of a name that was never seeded. Getting
+  ;; that wrong overwrites the supervisor's work with the template, which is
+  ;; the one thing userspace exists to prevent — so it is a column, not an
+  ;; inference.
+  ;;
+  ;; Backfilled to 'factory' for a SOLE version-1 row, which is what every
+  ;; seeded row looks like today; anything with a version above it is the
+  ;; project's own and defaults to 'project'. Agent-authored names have no
+  ;; shipped template, so refresh never reaches them either way.
+  ["ALTER TABLE userspace ADD COLUMN source TEXT NOT NULL DEFAULT 'project'"
+   "UPDATE userspace SET source = 'factory'
+     WHERE version = 1
+       AND NOT EXISTS (SELECT 1 FROM userspace u2
+                        WHERE u2.kind = userspace.kind
+                          AND u2.name = userspace.name
+                          AND u2.version > 1)"])
+
 (def migrations
   "Ordered. Index 0 is migration 1; PRAGMA user_version holds the count applied."
-  [v1 v2 v3 v4 v5 v6 v7 v8 v9 v10 v11 v12 v13 v14 v15 v16])
+  [v1 v2 v3 v4 v5 v6 v7 v8 v9 v10 v11 v12 v13 v14 v15 v16 v17])

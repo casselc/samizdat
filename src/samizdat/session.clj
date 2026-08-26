@@ -467,9 +467,20 @@
          ;; gate, and every gate dead is a bad loop.
          (let [gs (vals (:gates snap))
                fired (reduce + 0 (map #(or (:fired %) 0) gs))
-               met (reduce + 0 (map #(+ (or (:met %) 0) (or (:met-late %) 0)) gs))]
-           (when (and (>= fired (:min-total-gate-firings p))
-                      (<= (rate met fired) (:gate-met-rate p)))
+               met (reduce + 0 (map #(+ (or (:met %) 0) (or (:met-late %) 0)) gs))
+               ;; A threshold the project's policy table does not carry turns
+               ;; the rule OFF. It is not hypothetical: a project seeds its
+               ;; own copy of gates.edn on first read and that copy is
+               ;; authoritative afterwards, so a rule added to the harness
+               ;; later finds keys missing on every project older than it.
+               ;; This block renders into the supervisor's turn, and throwing
+               ;; there costs the supervisor its whole view of the session to
+               ;; report one pattern.
+               floor (:min-total-gate-firings p)
+               ceiling (:gate-met-rate p)]
+           (when (and floor ceiling
+                      (>= fired floor)
+                      (<= (rate met fired) ceiling))
              {:kind :steering-ignored :severity :high
               :detail (detail p :steering-ignored {:fired fired :met met})
               :evidence {:fired fired :met met :turns turns}}))]

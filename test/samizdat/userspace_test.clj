@@ -287,3 +287,36 @@
       "a test or a bare REPL sees the harness as shipped")
   (gates/reload-config!)
   (is (= 3 (gates/threshold :cull-threshold))))
+
+(deftest a-harness-upgrade-reaches-an-untouched-project-entry
+  ;; A project seeds its own copy of every template on first read, and that
+  ;; copy used to be authoritative forever. Live: a project seeded gates.edn
+  ;; on its first read, a threshold added to the harness afterwards was
+  ;; missing from that project's table, and the rule reading it threw rather
+  ;; than being absent. Entries seed lazily at first USE, so the project ended
+  ;; up on a sediment of whatever harness version touched each one first.
+  (let [conn (db/open! ":memory:")]
+    (testing "an untouched entry follows the shipped template"
+      (store/seed! conn :prompt "p" "v1 body")
+      (store/seed! conn :prompt "p" "v2 body")
+      (is (= "v2 body" (:body (store/load-latest conn :prompt "p"))))
+      (is (= 1 (:version (store/load-latest conn :prompt "p")))
+          "refreshed in place — appending would make it look edited and stop it following the next upgrade"))
+    (testing "a save of a name nothing ever seeded is the project's own, version 1 or not"
+      (store/save! conn :prompt "s" "written, never seeded")
+      (store/seed! conn :prompt "s" "a template that appeared later")
+      (is (= "written, never seeded" (:body (store/load-latest conn :prompt "s")))
+          "the version number cannot tell these apart; the source column can"))
+    (testing "an entry the project edited is never overwritten"
+      (store/seed! conn :prompt "q" "factory")
+      (store/save! conn :prompt "q" "the supervisor's version")
+      (store/seed! conn :prompt "q" "a newer factory")
+      (is (= "the supervisor's version" (:body (store/load-latest conn :prompt "q")))))
+    (testing "and its history still reverts to what the project started from"
+      (is (= "factory" (:body (store/load-version conn :prompt "q" 1)))))
+    (testing "an identical template is not a write"
+      (store/seed! conn :prompt "r" "same")
+      (let [before (:created_at (store/load-latest conn :prompt "r"))]
+        (store/seed! conn :prompt "r" "same")
+        (is (= before (:created_at (store/load-latest conn :prompt "r"))))
+        (is (= 1 (count (store/versions conn :prompt "r"))))))))
