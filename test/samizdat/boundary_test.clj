@@ -164,6 +164,7 @@
    "cell"        {:reach :harness-only}
    "reload_cells" {:reach :harness-only}
    "manifest"    {:reach :harness-only}
+   "policy"      {:reach :harness-only}
    "prompt"      {:reach :harness-only}
    "manual"      {:reach :harness-only}
    "introspect"  {:reach :harness-only}

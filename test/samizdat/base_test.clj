@@ -540,12 +540,10 @@
    "src/samizdat/agent/tools/mutate.clj"
    #{
     "\n\nFix it and save again."
-    "\n\nFix the cell and call reload_cells again."
     " Call reload_cells to make it live."
     " It is still the shipped template."
     " `cell list` shows this project's;"
     " `cells` shows what is loaded."
-    " file was restored to the last good version.\n\n"
     " in this project — it compiled, it dry-ran, and it"
     " is live on your next turn. The shipped template is"
     " running the shipped templates. Any save starts its"
@@ -554,8 +552,6 @@
     " unchanged; other projects still start from it."
     "' was NOT saved; the loop is"
     ". Reverting is itself an edit, so"
-    "Cell edit committed — it is live on your next turn."
-    "Cell edit rolled back; the loop is unchanged and your"
     "This project has stored no cell versions yet — it is"
     }
    "src/samizdat/agent/tools/ship.clj"

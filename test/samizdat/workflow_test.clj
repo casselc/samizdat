@@ -23,16 +23,20 @@
   that is the whole point."
   (:require [clojure.data.json :as json]
             [samizdat.agent.beam :as beam]
+            [samizdat.agent.tools.base :as base]
+            [samizdat.agent.tools.introspect]
             [samizdat.cells :as cells]
             [clojure.edn :as edn]
             [clojure.string :as str]
             [clojure.test :refer [deftest testing is use-fixtures]]
             [samizdat.agent.state :as state]
             [samizdat.llm.client :as llm]
+            [samizdat.manifests :as manifests]
             [samizdat.store.db :as db]
             [samizdat.store.journal :as journal]
             [samizdat.store.runs :as runs]
             [samizdat.store.userspace :as us]
+            [samizdat.userspace :as userspace]
             [samizdat.workflow :as workflow]
             [mycelium.workflow :as wf]))
 
@@ -299,3 +303,40 @@
       (is (seq (:cells definition)) "the definition came back with its cells")
       (is (some? compiled))
       (is (= :loop/assemble (get-in definition [:cells :start]))))))
+
+(deftest a-stored-role-manifest-is-what-compiles-and-what-the-catalog-serves
+  ;; compiled-manifest (the seam every role sub-loop runs through) read the
+  ;; FACTORY resource, so `manifest save "worker"` landed in userspace and was
+  ;; never read back — the self-tuning story held only for the run's top-level
+  ;; manifest (karamazov-blt.3). The catalog likewise served the factory
+  ;; :description for an evolved manifest (karamazov-blt.4).
+  (with-db [c]
+    (userspace/bind! c)
+    (try
+      (let [d (assoc (edn/read-string (userspace/body :manifest "worker"))
+                     :description "tuned-by-test")]
+        (userspace/save! :manifest "worker" (pr-str d)))
+      (is (str/includes? (str (manifests/manifest-body "worker")) "tuned-by-test")
+          "the role seam serves the stored version")
+      (is (some? (workflow/compiled-manifest "worker"))
+          "and the stored version is what compiles as the role sub-loop")
+      (is (= "tuned-by-test"
+             (:description (some #(when (= "worker" (:name %)) %)
+                                 (workflow/catalog c))))
+          "the catalog describes the version that will actually run")
+      (finally (userspace/unbind!)))))
+
+(deftest introspect-renders-the-driving-manifest-not-the-factory-loop
+  ;; The self-observation tool dumped manifests/loop.edn whatever was running,
+  ;; ignoring both the stored version and the run's actual manifest — the
+  ;; supervisor diagnosed from a wiring dump that was wrong twice over
+  ;; (karamazov-blt.4). The beam's ctx :turn-workflow is the version-true
+  ;; wiring, and introspect now renders it.
+  (let [r (base/run-tool {:tool-name "introspect" :branch {:id "B1"}
+                          :turn-workflow {:name "custom" :version 7
+                                          :definition {:cells {:start :x/one}
+                                                       :edges {:start :end}}}})]
+    (is (str/includes? (str (:result r)) "custom v7")
+        "the header names the manifest and version that drive the run")
+    (is (str/includes? (str (:result r)) "x/one")
+        "and the wiring rendered is that manifest's, not loop.edn's")))

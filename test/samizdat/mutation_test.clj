@@ -27,6 +27,7 @@
             [jolt.fs :as fs]
             [mycelium.cell :as cell]
             [samizdat.cells :as cells]
+            [samizdat.manifests :as manifests]
             [samizdat.mutation :as mut]
             [samizdat.store.db :as db]
             [samizdat.store.journal :as journal]
@@ -183,6 +184,54 @@
       (testing "and the attempt is journaled with its reason"
         (is (seq (filter #(re-find #"mutation-rolled-back" (str (:kind %)))
                          (journal/events-since c rid 0)))))
+      (finally (us/unbind!) (db/close c)))))
+
+(deftest an-edit-that-breaks-another-manifest-never-goes-live
+  ;; Validating one loop-def let a cell wired only into the beam or a team
+  ;; manifest commit whatever it broke — the active loop never references it,
+  ;; so its validate passed trivially (karamazov-blt.2). :extra-defs carries
+  ;; every other manifest through the same compile.
+  (write-cells! (str @root "/cells") "(fn [_ d] (update d :n inc))")
+  (cells/load-cells! (:dirs (opts)))
+  ;; a second cell, wired only into a NON-loop manifest
+  (binding [*ns* *ns*]
+    (load-string (str "(ns cells.other (:require [mycelium.cell :as cell]))\n"
+                      "(cell/defcell :other/thing {:doc \"x\" :pure true}\n"
+                      "  (fn [_ d] d))\n")))
+  (let [extra {"beamish" '{:cells {:start :other/thing :end :mini/end}
+                           :edges {:start {:go :end} :end :end}
+                           :dispatches {:start [[:go (fn [d] true)]]}}}
+        ;; the candidate re-declares :other/thing to require a ctx key no
+        ;; driver provides — invisible to the mini loop, fatal to "beamish"
+        candidate (str "(ns cells.other (:require [mycelium.cell :as cell]))\n"
+                       "(cell/defcell :other/thing {:doc \"x\" :pure true"
+                       " :requires [:no-such-ctx-key]}\n"
+                       "  (fn [_ d] d))\n")
+        r (mut/propose-cell! {:name "other" :body candidate
+                              :loop-def mini-def
+                              :extra-defs extra
+                              :compile-fn manifests/compile-definition
+                              :soak-input {:n 0}})]
+    (is (= :rolled-back (:status r)))
+    (is (str/includes? (str (:reason r)) "beamish")
+        "the reason names which manifest the edit broke")
+    (is (empty? (:requires (cell/get-cell :other/thing)))
+        "the registry was restored — the candidate's :requires is gone")))
+
+(deftest the-dir-protocol-refuses-a-store-mode-image
+  ;; After a store-mode load, loaded-file-content is keyed by store NAMES;
+  ;; apply-cell-edit!'s rollback would spit those names into the cwd as files
+  ;; and its reload would regress live cells to the templates
+  ;; (karamazov-blt.7). It now refuses instead of corrupting.
+  (write-cells! (str @root "/cells") "(fn [_ d] (update d :n inc))")
+  (let [c (db/open! ":memory:")]
+    (try
+      (us/bind! c)
+      (cells/load-cells!)                        ;; the PRODUCTION, store-mode load
+      (let [r (mut/apply-cell-edit! (opts))]
+        (is (= :rolled-back (:status r)))
+        (is (= :store-mode-image (:reason r))
+            "the reason is data; the sentence is a caller's to render"))
       (finally (us/unbind!) (db/close c)))))
 
 (deftest an-unbound-proposal-is-not-reported-committed

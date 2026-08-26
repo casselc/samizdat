@@ -28,49 +28,47 @@
   the next run, because the loader loads the latest stored version. Validation
   goes through mycelium + the cell registry directly rather than the workflow
   loader, to keep this tool out of the loop-driver's require graph."
-  (:require [clojure.edn :as edn]
-            [clojure.java.io :as io]
+  (:require [clojure.java.io :as io]
             [clojure.string :as str]
-            [mycelium.compose :as compose]
-            [mycelium.core :as myc]
             [samizdat.agent.tools.base :as base]
-            [samizdat.cells :as cells]
+            [samizdat.manifests :as manifests]
             [samizdat.store.userspace :as us]))
 
-(defn- register-subworkflows! [definition]
-  ;; Mirrors samizdat.workflow/register-subworkflows! — kept here rather than
-  ;; required, to keep this tool out of the loop-driver's cycle.
-  (doseq [[cell-id mname] (:subworkflows definition)]
-    (let [res (str "manifests/" mname ".edn")]
-      (when-not (io/resource res)
-        (throw (ex-info (str "sub-workflow manifest '" mname "' has no resource")
-                        {:manifest mname})))
-      (compose/register-workflow-cell!
-       cell-id (edn/read-string (slurp (io/resource res))) {}))))
-
 (defn- validate!
-  "Compile the definition the way load-loop! will — cells loaded, composed
-  sub-loops registered, then a full static pre-compile. Throws on any error."
+  "Compile the definition EXACTLY the way load-loop! will: cells loaded,
+  composed sub-loops registered through the userspace seam, ctx-key requires
+  checked, and the :constraints derived from the enforced invariants. Throws
+  on any error. The tool used to run a bare pre-compile that skipped the
+  last two, so a manifest that could not run could still be saved — and then
+  threw out of load-loop! at the next run start (karamazov-blt.6)."
   [edn-text]
-  (cells/load-cells!)
-  (let [definition (edn/read-string edn-text)]
-    (register-subworkflows! definition)
-    (myc/pre-compile definition))
+  (manifests/compile-loop (manifests/read-definition edn-text))
   true)
 
 (def ^:private usage
   "Actions: list, show {name, version?}, save {name, edn}. A manifest is the loop as data — a :cells map, :edges, and dispatch predicates. Save validates by compiling before it stores; the run that uses it is chosen by config :run :loop.")
 
-(defn- render-list [conn]
-  (let [rows (us/names conn :manifest)]
-    (if (seq rows)
-      (str/join "\n"
-                (for [{:keys [name version versions]} rows]
-                  (str name "  v" version " (" versions
-                       (if (= 1 versions) " version)" " versions)")
-                       (when (io/resource (str "manifests/" name ".edn"))
-                         "  [factory]"))))
-      "No manifests stored yet.")))
+(defn- render-list
+  "Every manifest this project can run: the stored rows PLUS the shipped
+  templates not yet seeded. Store-only listing hid a factory manifest until
+  its first run seeded it — `manifest show worker` before any worker run
+  answered \"No manifest worker\", so the agent could not read the thing it
+  is invited to tune (karamazov-blt.4)."
+  [conn]
+  (let [rows (us/names conn :manifest)
+        stored (set (map :name rows))
+        unseeded (for [nm manifests/shipped-manifests
+                       :when (and (not (stored nm))
+                                  (io/resource (manifests/manifest-resource nm)))]
+                   (str nm "  [factory template, unseeded]"))]
+    (str/join "\n"
+              (concat
+               (for [{:keys [name version versions]} rows]
+                 (str name "  v" version " (" versions
+                      (if (= 1 versions) " version)" " versions)")
+                      (when (io/resource (manifests/manifest-resource name))
+                        "  [factory]")))
+               unseeded))))
 
 (defmethod base/run-tool "manifest" [{:keys [branch conn] :as ctx}]
   (let [action (some-> (base/arg ctx :action) str str/trim str/lower-case not-empty)]
@@ -95,8 +93,15 @@
                            (us/load-version conn :manifest name v)
                            (us/load-latest conn :manifest name))]
               (base/ok branch (str name " v" (:version row) ":\n\n" (:body row)))
-              (base/malformed branch (str "No manifest " name
-                                          (when v (str " v" v)) ".")))))
+              ;; Not stored — fall back to the userspace seam, which serves
+              ;; the factory template (and seeds it as v1 when a project is
+              ;; bound), so a shipped manifest is readable before any run
+              ;; drives it (karamazov-blt.4). Version pinning has nothing to
+              ;; pin to here, so only the latest form takes this path.
+              (if-let [body (when-not v (manifests/manifest-body name))]
+                (base/ok branch (str name " (factory template):\n\n" body))
+                (base/malformed branch (str "No manifest " name
+                                            (when v (str " v" v)) "."))))))
 
         "save"
         (let [name (base/arg ctx :name)

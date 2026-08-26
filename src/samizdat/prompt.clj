@@ -61,6 +61,7 @@
    "memory-tool"
    "milestone"
    "planner"
+   "policy-tool"
    "probe-candidates"
    "probe-steer"
    "problem"

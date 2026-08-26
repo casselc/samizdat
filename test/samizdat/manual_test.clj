@@ -73,7 +73,9 @@
   (let [r (run {})]
     (is (= :neutral (:category r)))
     (is (str/includes? (:result r) "## Changing the harness"))
-    (is (str/includes? (:result r) "samizdat.mutation/apply-cell-edit!"))))
+    ;; The manual advertises the store-based protocol, not the legacy dir one
+    ;; (karamazov-blt.7): apply-cell-edit! refuses a store-mode image now.
+    (is (str/includes? (:result r) "samizdat.mutation/propose-cell!"))))
 
 (deftest the-tool-gives-one-entrys-full-docstring
   (let [r (run {:name "samizdat.agent.state/fork-branch"})]

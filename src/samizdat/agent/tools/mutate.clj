@@ -26,12 +26,12 @@
   A separate namespace requiring only base, so it plugs into the tool surface
   without dragging the mutation machinery into the aggregator."
   (:require [clojure.edn :as edn]
-            [clojure.java.io :as io]
             [clojure.string :as str]
             [mycelium.cell :as cell]
             [samizdat.agent.state :as state]
             [samizdat.agent.tools.base :as base]
             [samizdat.cells :as cells]
+            [samizdat.manifests :as manifests]
             [samizdat.mutation :as mutation]
             [samizdat.prompt :as prompt]
             [samizdat.store.userspace]
@@ -50,12 +50,38 @@
                                       :else "undeclared")]
                          (str id "  [" fx "]  " source))))))
 
+(defn- active-name
+  "Which manifest this run drives — config :run :loop, else the default.
+  Mirrors workflow/active-loop-name, which this tool cannot require (the
+  workflow ns reaches the tool dispatcher through the branch loop)."
+  [ctx]
+  (or (get-in ctx [:config :run :loop]) "loop"))
+
 (defn- current-loop-def
-  "The loop's workflow definition — the wiring the edit is validated against.
-  Read from the manifest resource rather than the workflow namespace, to keep
-  the tool free of the loop-driver dependency cycle."
-  []
-  (edn/read-string (slurp (io/resource "manifests/loop.edn"))))
+  "The ACTIVE loop's workflow definition, through the userspace seam — the
+  project's stored version, not the factory resource. Validating and soaking
+  against the shipped loop.edn meant an edit was checked against wiring the
+  run was not driving: a bad edit to the evolved loop could commit, and a
+  valid one could be refused (karamazov-blt.2)."
+  [ctx]
+  (edn/read-string (userspace/body! :manifest (active-name ctx))))
+
+(defn- extra-defs
+  "Every OTHER manifest this project can run — shipped and stored — as
+  {name definition}, for compile-only validation. A cell wired into the beam
+  or a team loop is not referenced by the active loop at all, so validating
+  the one definition let an edit that broke every other workflow commit
+  untouched (karamazov-blt.2)."
+  [active]
+  (into {}
+        (for [nm (distinct (concat manifests/shipped-manifests
+                                   (map :name (userspace/names :manifest))))
+              :when (not= nm active)
+              :let [body (manifests/manifest-body nm)]
+              :when body
+              :let [d (try (edn/read-string body) (catch Throwable _ nil))]
+              :when (seq (:cells d))]
+          [nm d])))
 
 (defn- soak-input
   "A synthetic starting state the soak dry-run terminates from: a branch that
@@ -66,21 +92,27 @@
                   :status :done :final-answer "soak")
    :turn 1})
 
-(defmethod base/run-tool "reload_cells" [{:keys [branch conn run-id]}]
-  (let [r (mutation/apply-cell-edit!
-           {:loop-def (current-loop-def)
-            :soak-input (soak-input)
-            :conn conn :run-id run-id})]
-    (if (= :committed (:status r))
+(defmethod base/run-tool "reload_cells" [{:keys [branch] :as ctx}]
+  ;; Reload the project's cells from the userspace store (plus .samizdat/cells
+  ;; seeds) — the PRODUCTION loader — then prove the active loop still
+  ;; compiles the way the run loader will. The old body ran the dir-based
+  ;; apply-cell-edit!, which read templates/disk instead of the store: calling
+  ;; it regressed store-evolved cells to the templates for the rest of the
+  ;; run, and its rollback wrote store keys into the cwd as files
+  ;; (karamazov-blt.7).
+  (let [snapshot (cell/registry-snapshot)]
+    (try
+      (cells/load-cells!)
+      (manifests/compile-definition (current-loop-def ctx))
       (base/ok branch
-               (str "Cell edit committed — it is live on your next turn."
-                    " (checkpoint -> reload -> validate -> soak all passed.)")
+               (prompt/render "cell-tool" {:reloaded true
+                                           :name (active-name ctx)})
                :progress? true)
-      (base/fail branch
-                 (str "Cell edit rolled back; the loop is unchanged and your"
-                      " file was restored to the last good version.\n\n"
-                      (:reason r)
-                      "\n\nFix the cell and call reload_cells again.")))))
+      (catch Throwable e
+        (cell/registry-restore! snapshot)
+        (base/fail branch
+                   (str (prompt/render "cell-tool" {:reload-failed true})
+                        "\n\n" (ex-message e)))))))
 
 ;; --- the project's own cells (userspace) -------------------------------------
 
@@ -145,9 +177,16 @@
             (not name) (base/malformed branch (base/missing ctx :name))
             (str/blank? (str body)) (base/malformed branch (base/missing ctx :clj))
             :else
-            (let [r (mutation/propose-cell!
+            (let [active (active-name ctx)
+                  r (mutation/propose-cell!
                      {:name name :body (str body)
-                      :loop-def (current-loop-def)
+                      :loop-def (current-loop-def ctx)
+                      :extra-defs (extra-defs active)
+                      ;; The loader's own static pipeline (sub-workflows,
+                      ;; ctx-key requires, derived constraints), WITHOUT its
+                      ;; registry reload — which would replace the candidate
+                      ;; just installed (karamazov-blt.2).
+                      :compile-fn manifests/compile-definition
                       :soak-input (soak-input)
                       :conn conn :run-id run-id})]
               (case (:status r)

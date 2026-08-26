@@ -63,6 +63,25 @@
   []
   (registry/adapter-for (get-in @system [:config :llm :provider])))
 
+(defn bind-project!
+  "Point userspace at this project's store, THEN reload every policy table.
+
+  One seam, because the order is the whole point (karamazov-blt.1): the
+  reloads used to run at the top of start!, ~35 lines before `bind!`, so all
+  three caches were filled from the SHIPPED templates and nothing re-read
+  them after the project bound — a project whose gates, wordlists or phases
+  had diverged silently ran factory policy for the whole process lifetime.
+  Reloading after the bind is what makes the caches hold the project's own
+  policy; the reload-on-every-start half (rather than trusting an atom that
+  survives stop!/start!) is what lets a long-lived interpreted session pick
+  up edits without a process restart."
+  [conn]
+  (userspace/bind! conn)
+  (gates/reload-config!)
+  (lexicon/reload!)
+  (phases/reload!)
+  conn)
+
 (defn start!
   "Bring the system up. `overrides` is merged into the config, so a REPL
   session can do (start! {:db {:path \":memory:\"} :http {:port 3999}}).
@@ -82,14 +101,6 @@
    (when (started?)
      (throw (ex-info "system already started; call stop! first" {})))
    (let [cfg (config/load-config overrides)
-          ;; Gate thresholds are cached in an atom that survives stop!/start!,
-           ;; so a restart would keep serving the pre-edit gates.edn. Reload on
-           ;; every start: long-lived interpreted sessions pick up threshold
-           ;; edits without a process restart. Same for the wordlists (tier 1c)
-           ;; and the phase machine (drg-4026 #34).
-           _ (gates/reload-config!)
-           _ (lexicon/reload!)
-           _ (phases/reload!)
          ;; A fresh session tally per process start. Short-term memory is
          ;; scoped to the process on purpose: a pattern that shows up across
          ;; three runs is exactly the pattern a single-run digest cannot see,
@@ -117,14 +128,16 @@
              (log/info "endpoint identified as llama.cpp:"
                        (:total-slots probed) "KV slots — prefix caching on"))
          c (db/open! (get-in cfg [:db :path]))
-         ;; Point the userspace reads at THIS project's store. From here on a
-         ;; cell, manifest, policy table or prompt resolves to the project's
-         ;; own version — seeded from the shipped template on first read — so
-         ;; two projects running this binary can evolve different loops and
-         ;; neither can edit the other's. Unbound (a bare REPL, a unit test)
-         ;; the same reads fall back to the templates, which is what the
-         ;; harness did before the store existed.
-         _ (userspace/bind! c)
+         ;; Point the userspace reads at THIS project's store, and reload the
+         ;; policy caches AFTER the bind so they hold the project's own
+         ;; gates/wordlists/phases (bind-project! carries the ordering
+         ;; argument). From here on a cell, manifest, policy table or prompt
+         ;; resolves to the project's own version — seeded from the shipped
+         ;; template on first read — so two projects running this binary can
+         ;; evolve different loops and neither can edit the other's. Unbound
+         ;; (a bare REPL, a unit test) the same reads fall back to the
+         ;; templates, which is what the harness did before the store existed.
+         _ (bind-project! c)
          server (adapter/run-server handler {:port (get-in cfg [:http :port])})]
      (reset! system {:config cfg :conn c :server server})
      (log/info "samizdat up on port" (get-in cfg [:http :port])

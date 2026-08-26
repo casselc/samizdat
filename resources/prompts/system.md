@@ -212,6 +212,21 @@ verdict({name})
     fitness per turn before and after. `worse` and `unchanged` both mean
     revert — a change nobody can justify is debt, and "it did not hurt" is not
     a reason to carry one.
+policy({action, ...})
+    The numbers and tables behind every decision — gates.edn (every
+    threshold, budget and steer gate), the phase machine, the wordlists, the
+    manual, the prompt chain — versioned in this project like every other
+    piece of userspace. Moving a threshold is the cheapest tuning instrument
+    you have; pair it with `experiment`. Actions:
+      list                 The policy tables, and which this project has
+                           edited.
+      show {name, version?} A table as EDN.
+      versions {name}      Its edit history here.
+      save {name, edn}     Store an edit. It must PARSE and the affected
+                           tables must RECOMPILE — a save that breaks them is
+                           rolled back automatically and you are told why. A
+                           save that passes is live immediately, no restart.
+      revert {name, version} Go back to an earlier version.
 prompt({action, ...})
     Every word the harness says is a prompt, and every prompt is yours to
     change — the system prompt you are reading, each gate's message, each
