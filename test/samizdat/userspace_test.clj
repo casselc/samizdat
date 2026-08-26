@@ -8,9 +8,11 @@
   gets its OWN copy of the shipped template, evolves it, and neither the
   harness's files nor another project's copy is affected. A layer that is
   shared is not userspace no matter which directory it lives in."
-  (:require [clojure.test :refer [deftest is testing use-fixtures]]
+  (:require [clojure.string :as str]
+            [clojure.test :refer [deftest is testing use-fixtures]]
             [samizdat.store.db :as db]
             [samizdat.store.userspace :as store]
+            [samizdat.system :as system]
             [samizdat.userspace :as us]
             [samizdat.agent.state :as state]
             [samizdat.agent.tools :as tools]
@@ -320,3 +322,102 @@
         (store/seed! conn :prompt "r" "same")
         (is (= before (:created_at (store/load-latest conn :prompt "r"))))
         (is (= 1 (count (store/versions conn :prompt "r"))))))))
+
+(deftest binding-a-project-serves-its-policy-not-the-templates
+  ;; system/start! used to run the three policy reloads ~35 lines BEFORE
+  ;; userspace/bind!, so gates/lexicon/phases cached the shipped templates and
+  ;; nothing re-read them after the project bound — a project whose policy had
+  ;; diverged silently ran factory numbers for the whole process lifetime
+  ;; (karamazov-blt.1). bind-project! is the one seam that carries the order.
+  (let [path (str "/tmp/samizdat-bind-order-" (random-uuid) ".sqlite3")
+        c (db/open! path)]
+    (try
+      (us/bind! c)
+      (let [g (us/edn-body! :policy "gates")]
+        (us/save! :policy "gates" (pr-str (assoc-in g [:cull-threshold :value] 999))))
+      (us/unbind!)
+      (db/close c)
+      (gates/reload-config!)
+      (is (not= 999 (gates/threshold :cull-threshold))
+          "unbound, the template's number serves — the project has not leaked")
+      (let [c2 (db/open! path)]
+        (try
+          (system/bind-project! c2)
+          (is (= 999 (gates/threshold :cull-threshold))
+              "the bind seam reloads policy AFTER binding, so the project's number wins")
+          (finally
+            (us/unbind!)
+            (gates/reload-config!)
+            (db/close c2))))
+      (finally
+        (when (us/bound?) (us/unbind!))
+        (gates/reload-config!)
+        (doseq [suffix ["" "-wal" "-shm"]]
+          (.delete (java.io.File. (str path suffix))))))))
+
+(deftest a-write-during-a-read-is-not-clobbered-by-the-stale-fill
+  ;; The cache fill was compute-then-swap!: a save! + invalidate! landing
+  ;; between the two re-installed the pre-edit body, which then served until
+  ;; the NEXT write — the supervisor's edit silently not taking, the exact
+  ;; failure the cache docstring warns about (karamazov-blt.8). The fill now
+  ;; carries the generation it read under and refuses to cache across an
+  ;; invalidation.
+  (let [c (db/open! ":memory:")]
+    (try
+      (us/bind! c)
+      (us/save! :cell "race-target" "v1")
+      (with-redefs [store/load-latest
+                    (let [orig store/load-latest]
+                      (fn [conn kind nm]
+                        (let [r (orig conn kind nm)]
+                          ;; a writer lands between the read and the cache fill
+                          (when (and (= :cell kind) (= "race-target" nm))
+                            (store/save! conn kind nm "v2")
+                            (us/invalidate!))
+                          r)))]
+        (is (= "v1" (us/body :cell "race-target"))
+            "the read that raced returns what it read — stale once is fine"))
+      (is (= "v2" (us/body :cell "race-target"))
+          "the next read serves the write; the stale fill did not stick")
+      (finally (us/unbind!) (db/close c)))))
+
+(deftest the-policy-tool-moves-a-threshold-live-and-rolls-back-a-broken-table
+  ;; RFC-010 names "move a threshold" as a supervisor instrument and the
+  ;; supervisor prompt says so, but no tool wrote the :policy kind — the only
+  ;; route was raw eval plus knowing to call reload-config!, undiscoverable
+  ;; (karamazov-blt.5). The tool saves, recompiles, and rolls back a save the
+  ;; recompile rejects, so a typo in gates.edn cannot take the harness down.
+  (let [c (db/open! ":memory:")]
+    (try
+      (us/bind! c)
+      (gates/reload-config!)
+      (let [before (gates/threshold :cull-threshold)
+            g (us/edn-body! :policy "gates")
+            r (tools/run-tool {:tool-name "policy" :branch {:id "B1"}
+                               :args {:action "save" :name "gates"
+                                      :edn (pr-str (assoc-in g [:cull-threshold :value] 42))}})]
+        (is (= :neutral (:category r)) (str (:result r)))
+        (is (= 42 (gates/threshold :cull-threshold))
+            "the saved threshold is live immediately — no restart, no new run")
+        (is (not= before 42) "and the test genuinely moved it")
+        ;; parseable EDN whose steer table cannot compile: a gate whose :when
+        ;; references a symbol that resolves to nothing (:gates is a VECTOR,
+        ;; ordered by priority)
+        (let [bad (update g :gates conj
+                          {:gate :broken-gate
+                           :priority 1
+                           :when '(no-such-fn-xyz branch)
+                           :message-suffix "x"
+                           :prediction {:kind :tool-called :window 1}})
+              r2 (tools/run-tool {:tool-name "policy" :branch {:id "B1"}
+                                  :args {:action "save" :name "gates"
+                                         :edn (pr-str bad)}})]
+          (is (= :failure (:category r2)))
+          (is (= 42 (gates/threshold :cull-threshold))
+              "the broken save rolled back; the previous policy is live again"))
+        (let [lst (tools/run-tool {:tool-name "policy" :branch {:id "B1"}
+                                   :args {:action "list"}})]
+          (is (str/includes? (str (:result lst)) "gates"))
+          (is (str/includes? (str (:result lst)) "phases")
+              "unedited tables list too — the whole surface is discoverable")))
+      (finally (us/unbind!) (gates/reload-config!) (db/close c)))))

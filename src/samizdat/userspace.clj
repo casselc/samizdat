@@ -69,10 +69,19 @@
 ;; silently not taking.
 (defonce ^:private cache (atom {}))
 
+;; Bumped by every invalidation. `body` records the generation BEFORE it reads
+;; and refuses to cache a value read under an older one — otherwise a write
+;; landing between the read and the cache fill re-installed the pre-edit body,
+;; which then served until the next write: exactly the "supervisor's edit
+;; silently not taking" failure the cache comment warns about
+;; (karamazov-blt.8).
+(defonce ^:private generation (atom 0))
+
 (defn invalidate!
   "Drop the read cache. Called on every write; public so a caller that changed
   the store behind this namespace's back can say so."
   []
+  (swap! generation inc)
   (reset! cache {})
   nil)
 
@@ -165,11 +174,17 @@
   (let [k [kind name]
         hit (get @cache k ::miss)]
     (if (= ::miss hit)
-      (let [v (read-body kind name)]
+      (let [gen @generation
+            v (read-body kind name)]
         ;; nil is cached too: an absent name is looked up on every render of a
         ;; prompt block that may not exist, and re-querying for a row that is
         ;; not there is the same cost as one that is.
-        (swap! cache assoc k v)
+        ;;
+        ;; Cache only if no invalidation landed while we were reading — a
+        ;; stale fill after a concurrent save! would serve the pre-edit body
+        ;; until the NEXT write. The value itself is still returned: stale is
+        ;; fine for the read that raced, poisonous for every read after.
+        (swap! cache (fn [c] (if (= gen @generation) (assoc c k v) c)))
         v)
       hit)))
 

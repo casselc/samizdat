@@ -143,6 +143,17 @@
         ;; pre-edit content, since nothing has reloaded the agent's edit yet).
         checkpoint {:registry (cell/registry-snapshot)
                     :files (cells/loaded-file-content)}]
+    ;; REFUSE when the last load was store-mode. Its content is keyed by store
+    ;; NAMES ("loop", "beam"), not paths — a rollback would spit those names as
+    ;; files into the cwd, and the (cells/load-cells! dirs) below would replace
+    ;; the project's store-evolved cells with templates/disk for the rest of
+    ;; the run (karamazov-blt.7). The dir protocol is for a dir-mode image; a
+    ;; store-mode image edits through propose-cell!.
+    (if (and (seq (:files checkpoint))
+             (not-any? #(str/includes? (str %) "/") (keys (:files checkpoint))))
+      ;; The sentence is the tool's to render (prompts/cell-tool.md); here the
+      ;; reason is data, like propose-cell!'s :unbound.
+      {:status :rolled-back :reason :store-mode-image}
     (try
       ;; RELOAD — install the edit into the live image. Transactional: a syntax
       ;; error throws here and the loader has already restored the registry;
@@ -165,7 +176,7 @@
         ;; restore the file and report.
         (rollback! opts checkpoint
                    (str "reload: the edited cell file did not load — "
-                        (or (ex-message e) (str e))))))))
+                        (or (ex-message e) (str e)))))))))
 
 ;; --- the store-backed edit (per-project userspace) ---------------------------
 ;;
@@ -189,6 +200,11 @@
     :name       — the cell's userspace name (the template basename, e.g. loop)
     :body       — the candidate Clojure source
     :loop-def   — the workflow definition to validate and soak against
+    :extra-defs — {manifest-name definition} of OTHER manifests to validate
+                  (compile only, no soak). A cell wired into the beam or a
+                  team loop is not referenced by the active loop at all, so
+                  validating that one definition let an edit that broke every
+                  other workflow commit untouched (karamazov-blt.2)
     :soak-input — the initial data map the soak dry-run starts from
     :compile-fn — how to compile+validate (default mycelium pre-compile)
     :conn :run-id — to journal the outcome (optional)
@@ -196,7 +212,7 @@
   Returns {:status :committed :version n} or
   {:status :rolled-back :reason ...} with the registry restored and nothing
   written to the store."
-  [{:keys [name body loop-def soak-input compile-fn conn run-id]}]
+  [{:keys [name body loop-def extra-defs soak-input compile-fn conn run-id]}]
   (let [compile-fn (or compile-fn myc/pre-compile)
         snapshot (cell/registry-snapshot)
         fail (fn [reason]
@@ -211,7 +227,11 @@
       ;; other cells. Syntax errors surface here.
       (binding [*ns* *ns*]
         (load-string body))
-      (if-let [reason (validate compile-fn loop-def)]
+      (if-let [reason (or (validate compile-fn loop-def)
+                          (some (fn [[nm d]]
+                                  (when-let [r (validate compile-fn d)]
+                                    (str "manifest '" nm "': " r)))
+                                extra-defs))]
         (fail reason)
         (if-let [reason (soak loop-def soak-input)]
           (fail reason)

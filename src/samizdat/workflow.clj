@@ -48,6 +48,7 @@
             [mycelium.workflow :as wf]
             [samizdat.cells :as cells]
             [samizdat.config :as config]
+            [samizdat.manifests :as manifests]
             [samizdat.llm.registry :as registry]
             [samizdat.agent.gitdiff :as gitdiff]
             [samizdat.agent.loop :as branch-loop]
@@ -65,12 +66,12 @@
 (def loop-name "loop")
 (def loop-resource "manifests/loop.edn")
 
-(defn manifest-resource
-  "The factory resource path a manifest name seeds from, e.g. \"loop\" ->
-  \"manifests/loop.edn\". A manifest with no such resource lives only in the
-  workflows table — one the agent authored at runtime."
-  [name]
-  (str "manifests/" name ".edn"))
+;; Reading, validating and compiling a manifest moved to samizdat.manifests
+;; (karamazov-blt.2/.3/.4/.6): the tools could not require THIS namespace (it
+;; requires the branch loop, which requires the tool dispatcher), so each
+;; re-implemented a slice of the pipeline and the slices drifted. The vars
+;; below delegate so every existing caller and test keeps its name.
+(def manifest-resource manifests/manifest-resource)
 
 (defn active-loop-name
   "Which manifest a run should drive, in precedence order: the name the caller
@@ -91,153 +92,16 @@
        selected
        loop-name)))
 
-(defn read-definition
-  "Parse a workflow definition from EDN text. Dispatch predicates stay as
-  forms here; maestro evaluates them at compile time."
-  [edn-text]
-  (edn/read-string edn-text))
+(def read-definition manifests/read-definition)
+(def register-subworkflows! manifests/register-subworkflows!)
 
-(defn register-subworkflows!
-  "A manifest can compose sub-loops: `:subworkflows {cell-id manifest-name}`
-  registers each named manifest as a workflow-cell (mycelium.compose) under
-  cell-id, so the parent can run it as one node. Sub-manifests are read from
-  their factory resource — a composed loop is authored, not agent-generated in
-  the db (yet). Runs before the parent compiles, since the parent references
-  these cell ids. A no-op for a flat manifest."
-  [definition]
-  (doseq [[cell-id mname] (:subworkflows definition)]
-    (let [res (manifest-resource mname)]
-      (when-not (io/resource res)
-        (throw (ex-info (str "sub-workflow manifest '" mname "' has no resource "
-                             res) {:manifest mname})))
-      (compose/register-workflow-cell!
-       cell-id (read-definition (slurp (io/resource res))) {}))))
+(def ctx-keys manifests/ctx-keys)
+(def cell-requires manifests/cell-requires)
+(def invariants manifests/invariants)
+(def enforced-constraints manifests/enforced-constraints)
+(def unenforced-invariants manifests/unenforced-invariants)
 
-(def ctx-keys
-  "The run-scoped resources every driver hands a cell, as a set.
-
-  A cell receives `ctx` and `data`. `data` is the workflow's value and
-  mycelium checks its shape; `ctx` is mycelium's `resources` slot, and its
-  keys were conventional — RFC-002 recorded that a cell reading a key the
-  driver does not set gets `nil` at run time, with nothing to say so until
-  something downstream fell over.
-
-  This is the contract, and it is checked from both ends: `compile-loop`
-  refuses a cell whose `:requires` names a key that is not here, and
-  `beam-test` asserts the production ctx actually carries every key that is.
-  One without the other is worth little — a contract nobody satisfies, or a
-  driver nobody holds to it.
-
-  Mechanism, not policy: it describes what the base provides, not what any
-  project should do with it."
-  #{;; RFC-002's documented set
-    :conn :run-id :config :llm-adapter :llm-config :root :max-turns :abort
-    ;; What the beam driver adds
-    :problem :beam? :beam-width :turn-workflow :iterating-loop? :git-baseline
-    :repl-session :sessions :engine-sessions :live-branches})
-
-(defn cell-requires
-  "The ctx keys `cell-id` declares it reads. `:requires` is mycelium's own
-  vocabulary — the guide documents it beside `:doc` and `:effects` — and it
-  was simply unused here, the same shape of miss as the manifests using only
-  `:must-follow` when `:must-precede` was sitting there."
-  [cell-id]
-  (set (:requires (cell/get-cell cell-id))))
-
-(defn- check-requires!
-  "Refuse a manifest whose cells want ctx keys no driver provides.
-
-  At COMPILE time, so a bad edit fails in the mutation protocol's validate
-  step — before the soak, and long before a nil surfaces as a
-  NullPointerException six cells downstream with nothing pointing back here."
-  [definition]
-  (let [wanted (for [[node cell-id] (:cells definition)
-                     k (cell-requires cell-id)
-                     :when (not (ctx-keys k))]
-                 {:node node :cell cell-id :key k})]
-    (when (seq wanted)
-      (throw (ex-info
-              (str "cells require ctx keys no driver provides: "
-                   (str/join ", " (for [{:keys [node cell key]} wanted]
-                                    (str node " (" cell ") wants " key)))
-                   ". Either the key belongs in workflow/ctx-keys and the"
-                   " drivers must set it, or the cell should not be asking.")
-              {:wanted wanted :provided (sort ctx-keys)})))))
-
-(defn invariants
-  "Every ordering rule a manifest CLAIMS, enforced or not.
-
-  The list exists because `:constraints` alone could not answer the question
-  an editor actually has. A manifest carrying two constraints looks like a
-  manifest with two invariants; the beam had four and the turn had five, and
-  the rest lived in cell docstrings — so there was no way to tell, from the
-  file being edited, which of its rules the compiler would catch. RFC-002
-  recorded that as a gap: an editor cannot know what is defended."
-  [definition]
-  (vec (:invariants definition)))
-
-(def ^:private constraint-keys
-  "The keys mycelium's checker reads, by constraint type. Anything else in an
-  invariant entry — `:protects`, `:enforced`, `:unenforced-because` — is for
-  the reader and must not reach the compiler."
-  [:type :if :then :cell :before :cells])
-
-(defn enforced-constraints
-  "mycelium `:constraints`, DERIVED from the enforced invariants.
-
-  One list, not two. A manifest that declared its invariants separately from
-  its constraints would let the two disagree, and the disagreement would say
-  the opposite of the truth in the more dangerous direction — a rule
-  documented as enforced that nothing checks.
-
-  An explicit `:constraints` is still honoured and appended, so a project
-  manifest stored before this key existed keeps compiling unchanged."
-  [definition]
-  (into (vec (:constraints definition))
-        (comp (filter :enforced)
-              (map #(into {} (filter (fn [[k _]] (some #{k} constraint-keys))) %)))
-        (:invariants definition)))
-
-(defn unenforced-invariants
-  "The rules a manifest claims that nothing checks. Each must say why: `no
-  constraint` and `no constraint yet` are different facts, and only one of
-  them is a decision."
-  [definition]
-  (vec (remove :enforced (:invariants definition))))
-
-(defn compile-loop
-  "Compile a loop definition through mycelium's full static checking:
-  structure, dispatch coverage, reachability, and the :constraints that make
-  the loop's invariants compile-time errors. Throws on any violation —
-  which is the mutation protocol's first line of defense. Logs, and returns
-  compiled with, any :mycelium/compile-warnings (undeclared cell effects)."
-  [definition]
-  ;; Load the cells from resources before every compile. The cell registry is
-  ;; global mutable state, and a non-empty registry is not proof the LOOP's
-  ;; cells are present (a test or another workflow may have registered
-  ;; different ones) — so this always loads rather than guarding on emptiness.
-  ;; Idempotent, cheap (one file), and it picks up any edited cell, which is
-  ;; the hot-reload the mutation protocol will build on.
-  ;; A definition with no cells is not a loop, and mycelium will happily
-  ;; compile one: `pre-compile` on nil returns an FSM whose start state is
-  ;; missing, and the failure surfaces later as a ClassCastException with
-  ;; nothing pointing back here. That is how a manifest read from the wrong
-  ;; column produced a run that died four frames deep in the driver — the
-  ;; store returns `:body` and the caller was still reading `:edn`, so
-  ;; `read-definition` was handed nil and returned it.
-  (when-not (seq (:cells definition))
-    (throw (ex-info (str "not a workflow definition: no :cells"
-                         (when (nil? definition) " (the definition is nil)"))
-                    {:definition definition})))
-  (cells/load-cells!)
-  ;; Register any composed sub-loops as cells before the parent references them.
-  (register-subworkflows! definition)
-  (check-requires! definition)
-  (let [compiled (myc/pre-compile
-                  (assoc definition :constraints (enforced-constraints definition)))]
-    (when-let [warnings (:mycelium/compile-warnings (:compiled-fsm compiled))]
-      (log/warn "loop definition compiled with warnings:" (pr-str warnings)))
-    compiled))
+(def compile-loop manifests/compile-loop)
 
 (defn load-loop!
   "The loop to drive a run: seed its factory resource on first use (if it has
@@ -281,63 +145,10 @@
 ;; turn, and the beam does the rest. The cells, the dispatches and the
 ;; constraints are untouched, so a manifest edit reaches both drivers.
 
-(def start-node
-  "The manifest's entry node. A convention every shipped manifest follows and
-  mycelium's own compile assumes."
-  :start)
-
-(defn finish-nodes
-  "Nodes whose cell is :loop/finish — the whole-run teardown the beam owns."
-  [definition]
-  (set (keep (fn [[node cell]] (when (= :loop/finish cell) node))
-             (:cells definition))))
-
-(defn iterating?
-  "Whether one pass through this manifest's slice is one TURN — a single model
-  call the beam can schedule against four siblings — or a whole-run workflow
-  that does its own looping inside one call.
-
-  Two conditions, and both are needed. The slice must contain :llm/infer, so
-  that a pass is one model call: `orchestrator` loops back to its start node,
-  but that node is an entire nested worker RUN, and treating it as a turn
-  would put a multi-minute job under the 900s turn deadline and run five of
-  them at once. And the chain must loop back to the start node, so that a pass
-  is a turn rather than the whole job: `team`, `feature` and `decompose` run
-  straight through.
-
-  loop / critic / review / worker / reviewer / supervisor iterate; team,
-  feature, decompose and orchestrator do not. The answer decides the beam's
-  width and whether the per-turn deadline applies."
-  [definition]
-  (let [cells (set (vals (:cells definition)))
-        loops-back? (some (fn [[_ to]]
-                            (if (map? to)
-                              (some #(= start-node %) (vals to))
-                              (= start-node to)))
-                          (:edges definition))]
-    (boolean (and (contains? cells :llm/infer) loops-back?))))
-
-(defn turn-manifest
-  "`definition` reduced to ONE turn: edges back to the start node and edges
-  into :loop/finish are redirected to :end, and the finish node is dropped
-  (mycelium's reachability check refuses an orphan).
-
-  Returns a definition that compiles and runs exactly like the original up to
-  the turn boundary, and then stops."
-  [definition]
-  (let [finish (finish-nodes definition)
-        terminal (conj finish start-node)
-        retarget (fn [to] (if (contains? terminal to) :end to))]
-    (-> definition
-        (assoc :cells (into {} (remove (comp finish key)) (:cells definition)))
-        (assoc :edges
-               (into {}
-                     (for [[from to] (:edges definition)
-                           ;; The finish node's own outgoing edge goes with it.
-                           :when (not (contains? finish from))]
-                       [from (if (map? to)
-                               (into {} (map (juxt key (comp retarget val))) to)
-                               (retarget to))]))))))
+(def start-node manifests/start-node)
+(def finish-nodes manifests/finish-nodes)
+(def iterating? manifests/iterating?)
+(def turn-manifest manifests/turn-manifest)
 
 (defn compile-turn-loop
   "Load the named manifest and compile BOTH forms: the whole-run definition
@@ -351,17 +162,7 @@
      :iterating? (iterating? definition)
      :compiled (compile-loop (turn-manifest definition))}))
 
-(defn compiled-manifest
-  "Compile the named factory manifest to a runnable sub-loop. The seam a role
-  cell uses to run a role's own loop (worker for an implementor, reviewer for a
-  reviewer). Compiled fresh each call, so a cell edit is picked up. Throws if
-  the name has no factory resource."
-  [name]
-  (let [res (manifest-resource name)]
-    (when-not (io/resource res)
-      (throw (ex-info (str "no factory manifest resource for '" name "' at " res)
-                      {:manifest name})))
-    (compile-loop (read-definition (slurp (io/resource res))))))
+(def compiled-manifest manifests/compiled-manifest)
 
 (defn worker-compiled
   "The worker sub-loop, compiled — for a team cell that runs a worker per
@@ -380,47 +181,7 @@
   ;; :prompt naming nothing are both "no suffix", not errors.
   (userspace/body :prompt name))
 
-(def ^:private factory-manifest-names
-  "The manifests that ship with the harness.
-
-  A literal list, resolved against `io/resource` rather than globbed off a
-  cwd-relative `resources/manifests`. Everything else in this namespace
-  already reads manifests through io/resource — the glob was the one holdout,
-  and it was the same bug provenance R3-11 fixed for the cells dir: a binary (or a
-  process started anywhere but the project root) found no directory, caught
-  the exception, and served the supervisor a catalogue with the factory half
-  silently missing. There is no portable listing for classpath resources, so
-  the set is enumerated and `catalog` drops any name that does not resolve —
-  a manifest deleted from resources/ falls out rather than 404ing."
-  ["loop" "beam" "critic" "orchestrator" "probe" "review" "reviewer"
-   "supervisor" "worker" "team" "feature" "decompose"])
-
-(defn catalog
-  "The workflows available to select or adapt: every factory manifest and every
-  stored one, each with its :description. This is the set the supervisor reads to
-  decide whether to switch a run to a different workflow, tweak an existing one,
-  or author a new one — the compiled menu the self-healing loop chooses from.
-  A manifest with no :description still lists, with an empty one."
-  [conn]
-  (let [factory (->> factory-manifest-names
-                     (filter #(io/resource (manifest-resource %)))
-                     set)
-        stored (->> (try (us/names conn :manifest) (catch Throwable _ nil))
-                    ;; us/names yields rows ({:name :version :versions}),
-                    ;; factory yields name strings — normalise to names.
-                    (map (fn [x] (if (map? x) (:name x) x)))
-                    (remove nil?)
-                    set)]
-    (->> (sort (into factory stored))
-         (keep (fn [nm]
-                 (let [res (manifest-resource nm)
-                       edn (if (io/resource res)
-                             (slurp (io/resource res))
-                             (some-> (us/load-latest conn :manifest nm) :body))]
-                   (when edn
-                     (let [d (try (read-definition edn) (catch Throwable _ nil))]
-                       {:name nm :description (str (:description d))})))))
-         vec)))
+(def catalog manifests/catalog)
 
 (defn render-catalog
   "The workflow catalog as a text menu — one `- name — description` line each —
@@ -475,11 +236,14 @@
   manifest's per-turn slice fresh, so a cell or manifest edit is picked up."
   ([ctx branch turn] (run-turn ctx branch turn loop-name))
   ([ctx branch turn manifest-name]
+   ;; Through the userspace seam: the stored version when the project has one,
+   ;; seeding the factory template on the way past — and a manifest the agent
+   ;; authored, which has no factory resource at all, drives a turn too
+   ;; (io/resource slurped unconditionally here and NPE'd on a store-only
+   ;; name, karamazov-blt.38).
    (let [wf (compile-loop
              (turn-manifest
-              (read-definition
-               (:body (us/seed! (:conn ctx) :manifest manifest-name
-                                (slurp (io/resource (manifest-resource manifest-name))))))))
+              (read-definition (manifests/manifest-body! manifest-name))))
          data (myc/run-compiled wf ctx {:branch branch :turn turn})]
      (when (myc/error? data)
        (throw (ex-info "the turn manifest failed structurally"

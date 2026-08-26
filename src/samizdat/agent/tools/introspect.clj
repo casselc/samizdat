@@ -32,20 +32,35 @@
   surface grows by a plug-in file rather than by editing the aggregator.
   Render fns are exposed (not private) so a test can call them directly."
   (:require [clojure.edn :as edn]
-            [clojure.java.io :as io]
             [clojure.string :as str]
             [mycelium.cell :as cell]
             [samizdat.agent.tools.base :as base]
             [samizdat.cells :as cells]
             [samizdat.manual :as manual]
+            [samizdat.manifests :as manifests]
             [samizdat.store.journal :as journal]))
 
+(defn active-manifest
+  "The manifest that is ACTUALLY driving this run, as {:name :version
+  :definition}. The beam puts compile-turn-loop's result in ctx
+  :turn-workflow — the version-true wiring — and a caller without one (a
+  test, a bare render) falls back to the configured name through the
+  userspace seam. Reading the factory loop.edn here meant the
+  self-observation tool showed a project that evolved its loop the FACTORY
+  wiring, and always called it 'loop' whatever was running
+  (karamazov-blt.4)."
+  [ctx]
+  (if-let [tw (:turn-workflow ctx)]
+    (select-keys tw [:name :version :definition])
+    (let [nm (or (get-in ctx [:config :run :loop]) "loop")]
+      {:name nm
+       :definition (edn/read-string (manifests/manifest-body! nm))})))
+
 (defn loop-def
-  "The loop's workflow definition — :cells (node -> cell-id), :edges
-  (node -> next node or dispatch map), :dispatches. Read from the manifest
-  resource for the same reason reload_cells does: no loop-driver cycle."
-  []
-  (edn/read-string (slurp (io/resource "manifests/loop.edn"))))
+  "The active loop's workflow definition — :cells (node -> cell-id), :edges
+  (node -> next node or dispatch map), :dispatches."
+  ([] (loop-def nil))
+  ([ctx] (:definition (active-manifest ctx))))
 
 (defn cell-effects
   "A cell's effects, as the cells tool renders them: 'pure', the sorted
@@ -76,7 +91,10 @@
   ([def]
    (str/join "\n"
              (for [[node cell-id] (sort-by key (:cells def))]
-               (str (name node) " = " (name cell-id)
+               ;; The FULL cell id, namespace included — :llm/* vs :tool/* is
+               ;; load-bearing (interceptors glob on it), and (name :llm/parse)
+               ;; and (name :fence/parse) rendered identically.
+               (str (name node) " = " (subs (str cell-id) 1)
                     "  [" (cell-effects cell-id) "]"
                     "  -> " (edge-str (get (:edges def) node)))))))
 
@@ -107,17 +125,19 @@
                    " | parse errors: " parse-errors)]
      (str head "\n\nrecent:\n" (render-recent rows)))))
 
-(defmethod base/run-tool "introspect" [{:keys [branch conn run-id max-turns]}]
-  (base/ok branch
-           (str "=== LOOP WIRING (manifests/loop.edn) ===\n\n"
-                (render-wiring)
-                "\n\n=== RUN HEALTH ===\n\n"
-                (if conn
-                  (render-health
-                   (map #(select-keys % [:turn :tool_name :category :parse_error])
-                        (journal/turns conn run-id))
-                   max-turns)
-                  "(no run database in this context — wiring only)"))))
+(defmethod base/run-tool "introspect" [{:keys [branch conn run-id max-turns] :as ctx}]
+  (let [{:keys [name version definition]} (active-manifest ctx)]
+    (base/ok branch
+             (str "=== LOOP WIRING (" name
+                  (when version (str " v" version)) ") ===\n\n"
+                  (render-wiring definition)
+                  "\n\n=== RUN HEALTH ===\n\n"
+                  (if conn
+                    (render-health
+                     (map #(select-keys % [:turn :tool_name :category :parse_error])
+                          (journal/turns conn run-id))
+                     max-turns)
+                    "(no run database in this context — wiring only)")))))
 
 (defmethod base/run-tool "manual" [{:keys [branch] :as ctx}]
   ;; The harness's own command surface, for a branch developing at the REPL

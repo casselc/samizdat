@@ -22,10 +22,12 @@
   (:require [clojure.java.io :as io]
             [clojure.string :as str]
             [clojure.test :refer [deftest testing is]]
+            [mycelium.cell :as cell]
             [samizdat.agent.tools.base :as base]
             [samizdat.agent.tools.manifest]
             [samizdat.store.db :as db]
             [samizdat.store.userspace :as us]
+            [samizdat.userspace :as userspace]
             [samizdat.workflow :as wf]))
 
 (defn- with-db [f]
@@ -194,3 +196,65 @@
         (is (= :mechanics (:category save)))
         (is (str/includes? (:result save) "Missing required argument(s): name"))
         (is (str/includes? (:result save) "\"manifest\"") "the skeleton names the tool")))))
+
+(deftest an-unseeded-factory-manifest-is-readable-before-any-run
+  ;; list/show read only the store, and seeding happens per-manifest on the
+  ;; run that drives it — so `manifest show worker` before any worker run
+  ;; answered "No manifest worker": the agent could not read the thing it is
+  ;; invited to tune (karamazov-blt.4).
+  (with-db
+    (fn [conn]
+      (let [shown (base/run-tool {:branch {:id "B1"} :conn conn :tool-name "manifest"
+                                  :args {:action "show" :name "worker"}})]
+        (is (= :neutral (:category shown)))
+        (is (str/includes? (str (:result shown)) ":cells")
+            "the factory template is served, not a refusal"))
+      (let [lst (base/run-tool {:branch {:id "B1"} :conn conn :tool-name "manifest"
+                                :args {:action "list"}})]
+        (is (str/includes? (str (:result lst)) "worker")
+            "the listing names shipped manifests before they are seeded")))))
+
+(deftest a-manifest-that-cannot-run-cannot-be-saved
+  ;; The tool validated with a bare pre-compile, skipping the ctx-key
+  ;; requires check and the derived constraints that load-loop! runs — a
+  ;; manifest that could not run saved fine and threw at the next run start
+  ;; (karamazov-blt.6). Validation now goes through the loader's own
+  ;; pipeline.
+  (with-db
+    (fn [conn]
+      (cell/register-spec! :test/bad-requires
+                           {:id :test/bad-requires :doc "x" :pure true
+                            :requires [:no-such-ctx-key]
+                            :handler (fn [_ d] d)})
+      (try
+        (let [bad (pr-str '{:cells {:start :test/bad-requires}
+                            :edges {:start :end}})
+              r (base/run-tool {:branch {:id "B1"} :conn conn :tool-name "manifest"
+                                :args {:action "save" :name "badreq" :edn bad}})]
+          (is (= :failure (:category r)))
+          (is (str/includes? (str (:result r)) "ctx key")
+              "the refusal names the loader check that would have thrown")
+          (is (nil? (us/load-latest conn :manifest "badreq")) "nothing was stored"))
+        (finally (cell/remove-cell! :test/bad-requires))))))
+
+(deftest a-parent-can-compose-a-stored-only-child
+  ;; register-subworkflows! read children from io/resource, so a parent whose
+  ;; :subworkflows named a manifest the agent authored (store-only) threw
+  ;; "has no resource" — composing new manifests, which the tool advertises,
+  ;; was impossible for the nested case (karamazov-blt.6). Children now
+  ;; resolve through the userspace seam.
+  (with-db
+    (fn [conn]
+      (userspace/bind! conn)
+      (try
+        (userspace/save! :manifest "authored-child"
+                         (pr-str '{:cells {:start :journal/record}
+                                   :edges {:start :end}}))
+        (let [parent (pr-str '{:cells {:start :child-cell}
+                               :edges {:start :end}
+                               :subworkflows {:child-cell "authored-child"}})
+              r (base/run-tool {:branch {:id "B1"} :conn conn :tool-name "manifest"
+                                :args {:action "save" :name "composed" :edn parent}})]
+          (is (= :neutral (:category r)) (str "save refused: " (:result r)))
+          (is (some? (us/load-latest conn :manifest "composed"))))
+        (finally (userspace/unbind!))))))

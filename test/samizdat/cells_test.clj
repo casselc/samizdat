@@ -23,7 +23,9 @@
   (:require [clojure.test :refer [deftest testing is use-fixtures]]
             [jolt.fs :as fs]
             [mycelium.cell :as cell]
-            [samizdat.cells :as cells]))
+            [samizdat.cells :as cells]
+            [samizdat.store.db :as db]
+            [samizdat.userspace :as userspace]))
 
 (def ^:private tmp (atom nil))
 
@@ -153,3 +155,27 @@
     (doseq [id (keys (cells/loaded))]
       (is (cell/effects-declared? (cell/get-cell id))
           (str id " must declare :pure or :effects")))))
+
+(deftest a-project-cell-overrides-a-shipped-id-whatever-its-name-sorts-as
+  ;; Store-mode loading sorted bodies alphabetically by store name, so whether
+  ;; a project cell's redefinition of a shipped cell-id won depended on how
+  ;; its name happened to sort against the template basenames — "aaa-custom"
+  ;; loaded FIRST and the shipped template silently overrode it
+  ;; (karamazov-blt.8). Shipped templates now load first, project extras
+  ;; after, so the project wins by construction.
+  (let [c (db/open! ":memory:")]
+    (try
+      (userspace/bind! c)
+      (userspace/save! :cell "aaa-custom"
+                       (str "(ns cells.custom (:require [mycelium.cell :as cell]))\n"
+                            "(cell/defcell :gate/arbiter"
+                            " {:doc \"overridden-by-project\" :pure true}\n"
+                            "  (fn [_ d] d))\n"))
+      (cells/load-cells!)
+      (is (= "overridden-by-project" (:doc (cell/get-cell :gate/arbiter)))
+          "the project's redefinition wins regardless of its store name")
+      (finally
+        (userspace/unbind!)
+        (db/close c)
+        ;; restore the template registry for whatever runs next
+        (cells/load-cells!)))))

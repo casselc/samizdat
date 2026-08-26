@@ -67,8 +67,8 @@
     :summary "Which cells are registered and which file each came from."}
    {:name samizdat.cells/load-cells!
     :summary "Reload every cell from resources. Transactional — a broken edit rolls the registry back."}
-   {:name samizdat.mutation/apply-cell-edit!
-    :summary "The safety around editing a cell: checkpoint, reload, validate, soak, commit or roll back."}
+   {:name samizdat.mutation/propose-cell!
+    :summary "The safety around a cell edit: install, validate against every manifest, soak, commit a project version or roll back."}
    {:name samizdat.workflow/catalog
     :summary "Every workflow available to select or adapt, with its description."}
    {:name samizdat.workflow/compile-loop
@@ -80,6 +80,12 @@
   :entries
   [{:name samizdat.agent.gates/threshold
     :summary "Read one tunable from gates.edn. Every gate budget in the harness is a value here."}
+   {:name samizdat.agent.gates/reload-config!
+    :summary "Re-read gates.edn from userspace and recompile the steer table. The policy tool's save does this for you."}
+   {:name samizdat.userspace/save!
+    :summary "Append a new version of any userspace piece (:cell :manifest :policy :prompt). Prefer the matching tool, which validates first."}
+   {:name samizdat.userspace/revert!
+    :summary "Re-append an older version of a userspace piece as the newest — the universal rollback."}
    {:name samizdat.agent.phases/withholds
     :summary "Which tools a phase refuses, from phases.edn."}
    {:name samizdat.prompt/render

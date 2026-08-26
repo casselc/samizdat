@@ -182,8 +182,17 @@
     (let [bodies (merge (userspace/seed-all! :cell cell-names)
                         ;; Unbound (a test, a bare REPL) there is no store to
                         ;; seed into, so the dir content IS the source.
-                        (when-not (userspace/bound?) from-dirs))]
-      (for [[nm body] (sort-by key bodies)]
+                        (when-not (userspace/bound?) from-dirs))
+          ;; Shipped templates load FIRST, in their shipped order; everything
+          ;; the project added after them, sorted for determinism. Later
+          ;; load-string wins in the registry, so this is what makes "a
+          ;; project cell overrides a shipped cell-id" true by construction —
+          ;; a plain (sort-by key) made precedence depend on how a project
+          ;; name happened to sort against the template basenames
+          ;; (karamazov-blt.8).
+          shipped-order (into {} (map-indexed (fn [i n] [n i]) cell-names))]
+      (for [[nm body] (sort-by (fn [[nm _]] [(get shipped-order nm 999999) nm])
+                               bodies)]
         {:id nm :content body :file? false :store? true}))))
 
 (defn- dir-sources
