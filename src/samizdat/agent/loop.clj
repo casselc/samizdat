@@ -34,7 +34,8 @@
   fire, so a gate cannot be credited with an outcome that preceded it. Those
   constraints are the manifest's to keep; what this namespace guarantees is
   that each step does one thing and says what it touched."
-  (:require [clojure.java.io :as io]
+  (:require [clojure.data.json :as json]
+            [clojure.java.io :as io]
             [clojure.string :as str]
             [clojure.tools.logging :as log]
             [samizdat.agent.arbiter :as arbiter]
@@ -560,30 +561,75 @@
     (runs/set-thesis! conn run-id (:id branch) t))
   nil)
 
+(defn- directive-turns
+  "How many turns an `extend` asks for, from its JSON payload, or nil."
+  [d]
+  (let [payload (or (try (json/read-str (str (:payload d)) :key-fn keyword)
+                         (catch Throwable _ nil))
+                    {})
+        by (or (:turns payload) (:by payload) (:max_turns payload))]
+    (when (and (number? by) (pos? by)) (long by))))
+
 (defn- drain-directives!
-  "Apply the human directives waiting at this boundary. The single-branch
-  driver only sees the branch-scoped kinds: `message` and `review` become a
-  :pending-directive the arbiter puts at priority zero; the scheduler-only
-  kinds (cull/fork/pause/resume) belong to the beam and are rejected here with
-  a reason rather than accepted silently. Returns the branch, possibly carrying
-  a :pending-directive. Shares the interventions queue with the HTTP control
-  surface, so a REPL steer and a UI steer are the same event."
-  [conn run-id branch turn]
+  "Apply the human directives waiting at this branch's boundary.
+
+  TWO DRIVERS, ONE QUEUE, and which drain owns a directive depends on the
+  run's shape (karamazov-blt.10):
+
+  On a BEAM run this drain takes only what is addressed to THIS branch —
+  a branch-scoped `message`/`review` lands sooner here than at the next
+  round top. Everything else (run-wide messages, cull/fork/retract/pause/
+  resume/extend) is LEFT PENDING for `:beam/directives`: this used to eat
+  and reject the scheduler kinds at whichever branch's boundary came first,
+  which — since a round's wall-clock lives inside `:beam/advance` — was
+  nearly always before the beam drain ever saw them. A human's pause was
+  resolved `:rejected` by a branch.
+
+  On a SINGLE-BRANCH run there is no beam drain, so everything lands here:
+  `message`/`review` become the :pending-directive the arbiter puts at
+  priority zero, `extend` raises the branch's cap and persists the run row
+  (karamazov-blt.12 — the old arm assumed control/extend! had run, which is
+  REPL-only, and left the row pending forever), and the scheduler-only kinds
+  are rejected with a reason rather than accepted silently.
+
+  Shares the interventions queue with the HTTP control surface, so a REPL
+  steer and a UI steer are the same event."
+  [{:keys [conn run-id beam?] :as ctx} branch turn]
   (if-not (and conn run-id)
     branch
     (reduce
      (fn [b d]
-       (case (:kind d)
-         ("message" "review")
-         (do (interventions/resolve! conn run-id (:id d) :applied nil turn)
-             (assoc b :pending-directive d))
-         "extend"
-         b ;; handled by control/extend! against the runs row, not here
-         (do (interventions/resolve! conn run-id (:id d) :rejected
-                                     (str (:kind d) " applies to the beam scheduler,"
-                                          " not a single-branch run")
-                                     turn)
-             b)))
+       (let [scoped-here? (some? (:branch_id d))]
+         (case (:kind d)
+           ("message" "review")
+           (if (and beam? (not scoped-here?))
+             b ;; run-wide: the beam broadcasts it to every branch at the round top
+             (do (interventions/resolve! conn run-id (:id d) :applied nil turn)
+                 (assoc b :pending-directive d)))
+
+           "extend"
+           (if beam?
+             b ;; run-level: the beam drain applies and persists it
+             (if-let [n (directive-turns d)]
+               (let [b' (update b :extended-turns (fnil + 0) n)]
+                 (interventions/resolve! conn run-id (:id d) :applied nil turn)
+                 ;; The row is what a crash-resume reads its budget from.
+                 (runs/extend-budget! conn run-id
+                                      (+ (:max-turns ctx) (:extended-turns b')))
+                 b')
+               (do (interventions/resolve! conn run-id (:id d) :rejected
+                                           (prompt/render "directive-rejected"
+                                                          {:extend-no-turns true})
+                                           turn)
+                   b)))
+
+           (if beam?
+             b ;; scheduler kinds: the beam drain owns them
+             (do (interventions/resolve! conn run-id (:id d) :rejected
+                                         (str (:kind d) " applies to the beam scheduler,"
+                                              " not a single-branch run")
+                                         turn)
+                 b)))))
      branch
      (interventions/pending conn run-id (:id branch)))))
 
@@ -612,7 +658,12 @@
   [{:keys [conn run-id max-turns] :as ctx} before branch turn {:keys [parsed result]}]
   (let [tool (:name parsed)
         branch (settle-predictions! conn branch turn [tool] before branch)
-        branch (drain-directives! conn run-id branch turn)]
+        branch (drain-directives! ctx branch turn)
+        ;; The cap the gates reason against includes whatever `extend`
+        ;; directives have granted this branch — otherwise last-call and the
+        ;; turn-budget notices keep firing against the spent original cap
+        ;; (karamazov-blt.12).
+        max-turns (+ max-turns (or (:extended-turns branch) 0))]
     (if (:done? result)
       (state/add-message branch "user" (truncate (:result result)) {:turn turn})
       ;; Coverage answers whether the safe-state rung's fallback is honest:

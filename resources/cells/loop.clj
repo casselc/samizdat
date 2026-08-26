@@ -113,7 +113,10 @@
    :pure true
    :requires [:max-turns]}
   (fn [ctx {:keys [branch turn] :as data}]
-    (let [max-turns (:max-turns ctx)
+    ;; Plus whatever `extend` directives granted this branch: ctx is fixed for
+    ;; the life of the run, so a raised cap has to travel on the branch
+    ;; (karamazov-blt.12).
+    (let [max-turns (+ (:max-turns ctx) (or (:extended-turns branch) 0))
           verdict (cond
                     (not (state/active? branch))
                     (if (:final-answer branch) :done :abandoned)

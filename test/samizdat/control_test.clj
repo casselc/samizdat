@@ -33,7 +33,10 @@
             [samizdat.workflow :as wf]
             [samizdat.agent.state :as state]
             [samizdat.api.control :as api-control]
+            [samizdat.api.openai :as openai]
             [samizdat.api.runs :as api-runs]
+            [samizdat.cells :as cells]
+            [mycelium.cell :as cell]
             [samizdat.llm.client :as llm]
             [samizdat.security.policy :as policy]
             [samizdat.store.db :as db]
@@ -330,3 +333,121 @@
               (str k " reached a boundary and was left pending"))
           (is (not (str/includes? (str (:disposition d)) "not wired"))
               (str k " is advertised to a human and rejected as unwired")))))))
+
+(deftest a-pending-resume-ends-the-pause-wait
+  ;; blt.9: paused? counts APPLIED rows, and the only code applying a resume
+  ;; was the :beam/directives cell — downstream of the round-open node that
+  ;; blocks while paused. The resume stayed pending forever; pause was a
+  ;; one-way door to abort. await-resume! now applies the two run-level kinds
+  ;; itself, every pass, at the same boundary the cell applies them.
+  (with-db [c]
+    (let [rid (runs/start-run! c {:problem "p"})]
+      (interventions/submit! c rid {:kind "pause"})
+      (drain c rid [(branch "B1")])
+      (is (true? (interventions/paused? c rid)))
+      ;; the resume a human submits from ANOTHER process while the beam parks
+      (interventions/submit! c rid {:kind "resume"})
+      (is (number? (beam/await-resume! {:conn c :run-id rid}))
+          "the wait returns rather than polling forever")
+      (is (false? (interventions/paused? c rid))
+          "the pending resume was applied by the wait loop itself"))))
+
+(deftest the-per-turn-drain-leaves-the-beams-directives-alone
+  ;; blt.10: the per-branch drain runs at every steer boundary and used to
+  ;; resolve cull/fork/pause/resume/retract as :rejected — on a beam run,
+  ;; where a round's wall-clock lives inside :beam/advance, so a human's
+  ;; pause almost always landed mid-round and was eaten by the first branch
+  ;; to finish its turn, before :beam/directives ever saw it.
+  (with-db [c]
+    (let [rid (runs/start-run! c {:problem "p"})]
+      (doseq [[k p] [["pause" {}] ["cull" {}] ["fork" {:thesis "t"}]
+                     ["retract" {:artifact_id 1}] ["extend" {:turns 3}]]]
+        (interventions/submit! c rid {:kind k :payload p}))
+      (interventions/submit! c rid {:kind "message" :payload {:text "all hands"}})
+      (interventions/submit! c rid {:kind "message" :branch-id "B1"
+                                    :payload {:text "just you"}})
+      (let [b (#'aloop/drain-directives! {:conn c :run-id rid :beam? true
+                                          :max-turns 40}
+                                         (branch "B1") 2)
+            by-kind (group-by :kind (interventions/history c rid))]
+        (is (some? (:pending-directive b))
+            "the branch-scoped message lands here, sooner than the round top")
+        (doseq [k ["pause" "cull" "fork" "retract" "extend"]]
+          (is (= "pending" (:status (first (by-kind k))))
+              (str k " is left for the beam drain, not eaten")))
+        (let [msgs (by-kind "message")
+              run-wide (first (filter #(nil? (:branch_id %)) msgs))
+              scoped (first (filter #(= "B1" (:branch_id %)) msgs))]
+          (is (= "pending" (:status run-wide))
+              "the run-wide message is the beam's to broadcast to every branch")
+          (is (= "applied" (:status scoped))))))))
+
+(deftest extend-lands-on-a-single-branch-run
+  ;; blt.12: the old arm returned the branch untouched, assuming
+  ;; control/extend! (REPL-only) had raised the runs row — the HTTP path only
+  ;; enqueues, so the directive sat pending forever and the cap never moved.
+  (with-db [c]
+    (let [rid (runs/start-run! c {:problem "p" :max-turns 10})]
+      (interventions/submit! c rid {:kind "extend" :payload {:turns 5}})
+      (let [b (#'aloop/drain-directives! {:conn c :run-id rid :beam? false
+                                          :max-turns 10}
+                                         (branch "B1") 2)
+            [d] (interventions/history c rid)]
+        (is (= 5 (:extended-turns b)) "the cap travels on the branch")
+        (is (= "applied" (:status d)))
+        (is (= 15 (:max_turns (runs/get-run c rid)))
+            "and persists on the row a crash-resume reads its budget from")))))
+
+(deftest an-extended-branch-routes-past-the-original-cap
+  ;; blt.12: ctx is fixed for the life of the run, so past the original cap
+  ;; every turn routed :exhausted -> :memory/distil — one LLM reflection per
+  ;; branch per extended round. The route reads the branch's extension now.
+  (cells/load-cells!)
+  (let [route (:handler (cell/get-cell :loop/route))
+        b (branch "B1")]
+    (is (= :exhausted (:verdict (route {:max-turns 5} {:branch b :turn 5}))))
+    (is (= :continue (:verdict (route {:max-turns 5}
+                                      {:branch (assoc b :extended-turns 3)
+                                       :turn 5})))
+        "an extension grants real turns, not a reflection loop")))
+
+(deftest a-human-cull-closes-the-row-and-keeps-the-branch-in-the-record
+  ;; blt.11: the drain marked :status :culled in the data map but nothing
+  ;; closed the row or carried the branch through settle/tick — it vanished
+  ;; from the run and its branches row stayed open forever, the exact zombie
+  ;; record-inactive!'s docstring warns about.
+  (cells/load-cells!)
+  (with-db [c]
+    (let [rid (runs/start-run! c {:problem "p"})]
+      (runs/open-branch! c rid {:branch-id "B1"})
+      (runs/open-branch! c rid {:branch-id "B2"})
+      (interventions/submit! c rid {:kind "cull" :branch-id "B2"})
+      (let [cellfn (:handler (cell/get-cell :beam/directives))
+            data (cellfn {:conn c :run-id rid}
+                         {:active [(branch "B1") (branch "B2")]
+                          :branches [(branch "B1") (branch "B2")]
+                          :turn 3})]
+        (is (= ["B1"] (mapv :id (:active data))))
+        (is (some #(and (= "B2" (:id %)) (= :culled (:status %)))
+                  (:branches data))
+            "the verdict is visible to settle's bookkeeping, so tick keeps it")
+        (let [row (first (filter #(= "B2" (:id %)) (runs/branches c rid)))]
+          (is (= "culled" (:status row)) "the row is closed, not a zombie"))))))
+
+(deftest a-chat-completion-run-is-registered-and-abortable
+  ;; blt.13: beam/run! was called with no :abort atom and no control/active
+  ;; registration, so POST /v1/runs/:id/abort answered 409 "no active run"
+  ;; for a genuinely running run, for its whole (potentially hours-long) life.
+  (with-db [c]
+    (let [seen (atom nil)]
+      (with-redefs [beam/run!
+                    (fn [{:keys [abort on-start]}]
+                      (is (some? abort) "an abort atom reaches the run")
+                      (on-start "r-oai")
+                      (reset! seen (contains? @api-control/active "r-oai"))
+                      {:status :completed :run-id "r-oai" :answer "a"})]
+        (openai/chat-completion {:conn c :config {:llm {:provider :local :model "m"}}}
+                                {:messages [{:role "user" :content "q"}]})
+        (is (true? @seen) "the run was visible to the abort endpoint while live")
+        (is (not (contains? @api-control/active "r-oai"))
+            "and deregistered when it finished")))))

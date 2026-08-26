@@ -278,17 +278,30 @@
   The abort flag is checked on every pass, because a paused run that could not
   be aborted out of would be a wedge with a friendly name.
 
+  APPLIES pending pause/resume rows itself, every pass. The `:beam/directives`
+  cell that normally applies them sits DOWNSTREAM of the node this blocks in,
+  so a `resume` submitted while paused stayed `pending` forever and `paused?`
+  — which counts applied rows only — kept reading the pause: the pause was a
+  one-way door to abort (karamazov-blt.9). Draining the two run-level kinds
+  here is the same boundary the directives cell applies them at — the top of
+  a round, with nothing in flight.
+
   Returns the number of times it waited, so a test can tell waiting from not
   waiting without watching the clock."
   [{:keys [conn run-id abort] :as _ctx}]
   (if-not (and conn run-id)
     0
     (loop [waited 0]
-      (if (and (interventions/paused? conn run-id)
-               (not (and abort @abort)))
-        (do (Thread/sleep (gates/threshold :pause-poll-ms))
-            (recur (inc waited)))
-        waited))))
+      (if (and abort @abort)
+        waited
+        (do
+          (doseq [d (interventions/pending conn run-id)
+                  :when (#{"pause" "resume"} (:kind d))]
+            (interventions/resolve! conn run-id (:id d) :applied nil nil))
+          (if (interventions/paused? conn run-id)
+            (do (Thread/sleep (gates/threshold :pause-poll-ms))
+                (recur (inc waited)))
+            waited))))))
 
 (defn- rejected
   "Record a refused directive with its reason.

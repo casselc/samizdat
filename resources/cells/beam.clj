@@ -354,14 +354,33 @@
     (let [{:keys [conn run-id]} ctx
           pending (interventions/pending conn run-id)
           {:keys [branches max-turns paused?]}
-          (beam/drain-directives! ctx active pending turn)]
-      ;; :paused? is NOT carried in the data map — beam/await-resume! reads the
-      ;; interventions table, because the resume that ends the wait is written
-      ;; by another process while this round is inside it. It is recorded here
-      ;; only so the round's trace says what happened.
-      (cond-> (assoc data :active branches)
-        (some? paused?) (assoc :paused-by-directive? paused?)
-        max-turns (update :max-turns (fnil + (beam/round-max-turns ctx data)) max-turns)))))
+          (beam/drain-directives! ctx active pending turn)
+          ;; A branch the human just culled is inactive NOW, and this cell is
+          ;; the only one that knows: it never enters :advanced, so the
+          ;; settle/cull bookkeeping downstream never sees it. Close its row
+          ;; and release what it held here, and fold the mark into :branches
+          ;; so settle's inactive set (computed from :branches) carries it
+          ;; into the round's record instead of tick dropping it — the open
+          ;; zombie row of karamazov-blt.11.
+          now-inactive (filterv (complement state/active?) branches)
+          still-active (filterv state/active? branches)
+          marked (into {} (map (juxt :id identity)) branches)]
+      (beam/record-inactive! ctx now-inactive)
+      (let [data' (cond-> (assoc data
+                                 :active still-active
+                                 :branches (mapv #(get marked (:id %) %)
+                                                 (:branches data)))
+                    (some? paused?) (assoc :paused-by-directive? paused?)
+                    max-turns (update :max-turns
+                                      (fnil + (beam/round-max-turns ctx data))
+                                      max-turns))]
+        ;; An extension is a fact about the RUN, so it survives a crash: the
+        ;; row is what a resume reads its budget from, and the drain's old
+        ;; comment ("a resume re-reads its budget from the control API
+        ;; anyway") was simply false (karamazov-blt.12).
+        (when max-turns
+          (runs/extend-budget! conn run-id (:max-turns data')))
+        data'))))
 
 (cell/defcell :beam/advance
   {:doc "One turn for every active branch, concurrently, each under a hard
@@ -370,7 +389,14 @@
    :effects [:net :db :fs :proc]
    :requires [:live-branches]}
   (fn [ctx {:keys [active branches turn] :as data}]
-    (let [advanced (beam/advance-all (assoc ctx :branch-count (count branches))
+    ;; The turn slice and its gates read (:max-turns ctx); an `extend` lives
+    ;; in the round's data map. Without this, every turn past the ORIGINAL
+    ;; cap routed :exhausted -> :memory/distil — one LLM reflection per
+    ;; branch per extended round — while the beam kept scheduling
+    ;; (karamazov-blt.12).
+    (let [advanced (beam/advance-all (assoc ctx
+                                            :branch-count (count branches)
+                                            :max-turns (beam/round-max-turns ctx data))
                                      (filterv state/active? active)
                                      turn)]
       ;; The driver's teardown needs the branches as they stand, and a manifest
