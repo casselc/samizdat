@@ -28,10 +28,18 @@
  :run
  {:id "277fa7e0-4f2c-4d35-9d20-3c20a1fc78f2"
   :database "/home/chuck/.local/share/samizdat/self-hosting-canary/run-897cf53-live.sqlite3"
+  :binding-id "bind:main:277fa7e0-4f2c-4d35-9d20-3c20a1fc78f2"
+  :instance-id "inst:main"
+  :binding-journal-event-id 2
+  :context-spec-coordinate "js1:[:map [[:bounds [:map [[:max-list-entries 1000] [:max-read-chars 60000] [:max-search-results 500] [:max-write-bytes 1048576] [:search-max-chars 500000] [:search-max-files 20000]]]] [:capabilities [:vector [:project/edit :project/list :project/read :project/search :project/stat]]] [:preset :project/develop] [:profile :agent/project-develop] [:root \"/home/chuck/opencode/src/samizdat-canary-target\"] [:samizdat.sandbox/kind :evaluator-spec] [:timeout-ms 30000]]]"
+  :runtime-coordinate-source {:database "/home/chuck/.local/share/samizdat/self-hosting-canary/run-897cf53-live.sqlite3"
+                              :journal-event-id 2
+                              :jolt-runtime "4af2362176160f2ed0e366689d7232b1a38adfec"}
   :max-turns 1000
   :terminal-status :interrupted
   :turns-observed 47
   :eval-statuses {:completed 19 :failed 7}
+  :persistent-helper {:defined false :reused false}
   :semantic-operation-counts {}
   :unsettled-intents []
   :done-green false}
