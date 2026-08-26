@@ -51,7 +51,11 @@
   (karamazov-blt.4)."
   [ctx]
   (if-let [tw (:turn-workflow ctx)]
-    (select-keys tw [:name :version :definition])
+    (if (:definition tw)
+      (select-keys tw [:name :version :definition])
+      (let [nm (or (get-in ctx [:config :run :loop]) "loop")]
+        {:name nm
+         :definition (edn/read-string (manifests/manifest-body! nm))}))
     (let [nm (or (get-in ctx [:config :run :loop]) "loop")]
       {:name nm
        :definition (edn/read-string (manifests/manifest-body! nm))})))
