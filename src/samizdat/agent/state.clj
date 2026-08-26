@@ -30,7 +30,9 @@
   (:require [clojure.set]
             [clojure.string :as str]
             [samizdat.agent.phases :as phases]
-            [samizdat.agent.wordlists :as wordlists]
+            [samizdat.lexicon :as lexicon]
+            [samizdat.prompt :as prompt]
+            [samizdat.tape :as tape]
             [samizdat.util :as util]))
 
 (defn new-branch
@@ -105,7 +107,56 @@
    ;; Verification tiers seen. :fast is a one-shot check, :slow is a
    ;; cross-checked template or a review-plus-audit pass.
    :tiers-seen #{}
+   ;; The ONE task this branch is working on, as {:id :title}, or nil. Set by
+   ;; `task claim`, cleared when that task closes. One rather than many so that
+   ;; "until it is done" means something: a branch holding three tasks is a
+   ;; branch that has told you nothing about what it is doing.
+   :task nil
    :final-answer nil})
+
+(defn fork-branch
+  "A child of `parent` carrying its CONVERSATION — the fork llm-repl's tape
+  makes cheap, and the one samizdat was not taking.
+
+  Every child used to open on `initial-messages problem`: a fresh two-message
+  tape, so a fork discarded everything its parent had learned and re-derived
+  it from the problem statement. The parent's own docstring for the crossover
+  block already assumed otherwise ('the child already carries them in its
+  inherited history'). Now it does.
+
+  What is INHERITED is the conversation: the messages up to `depth` (nil ≡ all
+  of them), and the slice of the turn log those messages cover, so compaction
+  and the turn-window predicates still have a history to read. What is NOT
+  inherited is every gate counter — consecutive failures, the mechanics tally,
+  the stall clock, the phase, the artifacts, the abandoned log. A child gets a
+  clean slate as a BRANCH while carrying the conversation, because the
+  counters are a record of how the PARENT was doing and culling a newborn for
+  its parent's failures is the mistake the reprieve machinery exists to
+  prevent.
+
+  `:turns` is RE-DERIVED from the inherited tape rather than copied, the way
+  llm-repl re-derives its turn count: truncating a copy drops assistant turns,
+  and the tape is the ground truth the counter has to agree with. `:forked-at`
+  records the branch point, without which an `{:at N}` fork's tree edge is
+  lossy — the depth is the only thing that says where the child left the
+  parent's line."
+  [parent {:keys [id depth turn thesis problem]}]
+  (let [messages (tape/truncate-at (:messages parent) depth)
+        ;; The turn records the inherited messages actually cover — matched by
+        ;; the stamps add-message writes, not by position. A turn whose
+        ;; messages were truncated away is not this child's history.
+        kept-turns (let [stamped (set (keep :turn messages))]
+                     (if (seq stamped)
+                       (vec (filter #(contains? stamped (:turn %)) (:turns parent)))
+                       []))]
+    (assoc (new-branch {:id id
+                        :parent-id (:id parent)
+                        :problem (or problem (:problem parent))
+                        :created-at-turn turn
+                        :messages messages})
+           :turns kept-turns
+           :forked-at (count messages)
+           :thesis thesis)))
 
 (defn active? [branch] (= :active (:status branch)))
 
@@ -250,7 +301,15 @@
 ;; Tier 1c: the list is wordlists.edn :claim-relevance — data, retunable at
 ;; runtime. A separate loader from gates.clj because this namespace sits
 ;; below gates in the require graph.
-(def ^:private claim-stopwords (wordlists/wordlist :claim-relevance))
+(def ^:private claim-stopwords
+  "The relevance filter's stopwords, re-read when the lexicon reloads.
+
+  This was a top-level `def`, evaluated once at namespace load — so a
+  supervisor editing the list saw nothing change until the process
+  restarted, in the namespace whose whole premise is that the list is data.
+  ship.clj had already hit this and fixed it with `generation-cache`; state
+  had the same bug and not the same fix."
+  (util/generation-cache lexicon/gen #(lexicon/wordlist :claim-relevance)))
 
 (defn- singularize
   "Strip one trailing `s`. `flow` and `flows` are the same noun, and a
@@ -260,10 +319,10 @@
 
   Applied AFTER the stopword filter, so a stopword's stem is never resurrected
   (`supports` is on the list; `support` is not). Never to a word ending in
-  `ss`, and never below five characters, so nothing is stemmed into a
-  collision."
+  `ss`, and never below the lexicon's `:min-stem-length`, so nothing is
+  stemmed into a collision."
   [w]
-  (if (and (>= (count w) 5)
+  (if (and (>= (count w) (lexicon/tuning :claim-matching :min-stem-length))
            (str/ends-with? w "s")
            (not (str/ends-with? w "ss")))
     (subs w 0 (dec (count w)))
@@ -272,8 +331,8 @@
 (defn- claim-tokens [s]
   (->> (str/split (str/lower-case (or s "")) #"[^a-z0-9]+")
        (remove str/blank?)
-       (remove claim-stopwords)
-       (filter #(>= (count %) 4))
+       (remove (claim-stopwords))
+       (filter #(>= (count %) (lexicon/tuning :claim-matching :min-token-length)))
        (map singularize)
        set))
 
@@ -393,7 +452,7 @@
 
   The claim-scoped refusal is the whole mechanism now. The proof harness's
   extra step — dropping a Lean branch back into :explore to force a new plan —
-  left with its tool surface (review3 #6); the phase machine's live work is
+  left with its tool surface (provenance R3-6); the phase machine's live work is
   the explore cap, the release valve that keeps a branch from camping in
   explore forever."
   [branch turn claim]
@@ -461,7 +520,7 @@
        ;; A failing call that carried a claim records it, so the stuck gate
        ;; knows what the branch was grinding on when it failed. The proof
        ;; harness's Lean exclusion (an unsolved goal is evidence about the
-       ;; proof, not the statement) left with its tool surface (review3 #6);
+       ;; proof, not the statement) left with its tool surface (provenance R3-6);
        ;; on the coding loop a failing claim is fair game to withhold.
        (and (= :failure category) (seq (str claim)))
        (assoc :last-failed-claim claim
@@ -542,8 +601,22 @@
                   (same? (peek turns))
                   (same? (peek (pop turns)))))))
 
-(defn add-message [branch role content]
-  (update branch :messages conj {:role role :content content}))
+(defn add-message
+  "Append a message. `meta` is optional per-message provenance merged onto it —
+  `{:turn n}` is the one that earns its keep: compaction needs to know which
+  turn a message belongs to in order to replace it with that turn's digest,
+  and the positional guess it used before is not sound (a provider error or a
+  no-call turn appends messages without appending a turn row, so the k-th
+  message is not the k-th turn). Stamping at creation, where the turn number
+  is actually known, makes the correspondence a fact rather than an inference.
+
+  Absent for the many call sites with no turn in scope; compaction falls back
+  to summarising a message from its own content, which is never a lie about
+  which turn it was."
+  ([branch role content] (add-message branch role content nil))
+  ([branch role content meta]
+   (update branch :messages conj
+           (merge {:role role :content content} (not-empty meta)))))
 
 (defn turn-count [branch] (count (:turns branch)))
 
@@ -636,55 +709,61 @@
    :failures (vec failures)
    :gate-tally (vec gate-tally)})
 
+(defn- claim-lines
+  "`- [kind/tier] claim` per artifact, or nil for an empty section — the
+  mechanical half of the residual report. What each section MEANS is prose,
+  and prose lives in prompts/residual-report.md."
+  [artifacts]
+  (when (seq artifacts)
+    (str/join "\n" (for [a artifacts]
+                     (str "- [" (:kind a) "/" (:tier a) "] " (:claim a))))))
+
 (defn render-residual-report
   "Markdown-ish text for the API content slot. The established section is the
   load-bearing one; existential, ambiguous, drift and run-level sections are
-  labeled for exactly what they are."
+  labeled for exactly what they are.
+
+  The labels are the point of this function and every one of them was a
+  string literal here. They are what tells a reader that `measured` is not
+  `established` and that an existential witness is not an instance — the
+  distinctions the whole residual report exists to make — and a project that
+  works on something other than proofs will want all of them said
+  differently. They are in prompts/residual-report.md now; this assembles the
+  lists and hands them over."
   [r]
   (when r
-    (str (:label r) "\n\n"
-         (str/join "\n\n"
-                   (for [b (:branches r)]
-                     (str (str "## " (:branch b)
-                               (when (:goal b) (str " — was proving: " (:goal b))))
-                          (when (seq (:outstanding b))
-                            (str "\n\nOutstanding sub-claims (undischarged):\n"
-                                 (str/join "\n" (map #(str "- " %) (:outstanding b)))))
-                          (when (seq (:established b))
-                            (str "\n\nEstablished (engine-confirmed):\n"
-                                 (str/join "\n" (for [a (:established b)]
-                                                  (str "- [" (:kind a) "/" (:tier a) "] " (:claim a))))))
-                          (when (seq (:existential b))
-                            (str "\n\nExistential only — the engine confirmed existence, not an instance:\n"
-                                 (str/join "\n" (for [a (:existential b)]
-                                                  (str "- [" (:kind a) "/" (:tier a) "] " (:claim a))))))
-                          (when (seq (:measured b))
-                            (str "\n\nMeasured — what a computation produced at the"
-                                 " parameters it was run at, not a proof:\n"
-                                 (str/join "\n" (for [a (:measured b)]
-                                                  (str "- [" (:kind a) "/" (:tier a) "] " (:claim a))))))
-                          (when (seq (:ambiguous b))
-                            (str "\n\nAmbiguous — the engine returned no decisive verdict; substantiates nothing:\n"
-                                 (str/join "\n" (for [a (:ambiguous b)]
-                                                  (str "- [" (:kind a) "/" (:tier a) "] " (:claim a))))))
-                          (when (:drift b)
-                            (str "\n\nThesis drift — the last audit found the evidence establishes \""
-                                 (:established (:drift b)) "\", "
-                                 (if (:relaxation? (:drift b))
-                                   "strictly weaker than the goal"
-                                   "matching the goal")
-                                 " \"" (:goal b) "\".")))))
-         (when (seq (:failures r))
-           (str "\n\n## Shared failure log (most recent first)\n"
-                (str/join "\n" (for [f (:failures r)]
-                                 (str "- [" (:branch_id f) " t" (:turn f) " " (:tool_name f) "] "
-                                      (:claim f) "\n  → " (:reason f))))))
-         (when (seq (:gate-tally r))
-           (str "\n\n## Gate firings\n"
-                (str/join "\n" (for [g (:gate-tally r)]
-                                 (str "- " (:gate g) ": " (:fired g) " fired, "
-                                      (or (:met g) 0) " met, " (or (:unmet g) 0) " unmet, "
-                                      (or (:open g) 0) " open"))))))))
+    (prompt/render
+     "residual-report"
+     {:label (:label r)
+      :branches
+      (for [b (:branches r)]
+        {:branch (:branch b)
+         :goal (:goal b)
+         :outstanding (when (seq (:outstanding b))
+                        (str/join "\n" (map #(str "- " %) (:outstanding b))))
+         :established (claim-lines (:established b))
+         :existential (claim-lines (:existential b))
+         :measured (claim-lines (:measured b))
+         :ambiguous (claim-lines (:ambiguous b))
+         :drift (boolean (:drift b))
+         :drift-established (:established (:drift b))
+         :drift-goal (:goal (:drift b))
+         ;; Whether the audit found a WEAKENING is the one judgement in this
+         ;; report. It reaches the template as a flag and the template says
+         ;; both readings, so a project can reword either without touching a
+         ;; conditional in compiled code.
+         :drift-relaxation (boolean (:relaxation? (:drift b)))})
+      :failures (when (seq (:failures r))
+                  (str/join "\n" (for [f (:failures r)]
+                                   (str "- [" (:branch_id f) " t" (:turn f) " "
+                                        (:tool_name f) "] " (:claim f)
+                                        "\n  → " (:reason f)))))
+      :gate-tally (when (seq (:gate-tally r))
+                    (str/join "\n" (for [g (:gate-tally r)]
+                                     (str "- " (:gate g) ": " (:fired g) " fired, "
+                                          (or (:met g) 0) " met, "
+                                          (or (:unmet g) 0) " unmet, "
+                                          (or (:open g) 0) " open"))))})))
 
 ;; --- safe state -------------------------------------------------------------
 ;;

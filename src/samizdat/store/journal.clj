@@ -29,9 +29,11 @@
   `GET /v1/runs/:id/journal?since=N` reads. The loop calls these; nothing calls
   the loop."
   (:require [clojure.data.json :as json]
+            [clojure.string :as str]
             [clojure.tools.logging :as log]
             [jdbc.core :as jdbc]
             [samizdat.events :as events]
+            [samizdat.session :as session]
             [samizdat.store.db :as db]))
 
 (defn- js
@@ -283,6 +285,13 @@
 
 ;; --- gate firings -----------------------------------------------------------
 
+(defn- observe-session!
+  "Feed the live session tally. Wrapped because a counter must never be able to
+  cost a turn: the journal's own contract is that it cannot destroy the work it
+  records, and a tally is strictly less important than the journal."
+  [path]
+  (try (session/observe! path) (catch Throwable _ nil)))
+
 (defn record-gate!
   "A gate fired, with what it expects to happen next.
 
@@ -304,15 +313,22 @@
              (db/last-insert-id conn))]
     (emit! conn run-id :gate {:branch-id branch-id :turn turn
                               :data {:gate gate :prediction prediction}})
+    (observe-session! [:gates (keyword (name gate)) :fired])
     id))
 
 (defn settle-gate!
   "Record whether a firing's prediction came true."
   [conn firing-id outcome settled-turn]
-  (db/with-writer
-    (db/execute! conn
+  (let [row (db/fetch-one conn ["SELECT gate FROM gate_firings WHERE id = ?" firing-id])]
+    (db/with-writer
+      (db/execute! conn
                    ["UPDATE gate_firings SET outcome = ?, settled_at_turn = ? WHERE id = ?"
-                    (name outcome) settled-turn firing-id])))
+                    (name outcome) settled-turn firing-id]))
+    ;; The settlement, not just the firing: a gate that fires and is never
+    ;; obeyed is the pattern worth surfacing, and it is invisible from firings
+    ;; alone.
+    (when-let [g (:gate row)]
+      (observe-session! [:gates (keyword g) (keyword (name outcome))]))))
 
 (defn unsettled-gates [conn run-id branch-id]
   (db/fetch conn ["SELECT * FROM gate_firings
@@ -326,12 +342,17 @@
   "Per gate: how often it fired, and how its predictions settled. A gate that
   never fires across a benchmark sweep is either dead or guarding something the
   probe set should be provoking; a gate whose predictions never settle is not
-  steering anything."
+  steering anything.
+
+  `met_late` is its own column rather than folded into either side: a gate
+  with a high late rate is one whose advice works and whose WINDOW is wrong,
+  which is a different repair from a gate nobody obeys."
   [conn run-id]
   (db/fetch conn
               ["SELECT gate,
                        count(*) AS fired,
                        sum(CASE WHEN outcome = 'met' THEN 1 ELSE 0 END) AS met,
+                       sum(CASE WHEN outcome = 'met-late' THEN 1 ELSE 0 END) AS met_late,
                        sum(CASE WHEN outcome = 'unmet' THEN 1 ELSE 0 END) AS unmet,
                        sum(CASE WHEN outcome IS NULL THEN 1 ELSE 0 END) AS open
                 FROM gate_firings WHERE run_id = ? GROUP BY gate ORDER BY fired DESC"
@@ -352,16 +373,70 @@
   [conn run-id kind data]
   (emit! conn run-id kind data))
 
+(def ^:private record-tables
+  "The tables holding a run's account of itself, and how each one names its
+  run. Ordered so an FTS mirror goes before the rows it indexes — deleted the
+  other way round, the subquery that finds the rowids has nothing left to find
+  and the index keeps ranking against nothing."
+  [["DELETE FROM failures_fts WHERE rowid IN
+       (SELECT id FROM failures WHERE run_id IN (%s))" :fts]
+   ["DELETE FROM shared_artifacts_fts WHERE rowid IN
+       (SELECT id FROM shared_artifacts WHERE run_id IN (%s))" :fts]
+   ["DELETE FROM turns WHERE run_id IN (%s)" :rows]
+   ["DELETE FROM artifacts WHERE run_id IN (%s)" :rows]
+   ["DELETE FROM shared_artifacts WHERE run_id IN (%s)" :rows]
+   ["DELETE FROM failures WHERE run_id IN (%s)" :rows]
+   ["DELETE FROM gate_firings WHERE run_id IN (%s)" :rows]
+   ["DELETE FROM messages WHERE run_id IN (%s)" :rows]
+   ["DELETE FROM interventions WHERE run_id IN (%s)" :rows]
+   ["DELETE FROM events WHERE run_id IN (%s)" :rows]])
+
+(def ^:private finished-before
+  "Runs that ended before the cutoff. `status != 'running'` AND a non-null
+  `ended_at`, the same pair prune-finished! uses: a row that says it is
+  running is either live or a leftover reconcile-orphans! has not seen yet,
+  and neither is safe to strip."
+  "SELECT id FROM runs WHERE status != 'running' AND ended_at IS NOT NULL
+     AND ended_at < ?")
+
+(defn prune-run-record!
+  "Delete the RECORD of runs that ended before `cutoff`: turns, artifacts,
+  failures, gate firings, branch messages, interventions and events.
+
+  The `runs` and `branches` rows survive. What is left is an index — this run
+  existed, it ended this way, at this time — without the bulk, which is a
+  strictly better thing to have than a deleted row when somebody asks what
+  happened six months ago.
+
+  DESTRUCTIVE, and off unless an operator turns it on. RFC-009's central
+  property is that a resume rebuilds branch state by replay and that a crashed
+  run stays inspectable; this ends both for the runs it touches. It exists
+  because `events/prune-finished!` addressed only half of provenance R2-11 and
+  the other four tables grew forever in the one shared file — but a default
+  that quietly discarded the record would be the wrong reading of the same
+  finding.
+
+  Returns the number of runs whose record was removed."
+  [conn cutoff]
+  (let [ids (mapv :id (db/fetch conn [finished-before cutoff]))]
+    (when (seq ids)
+      (let [placeholders (str/join ", " (repeat (count ids) "?"))]
+        (db/with-writer
+          (doseq [[sql _] record-tables]
+            (db/execute! conn (into [(format sql placeholders)] ids))))))
+    (count ids)))
+
 (defn prune-finished!
   "Delete the events rows of runs that ended before `cutoff` (an ISO-8601
   timestamp). Events are a tail buffer for the live run — their only readers
   are the live tail and last-progress-at — and every kind that matters is
   also written to a durable table (turns, artifacts, failures,
   gate_firings). Nothing pruned them, so the one shared DB file grew
-  without bound (review2 #11). The sweep runs on run start, not at finish:
+  without bound (provenance R2-11). The sweep runs on run start, not at finish:
   a tailing client still reads a just-finished run's events to see the
   :run-finished entry — that is how it learns the run ended — so events
-  ride out a retention window (24h in start-run!) and go after that."
+  ride out a retention window (gates.edn :retention :events-hours) and go
+  after that."
   [conn cutoff]
   (db/with-writer
     (db/execute! conn

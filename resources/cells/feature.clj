@@ -30,6 +30,8 @@
             [samizdat.engine.proc :as proc]
             [samizdat.llm.client :as llm]
             [samizdat.store.journal :as journal]
+            [samizdat.session :as session]
+            [samizdat.store.knowledge :as knowledge]
             [samizdat.store.runs :as runs]
             [samizdat.workflow :as wf]))
 
@@ -100,7 +102,8 @@
   {:doc "The reviewer role: run reviewer.edn on the implementors' finished work
         (on its own branch R<rev>) and read back PASS or REVISE. Fail-open to
         :pass on a reviewer error/abstention."
-   :effects [:net :db]}
+   :effects [:net :db]
+   :requires [:conn :run-id]}
   (fn [{:keys [conn run-id] :as ctx} {:keys [branch] :as data}]
     (safely conn run-id :review data
       (fn []
@@ -126,7 +129,8 @@
         deterministic checks, then an LLM verdict on the answer + the run's diff
         — but WITHOUT the single-branch critic's branch surgery. Sets
         :critic/decision :ship or :revise. Fail-open (a judge that errors ships)."
-   :effects [:net :db]}
+   :effects [:net :db]
+   :requires [:conn :git-baseline :root :run-id]}
   (fn [{:keys [conn run-id root git-baseline] :as ctx}
        {:keys [branch] :as data}]
     (safely conn run-id :critique data
@@ -198,7 +202,8 @@
         (does not pay for a test run) when gate 1 already failed — a hollow diff
         or a revise verdict means the loop is going back anyway. No :verify-cmd
         configured -> not applicable, passes."
-   :effects [:proc :db]}
+   :effects [:proc :db]
+   :requires [:config :conn :root :run-id]}
   (fn [{:keys [conn run-id root config] :as ctx} data]
     (let [cmd (get-in config [:run :verify-cmd])]
       (cond
@@ -231,7 +236,8 @@
         the harness's manifests/prompts/cells for future runs (the mutation
         protocol validates those). Not a fixed rule — a reasoning agent. Fails
         SAFE to :continue so it can never wedge the loop."
-   :effects [:net :db]}
+   :effects [:net :db]
+   :requires [:config :conn :run-id]}
   (fn [{:keys [conn run-id config] :as ctx} {:keys [results] :as data}]
     (safely conn run-id :supervise data
       (fn []
@@ -255,11 +261,24 @@
                                      :at-cap? (>= rev soft-cap)
                                      :soft-cap soft-cap}
                                     (journal/turns conn run-id))
+              ;; The mark the supervisor's deltas are measured from. Stamped
+              ;; BEFORE it is shown anything, so `since` covers the interval
+              ;; from its last intervention to now — the interval its last
+              ;; change was in force for. Named per run so two runs in one
+              ;; process do not read each other's deltas.
+              mark (str "supervisor:" run-id)
+              live (session/render mark)
+              _ (session/mark! mark)
               prob (str "Introspect on this run and decide whether the loop needs "
                         "an adjustment. A STAGE CRASHED signal is a harness bug the "
                         "loop just survived — diagnose it and, if you can, fix it at "
                         "the source with your tools. If a problem is systemic, tune "
-                        "the harness.\n\n" dig
+                        "the harness.\n\n"
+                        ;; Measured, not inferred. The digest says what the
+                        ;; stages produced; this says where the turns actually
+                        ;; went and whether the last change moved anything.
+                        (when (seq (str live)) (str live "\n\n"))
+                        dig
                         (when-let [tried (seq (:feature/tried data))]
                           (str "\n\n## Approaches already tried (do NOT repeat a losing one)\n"
                                (str/join "\n"
@@ -267,6 +286,33 @@
                                            (str "- round " round ": " strategy " → " outcome)))
                                "\nIf an approach keeps failing, try a DIFFERENT one — SWITCH the "
                                "implement strategy, tune a prompt, re-decompose — not the same thing again."))
+                        ;; What this project has LEARNED, ranked by standing.
+                        ;; The supervisor is the role that acts on experience,
+                        ;; and it cannot act on what it is not shown — a memory
+                        ;; store nobody reads is a diary, not a loop.
+                        (when-let [ms (seq (knowledge/standing conn))]
+                          (str "\n\n## What this project has learned\n"
+                               "Ranked by standing: kind, salience, and the record of"
+                               " whether acting on it worked. Report back with"
+                               " `outcome {id, worked}` when you act on one — that is"
+                               " the only signal that separates a memory worth keeping"
+                               " from one that merely gets read.\n"
+                               (str/join "\n"
+                                         (for [m ms]
+                                           (str "- " (:id m) " [" (:kind m) "]"
+                                                (format " s%.2f" (double (or (:salience m) 0.5)))
+                                                (let [w (or (:success_count m) 0)
+                                                      f (or (:failure_count m) 0)]
+                                                  (when (pos? (+ w f)) (str " " w "✓/" f "✗")))
+                                                ;; One run is an observation, not
+                                                ;; a pattern. Marked so acting on
+                                                ;; a single sighting is a
+                                                ;; deliberate choice.
+                                                (let [c (or (:corroborations m) 1)]
+                                                  (if (knowledge/corroborated? m)
+                                                    (str " [seen in " c " runs]")
+                                                    " [ONE RUN ONLY — not yet corroborated]"))
+                                                " " (:content m))))))
                         "\n\n## Workflows you can switch to, tune, or add to\n"
                         "When the current approach keeps failing — e.g. the "
                         "implementors cannot do the task in one shot — a DIFFERENT "
@@ -306,7 +352,8 @@
         into a hard runaway guard (:run :max-revisions-hard) as an unattended
         safety net, but by default there is none. Abandoning is honest, not a
         hollow ship: the run reports it did not solve the task."
-   :effects [:db]}
+   :effects [:db]
+   :requires [:config :conn :run-id]}
   (fn [{:keys [conn run-id config] :as ctx} data]
     (let [rev (revision data)
           soft-cap (or (get-in config [:run :max-revisions]) 6)

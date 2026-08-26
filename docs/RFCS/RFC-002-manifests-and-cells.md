@@ -1,0 +1,188 @@
+# RFC-002 — Cells and manifests
+
+**Status:** implemented.
+
+## Purpose
+
+Specifies the unit of work (a cell), the thing that wires units into a loop (a
+manifest), and the protocol by which an edit to either is validated before it
+becomes live.
+
+## Scope
+
+**This layer decides everything about what the harness does** — which step runs
+next, which branch lives, when a run ends. That is why it is userspace (RFC-001)
+and not `src/`.
+
+**A cell must not know** which manifest wired it, what ran before it, or what
+will run after. It transforms the data map and declares what it touched.
+
+**A manifest must not contain logic.** Dispatch predicates read explicit keys
+that a cell computed; the moment a predicate computes something, the routing has
+stopped being visible in the manifest.
+
+## Model
+
+### The cell contract
+
+```clojure
+(cell/defcell :ns/name
+  {:doc     "what this step does"
+   :pure    true            ; XOR
+   :effects [:net :db :fs :proc]}
+  (fn [ctx data] data'))
+```
+
+| | |
+|---|---|
+| `ctx` | run-scoped resources: `:conn :run-id :config :llm-adapter :llm-config :root :max-turns :abort`. Never mutated. |
+| `data` | the workflow's value, threaded node to node. A cell returns it changed. |
+| `:pure`/`:effects` | **load-bearing, not documentation.** The mutation soak stubs effectful cells to identity so a dry-run does no IO; a cell declaring neither is rejected, because the safety the marks exist for would be void. |
+
+Effect vocabulary: `:net` (a provider or network call), `:db`, `:fs`, `:proc`
+(spawns a process).
+
+Naming is load-bearing: `:llm/*`, `:tool/*`, `:journal/*`, `:gate/*` are what
+glob-scoped interceptors match on.
+
+### The manifest schema
+
+```clojure
+{:description  "what this workflow is for — the supervisor reads this to choose"
+ :cells        {node-kw cell-id}
+ :edges        {node-kw next-node          ; unconditional
+                node-kw {branch-kw node}}  ; dispatched
+ :dispatches   {node-kw [[branch-kw (fn [data] pred)] …]}   ; ordered, first wins
+ :constraints  [{:type :must-follow :if node :then node}]
+ :subworkflows {cell-id manifest-name}     ; optional: a nested manifest as one node
+ :prompt       "name"}                     ; optional: prompt appended to the base
+```
+
+`:start` is the entry node and `:end` terminates. Dispatch predicates are EDN
+forms evaluated at **compile** time; their bodies run per pass.
+
+### The two levels
+
+```
+manifests/beam.edn         the ROUND    advance · score · cull · settle ·
+                                        repopulate · spawn · tick · back edge
+  └─ manifests/loop.edn    the TURN     assemble · infer · parse · dispatch ·
+     (per-turn slice)                   journal · arbiter · route
+```
+
+`turn-manifest` **derives** the per-turn slice from a whole-run manifest by
+redirecting every edge that would return to `:start` or reach a `:loop/finish`
+node into `:end`. One file therefore serves both drivers and an edit reaches
+both — rather than two files that must be kept in agreement, which is how the
+two drivers drifted apart before karamazov-ioo.20.
+
+`iterating?` classifies a manifest: a pass is one **turn** the beam may schedule
+against siblings iff the slice contains `:llm/infer` **and** an edge returns to
+`:start`. Both conditions are needed — `orchestrator` returns to its start node,
+but that node is an entire nested run, so treating it as a turn would put a
+multi-minute job under the per-turn deadline and run five at once.
+
+## API
+
+### `samizdat.workflow`
+
+| fn | contract |
+|---|---|
+| `(read-definition edn-text)` | Parse. Dispatch predicates stay as forms. |
+| `(compile-loop definition)` | Load cells, register sub-workflows, then mycelium's full static check: structure, dispatch coverage, reachability, constraints. **Throws** on any violation. Logs and returns compile warnings. |
+| `(load-loop! conn [name])` | Seed the factory template, load the project's latest version, compile. `{:name :version :definition :compiled}`. |
+| `(turn-manifest definition)` | The per-turn slice. |
+| `(compile-turn-loop conn name)` | Both forms plus `:iterating?`. What the beam drives. |
+| `(compiled-manifest name)` | A factory manifest compiled fresh — the seam a role's sub-loop uses. |
+| `(run-turn ctx branch turn [manifest-name])` | **The one composition of a turn.** Compiles the slice and runs one branch through it, so it cannot drift from production. |
+| `(run! {:keys [conn config llm-adapter llm-config problem max-turns]})` | One branch to completion under the stored loop. |
+| `(catalog conn)` / `(render-catalog conn)` | Every selectable workflow with its `:description` — the menu the supervisor chooses from. |
+| `(iterating? definition)`, `(finish-nodes …)`, `(start-node)` | Classification. |
+| `(role-ctx ctx role)` | ctx with the adapter and model swapped to `config :run :role-models`. |
+| `(workflow-prompt definition)` / `(prompt-text name)` | A manifest's prompt suffix. |
+
+### `samizdat.cells`
+
+| fn | contract |
+|---|---|
+| `(load-cells!)` | **The project's** cells: seed templates into the store, read back, `load-string` into the live image. `.samizdat/cells` files seed alongside. Unbound, reads the templates. |
+| `(load-cells! dirs)` | A literal source scan of `dirs` plus shipped resources, **no store**. The seam a test loading a temp directory needs; deliberately not the production path. |
+| `(loaded)` | `{cell-id {:source name}}`. |
+| `(loaded-file-content)` | Last-good on-disk content, for the file-based rollback. |
+| `shipped-cells` | Template resource names, **enumerated not globbed** — a classpath has no directory listing, so a glob finds nothing inside a built binary. Pinned against the directory by a test. |
+
+Loading is **transactional**: on any error the registry is restored and the error
+rethrown, so a broken edit never half-loads.
+
+### `samizdat.mutation`
+
+| fn | contract |
+|---|---|
+| `(propose-cell! {:keys [name body loop-def soak-input compile-fn conn run-id]})` | Validate a candidate and commit it as a new version **only if it survives**. `{:status :committed :version n}` or `{:status :rolled-back :reason s}`. |
+| `(apply-cell-edit! {:keys [dirs loop-def soak-input compile-fn conn run-id]})` | The legacy file-based protocol: reload, validate, soak, commit or restore the file. |
+
+## Protocol
+
+### The mutation protocol
+
+```
+propose → load-string the candidate into the live image
+        → validate: does the loop still compile?
+        → soak: dry-run with effectful cells stubbed to identity, under a timeout
+        → commit as a new version   |   reject, registry restored
+```
+
+**Nothing is written until the candidate survives**, so a bad edit never enters
+the project's version history. The *attempt* is journalled with its reason — the
+store holds versions that were live, the journal holds every attempt and its
+verdict.
+
+The soak is bounded (10s) so a cell that loops cannot hang the protocol, and the
+registry is restored afterwards so the stubs never leak.
+
+### Compilation
+
+```
+workflow/compile-loop
+  ├─ cells/load-cells!              every compile, because the registry is
+  │                                 global mutable state and a non-empty
+  │                                 registry is not proof THIS loop's cells
+  │                                 are present
+  ├─ register-subworkflows!          nested manifests become workflow-cells
+  └─ myc/pre-compile                 structure · dispatch coverage ·
+                                     reachability · constraints
+```
+
+## Invariants
+
+| invariant | enforced by |
+|---|---|
+| A manifest that cannot run cannot be saved. | `manifest save` compiles before storing. |
+| A cell edit that breaks the loop never goes live. | `propose-cell!`'s validate + soak. |
+| A cell that declares no effects is rejected. | `mutation/validate` reads mycelium's `:undeclared-effects` warning. |
+| Declared constraints are compile-time errors. | mycelium `:constraints`; `beam-test` asserts a violating edit is refused. |
+| Every registered cell is reachable from some manifest. | `beam-test/every-shipped-cell-is-reachable-from-some-manifest`. |
+| Every shipped manifest compiles and is in the catalogue. | `beam-test/every-shipped-manifest-compiles-and-is-selectable`. |
+| The shipped cell list matches the directory. | `cells-test/shipped-cells-match-what-ships`. |
+| A shipped cell's requires are reachable without `load-string`. | `cells-test`, against `samizdat.cell-prelude`. |
+
+### Declared constraints today
+
+| manifest | constraint | protects |
+|---|---|---|
+| `loop` | `dispatch → journal` | a dispatched call is always recorded |
+| `loop` | `journal → arbiter` | a recorded turn always faces a gate |
+| `beam` | `score → cull` | retention reads fresh critic scores, not last round's |
+| `beam` | `settle → repopulate` | a branch is written down before its slot is refilled |
+
+## Known gaps
+
+- **Constraint coverage is partial and uneven.** The beam's other two ordering
+  rules (directives before advance, cull before spawn) and the turn's
+  (tool before arbiter, settle before fire) are documented in cell docstrings
+  only, because mycelium's constraint vocabulary does not express them cleanly
+  and a false compile error is worse than a comment. **There is no way to tell
+  from a manifest which of its invariants the compiler will catch** — an editor
+  cannot know what is defended.
+- A cell's `ctx` keys are conventional, not schema'd. A cell reading a key the
+  driver does not set gets `nil` at run time.

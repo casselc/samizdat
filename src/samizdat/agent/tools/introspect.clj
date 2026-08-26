@@ -37,6 +37,7 @@
             [mycelium.cell :as cell]
             [samizdat.agent.tools.base :as base]
             [samizdat.cells :as cells]
+            [samizdat.manual :as manual]
             [samizdat.store.journal :as journal]))
 
 (defn loop-def
@@ -117,3 +118,37 @@
                         (journal/turns conn run-id))
                    max-turns)
                   "(no run database in this context — wiring only)"))))
+
+(defmethod base/run-tool "manual" [{:keys [branch] :as ctx}]
+  ;; The harness's own command surface, for a branch developing at the REPL
+  ;; inside it. Curated in resources/manual.edn (LR-6), so what the agent is
+  ;; told it can do is editable at runtime — including by the agent.
+  ;;
+  ;; With a `name` argument, the full docstring for that one entry; without,
+  ;; the whole surface as summaries. A name that is not in the manual says so
+  ;; and lists the groups, rather than returning nothing.
+  (let [wanted (some-> (base/arg ctx :name) str str/trim not-empty)]
+    (try
+      (if wanted
+        (if-let [e (manual/find-entry wanted)]
+          (base/ok branch (str (:name e) " " (pr-str (:arglists e)) "\n\n"
+                               (:summary e) "\n\n"
+                               (or (:doc e) "(no docstring)")))
+          (base/malformed
+           branch
+           (str "`" wanted "` is not in the manual. Groups: "
+                (str/join ", " (map :group (manual/groups)))
+                ". Call `manual` with no arguments for the whole surface, or"
+                " `doc` for any var whether it is curated or not.")))
+        (base/ok branch
+                 (str "=== THE HARNESS'S OWN COMMAND SURFACE ===\n"
+                      "Call these from `eval`. `manual` with a `name` gives one"
+                      " entry's full docstring.\n\n"
+                      (manual/render))))
+      (catch Throwable e
+        ;; A broken manual.edn is a real failure and must say so: a manual that
+        ;; renders nothing reads as "there is nothing here".
+        (base/malformed branch
+                        (str "the manual could not be compiled — resources/manual.edn"
+                             " names something that does not resolve: "
+                             (ex-message e)))))))

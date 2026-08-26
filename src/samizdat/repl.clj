@@ -32,7 +32,89 @@
   arbitrary code execution in the harness process, by design: it is the
   mechanism the mutation protocol (karamazov-ioo.11) will build its
   checkpoint/soak/rollback safety around."
-  (:require [clojure.string :as str]))
+  (:require [clojure.edn :as edn]
+            [clojure.java.io :as io]
+            [clojure.string :as str]
+            [clojure.tools.logging :as log]
+            [jolt.host :as host]))
+
+(defn- project-paths
+  "The source paths `root` declares in its own deps.edn: `:paths` plus every
+  alias's `:extra-paths`. Falls back to src and test, which is what a Clojure
+  project without a deps.edn (or with one this cannot read) almost always
+  uses — a guess that is wrong costs a failed require, and no guess at all
+  costs the whole REPL-first workflow."
+  [root]
+  (let [f (io/file root "deps.edn")
+        declared (when (.exists f)
+                   (try (let [d (edn/read-string (slurp f))]
+                          (concat (:paths d)
+                                  (mapcat :extra-paths (vals (:aliases d)))))
+                        (catch Throwable _ nil)))]
+    (distinct (or (seq declared) ["src" "test"]))))
+
+(defn- cwd
+  "The process working directory, absolute. What a RELATIVE path inside `eval`
+  resolves against — jolt resolves against the real cwd, not `user.dir`, which
+  is why setting that property does not move it."
+  []
+  (str (.getCanonicalFile (io/file "."))))
+
+(defn warn-if-not-cwd!
+  "Say so, loudly, when the run root is not the directory the harness is
+  running in. Returns the mismatch as data, or nil.
+
+  The source roots above make the project REQUIRABLE from `eval`; they do
+  nothing about relative FILE paths, and jolt offers no chdir to fix that
+  with. So an `eval` of `(slurp \"README.md\")` reads the harness's own README
+  and answers plausibly — observed live, turn 4, where the agent read
+  samizdat's README, listed samizdat's directory at turn 5, and went on to
+  slurp samizdat's deps.edn believing all three were the project's.
+
+  A wrong answer that looks right is the worst failure this seam has, and the
+  fix is not in code: run the harness FROM the project root. The warning names
+  both directories so the operator can, because nothing else in the process
+  will ever notice."
+  [root]
+  (let [root* (str (.getCanonicalFile (io/file root)))
+        here (cwd)]
+    (when (not= root* here)
+      (log/warn "run root is not the working directory —"
+                "`eval` requires from" root* "but resolves relative FILE paths against" here
+                "— start the harness from the project root, or use absolute paths in eval")
+      {:root root* :cwd here})))
+
+(defn ensure-project-roots!
+  "Make the project at `root` loadable from `eval`, and return the paths added.
+
+  THE SYSTEM PROMPT PROMISES THIS AND THE HARNESS DID NOT DELIVER IT. The
+  prompt's whole first section is REPL-first — *try a form, inspect what it
+  returns, iterate BEFORE writing it to a file; require and exercise the
+  project's own namespaces here too* — and `eval` runs in the harness image,
+  whose source roots are samizdat's. A run targeting another project could
+  write `src/todo/core.clj` and then not require it: observed live, turn 12,
+  `Could not locate todo/core.jolt (or .clj/.cljc) on the source roots`. Every
+  word of that instruction was unreachable for the case the harness exists to
+  serve.
+
+  ADDITIVE, never a replacement: samizdat's own roots stay, because the agent
+  introspecting the harness it runs in is the other half of the job. Idempotent
+  — a second run against the same root changes nothing.
+
+  A stale root from a previous run is left in place deliberately. Removing it
+  would unload nothing (namespaces are already interned) while breaking a
+  resume that still refers to it, and an extra directory on the search path
+  costs a stat."
+  [root]
+  (when root
+    (warn-if-not-cwd! root)
+    (let [added (mapv #(str (io/file root %)) (project-paths root))
+          current (vec (host/source-roots))
+          missing (remove (set current) added)]
+      (when (seq missing)
+        (host/set-source-roots! (into current missing))
+        (log/info "eval can now reach" (str/join ", " missing)))
+      (vec missing))))
 
 (def ^:private session-counter (atom 0))
 
@@ -46,11 +128,36 @@
       (refer-clojure))
     ns-sym))
 
+(defn fork-session
+  "A new session carrying everything `parent` has defined.
+
+  A forked branch inherits its parent's CONVERSATION (state/fork-branch), so
+  it inherits a transcript in which those defs were made — and a child that
+  can read `(defn helper …)` in its own history but cannot call it is being
+  shown a lie about its own state. Copying the parent's interned vars is what
+  makes the inherited transcript true.
+
+  Copied, not shared: the two branches are competing approaches and a def one
+  makes after the fork must not appear in the other. `refer-clojure` gives the
+  child core; only the parent's OWN interns come across, which is why this
+  walks `ns-interns` rather than `ns-map`.
+
+  A missing or already-dropped parent yields a plain new session, because a
+  fork must never fail on the state of the thing it is forking from."
+  [parent]
+  (let [child (new-session)]
+    (when-let [pns (and parent (find-ns parent))]
+      (let [cns (find-ns child)]
+        (doseq [[sym v] (ns-interns pns)]
+          (when (var? v)
+            (intern cns sym @v)))))
+    child))
+
 (defn close-session
   "Drop a session's namespace. Each run gets a fresh namespace so defs
   accumulate across its turns; without this a long-lived serve process kept
   one namespace (plus everything the agent defined in it) per run, forever
-  (code-review-2026-08 #6). Idempotent on an unknown or already-removed name."
+  (provenance CR1-6). Idempotent on an unknown or already-removed name."
   [session]
   (when (find-ns session)
     (remove-ns session))
@@ -88,6 +195,22 @@
          ;; Run on its own thread and wait with a deadline. The eval catches its
          ;; own throwable and returns a result map, so deref yields a map or the
          ;; ::timeout sentinel — never a re-thrown exception.
+         ;; READER FEATURES ARE PROCESS-WIDE AND THE AGENT SETS THEM. The
+         ;; documented way to load a library that reads its :clj branches is
+         ;; set, require, set back — and when the require throws, as it will
+         ;; while the agent is still working out which features it needs, the
+         ;; set-back never runs. Live: one such eval dropped "bb" from the
+         ;; image, `honey.sql` failed on `::wrapper` from that turn onward,
+         ;; every later attempt failed the same way, and the run reflected the
+         ;; damage into long-term memory as a fact about the library. The
+         ;; corruption outlives the branch, the run, and — through the
+         ;; memories it explains — the process.
+         ;;
+         ;; So the seam restores them, the way it already scopes *ns* and
+         ;; *out*. Features matter at READ time, so a namespace loaded under
+         ;; the agent's features stays loaded after they are put back; what
+         ;; does not survive is the ability to break every later read.
+         features (__reader-features)
          fut (future
                (try
                  (let [value (binding [*ns* ns* *out* out]
@@ -98,7 +221,10 @@
                    {:ok false
                     :error (or (ex-message e) (str e))
                     :error-type (str (type e))
-                    :out (str out)})))
+                    :out (str out)})
+                 (finally
+                   (try (__reader-features-set! features)
+                        (catch Throwable _ nil)))))
          result (deref fut timeout ::timeout)]
      (if (= result ::timeout)
        (do (future-cancel fut)

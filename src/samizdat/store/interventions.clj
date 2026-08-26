@@ -75,13 +75,31 @@
                         AND (branch_id = ? OR branch_id IS NULL) ORDER BY id"
                      run-id branch-id])))
 
+(defn paused?
+  "Whether this run is currently paused: the most recently APPLIED pause or
+  resume was a pause.
+
+  Derived rather than stored, so there is one answer and it survives a process
+  restart — a `runs` column would be a second copy that a crash between the
+  directive and the column write could leave disagreeing with the record the
+  run is judged by. Only `applied` rows count: a pause the scheduler refused
+  never took effect, and a pending one has not reached a boundary yet."
+  [conn run-id]
+  (= "pause" (:kind (db/fetch-one
+                     conn
+                     ["SELECT kind FROM interventions
+                         WHERE run_id = ? AND status = 'applied'
+                           AND kind IN ('pause','resume')
+                         ORDER BY id DESC LIMIT 1"
+                      run-id]))))
+
 (defn resolve!
   "Record what the arbiter or scheduler did with a directive. `status` is
   applied or rejected, and `disposition` says why — a directive refused because
   it would cull the last branch is a different thing from one that landed, and
   the UI has to be able to tell them apart.
 
-  Decided by the ROW (review2 #4): only a still-pending directive of THIS run
+  Decided by the ROW (provenance R2-4): only a still-pending directive of THIS run
   resolves — a double resolve must not overwrite the first disposition, and a
   resolve under the wrong run-id must not journal into that run. Returns rows
   written."

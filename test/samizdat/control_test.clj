@@ -30,6 +30,7 @@
             [samizdat.control :as control]
             [samizdat.system :as system]
             [samizdat.agent.loop :as aloop]
+            [samizdat.workflow :as wf]
             [samizdat.agent.state :as state]
             [samizdat.api.control :as api-control]
             [samizdat.api.runs :as api-runs]
@@ -64,7 +65,7 @@
              (mapv :payload (control/pending c rid)))))))
 
 (deftest a-grant-intervention-is-applied-immediately
-  ;; a#2 (docs/code-review.md): grants/grant! had no production caller, so
+  ;; a#2 (docs/provenance.md): grants/grant! had no production caller, so
   ;; every deliberate :ask blocked a run forever — no endpoint, no tool, no
   ;; intervention kind wrote a grant. The human intervention surface is the
   ;; write path, and it applies on arrival rather than queueing for a
@@ -103,7 +104,7 @@
       (with-redefs [llm/chat (fn [& _]
                                {:content "```tool-call\n{\"name\": \"task\", \"args\": {\"action\": \"list\"}}\n```"
                                 :finish-reason "stop"})]
-        (let [after (aloop/run-turn ctx b 1)
+        (let [after (wf/run-turn ctx b 1)
               last-msg (last (:messages after))]
           (testing "the directive text is injected into the next-turn message"
             (is (str/includes? (:content last-msg) "human has intervened"))
@@ -113,7 +114,7 @@
             (is (= "applied" (:status (first (interventions/history c rid)))))))))))
 
 (deftest a-run-that-finishes-in-the-start-window-leaves-no-active-entry
-  ;; code-review-2026-08 #3: the run future's completion dissoc'd `active`
+  ;; provenance CR1-3: the run future's completion dissoc'd `active`
   ;; before the request thread had assoc'd it, stranding an entry that let
   ;; abort! rewrite a finished run's status to :aborted. Registration must
   ;; happen inside the run's own thread (on-start), so it can never land
@@ -135,7 +136,7 @@
             "abort on a finished run refuses rather than rewriting status")))))
 
 (deftest abort-refuses-when-the-run-won-the-finish-race
-  ;; review2 #4: the transient window a#3 could not close — the run's own
+  ;; provenance R2-4: the transient window provenance A-3 could not close — the run's own
   ;; :completed lands between abort!'s registry read and its finish-run!.
   ;; The store guard refuses the rewrite; abort! must answer 409 rather
   ;; than claim an abort that did not land.
@@ -151,7 +152,7 @@
         (finally (swap! api-control/active dissoc rid))))))
 
 (deftest an-unknown-intervention-kind-is-a-400-not-a-500
-  ;; review3 #12: submit! throws on an unknown kind, and intervene! let it
+  ;; provenance R3-12: submit! throws on an unknown kind, and intervene! let it
   ;; fly through to the server's catch-all 500. A bad request is the
   ;; client's to fix; the API should say 400 and name the known kinds.
   (with-db [c]
@@ -164,7 +165,7 @@
             "nothing was queued")))))
 
 (deftest a-negative-limit-is-not-a-disguised-no-limit
-  ;; review3 #12: a negative limit went straight into SQL LIMIT, and SQLite
+  ;; provenance R3-12: a negative limit went straight into SQL LIMIT, and SQLite
   ;; reads LIMIT -1 as no limit at all — so ?limit=-1 answered with the whole
   ;; table while looking like a tighter ask. The API edge clamps it to zero.
   (with-db [c]
@@ -175,7 +176,7 @@
       (is (= 2 (count (:runs (api-runs/list-runs c 2))))))))
 
 (deftest watch-follows-the-run-not-a-hardcoded-branch
-  ;; review3 #13: watch read branch-turns for "B1" and only "B1", so on a
+  ;; provenance R3-13: watch read branch-turns for "B1" and only "B1", so on a
   ;; beam run — 5 branches by default — the supervisor's window showed one
   ;; arm of the run and the other four were invisible, including whatever
   ;; branch was actually doing the work. Default to the run's last active
@@ -205,3 +206,127 @@
                      {:db {:path ":memory:"} :http {:port 0}})
       (system/stop!))
     (is (= 1 @called) "start! refreshed the cached gate thresholds")))
+
+;; --- the four directives that used to be advertised and rejected ------------
+;;
+;; RFC-006 recorded that `drain-directives!` recognised pause, resume, extend
+;; and fork and rejected them explicitly as unwired, and that rejecting beat
+;; accepting silently — but that they were advertised by the control API. Half
+;; of `interventions/kinds` was a promise the scheduler would not keep.
+
+(defn- drain [c rid branches]
+  (beam/drain-directives! {:conn c :run-id rid} branches
+                          (interventions/pending c rid) 1))
+
+(defn- branch [id]
+  {:id id :status :active :messages [] :turn 1})
+
+(deftest extend-raises-the-turn-cap
+  (with-db [c]
+    (let [rid (runs/start-run! c {:problem "p"})]
+      (interventions/submit! c rid {:kind "extend" :payload {:turns 20}})
+      (let [r (drain c rid [(branch "B1")])]
+        (is (= 20 (:max-turns r)))
+        (is (= "applied" (:status (first (interventions/history c rid))))))
+      (testing "the round's cap is the run's plus the extension"
+        (is (= 60 (beam/round-max-turns {:max-turns 40} {:max-turns 60})))
+        (is (= 40 (beam/round-max-turns {:max-turns 40} {}))
+            "no extension leaves the run's own cap alone")))))
+
+(deftest extend-without-a-turn-count-is-refused-and-says-so
+  ;; A directive is never silently dropped — the same discipline `cull` on the
+  ;; last branch already followed.
+  (with-db [c]
+    (let [rid (runs/start-run! c {:problem "p"})]
+      (interventions/submit! c rid {:kind "extend" :payload {}})
+      (let [r (drain c rid [(branch "B1")])
+            [d] (interventions/history c rid)]
+        (is (nil? (:max-turns r)))
+        (is (= "rejected" (:status d)))
+        (is (str/includes? (str (:disposition d)) "turns"))))))
+
+(deftest fork-becomes-a-pending-thesis-the-spawn-cell-already-honours
+  ;; No scheduler machinery of its own: :beam/spawn turns a branch's
+  ;; :pending-branch-theses into siblings under the total cap, and runs after
+  ;; the cull in the same round. A human's fork is the same object a branch's
+  ;; own branch_theses call produces.
+  (with-db [c]
+    (let [rid (runs/start-run! c {:problem "p"})]
+      (interventions/submit! c rid {:kind "fork"
+                                    :payload {:thesis "try the greedy bound"}})
+      (let [{:keys [branches]} (drain c rid [(branch "B1") (branch "B2")])
+            theses (mapcat :pending-branch-theses branches)]
+        (is (= 1 (count theses)) "exactly one parent takes the fork")
+        (is (= "try the greedy bound" (:goal (first theses))))
+        (is (true? (:from-human? (first theses))))))))
+
+(deftest fork-without-a-thesis-is-refused
+  (with-db [c]
+    (let [rid (runs/start-run! c {:problem "p"})]
+      (interventions/submit! c rid {:kind "fork" :payload {}})
+      (let [{:keys [branches]} (drain c rid [(branch "B1")])
+            [d] (interventions/history c rid)]
+        (is (empty? (mapcat :pending-branch-theses branches)))
+        (is (= "rejected" (:status d)))
+        (is (str/includes? (str (:disposition d)) "thesis"))))))
+
+(deftest pause-and-resume-are-derived-from-the-record
+  ;; Derived rather than stored, so there is one answer and it survives a
+  ;; process restart: a runs column would be a second copy that a crash
+  ;; between the directive and the column write could leave disagreeing with
+  ;; the record the run is judged by.
+  (with-db [c]
+    (let [rid (runs/start-run! c {:problem "p"})]
+      (is (false? (interventions/paused? c rid)) "a fresh run is not paused")
+
+      (interventions/submit! c rid {:kind "pause"})
+      (is (false? (interventions/paused? c rid))
+          "a PENDING pause has not reached a boundary yet")
+
+      (is (true? (:paused? (drain c rid [(branch "B1")]))))
+      (is (true? (interventions/paused? c rid)))
+
+      (interventions/submit! c rid {:kind "resume"})
+      (drain c rid [(branch "B1")])
+      (is (false? (interventions/paused? c rid))
+          "the most recently applied of the two wins"))))
+
+(deftest a-paused-run-stays-stoppable
+  ;; A pause that could not be aborted out of would be a wedge with a friendly
+  ;; name. await-resume! reads the abort flag on the same pass as the pause.
+  (with-db [c]
+    (let [rid (runs/start-run! c {:problem "p"})]
+      (interventions/submit! c rid {:kind "pause"})
+      (drain c rid [(branch "B1")])
+      (is (true? (interventions/paused? c rid)))
+      (let [aborted (atom true)
+            waited (beam/await-resume! {:conn c :run-id rid :abort aborted})]
+        (is (= 0 waited) "an aborted run does not wait for a resume")))))
+
+(deftest await-resume-returns-immediately-when-nothing-is-paused
+  (with-db [c]
+    (let [rid (runs/start-run! c {:problem "p"})]
+      (is (= 0 (beam/await-resume! {:conn c :run-id rid :abort (atom false)}))))))
+
+(deftest every-advertised-directive-kind-does-something
+  ;; The gap, asserted directly: interventions/kinds is what a human is shown,
+  ;; and half of it was a promise the scheduler would not keep. A kind that is
+  ;; advertised and rejected as unwired must not exist.
+  (with-db [c]
+    (let [rid (runs/start-run! c {:problem "p"})
+          payloads {"message" {:text "t"}
+                    "review" {}
+                    "cull" {}
+                    "fork" {:thesis "t"}
+                    "retract" {:artifact_id 1}
+                    "extend" {:turns 5}
+                    "pause" {}
+                    "resume" {}}]
+      (doseq [k (keys interventions/kinds)]
+        (interventions/submit! c rid {:kind k :payload (payloads k)})
+        (drain c rid [(branch "B1") (branch "B2")])
+        (let [d (first (filter #(= k (:kind %)) (interventions/history c rid)))]
+          (is (not= "pending" (:status d))
+              (str k " reached a boundary and was left pending"))
+          (is (not (str/includes? (str (:disposition d)) "not wired"))
+              (str k " is advertised to a human and rejected as unwired")))))))

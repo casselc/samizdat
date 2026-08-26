@@ -4,7 +4,27 @@ how to recover.
 
 ## The unit
 
-{{problem}}{{contract}}{{tests}}{{last-answer}}{{last-failure}}{{force-split}}
+{{problem}}
+{% if contract %}
+### Its contract
+{{contract}}
+{% endif %}{% if tests %}
+### Its tests (the spec it must satisfy)
+{{tests}}
+{% endif %}{% if last-answer %}
+### The most recent attempt
+{{last-answer}}
+{% endif %}{% if last-failure %}
+### Why it failed
+{{last-failure}}
+{% endif %}{% if force-split %}
+### A different angle was already tried and also failed
+Retrying with a hint did not work. Do NOT ask for another retry — the unit
+must be SPLIT into smaller sub-units now. Even a unit that looks like 'one
+thing' can be broken down (e.g. a focused test that pins the contract, plus
+the smallest change that makes it pass). Choose DECOMPOSE and list 2 or more
+sub-units.
+{% endif %}
 ## Your choice
 
 Pick ONE:
@@ -19,7 +39,10 @@ between them.
 wrong strategy. Give a one-paragraph hint at a different angle; the next
 attempt sees it and starts over. Use this when splitting would not actually
 reduce the complexity.
-{{last-round}}Return ONLY this JSON, nothing else:
+{% if last-round %}This is the LAST recovery round — the depth budget is nearly spent, so
+further splitting will be rejected. You MUST choose FRESH_APPROACH.
+
+{% endif %}Return ONLY this JSON, nothing else:
 {"decision": "decompose" | "fresh_approach",
  "reason": "one sentence",
  "subtasks": [ {"name": "a-short-kebab-name",

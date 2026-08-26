@@ -104,7 +104,7 @@
                                      ;; after the future completes strands
                                      ;; the entry, and the stranded entry
                                      ;; let abort! rewrite a finished run
-                                     ;; to :aborted (code-review-2026-08 #3).
+                                     ;; to :aborted (provenance CR1-3).
                                      :on-start (fn [rid]
                                                  (swap! active assoc rid {:abort abort})
                                                  (deliver promised rid))})]
@@ -148,7 +148,7 @@
           ;; have sent that.
           {:body {:run_id run-id :status "aborting"}}
           ;; The run finished between the registry read and the store write;
-          ;; the row guard refused the rewrite (review2 #4). Same refusal
+          ;; the row guard refused the rewrite (provenance R2-4). Same refusal
           ;; shape as an unknown run — the abort did not land.
           {:status 409
            :body {:error {:message (str "run " run-id " already finished")}
@@ -184,7 +184,7 @@
       (future
         (try
           ;; Registered inside the run's thread before any work, for the same
-          ;; reason as start-run! (code-review-2026-08 #3): an assoc on the
+          ;; reason as start-run! (provenance CR1-3): an assoc on the
           ;; caller racing a completion dissoc stranded the entry.
           (swap! active assoc run-id {:abort abort})
           (let [r (resume/resume! {:conn conn :config config
@@ -224,7 +224,7 @@
   the shell policy consults on every command, so there is no boundary to wait
   for. This is the one production write path into the grants table — a human
   surface, never a tool — and without it every deliberate `ask` (interpreters,
-  git push, curl, installs) blocked a run forever (a#2, docs/code-review.md)."
+  git push, curl, installs) blocked a run forever (provenance A-2, docs/provenance.md)."
   [conn run-id body]
   (if (= "grant" (:kind body))
     (if-let [pattern (grant-pattern (:payload body))]
@@ -236,7 +236,7 @@
        :body {:error {:message "a grant intervention needs payload.pattern — the shell glob to allow"
                      :run_id run-id}}})
     (if-not (contains? interventions/kinds (:kind body))
-      ;; review3 #12: this reached submit!'s throw and surfaced as the
+      ;; provenance R3-12: this reached submit!'s throw and surfaced as the
       ;; server's catch-all 500. An unknown kind is the client's mistake.
       {:status 400
        :body {:error {:message (str "Unknown intervention kind " (pr-str (:kind body))

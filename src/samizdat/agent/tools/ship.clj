@@ -11,9 +11,10 @@
             [samizdat.agent.tools.base :as base]
             [samizdat.agent.state :as state]
             [samizdat.agent.verify :as verify]
-            [samizdat.agent.wordlists :as wordlists]
+            [samizdat.lexicon :as lexicon]
             [samizdat.store.journal :as journal]
-            [samizdat.util :as util]))
+            [samizdat.util :as util]
+            [samizdat.session :as session]))
 
 
 
@@ -42,14 +43,20 @@
 ;; wordlists.edn data — retunable at runtime without a rebuild. The section
 ;; comments recording why words are on the list moved with the words.
 ;; Both memoized against the wordlists' generation rather than realized at
-;; namespace load: system/start! calls wordlists/reload! so a list edit takes
+;; namespace load: system/start! calls lexicon/reload! so a list edit takes
 ;; effect, and a top-level def turned that call into a no-op here.
 (def ^:private stopwords
-  (util/generation-cache wordlists/gen #(wordlists/wordlist :answer-framing)))
+  (util/generation-cache lexicon/gen #(lexicon/wordlist :answer-framing)))
+
+(defn- min-token
+  "The shortest token the answer-evidence gate will hold against an answer.
+  wordlists.edn `:claim-matching :answer-token-min-length`."
+  []
+  (lexicon/tuning :claim-matching :answer-token-min-length))
 
 (def ^:private tool-version-re
-  (util/generation-cache wordlists/gen
-                         #(re-pattern (wordlists/wordlist :tool-version))))
+  (util/generation-cache lexicon/gen
+                         #(re-pattern (lexicon/wordlist :tool-version))))
 
 (defn answer-tokens
   "Substantive tokens from a proposed answer: numbers and words that are not
@@ -70,9 +77,10 @@
        (remove #(and (str/includes? % "-")
                      (let [parts (remove str/blank? (str/split % #"-"))]
                        (and (seq parts)
-                            (every? (fn [p] (or ((stopwords) p) (< (count p) 4)))
+                            (every? (fn [p] (or ((stopwords) p)
+                                                (< (count p) (min-token))))
                                     parts)))))
-       (filter #(or (re-matches #"[0-9]+(\.[0-9]+)?" %) (>= (count %) 4)))
+       (filter #(or (re-matches #"[0-9]+(\.[0-9]+)?" %) (>= (count %) (min-token))))
        distinct))
 
 (def ^:private word-suffixes
@@ -84,12 +92,13 @@
 (defn- stem
   "The token with one morphological suffix removed, or nil.
 
-  Never below five characters, so nothing is shortened into a prefix that
-  matches everything."
+  Never below the lexicon's `:answer-suffix-min-stem`, so nothing is
+  shortened into a prefix that matches everything."
   [w]
   (some (fn [suf]
           (when (and (str/ends-with? w suf)
-                     (>= (- (count w) (count suf)) 5))
+                     (>= (- (count w) (count suf))
+                         (lexicon/tuning :claim-matching :answer-suffix-min-stem)))
             (subs w 0 (- (count w) (count suf)))))
         word-suffixes))
 
@@ -122,7 +131,10 @@
         ;; One derivational step further, for long words only: `computability`
         ;; against `computable` is the same complaint as `residues` against
         ;; `residue`, and no suffix list reaches it.
-        (and (>= (count token) 8) (str/includes? word-text (subs token 0 6))))))
+        (let [long-enough (lexicon/tuning :claim-matching :answer-prefix-token-length)
+              prefix (lexicon/tuning :claim-matching :answer-prefix-match-length)]
+          (and (>= (count token) long-enough)
+               (str/includes? word-text (subs token 0 prefix)))))))
 
 (defn uncovered-tokens
   "Answer tokens no confirmed artifact mentions.
@@ -266,11 +278,37 @@
                       {:verify-on? verify-on? :result vresult
                        :changed changed :require-test? require-test?})
         block (or block verify-block)]
-    (when (and vresult (:conn ctx) (:run-id ctx))
+    ;; Journalled whether the tests RAN or not. A rung that was configured on
+    ;; and then did nothing used to leave no trace at all — the note fired only
+    ;; when there was a result — so a run that shipped unverified looked
+    ;; identical in the record to one that shipped green. `:ran false` with a
+    ;; reason is the difference between a gate that passed and a gate that was
+    ;; never asked.
+    ;; The live tally, so a supervisor can see the gate being skipped WHILE it
+    ;; is happening rather than by reading the journal afterwards.
+    (when verify-on?
+      (session/observe! (if vresult
+                          [:verify (if (:green? vresult) :green :red)]
+                          [:verify :skipped]))
+      (when vresult (session/observe! [:verify :ran])))
+    (when (and verify-on? (:conn ctx) (:run-id ctx))
       (journal/note! (:conn ctx) (:run-id ctx) :ship-verify
                      {:branch-id (:id branch) :turn (:turn ctx)
-                      :data {:green (:green? vresult) :timeout (:timeout? vresult)
-                             :blocked (some? verify-block)}}))
+                      :data (if vresult
+                              {:ran true
+                               :green (:green? vresult) :timeout (:timeout? vresult)
+                               :blocked (some? verify-block)}
+                              {:ran false
+                               :blocked (some? verify-block)
+                               ;; A keyword, not a sentence: this is a journal
+                               ;; row somebody queries, and a stable token is
+                               ;; worth more to whoever is counting than prose
+                               ;; that reads nicely once.
+                               :why (cond
+                                      (nil? changed) :no-git-baseline
+                                      (empty? changed) :nothing-changed
+                                      (nil? cmd) :no-test-among-changed
+                                      :else :pre-checks-decided)})}))
     ;; Journalled whether or not anything blocked, so the run record still
     ;; shows what the lexical check saw even though words no longer decide.
     (when-let [words (and (:conn ctx) (:run-id ctx)

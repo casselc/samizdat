@@ -52,7 +52,7 @@
            (catch Throwable _ nil)))))
 
 (defn- url-decode
-  "review3 #12: query values arrive %XX-encoded with + for space. Decode to
+  "provenance R3-12: query values arrive %XX-encoded with + for space. Decode to
   bytes and build the string once from UTF-8, so a multibyte char spread
   across escapes reassembles whole. A % that does not head a valid escape
   passes through raw — the client already sent it, and a bad query string
@@ -149,7 +149,7 @@
 (defn- clamp-slow-ms
   "/slow exists so the smoke probe can prove /health still answers while a
   handler is busy; its ms parameter is a dial for \"briefly busy\", not a lease
-  on a connection thread, so it is clamped (review3 #4)."
+  on a connection thread, so it is clamped (provenance R3-4)."
   [ms]
   (min (max (or ms 1000) 0) slow-ms-cap))
 

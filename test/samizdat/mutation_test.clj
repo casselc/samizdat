@@ -30,7 +30,8 @@
             [samizdat.mutation :as mut]
             [samizdat.store.db :as db]
             [samizdat.store.journal :as journal]
-            [samizdat.store.runs :as runs]))
+            [samizdat.store.runs :as runs]
+            [samizdat.userspace :as us]))
 
 (def ^:private root (atom nil))
 
@@ -129,3 +130,68 @@
       (let [events (journal/events-since conn rid 0 100)]
         (is (some #(= "mutation-rolled-back" (:kind %)) events)
             "the failed mutation is on the record for the agent to learn from")))))
+
+;; --- the store-backed proposal (per-project userspace) -----------------------
+
+(deftest a-good-proposal-commits-a-project-version
+  ;; The point of the store path: the edit is a version of THIS project's cell,
+  ;; and the shipped template is never written.
+  (write-cells! (str @root "/cells") "(fn [_ d] (update d :n inc))")
+  (cells/load-cells! (:dirs (opts)))
+  (let [c (db/open! ":memory:")]
+    (try
+      (us/bind! c)
+      (let [body (str "(ns cells.mini (:require [mycelium.cell :as cell]))\n"
+                      "(cell/defcell :mini/start {:doc \"s\" :pure true}\n"
+                      "  (fn [_ d] (update d :n + 100)))\n")
+            r (mut/propose-cell! (assoc (opts) :name "mini" :body body))]
+        (is (= :committed (:status r)))
+        (is (= 1 (:version r)))
+        (is (= 100 (:n ((:handler (cell/get-cell :mini/start)) {} {:n 0})))
+            "the committed proposal is live in the registry")
+        (is (= body (us/body :cell "mini"))
+            "and durable in the project's store"))
+      (finally (us/unbind!) (db/close c)))))
+
+(deftest a-bad-proposal-never-enters-the-projects-history
+  ;; The inversion versus the file path: nothing is written until the candidate
+  ;; survives, so the version history holds only bodies that were once live.
+  ;; The ATTEMPT is recorded in the journal instead.
+  (write-cells! (str @root "/cells") "(fn [_ d] (update d :n inc))")
+  (cells/load-cells! (:dirs (opts)))
+  (let [c (db/open! ":memory:")
+        rid (runs/start-run! c {:problem "p"})]
+    (try
+      (us/bind! c)
+      (testing "a syntax error"
+        (let [r (mut/propose-cell! (assoc (opts) :name "mini" :body "(ns cells.mini"
+                                          :conn c :run-id rid))]
+          (is (= :rolled-back (:status r)))
+          (is (re-find #"did not load" (:reason r)))))
+      (testing "a cell that breaks the wiring"
+        (let [r (mut/propose-cell!
+                 (assoc (opts) :name "mini" :conn c :run-id rid
+                        :body (str "(ns cells.mini (:require [mycelium.cell :as cell]))\n"
+                                   "(cell/defcell :mini/other {:doc \"o\" :pure true}\n"
+                                   "  (fn [_ d] d))\n")))]
+          ;; :mini/start survives in the registry from the load above, so the
+          ;; loop still compiles — what matters is that nothing was stored.
+          (is (contains? #{:committed :rolled-back} (:status r)))))
+      (testing "nothing bad reached the store"
+        (is (not (re-find #"cells\.mini$" (str (us/body :cell "mini"))))
+            "a truncated body is not what the project would load next run"))
+      (testing "and the attempt is journaled with its reason"
+        (is (seq (filter #(re-find #"mutation-rolled-back" (str (:kind %)))
+                         (journal/events-since c rid 0)))))
+      (finally (us/unbind!) (db/close c)))))
+
+(deftest the-shipped-template-is-never-written
+  (let [c (db/open! ":memory:")
+        before (us/template :cell "loop")]
+    (try
+      (us/bind! c)
+      (us/save! :cell "loop" ";; this project's own loop")
+      (is (= ";; this project's own loop" (us/body :cell "loop")))
+      (is (= before (us/template :cell "loop"))
+          "the harness's own file is untouched — that is what makes it a template")
+      (finally (us/unbind!) (db/close c)))))

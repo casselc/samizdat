@@ -1,0 +1,9 @@
+{% if outside-root %}Path {{path}} is outside the project root and cannot be {{verb}}.{% endif %}{% if more %}… showing lines {{next}} of {{total}}. Continue with read_file({"path": "{{path}}", "offset": {{next}}}) — do NOT re-read from the start, and do not go looking for another way to read the same file.{% endif %}{% if no-file %}No file {{path}} under the project root.{% endif %}{% if needs-path %}{{tool}} needs a `path`.{% endif %}{% if needs-old-text %}edit_file needs `old_text` to find.{% endif %}{% if needs-content %}write_file needs `content` (an empty string is allowed).{% endif %}{% if not-found %}old_text not found in {{path}}. The exact text must match, including whitespace — tried an exact and a line-trimmed match.{% endif %}{% if ambiguous %}old_text matched {{count}} times in {{path}}:
+{{lines}}{% if more %}
+  … and {{more}} more{% endif %}
+
+Add surrounding context to old_text to narrow it, or pass replace_all: true to change every occurrence.{% endif %}{% if edited %}Edited {{path}} ({{replacements}} replacement{{plural}}).{% if fallback %}
+[harness] matched via {{fallback}} fallback — exact text not found; whitespace tolerated.{% endif %}{% if unbalanced %}
+[harness] the edit means the Clojure no longer balances: {{unbalanced}} It will not load until you fix it.{% endif %}{% endif %}{% if wrote %}Wrote {{chars}} chars to {{path}}.{% if repaired %}
+[harness] {{note}}{% endif %}{% if unbalanced %}
+[harness] Written as given, but the Clojure does not balance: {{unbalanced}} It will not load until you fix it.{% endif %}{% endif %}{% if unbalanced-generic %}the delimiters no longer balance{% endif %}

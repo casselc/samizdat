@@ -27,16 +27,52 @@
   Ordinary edit tools, deliberately not shell redirection: an agent that has to
   write files through `cat > f <<EOF` fights the tool surface, and the point of
   the dogfood is to see it change code, not wrestle heredocs."
-  (:require [clojure.string :as str]
+  (:require [samizdat.agent.gates :as gates]
+            [clojure.string :as str]
             [jolt.fs :as fs]
-            [samizdat.lisp :as lisp]))
+            [samizdat.lisp :as lisp]
+            [samizdat.prompt :as prompt]))
 
 (def ^:private clojure-exts #{"clj" "cljc" "cljs" "cljd" "edn" "bb"})
+
+(defn- msg
+  "One of the file tools' branch-facing messages, from prompts/file-tool.md.
+
+  Every one of these was a `str` here. They are the whole of what the model
+  learns when an edit does not apply — which text did not match, that
+  whitespace was tolerated, that the result no longer balances — and a
+  project working in a language the paren-balance note means nothing for
+  should be able to reword or drop them without a rebuild. One template keyed
+  by reason rather than a file per sentence, because they are one surface."
+  [ctx]
+  (prompt/render "file-tool" ctx))
 
 (defn- clojure-file? [path]
   (contains? clojure-exts (last (str/split (str path) #"\."))))
 
-(def ^:private max-read-chars 60000)
+(defn- max-read-chars
+  "How much of a file one `read` returns: the SMALLER of :file-read-chars and
+  :tool-result-chars, both gates.edn :context-budget.
+
+  The minimum, not :file-read-chars alone, because every tool result passes
+  through the loop's own clip on its way to the model. :file-read-chars was
+  60000 and :tool-result-chars 4000, so this tool's budget never bound
+  anything — the outer clip did, and it lands AFTER the page marker is
+  written. Paging against a budget that is not the effective one produces a
+  `continue from line N` the model never sees, which is the dead end it was
+  meant to fix, one layer further in."
+  []
+  (let [{:keys [file-read-chars tool-result-chars]} (gates/threshold :context-budget)]
+    ;; No fallback numbers: repeating gates.edn's values here is how the table
+    ;; stops being the one place they live. A budget missing from the table is
+    ;; a broken table, and throwing says so.
+    (apply min (keep identity [file-read-chars tool-result-chars]))))
+
+(defn- grep-ranges
+  "How many distinct line ranges a search reports before it says '… and N
+  more', from gates.edn :context-budget."
+  []
+  (:grep-ranges (gates/threshold :context-budget)))
 
 (defn- resolve-under-root
   "Canonicalize `path` under `root`; return the resolved absolute path string,
@@ -51,27 +87,67 @@
 (defn- miss [branch msg]
   {:result msg :category :mechanics :progress? false :branch branch})
 
+(defn- page
+  "The lines of `content` from `offset` (0-based) that fit in the char budget,
+  as {:text :from :next :total}. `next` is the line to ask for to continue, or
+  nil at the end.
+
+  Lines rather than characters because a line number is something the model
+  can hold and act on; a character offset into a file it has only seen part of
+  is not. A single line longer than the whole budget is emitted anyway rather
+  than dropped — a page that can return nothing would never advance."
+  [content offset budget limit]
+  (let [lines (str/split-lines content)
+        total (count lines)
+        from (max 0 (min offset total))]
+    (loop [i from, taken [], used 0]
+      (if (or (>= i total)
+              (and limit (>= (count taken) limit))
+              (and (seq taken) (> (+ used (count (nth lines i)) 1) budget)))
+        {:text (str/join "\n" taken) :from from :total total
+         :next (when (< i total) i)}
+        (recur (inc i) (conj taken (nth lines i))
+               (+ used (count (nth lines i)) 1))))))
+
 (defn read-file
-  "Return the contents of a file under the root. :neutral — reading establishes
-  nothing. A missing file or an escaping path is :mechanics (a call made
-  wrong), never :failure."
+  "Return the contents of a file under the root, a page at a time. :neutral —
+  reading establishes nothing. A missing file or an escaping path is
+  :mechanics (a call made wrong), never :failure.
+
+  `offset` is a 0-based LINE to start from and `limit` a maximum number of
+  lines; both are optional and the char budget still bounds the result.
+
+  IT PAGES BECAUSE WITHOUT PAGING IT LOOPED. The result was clipped at the
+  budget and marked `… [truncated]`, which names a problem and no way out of
+  it. Live, against a 7KB brief: the model read the same file six times
+  through `read_file`, `cat`, `wc && sed` and `sed`, got the identical first
+  4014 characters every time, and then spent four more turns writing a chunked
+  reader in `eval` — ten turns of a forty-turn budget to read one file it had
+  been told to start from. A truncation marker has to end with the call that
+  continues it, or it is a dead end the model can only walk into again."
   [{:keys [branch root args]}]
-  (let [path (str (:path args))]
+  (let [path (str (:path args))
+        offset (or (some-> (:offset args) str parse-long) 0)
+        limit (some-> (:limit args) str parse-long)]
     (cond
       (str/blank? path)
-      (miss branch "read_file needs a `path`.")
+      (miss branch (msg {:needs-path true :tool "read_file"}))
 
       :else
       (if-let [abs (resolve-under-root (or root ".") path)]
         (if (fs/exists? abs)
           (let [content (slurp abs)
-                shown (subs content 0 (min (count content) max-read-chars))]
-            {:result (str path ":\n" shown
-                          (when (> (count content) max-read-chars)
-                            "\n… [truncated]"))
+                {:keys [text from next total]}
+                (page content offset (max-read-chars) limit)]
+            {:result (str path
+                          (when (pos? from) (str " (from line " from ")"))
+                          ":\n" text
+                          (when next
+                            (str "\n" (msg {:more true :path path :next next
+                                            :shown next :total total}))))
              :category :neutral :progress? false :branch branch})
-          (miss branch (str "No file " path " under the project root.")))
-        (miss branch (str "Path " path " is outside the project root and cannot be read."))))))
+          (miss branch (msg {:no-file true :path path})))
+        (miss branch (msg {:outside-root true :path path :verb "read"}))))))
 
 (defn grep-project
   "Search the project's source files for `pattern` (a regex string); return a
@@ -145,12 +221,12 @@
         new-text (str (:new_text args))
         replace-all? (boolean (:replace_all args))]
     (cond
-      (str/blank? path) (miss branch "edit_file needs a `path`.")
-      (str/blank? old-text) (miss branch "edit_file needs `old_text` to find.")
+      (str/blank? path) (miss branch (msg {:needs-path true :tool "edit_file"}))
+      (str/blank? old-text) (miss branch (msg {:needs-old-text true}))
       :else
       (if-let [abs (resolve-under-root (or root ".") path)]
         (if-not (fs/exists? abs)
-          (miss branch (str "No file " path " under the project root."))
+          (miss branch (msg {:no-file true :path path}))
           (let [content (str/replace (slurp abs) "\r\n" "\n")
                 old-text (str/replace old-text "\r\n" "\n")
                 new-text (str/replace new-text "\r\n" "\n")
@@ -161,20 +237,16 @@
                 starts (line-starts content)]
             (cond
               (empty? ranges)
-              (miss branch
-                    (str "old_text not found in " path ". The exact text must match,"
-                         " including whitespace — tried an exact and a line-trimmed match."))
+              (miss branch (msg {:not-found true :path path}))
 
               (and (> (count ranges) 1) (not replace-all?))
               (miss branch
-                    (str "old_text matched " (count ranges) " times in " path ":\n"
-                         (str/join "\n"
-                                   (for [[s _] (take 20 ranges)]
-                                     (str "  Line " (line-of starts s))))
-                         (when (> (count ranges) 20)
-                           (str "\n  … and " (- (count ranges) 20) " more"))
-                         "\n\nAdd surrounding context to old_text to narrow it, or pass"
-                         " replace_all: true to change every occurrence."))
+                    (msg {:ambiguous true :path path :count (count ranges)
+                          :lines (str/join "\n"
+                                           (for [[s _] (take (grep-ranges) ranges)]
+                                             (str "  Line " (line-of starts s))))
+                          :more (when (> (count ranges) (grep-ranges))
+                                  (- (count ranges) (grep-ranges)))}))
 
               :else
               ;; Splice in reverse so earlier offsets stay valid.
@@ -188,21 +260,15 @@
                     unbalanced (when (clojure-file? path)
                                  (let [{:keys [status note]} (lisp/balance edited)]
                                    (when (not= :balanced status)
-                                     (or note "the delimiters no longer balance"))))]
+                                     (or note (msg {:unbalanced-generic true})))))]
                 (spit abs edited)
-                {:result (str "Edited " path
-                              " (" (if replace-all? (count ranges) 1) " replacement"
-                              (when (and replace-all? (> (count ranges) 1)) "s") ")."
-                              (when fallback (str "\n[harness] matched via " fallback
-                                                  " fallback — exact text not found;"
-                                                  " whitespace tolerated."))
-                              (when unbalanced
-                                (str "\n[harness] the edit means the Clojure no longer"
-                                     " balances / does not balance: " unbalanced
-                                     " It will not load until you fix it.")))
+                {:result (let [n (if replace-all? (count ranges) 1)]
+                           (msg {:edited true :path path :replacements n
+                                 :plural (when (> n 1) "s")
+                                 :fallback fallback :unbalanced unbalanced}))
                  :category :success :progress? true :branch branch
                  :fallback fallback}))))
-        (miss branch (str "Path " path " is outside the project root and cannot be edited."))))))
+        (miss branch (msg {:outside-root true :path path :verb "edited"}))))))
 
 (defn write-file
   "Write `content` to a file under the root, creating parent directories.
@@ -213,10 +279,10 @@
         content (:content args)]
     (cond
       (str/blank? path)
-      (miss branch "write_file needs a `path`.")
+      (miss branch (msg {:needs-path true :tool "write_file"}))
 
       (nil? content)
-      (miss branch "write_file needs `content` (an empty string is allowed).")
+      (miss branch (msg {:needs-content true}))
 
       :else
       (if-let [abs (resolve-under-root (or root ".") path)]
@@ -234,11 +300,10 @@
           (when-let [parent (fs/parent abs)]
             (fs/create-dirs parent))
           (spit abs content*)
-          {:result (str "Wrote " (count content*) " chars to " path "."
-                        (when (= :repaired status) (str "\n[harness] " note))
-                        (when (= :unbalanced status)
-                          (str "\n[harness] Written as given, but the Clojure does not"
-                               " balance: " note " It will not load until you fix it.")))
+          {:result (msg {:wrote true :path path :chars (count content*)
+                         :repaired (= :repaired status)
+                         :note note
+                         :unbalanced (when (= :unbalanced status) note)})
            :category :success :progress? true :branch branch
            :repaired? (= :repaired status)})
-        (miss branch (str "Path " path " is outside the project root and cannot be written."))))))
+        (miss branch (msg {:outside-root true :path path :verb "written"}))))))

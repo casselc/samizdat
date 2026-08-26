@@ -121,8 +121,13 @@
                                       {:provider provider
                                        :known (keys providers)})))
          ;; The project layer layers between defaults and overrides. Root: the
-         ;; caller's :run :root if given, else the process working dir.
+         ;; caller's :run :root if given, then HARNESS_ROOT, else the process
+         ;; working dir. The env rung exists because a SERVED harness has no
+         ;; other way to name the project it works on: every other run knob has
+         ;; an override, and without this one `jolt serve` can only ever build
+         ;; whatever directory it was launched from.
          root (or (get-in overrides [:run :root])
+                  (env "HARNESS_ROOT")
                   (System/getProperty "user.dir"))
          project (project-config root)]
      (deep-merge
@@ -173,7 +178,12 @@
        ;; turns become one-line digests), and the turn-budget gate nudges
        ;; toward shipping as the cap nears. A blocking HTTP caller that wants a
        ;; tighter bound sets HARNESS_MAX_TURNS.
-       :run      {:max-turns  (or (env-long "HARNESS_MAX_TURNS") 1000)
+       :run      {;; Carried into :run so beam/workflow read the same root
+                  ;; project-config was layered from. Without it the env rung
+                  ;; would pick the project's .samizdat/config.edn and then run
+                  ;; against the working dir anyway.
+                  :root       root
+                  :max-turns  (or (env-long "HARNESS_MAX_TURNS") 1000)
                   :beam-width (or (env-long "HARNESS_BEAM_WIDTH") 5)
                   ;; Which loop manifest drives a run. The workflows table holds
                   ;; many named, versioned manifests; this picks one by name (its

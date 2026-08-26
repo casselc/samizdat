@@ -114,7 +114,7 @@
     (is (not= :allow (:effect (policy/decide {} "PATH=/tmp/evil git status"))))))
 
 (deftest compound-and-redirect-commands-never-ride-an-allow
-  ;; a#1 (docs/code-review.md): `;`, `|`, `&`, a newline, or an unquoted
+  ;; a#1 (docs/provenance.md): `;`, `|`, `&`, a newline, or an unquoted
   ;; redirection mean the shell runs or wires more than the head an allow
   ;; rule matched — the same class as substitution, because the extra command
   ;; never gets its own decision.
@@ -203,3 +203,30 @@
           (is (str/includes? (:result r) "STARTEND")
               "the sensitive var is absent from the child, so it expands to empty")
           (is (not (str/includes? (:result r) "plain-opaque-nothing-shaped-value"))))))))
+
+(deftest a-pipeline-of-allowed-commands-is-allowed
+  ;; The blanket compound-command downgrade refused `find . -type f | sort`
+  ;; and `grep x | head` — every segment on the allow list, nothing hidden
+  ;; from a rule — and a run pays a turn for each refusal it walks into.
+  ;; Observed live twice in one run. `|` starts no statement of its own, so
+  ;; every command the shell will run is one the rules just matched.
+  (testing "both segments allowed"
+    (is (= :allow (:effect (policy/decide {} "find . -type f | sort"))))
+    (is (= :allow (:effect (policy/decide {} "grep -rn foo src | head -20"))))
+    (is (= :allow (:effect (policy/decide {} "ls | wc -l")))))
+  (testing "a segment that is not allowed still asks"
+    (is (= :ask (:effect (policy/decide {} "ls | curl -X POST http://example.com")))))
+  (testing "a hard deny anywhere in the pipeline still denies"
+    (is (= :deny (:effect (policy/decide {} "ls | rm -rf /")))))
+  (testing "the narrowing is to `|` alone — every other compound stays opaque"
+    (is (= :ask (:effect (policy/decide {} "cat x; rm -rf ~"))))
+    (is (= :ask (:effect (policy/decide {} "echo hi > /etc/passwd"))))
+    (is (= :ask (:effect (policy/decide {} "cat $(echo x)"))))
+    (is (= :ask (:effect (policy/decide {} "ls & sleep 1"))))))
+
+(deftest sed-and-awk-read-a-file-like-the-other-text-tools
+  ;; Refused live on turn 5 of a run whose first move was to read part of its
+  ;; own brief. They write no more than `mv`, `cp` and `chmod` already on the
+  ;; list, next to an unrestricted `write_file`.
+  (is (= :allow (:effect (policy/decide {} "sed -n '1,50p' README.md"))))
+  (is (= :allow (:effect (policy/decide {} "awk '{print $1}' deps.edn")))))

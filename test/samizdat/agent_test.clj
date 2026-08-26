@@ -32,6 +32,7 @@
             [samizdat.agent.critic :as critic]
             [samizdat.agent.gates :as gates]
             [samizdat.agent.loop :as aloop]
+            [samizdat.workflow :as wf]
             [samizdat.agent.phases :as phases]
             [samizdat.agent.resume :as resume]
             [samizdat.agent.state :as state]
@@ -39,7 +40,8 @@
             [samizdat.agent.tools.base :as tools-base]
             [samizdat.agent.tools.ship :as ship]
             [samizdat.agent.verify :as verify]
-            [samizdat.agent.wordlists :as wordlists]
+            [samizdat.lexicon :as lexicon]
+            [samizdat.cells :as cells]
             [samizdat.agent.gitdiff :as gitdiff]
             [samizdat.llm.client :as llm]
             [clojure.data.json :as json]
@@ -49,6 +51,21 @@
             [samizdat.store.interventions :as interventions]
             [samizdat.store.journal :as journal]
             [samizdat.store.runs :as runs]))
+
+;; The retention and repopulation cascades moved into cells/beam.clj — they are
+;; POLICY, and policy is userspace (samizdat-adw). These assertions did not
+;; change: same arguments, same expectations, resolved out of the cell's
+;; namespace instead of the harness's. Resolved at CALL time rather than at
+;; load, because the cell namespace does not exist until the loader has run.
+(defn- cell-fn [sym]
+  ;; find-ns first: ns-resolve THROWS on an absent namespace rather than
+  ;; returning nil, so an `or` never reaches its fallback.
+  (when-not (find-ns 'cells.beam) (cells/load-cells!))
+  (or (ns-resolve 'cells.beam sym)
+      (throw (ex-info (str "cells.beam/" sym " did not load") {}))))
+
+(defn- cull-or-keep [& args] (apply (cell-fn 'cull-or-keep) args))
+(defn- repopulate [& args] (apply (cell-fn 'repopulate) args))
 
 ;; --- gates and the arbiter --------------------------------------------------
 
@@ -265,7 +282,7 @@
            (str "gate " gate " has no way to be met; it can only expire unmet")))))
 
 (deftest settle-and-tool-vocab-names-are-registered-tools
-  ;; review3 #6/#7. The proof-era tool names (verify_template, review, audit,
+  ;; provenance R3-6/#7. The proof-era tool names (verify_template, review, audit,
   ;; sketch, retract_rule, proof_*, octave_eval) outlived the tool surface
   ;; that served them. A settle name the loop can never dispatch is a gate
   ;; whose settle silently narrows — and vf-9bo's every-tool probe above
@@ -322,13 +339,13 @@
   ;; into resources/wordlists.edn, so a list is retuned at runtime without a
   ;; rebuild. A separate loader from gates.clj because state.clj sits below
   ;; gates in the require graph and cannot read its accessor.
-  (is (set? (wordlists/wordlist :claim-relevance)))
-  (is (contains? (wordlists/wordlist :claim-relevance) "the"))
-  (is (set? (wordlists/wordlist :answer-framing)))
-  (is (contains? (wordlists/wordlist :answer-framing) "mathlib"))
-  (is (string? (wordlists/wordlist :tool-version)))
-  (is (re-find (re-pattern (wordlists/wordlist :tool-version)) "Python 3.11"))
-  (is (nil? (re-find (re-pattern (wordlists/wordlist :tool-version))
+  (is (set? (lexicon/wordlist :claim-relevance)))
+  (is (contains? (lexicon/wordlist :claim-relevance) "the"))
+  (is (set? (lexicon/wordlist :answer-framing)))
+  (is (contains? (lexicon/wordlist :answer-framing) "mathlib"))
+  (is (string? (lexicon/wordlist :tool-version)))
+  (is (re-find (re-pattern (lexicon/wordlist :tool-version)) "Python 3.11"))
+  (is (nil? (re-find (re-pattern (lexicon/wordlist :tool-version))
                      "witness 3"))))
 
 (deftest a-reframed-branch-settles-stuck-with-a-live-verification
@@ -346,7 +363,7 @@
                                  :branch-after b})))))
 
 (deftest gates-config-carries-no-keys-for-removed-machinery
-  ;; review3 #9: :sketch-duplicate-threshold documented the sketch diversity
+  ;; provenance R3-9: :sketch-duplicate-threshold documented the sketch diversity
   ;; gate (vf-eaw) whose tool left with the proof harness. The code it points
   ;; at hardcodes 0.6 and its query is test-only — the key is doc-rot, the
   ;; same class as the four keys pass 2 deleted.
@@ -533,7 +550,7 @@
       (is (= 1 (:met (first (journal/gate-tally c rid))))))))
 
 (deftest the-fork-invite-floor-gates-repopulation
-  ;; review2 #13: :fork-invite-floor documented minimum critic scores for a
+  ;; provenance R2-13: :fork-invite-floor documented minimum critic scores for a
   ;; fork invitation and nothing read it — the scheduler invited the
   ;; strongest survivor even when every survivor sat below the floor,
   ;; spending budget on lines not yet earning it.
@@ -547,10 +564,10 @@
                 floor)
         "sanity: the weak fixture is below the configured floor")
     (is (empty? (filter :fork-invited
-                        (#'beam/repopulate {:beam-width 3} weak 2 5)))
+                        (repopulate {:beam-width 3} weak 2 5)))
         "no survivor above the floor: nobody is invited to reseed")
     (is (= ["B2"] (mapv :id (filter :fork-invited
-                                    (#'beam/repopulate {:beam-width 3} strong 2 5))))
+                                    (repopulate {:beam-width 3} strong 2 5))))
         "a survivor above the floor is still invited")))
 
 ;; --- the explore/build phase machine (vf-b25, vf-eaw) ----------------------
@@ -601,7 +618,7 @@
                                                       :distinctness 5 :viability 4}
                                              :turn 16})
                        (assoc :turns (vec (repeat 3 {}))))
-          spared (#'beam/cull-or-keep ctx juvenile 2
+          spared (cull-or-keep ctx juvenile 2
                                       [{:progress 5 :momentum 5
                                         :distinctness 5 :viability 4}])
           jm (-> spared :messages peek :content)]
@@ -617,7 +634,7 @@
                                                        :distinctness 4 :viability 3}
                                               :turn 20})
                         (assoc :turns (vec (repeat 20 {}))))
-          kept (#'beam/cull-or-keep ctx reprieved 2 [])
+          kept (cull-or-keep ctx reprieved 2 [])
           rm (-> kept :messages peek :content)]
       (is (state/active? kept) "no dominating sibling, so the reprieve holds")
       (is (str/includes? rm "reprieve ends unconditionally at"))
@@ -647,7 +664,7 @@
                               :turns (vec (repeat 10 {})))]
     (is (some #{:stuck} (map :gate (arbiter/eligible {:branch at-stuck :max-turns 40})))
         "the gate fires at its own threshold")
-    (is (= :active (:status (#'beam/cull-or-keep {:turn 10} at-stuck 2 [])))
+    (is (= :active (:status (cull-or-keep {:turn 10} at-stuck 2 [])))
         "and the branch is not yet cullable when it does")))
 
 (deftest a-lookup-miss-is-not-a-mathematical-failure
@@ -724,9 +741,9 @@
         failing (-> (branch-with :consecutive-failures (gates/threshold :cull-threshold))
                     (assoc :turns (vec (repeat 10 {})))
                     (state/enter-reframe 10 "the greedy exchange terminates"))]
-    (is (= :active (:status (#'beam/cull-or-keep {:turn 11} failing 2 [])))
+    (is (= :active (:status (cull-or-keep {:turn 11} failing 2 [])))
         "spared while it is re-planning")
-    (let [expired (#'beam/cull-or-keep {:turn (+ 10 grace)} failing 2 [])]
+    (let [expired (cull-or-keep {:turn (+ 10 grace)} failing 2 [])]
       (is (= :culled (:status expired)) "the loan comes due")
       (is (str/includes? (:inactive-reason expired) "reframe")
           "and the record says the branch had already been given its chance"))
@@ -735,13 +752,13 @@
       (let [floored (assoc failing :consecutive-failures
                            (* (gates/threshold :cull-hard-multiple)
                               (gates/threshold :cull-threshold)))
-            r (#'beam/cull-or-keep {:turn 11} floored 2 [])]
+            r (cull-or-keep {:turn 11} floored 2 [])]
         (is (= :culled (:status r)))
         (is (str/includes? (:inactive-reason r) "reframe")
             "the reason names what actually happened; the cull reasons are the
              run's post-hoc explanation of itself and are read later as evidence")))
     (testing "a branch with no reframe is culled exactly as before"
-      (is (= :culled (:status (#'beam/cull-or-keep
+      (is (= :culled (:status (cull-or-keep
                                {:turn 11}
                                (dissoc failing :reframe-claim :reframe-entered-turn)
                                2 [])))))))
@@ -795,7 +812,7 @@
                                                      :subClaims ["the box bound holds"]}})
                                             "\n```")
                               :finish-reason "stop"})]
-      (let [after (aloop/run-turn {:conn c :run-id rid :max-turns 40
+      (let [after (wf/run-turn {:conn c :run-id rid :max-turns 40
                                    :llm-adapter :a :llm-config {:max-tokens 16384}}
                                   b (inc cap))]
         (is (= :build (:phase after)))
@@ -921,11 +938,10 @@
                                     (gates/threshold :safe-state-multiple))))))
 
 (deftest green-verify-marks-the-green-point
-  ;; No tool on the current surface emits :claim-status artifacts (the proof
-  ;; engines that did are gone), so keying the green point on :confirmed was
-  ;; keying it on a status that never occurs. A green ship-verify — the suite
-  ;; actually passed — is the real known-good state; ship reports it and the
-  ;; loop stamps the cursor.
+  ;; The green point is a fact about the WORKING TREE — the suite was observed
+  ;; passing — so it keys on the verify signal and not on any claim. That is
+  ;; why it did not move to the artifact trigger when :clear-reframe did: the
+  ;; two entries ask different questions and neither subsumes the other.
     (with-redefs [tools/run-tool (fn [{:keys [branch]}]
                                  {:branch branch
                                   :result "Answer accepted."
@@ -981,24 +997,24 @@
                     (assoc :turns (vec (repeat 10 {}))))
         productive (assoc failing :artifacts [{:claim "every element of S satisfies P" :claim-status :confirmed
                                                :turn 5}])]
-    (is (= :culled (:status (#'beam/cull-or-keep {} failing 2 []))))
-    (is (= :active (:status (#'beam/cull-or-keep {} productive 2 []))))
+    (is (= :culled (:status (cull-or-keep {} failing 2 []))))
+    (is (= :active (:status (cull-or-keep {} productive 2 []))))
     (testing "a stale confirmation does not protect it forever"
       (let [stale (assoc failing :artifacts [{:claim "every element of S satisfies P" :claim-status :confirmed
                                               :turn 0}])]
-        (is (= :culled (:status (#'beam/cull-or-keep {} stale 2 []))))))
+        (is (= :culled (:status (cull-or-keep {} stale 2 []))))))
     (testing "the last branch standing is never culled"
       ;; Found by the width sweep: the width-1 arm was culled at turn 9 of 12
       ;; and the run ended there, which reads as evidence against narrow beams
       ;; and is actually a rule fired outside the situation it was written for.
-      (is (= :active (:status (#'beam/cull-or-keep {} failing 0 [])))))
+      (is (= :active (:status (cull-or-keep {} failing 0 [])))))
     (testing "a recent measurement protects it too"
       ;; vf-0of. A branch locating something empirically confirms nothing by
       ;; construction, so the confirmation-only trigger culled exactly the
       ;; branch whose thesis was the measurement.
       (let [measuring (assoc failing :artifacts [{:claim "the rate at sigma = 0.7 is 0.72"
                                                   :claim-status :empirical :turn 5}])]
-        (is (= :active (:status (#'beam/cull-or-keep {} measuring 2 []))))))))
+        (is (= :active (:status (cull-or-keep {} measuring 2 []))))))))
 
 (deftest a-run-can-keep-exploring-after-a-branch-ships
   ;; Winner-takes-all ends a research run at the first qualifying answer.
@@ -1181,18 +1197,18 @@
                                               :turn 16})
                         (assoc :turns (vec (repeat turns {})))))]
       (testing "a branch inside its grace period survives a dominating elder"
-        (let [b (#'beam/cull-or-keep ctx (newborn 3) 2 [mature])]
+        (let [b (cull-or-keep ctx (newborn 3) 2 [mature])]
           (is (state/active? b))
           (is (= 1 (count (filter #(= "cull-spared" (:kind %))
                                   (journal/events-since c rid 0)))))))
       (testing "past the grace period the ordinary rules resume"
-        (is (= :culled (:status (#'beam/cull-or-keep
+        (is (= :culled (:status (cull-or-keep
                                  ctx
                                  (newborn (inc (gates/threshold :juvenile-grace)))
                                  2 [mature])))))
       (testing "grace does not save a branch the critic calls a dead end"
         (let [doomed (assoc-in (newborn 3) [:critic :scores :viability] 1)]
-          (is (= :culled (:status (#'beam/cull-or-keep ctx doomed 2 [])))))))))
+          (is (= :culled (:status (cull-or-keep ctx doomed 2 [])))))))))
 
 (deftest pareto-retention-spares-non-dominated-branches
   ;; The scalar rule is the TRIGGER; domination is the verdict. Three runs in
@@ -1207,7 +1223,7 @@
                                      :critic {:scores scores :turn 6})
                         (assoc :turns (vec (repeat 8 {})))))]
       (testing "failing and dominated: culled"
-        (is (= :culled (:status (#'beam/cull-or-keep
+        (is (= :culled (:status (cull-or-keep
                                  ctx
                                  (failing 3 {:progress 2 :momentum 2
                                              :distinctness 2 :viability 3})
@@ -1215,7 +1231,7 @@
                                  [{:progress 3 :momentum 4
                                    :distinctness 3 :viability 4}])))))
       (testing "failing but non-dominated: spared, journaled, and told"
-        (let [b (#'beam/cull-or-keep
+        (let [b (cull-or-keep
                  ctx
                  (failing 3 {:progress 2 :momentum 2
                              :distinctness 5 :viability 3})
@@ -1228,13 +1244,13 @@
           (is (= 1 (count (filter #(= "cull-spared" (:kind %))
                                   (journal/events-since c rid 0)))))))
       (testing "the critic's own dead-end verdict culls"
-        (is (= :culled (:status (#'beam/cull-or-keep
+        (is (= :culled (:status (cull-or-keep
                                  ctx
                                  (failing 3 {:progress 2 :momentum 2
                                              :distinctness 5 :viability 1})
                                  1 [])))))
       (testing "the hard floor: double the threshold ends the reprieve"
-        (is (= :culled (:status (#'beam/cull-or-keep
+        (is (= :culled (:status (cull-or-keep
                                  ctx
                                  (failing 6 {:progress 2 :momentum 2
                                              :distinctness 5 :viability 5})
@@ -1258,7 +1274,7 @@
           dead (assoc (scored "B3" {:progress 1 :momentum 1 :distinctness 1 :viability 1} 12)
                       :status :culled)]
       (testing "below target width, the strongest survivor is marked to reseed"
-        (let [bs (#'beam/repopulate ctx [strong weak dead] 3 20)
+        (let [bs (repopulate ctx [strong weak dead] 3 20)
               b1 (first (filter #(= "B1" (:id %)) bs))
               b2 (first (filter #(= "B2" (:id %)) bs))]
           (is (= 20 (:fork-invited b1)))
@@ -1273,17 +1289,17 @@
                                   (journal/events-since c rid 0)))))))
       (testing "at or above target width it stays quiet"
         (is (nil? (:fork-invited
-                   (first (#'beam/repopulate ctx [strong weak
+                   (first (repopulate ctx [strong weak
                                                   (scored "B4" {:progress 2 :momentum 2
                                                                 :distinctness 2 :viability 2} 12)]
                                              3 20))))))
       (testing "no room under the cap, no ask"
         (is (nil? (:fork-invited
-                   (first (#'beam/repopulate ctx [strong dead]
+                   (first (repopulate ctx [strong dead]
                                              (gates/threshold :max-total-branches) 20))))))
       (testing "a recent ask is not repeated"
         (is (= 18 (:fork-invited
-                   (first (#'beam/repopulate ctx [(assoc strong :fork-invited 18) dead]
+                   (first (repopulate ctx [(assoc strong :fork-invited 18) dead]
                                              3 20)))))))))
 
 (deftest every-gate-renders-its-message
@@ -1468,7 +1484,7 @@
     (runs/open-branch! c rid {:branch-id "B1" :created-at-turn 0})
     (with-redefs [llm/chat (fn [& _] {:content "Let me confirm a#712 first."
                                       :finish-reason "stop"})]
-      (let [after (aloop/run-turn {:conn c :run-id rid :max-turns 40
+      (let [after (wf/run-turn {:conn c :run-id rid :max-turns 40
                                    :llm-adapter :a :llm-config {:max-tokens 16384}}
                                   b 1)]
         (is (= "```tool-call\n" (:prefill after))
@@ -1494,7 +1510,7 @@
                                                      :subClaims ["the box bound holds"]}})
                                             "\n```")
                               :finish-reason "stop"})]
-      (let [after (aloop/run-turn {:conn c :run-id rid :max-turns 40
+      (let [after (wf/run-turn {:conn c :run-id rid :max-turns 40
                                    :llm-adapter :a :llm-config {:max-tokens 16384}}
                                   b 1)]
         (is (nil? (:prefill after)))))))
@@ -1510,7 +1526,7 @@
                  :prefill "```tool-call\n")]
     (runs/open-branch! c rid {:branch-id "B1" :created-at-turn 0})
     (with-redefs [llm/chat (fn [& _] {:content "{\"name\": " :finish-reason "length"})]
-      (let [after (aloop/run-turn {:conn c :run-id rid :max-turns 40
+      (let [after (wf/run-turn {:conn c :run-id rid :max-turns 40
                                    :llm-adapter :a :llm-config {:max-tokens 16384}}
                                   b 1)]
         (is (= "```tool-call\n" (:prefill after)))))))
@@ -1652,15 +1668,15 @@
           babbling (fn [n]
                      (-> (branch-with :id "BM" :consecutive-mechanics-failures n)
                          (assoc :turns (vec (repeat 8 {})))))]
-      (is (state/active? (#'beam/cull-or-keep ctx (babbling threshold) 2 []))
+      (is (state/active? (cull-or-keep ctx (babbling threshold) 2 []))
           "at the verification threshold a mechanics-only branch keeps going")
-      (let [dead (#'beam/cull-or-keep ctx (babbling (* 2 threshold)) 2 [])]
+      (let [dead (cull-or-keep ctx (babbling (* 2 threshold)) 2 [])]
         (is (= :culled (:status dead)))
         (is (re-find #"(?i)tool call|fence|malformed" (:inactive-reason dead))
             (str "the reason must name the real cause, not a dead-end line: "
                  (:inactive-reason dead))))
       (testing "and the last branch standing is never culled for it either"
-        (is (state/active? (#'beam/cull-or-keep ctx (babbling (* 4 threshold)) 0 [])))))))
+        (is (state/active? (cull-or-keep ctx (babbling (* 4 threshold)) 0 [])))))))
 
 (deftest a-branch-culled-on-policy-refusals-is-not-blamed-for-malformed-fences
   ;; Six build-phase `sketch` refusals are six perfectly well-formed calls the
@@ -1678,7 +1694,7 @@
                              :consecutive-policy-refusals (* 2 threshold)
                              :phase :build)
                 (assoc :turns (vec (repeat 8 {}))))
-          dead (#'beam/cull-or-keep ctx b 2 [])]
+          dead (cull-or-keep ctx b 2 [])]
       (is (= :culled (:status dead)))
       (is (not (re-find #"(?i)well-formed fence|malformed" (:inactive-reason dead)))
           "a declined call is not a protocol failure")
@@ -1696,7 +1712,7 @@
                              :consecutive-mechanics-failures (* 2 threshold)
                              :consecutive-policy-refusals 2)
                 (assoc :turns (vec (repeat 8 {}))))
-          dead (#'beam/cull-or-keep ctx b 2 [])]
+          dead (cull-or-keep ctx b 2 [])]
       (is (= :culled (:status dead)))
       (is (re-find #"(?i)2 .*policy" (:inactive-reason dead)))
       (is (re-find #"(?i)4 .*fence|4 .*malformed" (:inactive-reason dead))
@@ -1726,9 +1742,18 @@
       (is (= :met (arbiter/settle {:gate :reflection :turn 1 :window 1}
                                   {:current-turn 2 :tools-called ["introspect"]
                                    :branch-before (branch-with) :branch-after (branch-with)})))
+      ;; A turn past the window with the wrong tool is no longer :unmet on the
+      ;; spot — it is still OPEN through the grace, because a gate's advice
+      ;; commonly costs a turn to attempt and another to verify, and settling
+      ;; the moment the window passes made slow-but-followed advice read
+      ;; exactly like ignored advice.
+      (is (nil? (arbiter/settle {:gate :reflection :turn 1 :window 1}
+                                {:current-turn 3 :tools-called ["eval"]
+                                 :branch-before (branch-with) :branch-after (branch-with)})))
       (is (= :unmet (arbiter/settle {:gate :reflection :turn 1 :window 1}
-                                    {:current-turn 3 :tools-called ["eval"]
-                                     :branch-before (branch-with) :branch-after (branch-with)}))))))
+                                    {:current-turn 20 :tools-called ["eval"]
+                                     :branch-before (branch-with) :branch-after (branch-with)}))
+          "past the grace it is genuinely unmet"))))
 
 (deftest the-studying-gate-catches-inspect-without-shipping
   (let [studying (branch-with :turns (vec (concat [{:tool "write_file"}]
@@ -1906,8 +1931,16 @@
     (is (= 3 (count rungs)))
     (is (= [:answer-exists :figure-coverage :engages-problem]
            (mapv :name rungs))))
-  (is (= "Supply an `answer` to ship."
-         (ship/ship-gate-block {:answer nil})))
+  ;; Asserts the SKELETON, not the sentence: two live runs did the work,
+  ;; passed their tests, closed their task, then spent every remaining turn
+  ;; calling `done` empty and ended :exhausted with nothing shipped. The rung
+  ;; was saying only the argument's name — the exact failure base/missing
+  ;; exists to prevent — so what matters is that it now shows the call.
+  (let [msg (ship/ship-gate-block {:answer nil})]
+    (is (str/includes? msg "answer"))
+    (is (str/includes? msg "```tool-call")
+        "a missing-argument complaint has to show the call it wanted")
+    (is (str/includes? msg "\"name\": \"done\"")))
   (let [figures-msg (ship/ship-gate-block {:answer "the count is 42 and 7"
                                            :problem "count things"
                                            :evidence [{:claim "count is 40"}]
@@ -1942,29 +1975,136 @@
 
 (deftest phase-refusal-reads-the-phase-table
   ;; drg-4026 #34: phase-refusal consults the table's :withholds — the seam
-  ;; the audit called inert. Empty today (the withheld proof tools left),
-  ;; and a refusal from it must carry :policy-refusal? true so the cull
-  ;; record can tell a declined call from a malformed fence.
-  (is (nil? (tools-base/phase-refusal {:branch {:phase :explore}
-                                       :tool-name "eval"})))
-  (with-redefs [phases/withholds (fn [_] #{"eval"})]
-    (let [r (tools-base/phase-refusal {:branch {:phase :explore}
-                                       :tool-name "eval"})]
-      (is (map? r))
-      (is (true? (:policy-refusal? r)))
-      (is (str/includes? (str (:result r)) "explore")))))
+  ;; the audit called inert. Still empty (the withheld proof tools left), and
+  ;; a refusal from it must carry :policy-refusal? true so the cull record can
+  ;; tell a declined call from a malformed fence.
+  (with-redefs [phases/refusals (fn [] [])]
+    (is (nil? (tools-base/phase-refusal {:branch {:phase :explore}
+                                         :tool-name "eval"})))
+    (with-redefs [phases/withholds (fn [_] #{"eval"})]
+      (let [r (tools-base/phase-refusal {:branch {:phase :explore}
+                                         :tool-name "eval"})]
+        (is (map? r))
+        (is (true? (:policy-refusal? r)))
+        (is (str/includes? (str (:result r)) "explore"))))))
+
+(deftest the-board-is-enforced-not-merely-encouraged
+  ;; RFC-008 recorded that the board was "encouraged, not enforced": the
+  ;; context block said "No task claimed" and the prompt said work starts with
+  ;; a task, but nothing refused a call from a branch holding none. RFC-007
+  ;; named `phases.edn :withholds` as the mechanism and noted it was empty —
+  ;; and it could not have expressed this rule anyway, because it is handed a
+  ;; PHASE and holding a task is a fact about the BRANCH.
+  (let [unclaimed {:id "b1" :phase :explore}
+        holding   {:id "b1" :phase :explore :task {:id "sz-abc" :title "t"}}]
+    (testing "a branch with no task cannot change the working tree"
+      (doseq [t ["write_file" "edit_file"]]
+        (let [r (tools-base/phase-refusal {:branch unclaimed :tool-name t})]
+          (is (map? r) (str t " was allowed from an unclaimed branch"))
+          (is (true? (:policy-refusal? r))
+              "a declined call is not evidence about the branch's line of inquiry")
+          (is (= :work-needs-a-task (:refusal-rule r)))
+          (is (str/includes? (str (:result r)) "task")
+              "the refusal says what to do about it"))))
+
+    (testing "holding one, it can"
+      (doseq [t ["write_file" "edit_file"]]
+        (is (nil? (tools-base/phase-refusal {:branch holding :tool-name t})))))
+
+    (testing "investigating never needs a task — a branch must be able to find
+              out what to claim before it can claim it"
+      (doseq [t ["read_file" "grep" "lsp" "shell" "eval" "task" "message"]]
+        (is (nil? (tools-base/phase-refusal {:branch unclaimed :tool-name t}))
+            (str t " was refused, which is a deadlock rather than a policy"))))
+
+    (testing "finishing never needs a task — discarding completed work over a
+              missing row is the worst available trade, and ending a run is
+              where a bad refusal is least recoverable"
+      (doseq [t ["done" "give_up"]]
+        (is (nil? (tools-base/phase-refusal {:branch unclaimed :tool-name t})))))))
+
+(deftest a-refusal-rule-is-data-and-can-be-turned-off
+  ;; The whole point of the table: a project that does not want a board should
+  ;; not have to carry one, and should not need a rebuild to say so.
+  (with-redefs [phases/refusals (fn [] [])]
+    (is (nil? (tools-base/phase-refusal {:branch {:id "b" :phase :explore}
+                                         :tool-name "write_file"}))))
+  ;; And a rule with a different condition fires on that condition instead.
+  (with-redefs [phases/refusals
+                (fn [] [{:rule :never-on-tuesdays
+                         :when (fn [ctx] (= "b-doomed" (:id (:branch ctx))))
+                         :tools #{"write_file"}
+                         :message-file "task-required"}])]
+    (is (some? (tools-base/phase-refusal {:branch {:id "b-doomed"} :tool-name "write_file"})))
+    (is (nil? (tools-base/phase-refusal {:branch {:id "b-fine"} :tool-name "write_file"})))))
+
+(deftest a-confirmed-artifact-ends-a-reframe
+  ;; RFC-007 recorded that :transitions carried one entry and that an
+  ;; artifact-status trigger was available and unused. Wiring it needed the
+  ;; table to be able to match a VALUE: :claim-status is truthy for :confirmed,
+  ;; :empirical and :sketch alike, so the truthy test the table had would have
+  ;; fired the confirmed effects on an unverified plan. A status is a
+  ;; vocabulary, not a flag.
+  ;;
+  ;; What it is keyed to is clear-reframe's own long-standing definition —
+  ;; "the branch banked something the withheld approach could not have
+  ;; produced" — which is a statement about confirming a claim, not about a
+  ;; green test run. Keying it here makes it general: ANY tool that confirms a
+  ;; claim ends a reframe, not only a green ship-verify.
+  (let [reframed (state/begin-reframe (branch-with) 3 "the withheld claim")]
+    (is (some? (:reframe-claim reframed)) "the branch is inside a reframe")
+
+    (testing "a confirmed artifact lifts it"
+      (is (nil? (:reframe-claim
+                 (aloop/apply-transitions {} {:claim-status :confirmed} reframed)))))
+
+    (testing "an unverified plan does not — this is the whole reason the table
+              had to learn to match a value rather than test for truth"
+      (doseq [status [:sketch :empirical :refuted]]
+        (is (some? (:reframe-claim
+                    (aloop/apply-transitions {} {:claim-status status} reframed)))
+            (str status " lifted a reframe"))))
+
+    (testing "and no artifact at all does not"
+      (is (some? (:reframe-claim (aloop/apply-transitions {} nil reframed)))))
+
+    (testing "confirming a claim is not the same as a green working tree"
+      (is (nil? (:green-snapshot
+                 (aloop/apply-transitions {} {:claim-status :confirmed}
+                                          (assoc reframed :turns [{} {}]))))))))
+
+(deftest a-transition-entry-can-test-for-truth-or-match-a-value
+  ;; Both forms, at the seam rather than through a whole turn, so the table's
+  ;; contract is pinned independently of which effects happen to be wired.
+  (with-redefs [phases/transitions (fn [] {[:result :flagged?] [:mark-green]})]
+    (is (= [:mark-green] (aloop/transition-effects {:result {:flagged? true}})))
+    (is (= [] (vec (aloop/transition-effects {:result {:flagged? false}})))))
+  (with-redefs [phases/transitions (fn [] {[:artifact :kind] {:test [:clear-reframe]}})]
+    (is (= [:clear-reframe] (aloop/transition-effects {:artifact {:kind :test}})))
+    (is (= [] (vec (aloop/transition-effects {:artifact {:kind :lemma}})))
+        "a value-keyed entry fires on its value and no other")))
 
 (deftest result-transitions-are-resource-data
   ;; drg-4026 #3: the claim-first state machine as a declarative table —
   ;; tool-result signals map to branch effects, applied generically, not
-  ;; cond-> clauses in the executor. The one live row: a green ship-verify
-  ;; stamps the green point and ends any reframe.
-  (is (= [:mark-green :clear-reframe]
-         (get (phases/transitions) [:result :verified-green?])))
-  (let [b (assoc (branch-with) :reframe-entered-turn 3 :reframe-claim "c")
-        out (aloop/apply-transitions {:verified-green? true} nil b)]
-    (is (= (count (:turns out)) (:green-snapshot out)))
-    (is (nil? (:reframe-entered-turn out)))
+  ;; cond-> clauses in the executor.
+  ;;
+  ;; Two live rows now, asking different questions. The green point is about
+  ;; the WORKING TREE and keys on the verify signal; ending a reframe is about
+  ;; BANKING A CLAIM and keys on a confirmed artifact. :clear-reframe used to
+  ;; ride the verify signal, which made a green test run the only thing that
+  ;; could end a reframe — narrower than what clear-reframe means.
+  (is (= [:mark-green] (get (phases/transitions) [:result :verified-green?])))
+  (is (= {:confirmed [:clear-reframe]}
+         (get (phases/transitions) [:artifact :claim-status])))
+  (let [b (assoc (branch-with) :reframe-entered-turn 3 :reframe-claim "c")]
+    (let [out (aloop/apply-transitions {:verified-green? true} nil b)]
+      (is (= (count (:turns out)) (:green-snapshot out)))
+      (is (= 3 (:reframe-entered-turn out))
+          "a green tree is not by itself a banked claim"))
+    (let [out (aloop/apply-transitions {} {:claim-status :confirmed} b)]
+      (is (nil? (:reframe-entered-turn out)))
+      (is (nil? (:green-snapshot out))))
     (is (= b (aloop/apply-transitions {:verified-green? false} nil b))
         "no signal, no transition")))
 
@@ -1983,3 +2123,63 @@
     (is (= [0 0 1 1 "B1"] (state/finished-key weak))
         "a relaxation ranks below a direct proof")
     (is (= [strong weak] (state/rank-finished [weak strong])))))
+
+(deftest every-context-budget-key-is-actually-read
+  ;; A knob that is documented, parsed, and read by nothing is worse than no
+  ;; knob: `:run :loop` was exactly that for a whole phase — configured in
+  ;; three places and consulted by no live code — so the critic, team, feature
+  ;; and decompose loops could not run outside the suite. These numbers decide
+  ;; how much the model sees, which makes a dead one invisible in the same way.
+  (let [src (->> (file-seq (java.io.File. "src"))
+                 (filter #(.isFile %))
+                 (filter #(str/ends-with? (.getName %) ".clj"))
+                 (map slurp)
+                 (str/join "\n"))
+        declared (keys (gates/threshold :context-budget))]
+    (is (seq declared))
+    (doseq [k declared]
+      ;; Either spelling counts: the explicit keyword, or the bare name as a
+      ;; {:keys [...]} destructuring binding. Matching only the keyword failed
+      ;; on the first key that was read idiomatically, and a test that dictates
+      ;; destructuring style to avoid a false positive is the wrong trade.
+      (is (or (str/includes? src (str k))
+              (re-find (re-pattern (str ":keys \\[[^\\]]*\\b"
+                                        (java.util.regex.Pattern/quote (name k))
+                                        "\\b"))
+                       src))
+          (str k " is declared in gates.edn :context-budget but nothing in src"
+               " reads it — either wire it or drop it")))))
+
+(deftest a-prediction-tells-late-compliance-from-none
+  ;; RFC-007: "a prediction's :window is in turns, so a gate whose advice takes
+  ;; longer than its window to follow settles :unmet regardless of whether it
+  ;; worked." Two outcomes could not tell apart the gate nobody obeys and the
+  ;; gate whose advice is sound but slow — and those want opposite repairs:
+  ;; reword the first, widen the second's window.
+  (let [p {:gate :milestone :turn 5 :window 2}
+        at (fn [turn called] {:current-turn turn :tools-called called
+                              :branch-before {} :branch-after {}})]
+    (testing "inside the window is prompt compliance"
+      (is (= :met (arbiter/settle p (at 6 ["done"])))))
+
+    (testing "after the window but inside the grace is LATE compliance,
+              which used to be indistinguishable from never"
+      (is (= :met-late (arbiter/settle p (at 9 ["done"])))))
+
+    (testing "silence past the window is still open — the grace is what makes
+              late compliance observable at all"
+      (is (nil? (arbiter/settle p (at 8 [])))))
+
+    (testing "silence past the grace is :unmet, which now means what it says"
+      (is (= :unmet (arbiter/settle p (at 12 [])))))))
+
+(deftest the-grace-is-a-threshold-not-a-constant
+  (is (pos? (gates/threshold :prediction-grace-turns))
+      "a project whose turns are slower wants a wider grace, and that is a
+       retune rather than a rebuild")
+  (let [p {:gate :milestone :turn 0 :window 1}]
+    (with-redefs [gates/threshold (fn [k] (if (= k :prediction-grace-turns) 0
+                                              (#'gates/threshold k)))]
+      (is (= :unmet (arbiter/settle p {:current-turn 1 :tools-called []
+                                       :branch-before {} :branch-after {}}))
+          "a zero grace restores the old two-outcome behaviour exactly"))))

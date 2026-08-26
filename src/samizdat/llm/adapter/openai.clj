@@ -31,7 +31,15 @@
   the fence parser sees one string either way."
   (:require [clojure.data.json :as json]
             [clojure.string :as str]
-            [samizdat.llm.adapter :as adapter]))
+            [samizdat.lexicon :as lexicon]
+            [samizdat.llm.adapter :as adapter]
+            [samizdat.util :as util]))
+(def ^:private usage-cap-re
+  "Memoized against the lexicon's generation, so an added gateway phrasing
+  takes effect on reload rather than at the next restart."
+  (util/generation-cache lexicon/gen
+                         #(re-pattern (lexicon/wordlist :usage-cap-signals))))
+
 
 (defn- tool-call->fence
   "A native OpenAI tool_call turned into the harness's text-fence convention, so
@@ -62,6 +70,65 @@
   (and (= :deepseek provider-id)
        (str/includes? (str (:base-url config)) "/beta")))
 
+(defn llama-cpp-endpoint?
+  "Whether this config points at a llama.cpp server.
+
+  Two ways to be one, and the second is why this exists. `:local` as a
+  provider id is how an operator DECLARES it. `:llama-cpp?` is what
+  `client/probe-llama-cpp` DISCOVERED by asking `/props` at startup — so a
+  llama-server configured under `:openai`, which RFC-005 recorded as silently
+  losing its prefix pinning, gets it anyway.
+
+  The declared form still counts on its own, because a probe needs the server
+  to be up and the config to be right about the URL, and neither is
+  guaranteed at the moment an operator is setting one up."
+  [provider-id config]
+  (or (= :local provider-id) (boolean (:llama-cpp? config))))
+
+(defn- local-cache-wire
+  "The extra body keys a llama.cpp server honours, or an empty map.
+
+  `cache_prompt` asks the server to reuse the longest common prefix it already
+  holds instead of re-prefilling. That is the difference between an inherited
+  fork or a fan of probes off one tape costing a completion each and costing a
+  full prefill each — see docs/RFCS/RFC-005-provider-layer.md.
+
+  `id_slot` PINS a conversation to a physical KV slot, and is emitted only
+  from an explicit `:slots` table in the provider config ({cache-key -> int}).
+  Absent, the server picks by prefix similarity and LRU, which is the right
+  default: a slot count is a property of how the server was launched, and
+  inventing an index would evict another conversation's warm prefix to serve
+  a guess. A bad pin costs a re-prefill, never a wrong answer.
+
+  `chat_template_kwargs {enable_thinking false}` turns Qwen-family reasoning
+  OFF. llama.cpp has it ON by default and `/no_think` in the PROMPT does not
+  disable it — the template decides, not the text — so without this knob a
+  local model can spend its whole output budget thinking and return a reply
+  with neither content nor a tool call. This layer already treats that reply
+  as an error rather than an empty answer (see `client`), which is the right
+  reading and does nothing to prevent it; this is what prevents it. From
+  llm-repl's `llamacpp` backend, which documents the same trap.
+
+  Opt-out via `:thinking? true` in the provider config, because a reasoning
+  model asked to reason is a legitimate configuration — just not the default
+  for a harness whose turns must end in a tool call.
+
+  Gated on the endpoint being llama.cpp, so every hosted provider's body is
+  byte-identical to what it was. The cache design is llm-repl's `llama-wire`;
+  only the seam differs."
+  [provider-id config cache-key]
+  (if-not (llama-cpp-endpoint? provider-id config)
+    {}
+    (cond-> {}
+      (not (:thinking? config))
+      (assoc :chat_template_kwargs {:enable_thinking false})
+
+      (some? cache-key)
+      (assoc :cache_prompt true)
+
+      (and cache-key (get (:slots config) cache-key))
+      (assoc :id_slot (get (:slots config) cache-key)))))
+
 (defrecord OpenAIAdapter [provider-id label reasoning-key max-tokens-key]
   adapter/Adapter
   (id [_] provider-id)
@@ -82,8 +149,9 @@
       {"Authorization" (str "Bearer " k)}
       {}))
 
-  (chat-body [this config {:keys [messages max-tokens temperature prefill force-tool]}]
-   ;; The gate is the protocol method on THIS adapter (review3 #14), so the
+  (chat-body [this config {:keys [messages max-tokens temperature prefill force-tool
+                                  cache-key]}]
+   ;; The gate is the protocol method on THIS adapter (provenance R3-14), so the
    ;; answer a caller can query and the answer chat-body acts on are one
    ;; path and cannot drift apart.
    (let [use-prefill? (and prefill (adapter/prefill-support? this config))]
@@ -119,7 +187,12 @@
       (and force-tool (not use-prefill?))
       (assoc :tools [{:type "function" :function force-tool}]
              :tool_choice {:type "function"
-                           :function {:name (:name force-tool)}}))))
+                           :function {:name (:name force-tool)}})
+
+      ;; Local llama-server prefix-cache reuse. Merged LAST and only for
+      ;; :local, so no hosted provider's body changes.
+      :always
+      (merge (local-cache-wire provider-id config cache-key)))))
 
   (prefill-support? [_ config] (supports-prefill? provider-id config))
 
@@ -169,12 +242,10 @@
     (let [msg (str (get-in body [:error :message])
                    " " (get-in body [:error :type])
                    " " (get-in body [:error :code]))]
-      ;; The English signals cover OpenAI/DeepSeek; GLM/Zhipu report a daily
-      ;; usage cap as error code 1308 with a Chinese "使用上限" message, and
-      ;; some gateways phrase it "per-day" — a 429 on any of these is spent
-      ;; budget, not backpressure, so it must not be retried.
-      (boolean (re-find #"(?i)insufficient|quota|billing|exceeded your current|payment|per-day|daily limit|1308|使用上限|每日"
-                        msg)))))
+      ;; The vocabulary is wordlists.edn :usage-cap-signals — a fact about
+      ;; PROVIDERS, who change their error text without asking, so somebody
+      ;; hitting a new gateway's wording can add it and keep working.
+      (boolean (re-find (usage-cap-re) msg)))))
 
 (defn openai-family
   "Build an adapter for an OpenAI-compatible endpoint.

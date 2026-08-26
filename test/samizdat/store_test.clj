@@ -34,6 +34,8 @@
             [samizdat.store.artifacts :as artifacts]
             [samizdat.store.db :as db]
             [samizdat.store.interventions :as interventions]
+            [samizdat.lexicon :as lexicon]
+            [samizdat.store.failures :as failures]
             [samizdat.store.journal :as journal]
             [samizdat.store.migrations :as migrations]
             [samizdat.store.runs :as runs]))
@@ -821,7 +823,7 @@
        (is (re-find #"(?i)UNVERIFIED|not results" block)))))
 
 (deftest a-failed-migration-rolls-back-and-keeps-the-version
-  ;; review2 #3: migrations are non-idempotent ALTERs, but each ran as
+  ;; provenance R2-3: migrations are non-idempotent ALTERs, but each ran as
   ;; autocommitted statements with the version bump after the last one — a
   ;; crash between the two left user_version stale and every later boot
   ;; died on `duplicate column name` forever. A migration must be
@@ -846,7 +848,7 @@
            (set (filter #(str/starts-with? % "mg_") (db/table-names c)))))))
 
 (deftest lifecycle-writes-are-decided-by-the-row
-  ;; review2 #4: finish-run!/mark-running!/close-branch!/resolve! were
+  ;; provenance R2-4: finish-run!/mark-running!/close-branch!/resolve! were
   ;; WHERE id = ? only, so a stale caller rewrote a terminal run (abort!'s
   ;; transient window vs the run's own completion) or a closed branch's
   ;; inactive_reason. Guards follow reconcile-orphans!'s precedent.
@@ -880,7 +882,7 @@
                                         (interventions/history c rid)))))))))
 
 (deftest old-finished-runs-get-their-events-pruned-on-the-next-start
-  ;; review2 #11: events are a durable duplicate of every turn/artifact/
+  ;; provenance R2-11: events are a durable duplicate of every turn/artifact/
   ;; failure/gate write whose only readers are the live tail and
   ;; last-progress-at; nothing ever pruned them, so the one shared DB file
   ;; grew without bound. The sweep runs at run START, not at finish: a
@@ -922,3 +924,72 @@
         (is (= "stuck" (:gate (first (:unsettled-gates d)))))
         (is (= #{:branch :turns :unsettled-gates :artifacts}
                (set (keys d))))))))
+
+;; --- retention --------------------------------------------------------------
+
+(deftest the-run-record-is-kept-forever-by-default
+  ;; RFC-009's central property is that a resume rebuilds branch state by
+  ;; replay and that a crashed run stays inspectable. Pruning turns ends both
+  ;; for that run, so it is an operator's decision about disk and never a
+  ;; default anyone inherits.
+  (is (nil? (:run-record-days (lexicon/policy :retention)))
+      "if this ever defaults to a number, the harness silently starts
+       discarding the account every other property is built on")
+  (is (pos? (:events-hours (lexicon/policy :retention)))
+      "events are a tail buffer and do sweep on their own"))
+
+(deftest pruning-the-record-leaves-the-run-and-takes-the-detail
+  (with-db [c]
+    (let [rid (runs/start-run! c {:problem "p"})]
+      (runs/open-branch! c rid {:branch-id "B1"})
+      (journal/record-turn! c rid {:branch-id "B1" :turn 1 :tool-name "eval"
+                                   :args {} :result "r" :category "success"})
+      (journal/record-gate! c rid {:branch-id "B1" :turn 1 :gate "stuck"
+                                   :message "m" :prediction "p" :window 3})
+      (failures/record! c rid {:branch-id "B1" :turn 1 :tool-name "eval"
+                               :claim "c" :reason "why"})
+      (runs/finish-run! c rid "completed" "done")
+
+      (testing "a cutoff before the run leaves everything alone"
+        (is (= 0 (journal/prune-run-record! c "2000-01-01T00:00:00Z")))
+        (is (= 1 (count (journal/turns c rid)))))
+
+      (testing "a cutoff after it takes the detail"
+        (is (= 1 (journal/prune-run-record! c "2999-01-01T00:00:00Z")))
+        (is (empty? (journal/turns c rid)))
+        (is (empty? (journal/gate-firings c rid)))
+        (is (empty? (failures/recent c rid))))
+
+      (testing "and leaves the run itself — an index of what happened,
+                without the bulk, which beats a deleted row when somebody
+                asks what happened six months ago"
+        (let [r (runs/get-run c rid)]
+          (is (some? r))
+          (is (= "completed" (:status r)))
+          (is (= "p" (:problem r))))))))
+
+(deftest a-running-run-is-never-pruned
+  ;; A row that says it is running is either live or a leftover
+  ;; reconcile-orphans! has not seen yet, and neither is safe to strip.
+  (with-db [c]
+    (let [rid (runs/start-run! c {:problem "p"})]
+      (runs/open-branch! c rid {:branch-id "B1"})
+      (journal/record-turn! c rid {:branch-id "B1" :turn 1 :tool-name "eval"
+                                   :args {} :result "r" :category "success"})
+      (is (= 0 (journal/prune-run-record! c "2999-01-01T00:00:00Z")))
+      (is (= 1 (count (journal/turns c rid)))))))
+
+(deftest pruning-takes-the-fts-mirror-with-the-rows
+  ;; An orphaned index entry keeps ranking against nothing, which is worse
+  ;; than either keeping or deleting cleanly. The deletes are ordered so the
+  ;; subquery that finds the rowids still has rows to find.
+  (with-db [c]
+    (let [rid (runs/start-run! c {:problem "p"})]
+      (runs/open-branch! c rid {:branch-id "B1"})
+      (failures/record! c rid {:branch-id "B1" :turn 1 :tool-name "eval"
+                               :claim "the greedy bound holds" :reason "it does not"})
+      (runs/finish-run! c rid "completed" "done")
+      (is (seq (failures/similar c rid "greedy bound")))
+      (journal/prune-run-record! c "2999-01-01T00:00:00Z")
+      (is (empty? (failures/similar c rid "greedy bound"))
+          "the index went with the rows"))))

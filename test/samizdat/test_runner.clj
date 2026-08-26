@@ -65,6 +65,11 @@
             [mycelium.validation-test]
             [mycelium.workflow-test]
             [samizdat.agent-test]
+            [samizdat.base-test]
+            [samizdat.boundary-test]
+            [samizdat.session-test]
+            [samizdat.reflect-test]
+            [samizdat.watch-test]
             [samizdat.tasks-test]
             [samizdat.knowledge-test]
             [samizdat.messages-test]
@@ -94,6 +99,14 @@
             [samizdat.cells-test]
             [samizdat.mutation-test]
             [samizdat.repl-test]
+            [samizdat.tape-test]
+            [samizdat.infer-test]
+            [samizdat.fork-test]
+            [samizdat.probe-test]
+            [samizdat.manual-test]
+            [samizdat.userspace-test]
+            [samizdat.beam-test]
+            [samizdat.kanban-test]
             [samizdat.security.policy-test]
             [samizdat.llm-test]
             [samizdat.prompt-test]
@@ -155,6 +168,11 @@
     samizdat.store-test
     samizdat.llm-test
     samizdat.agent-test
+    samizdat.base-test
+    samizdat.boundary-test
+    samizdat.session-test
+    samizdat.reflect-test
+    samizdat.watch-test
     samizdat.tasks-test
     samizdat.knowledge-test
     samizdat.messages-test
@@ -184,6 +202,14 @@
     samizdat.cells-test
     samizdat.mutation-test
     samizdat.repl-test
+    samizdat.tape-test
+    samizdat.infer-test
+    samizdat.fork-test
+    samizdat.probe-test
+    samizdat.manual-test
+    samizdat.userspace-test
+    samizdat.beam-test
+    samizdat.kanban-test
     samizdat.security.policy-test
     samizdat.prompt-test
     samizdat.server-test

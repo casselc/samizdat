@@ -106,7 +106,8 @@
         when a unit is stuck, split it (architect) and solve the sub-units first,
         then assemble. Landed => the manager branch ships the tree; failed =>
         abandoned honestly."
-   :effects [:net :db]}
+   :effects [:net :db]
+   :requires [:conn :run-id]}
   (fn [{:keys [conn run-id] :as ctx} {:keys [branch] :as data}]
     (let [worker (wf/worker-compiled)
           root {:id "T" :problem (:problem branch)}

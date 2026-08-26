@@ -27,10 +27,12 @@
             [clojure.test :refer [deftest testing is are]]
             [jolt.http-client :as http]
             [samizdat.llm.adapter :as adapter]
+            [samizdat.llm.adapter.openai :as openai]
             [samizdat.llm.client :as client]
             [samizdat.llm.fence :as fence]
             [samizdat.llm.message :as message]
-            [samizdat.llm.registry :as registry]))
+            [samizdat.llm.registry :as registry]
+            [samizdat.tape :as tape]))
 
 ;; --- fence extraction -------------------------------------------------------
 
@@ -156,12 +158,15 @@
   ;; A 19-turn branch carries ~26KB on the wire against ~1.5KB of digest, and
   ;; the longest branch on record is 86 turns.
   ;;
-  ;; The system prompt and the problem always survive, the recent turns survive
-  ;; verbatim because that is the branch's working memory, and everything older
-  ;; collapses to one line per turn. Details stay in the journal and the
-  ;; artifacts are fetchable by id, so nothing is lost — only unloaded.
-  (let [pair (fn [i] [{:role "assistant" :content (str "long reasoning " i (apply str (repeat 400 "x")))}
-                      {:role "user" :content (str "result " i (apply str (repeat 400 "y")))}])
+  ;; LR-4 changed the MECHANISM, not the goal. The digest used to be appended
+  ;; to the PROBLEM message and the aged-out pairs dropped; now each aged-out
+  ;; message is replaced IN PLACE, so roles, order and count are identical and
+  ;; the shared prefix stops being rewritten on every compaction. The frame
+  ;; and the recent window are as protected as they ever were.
+  (let [pair (fn [i] [{:role "assistant" :turn i
+                       :content (str "long reasoning " i (apply str (repeat 400 "x")))}
+                      {:role "user" :turn i
+                       :content (str "result " i (apply str (repeat 400 "y")))}])
         msgs (into [{:role "system" :content "SYS"}
                     {:role "user" :content "## Problem\n\nsolve it"}]
                    (mapcat pair (range 1 21)))
@@ -170,27 +175,52 @@
                              :error (when (even? i) "boom")})
                     (range 1 21))
         out (message/compact msgs turns {:keep-pairs 4 :threshold-chars 1000})]
-    (testing "the frame survives"
-      (is (= "system" (:role (first out))))
-      (is (= "SYS" (:content (first out))))
-      (is (str/includes? (:content (second out)) "solve it")))
-    (testing "the digest rides on the problem message, so roles stay alternating"
-      (is (= "user" (:role (second out))))
-      (is (= ["assistant" "user" "assistant" "user" "assistant" "user" "assistant" "user"]
-             (mapv :role (drop 2 out)))))
+    (testing "the frame survives untouched — the whole prefix cache rests on it"
+      (is (= (first msgs) (first out)))
+      (is (= (second msgs) (second out))))
+    (testing "the shape is identical, so alternation needs no provider to be forgiving"
+      (is (= (count msgs) (count out)))
+      (is (= (mapv :role msgs) (mapv :role out))))
     (testing "recent turns survive verbatim"
-      (is (str/includes? (:content (nth out 2)) "long reasoning 17"))
+      (is (str/includes? (:content (nth out (- (count out) 8))) "long reasoning 17"))
       (is (str/includes? (:content (last out)) "result 20")))
-    (testing "early turns are gone as prose but present as a digest"
+    (testing "early turns are unloaded as prose but retained as what was tried"
       (let [all (str/join "\n" (map :content out))]
-        (is (not (str/includes? all "long reasoning 3")) "the prose is unloaded")
-        (is (str/includes? all "tool3") "but what it tried is retained")
+        (is (not (str/includes? all "long reasoning 3"))
+            "the prose of an unloaded turn is gone from the wire")
+        (is (str/includes? all "tool3") "what it tried is retained")
         (is (str/includes? all "tool16"))
         (is (not (str/includes? all "tool17"))
             "turns kept verbatim are not also digested")))
+    (testing "a message's own turn stamp is what picks its digest, not its position"
+      ;; The positional guess was unsound: a provider error or a no-call turn
+      ;; appends messages without appending a turn row.
+      (is (str/includes? (:content (nth out 2)) "t1 tool1")))
+    (testing "the original prose is kept on the branch's copy for the record"
+      (is (str/includes? (:original (nth out 2)) "long reasoning 1")))
     (testing "it is smaller"
       (is (< (count (str/join (map :content out)))
              (quot (count (str/join (map :content msgs))) 2))))
+    (testing "compacting twice is idempotent — one attempt per message, ever"
+      (is (= out (message/compact out turns {:keep-pairs 4 :threshold-chars 1000}))))
+    (testing "THE POINT: the prefix before the newest compaction never moves"
+      ;; Two consecutive turns' worth of wire messages. Under the old
+      ;; append-to-the-problem-message scheme, message 1 differed between
+      ;; these two and every cached token after it was invalidated.
+      (let [later (into msgs (mapcat pair [21 22]))
+            turns' (into turns [{:turn 21 :tool "tool21" :category :success}
+                                {:turn 22 :tool "tool22" :category :success}])
+            out' (message/compact later turns' {:keep-pairs 4 :threshold-chars 1000})
+            ;; The region BOTH calls had aged out: everything before the
+            ;; FIRST call's verbatim window. Two more turns move that window
+            ;; forward, so the messages between the old boundary and the new
+            ;; one get compacted for the first time in out' — the boundary
+            ;; advancing is the one place a rewrite is supposed to happen.
+            settled (tape/window-index msgs 4)]
+        (is (= (take settled out) (take settled out'))
+            "everything already compacted is byte-identical between turns")
+        (is (= (take 2 msgs) (take 2 out'))
+            "and the frame is still the frame — the old scheme rewrote index 1 here")))
     (testing "a short history is left exactly alone"
       (let [short-msgs (into [{:role "system" :content "SYS"}
                               {:role "user" :content "P"}]
@@ -315,7 +345,7 @@
     "{not json at all")
 
   (testing "the error text names the causes the repair pass does not cover"
-    (let [p (fence/parse-tool-call (fenced "{\"name\": \"x\", \"args\": {\"a\": \"un\"escaped\"}}"))]
+    (let [p (fence/parse-tool-call (fenced "{\"name\": \"x\", \"args\": {\"a\": \"un\"escaped\"}"))]
       (is (= "__parse_error__" (:name p)))
       (is (str/includes? (:parse-error p) "unescaped quote")))))
 
@@ -347,8 +377,10 @@
     (let [body "{\"name\": \"x\", \"args\": {\"p\": \"a\\\\\"}}"]
       (is (= "a\\" (get-in (fence/parse-tool-call (fenced body)) [:args :p])))))
 
-  (testing "repair on a body that is broken beyond control characters still fails"
-    (let [p (fence/parse-tool-call (fenced "{\"name\": \"x\", \"args\": {\"c\": \"a\nb\""))]
+  (testing "a body that ends INSIDE a string is not repaired — that is what a
+            reply cut off by the token cap looks like, and completing it would
+            hand write_file half a file to overwrite the whole one with"
+    (let [p (fence/parse-tool-call (fenced "{\"name\": \"x\", \"args\": {\"c\": \"a\nb"))]
       (is (= "__parse_error__" (:name p)))
       (is (:auto-repaired? p) "the repair was attempted and is recorded even though it failed"))))
 
@@ -469,6 +501,39 @@
         (is (str/includes? (:content p) "shipped the partial")
             "so the loop's fence parser reads it exactly like a normal tool call")))))
 
+(deftest the-local-endpoint-gets-prefix-cache-reuse-and-nobody-else-does
+  ;; LR-5. An inherited fork and a fan of probes off one tape are only cheap if
+  ;; the server reuses the warm prefix instead of re-prefilling it; without
+  ;; cache_prompt that is most of their cost. Design copied from llm-repl's
+  ;; llama-wire: cache_prompt on the local path, id_slot ONLY from an explicit
+  ;; slots table, because a slot count is a property of how the server was
+  ;; launched and a guessed index evicts somebody else's warm prefix.
+  (let [local (registry/adapter-for :local)
+        cfg {:base-url "http://127.0.0.1:8080/v1" :model "local-model"}
+        opts {:messages [{:role "user" :content "x"}] :cache-key "B1"}]
+    (testing "the local endpoint asks for prefix reuse"
+      (is (true? (:cache_prompt (adapter/chat-body local cfg opts)))))
+    (testing "no id_slot without an explicit slots table — the server picks"
+      (is (nil? (:id_slot (adapter/chat-body local cfg opts)))))
+    (testing "a configured slot pins the conversation"
+      (is (= 2 (:id_slot (adapter/chat-body local (assoc cfg :slots {"B1" 2}) opts)))))
+    (testing "a cache key with no matching slot entry still gets reuse, unpinned"
+      (let [body (adapter/chat-body local (assoc cfg :slots {"B9" 0}) opts)]
+        (is (true? (:cache_prompt body)))
+        (is (nil? (:id_slot body)))))
+    (testing "no cache key, no wire change"
+      (is (nil? (:cache_prompt (adapter/chat-body local cfg (dissoc opts :cache-key))))))
+    (testing "every hosted provider's body is byte-identical with or without the key"
+      (doseq [p [:deepseek :glm :openai]]
+        (let [a (registry/adapter-for p)]
+          (is (= (adapter/chat-body a (assoc cfg :api-key "k") (dissoc opts :cache-key))
+                 (adapter/chat-body a (assoc cfg :api-key "k") opts))
+              (str (name p) " must ignore a knob it has nowhere to put")))))
+    (testing "Ollama ignores it too"
+      (let [a (registry/adapter-for :ollama)]
+        (is (= (adapter/chat-body a cfg (dissoc opts :cache-key))
+               (adapter/chat-body a cfg opts)))))))
+
 (deftest adapters-differ-only-where-they-should
   (let [cfg {:base-url "https://api.example.com/v1" :model "m" :api-key "k"}]
     (testing "the OpenAI family"
@@ -560,7 +625,7 @@
         (is (true? (:prefix (last msgs))))))
 
     (testing "chat-body gates prefill through the protocol, not a private twin"
-      ;; review3 #14: chat-body consulted a private supports-prefill? while
+      ;; provenance R3-14: chat-body consulted a private supports-prefill? while
       ;; the protocol method delegated to it — two paths deciding one
       ;; question, so a provider update touching one left the other behind.
       ;; The protocol method is the only gate now: overriding it must change
@@ -704,7 +769,7 @@
   (testing "the ask is unclamped — the ceiling lives at the sleep"
     ;; The clamp used to sit in retry-after-ms, which made the in-run cap
     ;; check compare a 60s-bounded number against a 300s threshold and so
-    ;; never fire (code-review-2026-08 #2).
+    ;; never fire (provenance CR1-2).
     (is (= 3600000 (client/retry-after-ms {"retry-after" "3600"})))
     (is (= client/max-backoff-ms (#'client/backoff-ms 0 {"retry-after" "3600"}))
         "what we actually sleep is still bounded by our ceiling"))
@@ -840,7 +905,7 @@
     (is (nil? (fence/parse-tool-call "<invoke>no name here</invoke>")))))
 
 (deftest retry-after-is-the-providers-ask-unclamped
-  ;; code-review-2026-08 #2: the value was clamped to max-backoff-ms (60s)
+  ;; provenance CR1-2: the value was clamped to max-backoff-ms (60s)
   ;; BEFORE the in-run cap check compared it against max-in-run-retry-wait-ms
   ;; (300s) — a 60s ceiling under a 300s guard made the "usage cap wearing a
   ;; rate limit" branch unreachable. The clamp belongs at the sleep, not here.
@@ -979,3 +1044,115 @@
       (is (:unfenced? p)))
     (is (nil? (fence/parse-tool-call "```tool-call\nI will search for it"))
         "and an opener over prose is still no call at all")))
+
+;; --- identifying a llama.cpp endpoint ---------------------------------------
+
+(deftest a-llama-cpp-endpoint-is-identified-by-asking-not-by-config-key
+  ;; RFC-005 recorded that :local was decided by which config key an endpoint
+  ;; sat under, so a llama-server configured as :openai silently got no prefix
+  ;; pinning. The naive repair — send cache_prompt everywhere and let servers
+  ;; ignore it — is worse than the gap: dirge measured strict OpenAI-compatible
+  ;; servers answering 422 on the whole request over one unknown field, so a
+  ;; field sent hopefully is a session that cannot make a single request.
+  (let [hosted (openai/openai-family {:id :openai :label "O"})
+        req {:messages [] :max-tokens 10 :cache-key "B1"}]
+    (testing "a hosted endpoint's body is untouched"
+      (let [body (adapter/chat-body hosted {:base-url "u"} req)]
+        (is (nil? (:cache_prompt body)))
+        (is (nil? (:chat_template_kwargs body)))
+        (is (nil? (:id_slot body)))))
+
+    (testing "the same adapter, once /props identified it, gets the knobs"
+      (let [body (adapter/chat-body hosted {:base-url "u" :llama-cpp? true} req)]
+        (is (true? (:cache_prompt body)))))))
+
+(deftest thinking-is-off-by-default-on-a-local-endpoint
+  ;; llama.cpp has Qwen-family reasoning ON by default and `/no_think` in the
+  ;; PROMPT does not disable it — the chat template decides, not the text. A
+  ;; local model can therefore spend its whole output budget thinking and
+  ;; return a reply with neither content nor a tool call. This layer already
+  ;; treats that reply as an error rather than an empty answer, which is the
+  ;; right reading and does nothing to prevent it.
+  (let [local (openai/openai-family {:id :local :label "L"})
+        req {:messages [] :max-tokens 10 :cache-key "B1"}]
+    (is (= {:enable_thinking false}
+           (:chat_template_kwargs (adapter/chat-body local {:base-url "u"} req))))
+    (testing "and a reasoning model asked to reason is still a valid config"
+      (is (nil? (:chat_template_kwargs
+                 (adapter/chat-body local {:base-url "u" :thinking? true} req)))))))
+
+(deftest an-id-slot-is-pinned-only-from-an-explicit-table
+  ;; A slot count is a property of how the server was launched; inventing an
+  ;; index evicts another conversation's warm prefix to serve a guess.
+  (let [local (openai/openai-family {:id :local :label "L"})
+        req {:messages [] :max-tokens 10 :cache-key "B1"}]
+    (is (nil? (:id_slot (adapter/chat-body local {:base-url "u"} req))))
+    (is (= 3 (:id_slot (adapter/chat-body local {:base-url "u" :slots {"B1" 3}} req))))
+    (is (nil? (:id_slot (adapter/chat-body local {:base-url "u" :slots {"other" 3}} req))))))
+
+(deftest the-probe-answers-nil-for-anything-that-is-not-llama-cpp
+  ;; Unreachable, not-llama.cpp and malformed are the same answer, and none of
+  ;; them is a reason not to start.
+  (with-redefs [http/get (fn [& _] {:status 404 :body "not found"})]
+    (is (nil? (client/probe-llama-cpp {:base-url "http://x/v1"}))))
+  (with-redefs [http/get (fn [& _] {:status 200 :body "{\"object\":\"list\"}"})]
+    (is (nil? (client/probe-llama-cpp {:base-url "http://x/v1"}))
+        "a 200 without total_slots is some other server"))
+  (with-redefs [http/get (fn [& _] (throw (ex-info "connection refused" {})))]
+    (is (nil? (client/probe-llama-cpp {:base-url "http://x/v1"}))))
+  (with-redefs [http/get (fn [& _] {:status 200 :body "{\"total_slots\": 4}"})]
+    (is (= {:llama-cpp? true :total-slots 4}
+           (client/probe-llama-cpp {:base-url "http://x/v1"}))
+        "and total_slots is the server saying how it was launched")))
+
+;; --- repairing a tool call the model nearly got right -----------------------
+
+(deftest a-missing-closing-brace-is-repaired-not-refused
+  ;; Observed live, TWICE in one fourteen-turn run, on the two calls carrying
+  ;; the run's actual work: the model emitted a complete write_file whose args
+  ;; object closed and whose outer object did not. The reply was not truncated
+  ;; — it finished cleanly inside the fence — the model simply miscounted,
+  ;; which is what happens when the closing braces are eight hundred
+  ;; characters of escaped Clojure away from their openers.
+  ;;
+  ;; Fourteen percent of that run's turns died on one absent character the
+  ;; harness could supply deterministically.
+  (let [reply (str "```tool-call\n"
+                   "{\"name\": \"write_file\", \"args\": {\"path\": \"src/todo/core.clj\","
+                   " \"content\": \"(ns todo.core)\\n\\n(defn add [ts t] (conj ts {:t t}))\"}"
+                   "\n```")
+        parsed (fence/parse-tool-call reply)]
+    (is (= "write_file" (:name parsed)))
+    (is (= "src/todo/core.clj" (get-in parsed [:args :path])))
+    (is (str/includes? (get-in parsed [:args :content]) "(defn add"))
+    (is (true? (:auto-repaired? parsed))
+        "a branch whose calls need repairing is a fact the mechanics tally
+         should see, so the repair is never silent")))
+
+(deftest the-brace-repair-only-adds-and-only-outside-strings
+  (testing "a brace inside a content string is text, not structure — the case
+            that matters, since the argument is usually source code"
+    (is (= "{\"content\": \"{{{ [[[ \"}"
+           (fence/close-unbalanced "{\"content\": \"{{{ [[[ \"}"))))
+
+  (testing "an escaped quote does not end the string"
+    (is (= "{\"a\": \"say \\\"{\\\" here\"}"
+           (fence/close-unbalanced "{\"a\": \"say \\\"{\\\" here\"}"))))
+
+  (testing "already balanced is untouched"
+    (is (= "{\"a\": [1 2]}" (fence/close-unbalanced "{\"a\": [1 2]}"))))
+
+  (testing "too many closers is a different mistake and is left to be reported"
+    (is (= "{\"a\": 1}}" (fence/close-unbalanced "{\"a\": 1}}"))))
+
+  (testing "nested openers close in the right order — a stack, not a count"
+    (is (= "{\"a\": {\"b\": [1]}}" (fence/close-unbalanced "{\"a\": {\"b\": [1"))))
+
+  (testing "a body ending inside a string is refused, however unbalanced"
+    (is (= "{\"a\": \"unfinished" (fence/close-unbalanced "{\"a\": \"unfinished")))))
+
+(deftest a-body-that-cannot-be-repaired-still-explains-itself
+  (let [parsed (fence/parse-tool-call "```tool-call\n{\"name\": not-json}\n```")]
+    (is (= "__parse_error__" (:name parsed)))
+    (is (str/includes? (:parse-error parsed) "brace")
+        "the complaint names the missing-closer cause alongside the others")))

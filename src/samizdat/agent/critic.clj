@@ -41,7 +41,8 @@
             [samizdat.llm.message :as message]
             [samizdat.llm.client :as llm]
             [samizdat.prompt :as prompt]
-            [samizdat.store.journal :as journal]))
+            [samizdat.store.journal :as journal]
+            [samizdat.util :as util]))
 
 ;; The score prompt is resources/prompts/critic.md (tier 2a), rendered by
 ;; selmer — the shared samizdat.prompt seam every gate message reads through.
@@ -55,8 +56,11 @@
   :momentum      whether the RECENT turns are productive or flailing
   :distinctness  how different this approach is from the sibling theses —
                  the beam's diversity lives here
-  :viability     whether the current line has anywhere left to go"
-  (vec (gates/threshold :critic-objectives)))
+  :viability     whether the current line has anywhere left to go
+
+  Memoized against the gates generation rather than realized at namespace
+  load, so `reload-config!` actually moves it."
+  (util/generation-cache gates/gen #(vec (gates/threshold :critic-objectives))))
 
 (defn parse-scores
   "Line-anchored `SCORE <objective>: <1-5>` lines out of a critic response.
@@ -66,16 +70,21 @@
   drafts and the last wins, and anything short of all four objectives in
   range returns nil — no information, fail closed."
   [text]
-  (let [t (message/strip-think-blocks text)
+  (let [objs (objectives)
+        {:keys [min max]} (gates/threshold :critic-scale)
+        ;; Built from the rubric rather than written beside it. The names and
+        ;; the range are gates.edn, and a pattern that named them again would
+        ;; be a second copy that a retune silently leaves behind.
+        pattern (re-pattern (str "(?i)SCORE\\s+("
+                                 (str/join "|" (map name objs))
+                                 ")\\s*:\\s*([" min "-" max "])\\s*"))
+        t (message/strip-think-blocks text)
         m (into {}
                 (keep (fn [line]
-                        (when-let [[_ obj v]
-                                   (re-matches
-                                    #"(?i)SCORE\s+(progress|momentum|distinctness|viability)\s*:\s*([1-5])\s*"
-                                    (str/trim line))]
+                        (when-let [[_ obj v] (re-matches pattern (str/trim line))]
                           [(keyword (str/lower-case obj)) (parse-long v)])))
                 (str/split-lines t))]
-    (when (= (count objectives) (count m)) m)))
+    (when (= (count objs) (count m)) m)))
 
 (def survival-objectives
   "The objectives a CULL decision reads: everything except :progress.
@@ -87,8 +96,15 @@
   cannot be lost by culling it, so survival should turn on where the line is
   GOING (momentum, viability) and on what it uniquely covers (distinctness).
   A branch that banked a great deal and then stopped moving is exactly the
-  one worth reclaiming budget from."
-  [:momentum :distinctness :viability])
+  one worth reclaiming budget from.
+
+  DERIVED from the rubric — :critic-objectives minus the cumulative ones —
+  rather than listed again, which is what it was: a second vector that a
+  retune of the rubric silently left behind."
+  (util/generation-cache
+   gates/gen
+   #(let [cumulative (set (gates/threshold :critic-cumulative-objectives))]
+      (vec (remove cumulative (objectives))))))
 
 (defn dominated?
   "True when some sibling is at least as good on every survival objective
@@ -96,8 +112,8 @@
   [scores sibling-scores]
   (boolean
    (some (fn [o]
-           (and (every? #(>= (get o % 0) (get scores % 0)) survival-objectives)
-                (some #(> (get o % 0) (get scores % 0)) survival-objectives)))
+           (and (every? #(>= (get o % 0) (get scores % 0)) (survival-objectives))
+                (some #(> (get o % 0) (get scores % 0)) (survival-objectives))))
          sibling-scores)))
 
 (defn- summary
@@ -110,7 +126,9 @@
                          (filter #(= "user" (:role %)))
                          (take-last 2)
                          (map #(let [c (str (:content %))]
-                                 (subs c 0 (min 400 (count c))))))]
+                                 (let [cap (:critic-claim-chars
+                                            (gates/threshold :context-budget))]
+                                   (subs c 0 (min cap (count c)))))))]
     (str "BRANCH " (:id branch) "\n"
          "Thesis: " (or (get-in branch [:thesis :goal]) "(none registered)") "\n"
          "Turns taken: " (state/turn-count branch)
@@ -148,11 +166,13 @@
         scores (try
                  (parse-scores
                   (:content (llm/chat llm-adapter llm-config
+                                      ;; BOTH halves of the critic's prompt come
+                                      ;; from resources. The system half was a
+                                      ;; str in this file, which made the
+                                      ;; critic the one seam where half the
+                                      ;; prompt was editable and half was not.
                                       [{:role "system"
-                                        :content (str "You are a strict research"
-                                                      " director. Keep deliberation"
-                                                      " brief and end with the four"
-                                                      " SCORE lines.")}
+                                        :content (prompt/prompt "critic-system")}
                                        {:role "user" :content p}]
                                       {:temperature 0.0})))
                  (catch Throwable _ nil))]

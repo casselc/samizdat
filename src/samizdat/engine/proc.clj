@@ -54,7 +54,7 @@
 
   SIGTERM the tree first, then SIGKILL whatever is still alive — including
   processes that trapped TERM, which outlived the old root-only escalation as
-  orphans (review3 #8). p/destroy-tree is deliberately NOT used: on jolt it
+  orphans (provenance R3-8). p/destroy-tree is deliberately NOT used: on jolt it
   signals through ProcessHandle.destroy, which silently does nothing, so its
   tree-wide TERM never landed at all.
 

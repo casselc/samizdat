@@ -32,10 +32,12 @@
   Session grants (human-only, from the grants table) are consulted ahead of the
   base rules, so an approved `ask` becomes an allow for the rest of the run —
   but a hard deny always wins. This is the `perm` node of the security model
-  (docs/security.md), and `run-shell` is where it, the env scrub, and the
+  (docs/RFCS/RFC-003-security-model.md), and `run-shell` is where it, the env scrub, and the
   redaction boundary meet on the shell tool path."
   (:require [clojure.string :as str]
             [samizdat.engine.proc :as proc]
+            [samizdat.lexicon :as lexicon]
+            [samizdat.prompt :as prompt]
             [samizdat.security.secrets :as secrets]
             [samizdat.store.grants :as grants]
             [samizdat.util :as util]))
@@ -78,8 +80,14 @@
 
 (defn- shell-split
   "One quote-aware pass over a command string, yielding its shell STRUCTURE:
-  the statement segments (split at unquoted `;`, `|`, `&`, and newline) and
-  whether an unquoted redirection (`<` or `>`) appears anywhere.
+  the statement segments (split at unquoted `;`, `|`, `&`, and newline), WHICH
+  of those separators it actually saw, and whether an unquoted redirection
+  (`<` or `>`) appears anywhere.
+
+  The separator set is reported because they are not equally dangerous. A `|`
+  feeds one allowed command into the next and runs nothing an allow rule
+  cannot see; a `;` or `&` starts a statement that has nothing to do with the
+  first. `decide` uses the distinction to stop refusing `grep x | head`.
 
   Quote semantics follow bash: single quotes are literal (nothing inside is
   an operator, not even backslash), double quotes honor backslash escapes, and
@@ -88,39 +96,40 @@
 
   Redirection does not split: it does not start a new command, and a deny glob
   (`.*` spans the rest of the string) already covers the tail of its segment.
-  This is the lexer a#1 (docs/code-review.md) asked for — the old regex-only
+  This is the lexer provenance A-1 asked for — the old regex-only
   classification let `echo pwned; rm -rf ~` ride `echo **` because `.*`
   matches `;` too."
   [raw]
   (let [n (count raw)
         sep? #{\; \| \& \newline}]
-    (loop [i 0, state :code, cur [], segs [], redirect? false]
+    (loop [i 0, state :code, cur [], segs [], redirect? false, seps #{}]
       (if (>= i n)
         {:segments (->> (conj segs (apply str cur))
                         (map str/trim)
                         (remove str/blank?)
                         vec)
+         :separators seps
          :redirection? redirect?}
         (let [c (nth raw i)]
           (case state
             :code (cond
                     (= c \\) (if (< (inc i) n)
-                                (recur (+ i 2) :code (into cur [c (nth raw (inc i))]) segs redirect?)
-                                (recur (inc i) :code (conj cur c) segs redirect?))
-                    (= c \') (recur (inc i) :single (conj cur c) segs redirect?)
-                    (= c \") (recur (inc i) :double (conj cur c) segs redirect?)
-                    (sep? c) (recur (inc i) :code [] (conj segs (apply str cur)) redirect?)
-                    (or (= c \<) (= c \>)) (recur (inc i) :code (conj cur c) segs true)
-                    :else (recur (inc i) :code (conj cur c) segs redirect?))
+                                (recur (+ i 2) :code (into cur [c (nth raw (inc i))]) segs redirect? seps)
+                                (recur (inc i) :code (conj cur c) segs redirect? seps))
+                    (= c \') (recur (inc i) :single (conj cur c) segs redirect? seps)
+                    (= c \") (recur (inc i) :double (conj cur c) segs redirect? seps)
+                    (sep? c) (recur (inc i) :code [] (conj segs (apply str cur)) redirect? (conj seps c))
+                    (or (= c \<) (= c \>)) (recur (inc i) :code (conj cur c) segs true seps)
+                    :else (recur (inc i) :code (conj cur c) segs redirect? seps))
             :single (if (= c \')
-                      (recur (inc i) :code (conj cur c) segs redirect?)
-                      (recur (inc i) :single (conj cur c) segs redirect?))
+                      (recur (inc i) :code (conj cur c) segs redirect? seps)
+                      (recur (inc i) :single (conj cur c) segs redirect? seps))
             :double (cond
                       (and (= c \\) (< (inc i) n))
-                      (recur (+ i 2) :double (into cur [c (nth raw (inc i))]) segs redirect?)
+                      (recur (+ i 2) :double (into cur [c (nth raw (inc i))]) segs redirect? seps)
 
-                      (= c \") (recur (inc i) :code (conj cur c) segs redirect?)
-                      :else (recur (inc i) :double (conj cur c) segs redirect?))))))))
+                      (= c \") (recur (inc i) :code (conj cur c) segs redirect? seps)
+                      :else (recur (inc i) :double (conj cur c) segs redirect? seps))))))))
 
 (defn- exec-prefix-stripped
   "The command with leading `VAR=val` assignments and exec wrappers
@@ -156,9 +165,18 @@
   rest of what would run."
   [command]
   (let [raw (str/trim (str command))
-        {:keys [segments redirection?]} (shell-split raw)]
+        {:keys [segments separators redirection?]} (shell-split raw)]
     {:raw raw
      :head (command-head raw)
+     :segments segments
+     ;; A PIPELINE and nothing else: no substitution, no redirection, and the
+     ;; only separator was `|`. Every segment is then a command an allow rule
+     ;; can see in full, which is what lets `decide` stop refusing a pipe
+     ;; between two allowed reads.
+     :pipeline-only? (boolean (and (> (count segments) 1)
+                                   (= #{\|} separators)
+                                   (not redirection?)
+                                   (not (some #(re-find % raw) complex-markers))))
      :complex? (boolean (or (some #(re-find % raw) complex-markers)
                             redirection?
                             (> (count segments) 1)))}))
@@ -176,6 +194,12 @@
    ["which **" :allow] ["type **" :allow] ["cat **" :allow] ["head **" :allow]
    ["tail **" :allow] ["wc **" :allow] ["sort **" :allow] ["uniq **" :allow]
    ["cut **" :allow] ["diff **" :allow] ["grep **" :allow] ["rg **" :allow]
+   ;; sed and awk sit with the other text tools rather than with the mutators:
+   ;; `sed -i` does write, but so do `mv`, `cp`, `touch` and `chmod` below it,
+   ;; and the agent already has an unrestricted `write_file`. Refusing them
+   ;; protected nothing and cost a turn every time a run reached for the most
+   ;; ordinary way to read part of a file.
+   ["sed **" :allow] ["awk **" :allow]
    ["find **" :allow] ["file **" :allow] ["stat **" :allow] ["env" :allow]
    ["date **" :allow] ["whoami" :allow] ["hostname" :allow]
    ;; benign shell builtins
@@ -236,7 +260,7 @@
 
   `session` is {:grants [pattern ...]} from the grants table (empty is fine)."
   [session command]
-  (let [{:keys [raw head complex?]} (classify command)
+  (let [{:keys [raw head complex? pipeline-only? segments]} (classify command)
         ;; Allow matching sees the command RAW — a wrapper prefix changes what
         ;; runs and must not ride an allow. Deny matching sees EVERY statement
         ;; segment (each is a command the shell would run on its own) plus its
@@ -256,14 +280,58 @@
                  deny-hit :deny
                  grant-hit :allow
                  :else (or base-hit default-effect))
-        ;; A complex command cannot ride an allow: downgrade allow → ask, but a
-        ;; deny still stands.
-        effect (if (and complex? (= :allow effect)) :ask effect)]
-    {:effect effect :head head :raw raw}))
+        ;; A PIPELINE of independently-allowed commands is allowed. The blanket
+        ;; downgrade refused `find . -type f | sort` and `grep x | head` —
+        ;; both segments on the list, nothing hidden from a rule — and a run
+        ;; spends a turn on each refusal it meets. The reasoning that makes a
+        ;; compound command opaque does not apply here: `|` starts no
+        ;; statement of its own, so every command the shell will run is one
+        ;; the allow rules just matched. `;`, `&`, substitution and
+        ;; redirection are all still opaque and still downgrade.
+        piped-allow? (and pipeline-only?
+                          (not deny-hit)
+                          (seq segments)
+                          (every? #(= :allow (last-match base-rules [%])) segments))
+        ;; A complex command cannot otherwise ride an allow: downgrade
+        ;; allow → ask, but a deny still stands.
+        promoted? (and complex? (not piped-allow?)
+                       (= :allow (or base-hit default-effect))
+                       (not deny-hit) (not grant-hit))
+        effect (cond
+                 (and piped-allow? (not= :deny effect)) :allow
+                 (and complex? (= :allow effect)) :ask
+                 :else effect)]
+    ;; `:promoted?` — this command WOULD have been allowed on its head and was
+    ;; downgraded for being compound. Returned because the refusal has to be
+    ;; able to say so: without it the message reads "`ls` is not on the allow
+    ;; list", which is false and sent a live run round the same wall twice.
+    {:effect effect :head head :raw raw :complex? complex? :promoted? promoted?}))
 
 ;; --- the shell tool ---------------------------------------------------------
 
-(def ^:private max-output-chars 8000)
+(defn- max-output-chars
+  "How much of a command's output the model sees. gates.edn
+  `:context-budget :shell-output-chars`.
+
+  How much the model gets to see is one table, and this was a constant
+  outside it — larger than `:tool-result-chars` for a good reason (a build
+  log's useful part is at the end of a great deal of noise) that nobody
+  reading either number could see, because they were not in the same place.
+
+  A truncation limit, not a security control: the redaction boundary is
+  applied to what remains, not to what is cut, so raising this cannot expose
+  anything redaction would have caught."
+  []
+  (lexicon/budget :shell-output-chars))
+
+(defn- complex-markers-in
+  "Which compound-command constructs `raw` actually contains, so a refusal can
+  name the one the model used instead of listing every possibility."
+  [raw]
+  (->> [["&&" "&&"] ["||" "||"] ["|" "|"] [";" ";"] ["$(" "$(...)"]
+        ["`" "backticks"] ["<(" "<(...)"] [">" ">"]]
+       (keep (fn [[needle label]] (when (str/includes? raw needle) label)))
+       distinct))
 
 (defn run-shell
   "Run a shell command through the full gate: decide, then (on allow) resolve
@@ -284,7 +352,7 @@
   (let [command (str (:command args))
         env (or (:env ctx) (into {} (System/getenv)))
         session (if (and conn run-id) (grants/for-run conn run-id) {:grants []})
-        {:keys [effect head]} (decide session command)
+        {:keys [effect head complex? promoted?]} (decide session command)
         known (secrets/known-values env command)]
     (case effect
       :deny
@@ -294,10 +362,20 @@
        :policy {:effect :deny}}
 
       :ask
+      ;; The refusal has to teach the fix, or it is just a wall. Observed live
+      ;; twice in one run: the model opened with `ls -la && cat README.md`,
+      ;; was refused, and four turns later tried
+      ;; `find . -type f | head -50 && echo --- && …` — the same shape, because
+      ;; nothing in the first refusal said that being COMPOUND was the reason.
+      ;; It reads as "the shell is closed" rather than "issue these separately".
       {:category :neutral :progress? false :needs-approval true
-       :result (str "Command needs approval: `" command "`.\n"
-                    "This is not on the allow list. A human must grant it"
-                    " (allow-always for `" head " *`) before it can run.")
+       :result (prompt/render "shell-refused"
+                              {:command command :head head :complex? complex?
+                               :promoted promoted?
+                               :markers (when complex?
+                                          (str/join " or "
+                                                    (map #(str "`" % "`")
+                                                         (complex-markers-in command))))})
        :policy {:effect :ask :suggest (str head " *")}}
 
       :allow
@@ -325,7 +403,8 @@
             ;; truncate-middle keeps the head AND tail, because the end of a
             ;; command's output (a test summary, an exit line) is as load-
             ;; bearing as the start.
-            redacted (util/truncate-middle (secrets/redact out known) max-output-chars)]
+            redacted (util/truncate-middle (secrets/redact out known)
+                                           (max-output-chars))]
         ;; A missing exit code is a spawn that did not report one, which is
         ;; not evidence the command succeeded. `(or (:exit r) 0)` read it as
         ;; success, the opposite of what run-verify does with the same shape;

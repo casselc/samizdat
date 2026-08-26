@@ -17,30 +17,35 @@
 ;; SPDX-License-Identifier: GPL-3.0-or-later
 
 (ns samizdat.agent.loop
-  "The branch loop: one turn is one model call, one tool call, one arbiter
-  decision, and a journal append.
+  "WHAT A TURN IS MADE OF. The steps — assemble, call, absorb, dispatch,
+  journal, arbitrate, steer — as public functions with nothing composing them.
 
-  Phase 3 runs a single branch. The beam in Phase 4 schedules many of these;
-  nothing here assumes it is alone, which is why every write already carries a
-  branch id.
+  What a turn IS lives in the loop manifest, whose cells call these. This
+  namespace held a `run-turn` that composed them itself, which meant there were
+  two definitions of a turn and an edit to the manifest reached only one; see
+  samizdat.workflow/run-turn, which is now the only composition.
 
-  The order inside a turn is load-bearing. The tool runs before the arbiter, so
-  a gate sees the state the turn produced rather than the state it started
-  from. Predictions settle before new gates fire, so a gate cannot be credited
-  with an outcome that preceded it."
+  Nothing here assumes it is running alone — every write carries a branch id —
+  because the beam schedules many branches through the same steps.
+
+  THE ORDER IS LOAD-BEARING, and the manifest is where it is now written down.
+  The tool runs before the arbiter, so a gate sees the state the turn produced
+  rather than the state it started from. Predictions settle before new gates
+  fire, so a gate cannot be credited with an outcome that preceded it. Those
+  constraints are the manifest's to keep; what this namespace guarantees is
+  that each step does one thing and says what it touched."
   (:require [clojure.java.io :as io]
             [clojure.string :as str]
             [clojure.tools.logging :as log]
             [samizdat.agent.arbiter :as arbiter]
             [samizdat.agent.gates :as gates]
+            [samizdat.agent.infer :as infer]
             [samizdat.agent.phases :as phases]
             [samizdat.agent.state :as state]
             [samizdat.agent.tools :as tools]
-            [samizdat.llm.client :as llm]
-            [samizdat.llm.fence :as fence]
             [samizdat.agent.skills :as skills]
-            [samizdat.llm.message :as message]
             [samizdat.prompt :as prompt]
+            [samizdat.session :as session]
             [samizdat.store.artifacts :as artifacts]
             [samizdat.store.failures :as failures]
             [samizdat.store.interventions :as interventions]
@@ -49,7 +54,12 @@
             [samizdat.store.messages :as messages]
             [samizdat.store.runs :as runs]))
 
-(def max-result-chars 4000)
+(defn max-result-chars
+  "How much of one tool result the branch is shown, from gates.edn
+  :context-budget. A project reading generated files needs a different number
+  from one reading hand-written namespaces, which is why it is not a constant."
+  []
+  (:tool-result-chars (gates/threshold :context-budget)))
 
 (defn system-prompt
   "The system prompt, with the template catalogue substituted in.
@@ -69,7 +79,13 @@
   ;; the prompt but cheap — names and trigger descriptions only, never
   ;; bodies — so the model knows what it can `skill load` and WHEN,
   ;; without spending a turn to discover them.
-  (prompt/render "system"
+  ;;
+  ;; The TEXT comes through the :system chain (prompt-chain.edn, LR-7), so a
+  ;; project can replace the shipped prompt outright or suppress it entirely.
+  ;; First-present-wins: a level replaces, never concatenates. A suppressed
+  ;; base is legitimate — a workflow's own :prompt then IS the instruction
+  ;; set — so this renders empty rather than falling back to the shipped file.
+  (prompt/render-str (or (prompt/layer :system) "")
     {:templates ""
      :skills (skills/render-catalog)}))
 
@@ -78,7 +94,9 @@
   than a slurp inline so the digest can be attributable to it; re-read per
   digest, which is per run."
   []
-  (slurp (io/resource "prompts/judge-exemptions.md")))
+  ;; Through the prompt seam, so a project can tune what its judges must not
+  ;; flag without editing the harness for everyone.
+  (prompt/prompt "judge-exemptions"))
 
 (defn prompt-digest
   "A cheap fingerprint of the prompt and gate set a run used. AHE component
@@ -100,10 +118,17 @@
                   (or (not require-relevance?)
                       (state/advances-thesis? branch (:claim artifact)))))))
 
-(defn- truncate [s]
-  (let [s (str s)]
-    (if (> (count s) max-result-chars)
-      (str (subs s 0 max-result-chars) "\n… [truncated]")
+(defn- truncate
+  "Clip a tool result to the budget, ending with what the model can DO about
+  it. See gates.edn :tool-clip for why the marker carries the sizes and the
+  instruction rather than the bare word `truncated`."
+  [s]
+  (let [s (str s)
+        cap (max-result-chars)]
+    (if (> (count s) cap)
+      (str (subs s 0 cap)
+           (prompt/render-str (:message (gates/threshold :tool-clip))
+                              {:shown cap :total (count s)}))
       s)))
 
 (defn initial-messages
@@ -117,7 +142,9 @@
    [{:role "system" :content (cond-> (system-prompt)
                                (not (str/blank? prompt-suffix))
                                (str "\n\n" prompt-suffix))}
-    {:role "user" :content (str "## Problem\n\n" problem "\n\nIssue your first tool call.")}]))
+    ;; The opening user turn is prose the model reads and a project may want
+    ;; worded differently — prompts/problem.md, not a `str` here.
+    {:role "user" :content (prompt/render "problem" {:problem problem})}]))
 
 (defn- context-block
   "What the harness adds to the branch's view before its next turn: the
@@ -158,7 +185,24 @@
       (journal/note! conn run-id :shared-artifact-hit
                      {:branch-id (:id branch)
                       :data {:claim (:claim a) :source-branch (:branch_id a)}}))
-    (let [blocks (keep identity [;; The run's settled state, first and complete:
+    (let [blocks (keep identity [;; WHAT THIS BRANCH IS WORKING ON, first in the
+                                 ;; block. Restated every turn rather than held
+                                 ;; at a fixed position near the top of the
+                                 ;; array: the block is appended at the END,
+                                 ;; which is where the prefix-cache boundary
+                                 ;; already is, so this costs nothing per turn —
+                                 ;; whereas a block maintained early in the
+                                 ;; array invalidates every cached token behind
+                                 ;; it each time the task changes. The task's
+                                 ;; full statement is pinned into the tape once
+                                 ;; on claim (tools/tasks); this is the
+                                 ;; reminder, and the end is where a model
+                                 ;; attends most.
+                                 (if-let [t (:task branch)]
+                                   (prompt/render "task-current"
+                                     {:id (:id t) :title (:title t)})
+                                   (prompt/prompt "task-none"))
+                                 ;; The run's settled state, first and complete:
                                  ;; what is established and — the half nothing
                                  ;; carried before — what is RULED OUT. Read
                                  ;; from the artifacts table every turn, so it
@@ -179,7 +223,9 @@
                                  ;; a bounded preview; nil when the inbox is
                                  ;; empty. Surfacing does not consume — the
                                  ;; message tool's inbox action marks read.
-                                 (messages/render-inbox conn run-id (:id branch))
+                                 (messages/render-inbox
+                                  conn run-id (:id branch)
+                                  (:inbox-lines (gates/threshold :context-budget)))
                                  (failures/render fhits)
                                  (artifacts/render ahits)])]
       {:block (when (seq blocks) (str/join "\n\n" blocks))
@@ -187,77 +233,16 @@
 
 ;; --- one turn ---------------------------------------------------------------
 
-(def ^:private max-call-attempts
-  "One retry, then the turn is spent. Unbounded escalation here would let a
-  single turn eat a branch's whole budget, and a model that has not reached a
-  tool call in twice its cap is not one token short."
-  2)
-
-(defn- truncated-without-call?
-  "The response ran out of tokens before it emitted a usable tool call.
-
-  fence/signals already separates this from `:no-fence` and its docstring says
-  what to do about it — 'the fix is more tokens, not more steering' — but the
-  loop steered anyway and forfeited the turn. gen-12 opened with three of these
-  in a single round; gen-11 spent 12% of its turns this way against gen-10's
-  4%. Truncation that still carried a call is a complete turn and is left
-  alone.
-
-  Takes the prefill for the same reason the parser does: a prefilled response
-  begins mid-fence, so parsing it without the opener finds no call and would
-  bill the branch a retry for a turn that had in fact issued one."
-  [response prefill]
-  (let [parsed (fence/parse-tool-call (:content response) {:prefill prefill})]
-    (and (:truncated (fence/signals response parsed))
-         (or (nil? parsed) (= "__parse_error__" (:name parsed))))))
-
 (defn call-model
-  "One model call, retried once at a doubled budget when the first response hit
-  the token cap before emitting a tool call.
+  "One model call for `branch`, through the injected inference seam.
 
-  Same sizing as the judge's: double the configured budget rather than repeat
-  it, since a response that ran out of room needs room, and repeating the call
-  at the same cap reproduces the same truncation."
+  The mechanism moved to samizdat.agent.infer, where the tape is a value and
+  `complete` is an argument — this is the branch-shaped wrapper the cells and
+  the beam call. Same behaviour as before: one retry at a doubled budget when
+  the response hit the token cap before emitting a tool call, and a provider
+  failure returned as {:ok false :error} rather than thrown."
   [ctx branch]
-  (loop [attempt 1]
-    (let [budget (when-let [base (:max-tokens (:llm-config ctx))]
-                   (* base (bit-shift-left 1 (dec attempt))))
-          r (try
-              {:ok true
-               :response (llm/chat (:llm-adapter ctx) (:llm-config ctx)
-                                   ;; Older turns go as a digest of what they
-                                   ;; tried once the history is long; the
-                                   ;; branch's own message list is untouched,
-                                   ;; so the journal and a resume still hold
-                                   ;; everything. Below the threshold this
-                                   ;; returns the messages unchanged.
-                                   (message/compact (:messages branch)
-                                                    (:turns branch))
-                                   (cond-> {}
-                                     budget (assoc :max-tokens budget)
-                                     ;; Set by the previous turn's steer. The
-                                     ;; adapter drops it if the provider cannot
-                                     ;; continue a trailing assistant message,
-                                     ;; so this is a hint, never a requirement.
-                                     (:prefill branch)
-                                     (assoc :prefill (:prefill branch))
-                                     ;; A gate forcing a specific tool: sent as a
-                                     ;; native tool_choice, honoured on every
-                                     ;; OpenAI-compatible provider (GLM included).
-                                     (:force-tool branch)
-                                     (assoc :force-tool (:force-tool branch))))}
-              (catch Throwable e
-                {:ok false :error (ex-message e)}))]
-      (if (and (:ok r)
-               (< attempt max-call-attempts)
-               (truncated-without-call? (:response r) (:prefill branch)))
-        (do (when (and (:conn ctx) (:run-id ctx))
-              (journal/note! (:conn ctx) (:run-id ctx) :turn-retry
-                             {:branch-id (:id branch)
-                              :data {:reason "truncated before any tool call"
-                                     :budget budget}}))
-            (recur (inc attempt)))
-        r))))
+  ((infer/complete-fn ctx) (infer/of-branch branch)))
 
 (defn- settle-predictions!
   "Close out any prediction whose window has passed or whose expectation the
@@ -301,47 +286,57 @@
                   {:lead (if (:reframe-entered-turn branch)
                            "Your re-planning budget is spent: "
                            "The explore prologue is over: ")
-                   :cap (gates/threshold :explore-cap)}))))))
+                   :cap (gates/threshold :explore-cap)}))
+         {:turn turn}))))
 
 (defn provider-error-step
   "A provider failure is not the branch's fault and must not count against it
-  as a verification failure."
-  [{:keys [conn run-id]} branch turn error]
-  (log/warn "branch" (:id branch) "turn" turn "model call failed:" error)
-  (journal/record-turn! conn run-id
-                        {:branch-id (:id branch) :turn turn
-                         :tool-name "__provider_error__" :result error
-                         :category "neutral"})
-  (state/add-message branch "user"
-                     (str "[harness] The provider call failed: " error
-                          " Try again.")))
+  as a verification failure.
+
+  It IS counted against the run, though, which is different and was missing.
+  `:provider` existed in the session tally and nothing ever wrote to it — dead
+  structure, and the exact trap the fence parser's own comment warns about: a
+  signal that is never fed reads identically to a behaviour that never
+  happens. A run losing half its turns to empty replies scored as neutral,
+  because a provider error is journalled `:neutral` (correctly — the BRANCH
+  did nothing wrong) and nothing else looked at it.
+
+  Counted by REASON, because the responses differ. An empty reply means the
+  model spent its whole budget thinking and wants more tokens or reasoning
+  turned off; a refused connection wants waiting. Telling a supervisor only
+  that `the provider failed` gives it nothing to act on."
+  ([ctx branch turn error] (provider-error-step ctx branch turn error nil))
+  ([{:keys [conn run-id]} branch turn error reason]
+   (session/observe! [:provider (or reason :call-failed)])
+   (log/warn "branch" (:id branch) "turn" turn "model call failed:" error)
+   (journal/record-turn! conn run-id
+                         {:branch-id (:id branch) :turn turn
+                          :tool-name "__provider_error__" :result error
+                          :category "neutral"})
+   (state/add-message branch "user"
+                      (str "[harness] The provider call failed: " error
+                           " Try again.")
+                      {:turn turn})))
 
 (defn absorb-response
-  "Fold the model's response into the branch: parse the fence, record the
-  mechanics signals, and append what the assistant actually said — opener
-  included, because storing the bare completion would leave a turn beginning
-  mid-fence in the transcript, misrepresenting the format back to the model
-  on every later turn."
-  [branch response]
-  (let [content (:content response)
-        ;; The prefill the request ended with, if any. Without it the response
-        ;; starts mid-fence and parses as a no-call — the very failure the
-        ;; prefill exists to prevent.
-        prefill (:prefill branch)
-        parsed (fence/parse-tool-call content {:prefill prefill})
-        signals (fence/signals response parsed)
-        said (fence/reattach content prefill)]
-    {:parsed parsed
-     :signals signals
-     :said said
-     :branch (-> branch
-                 ;; Cleared here, not where it was set: one steer forecloses
-                 ;; prose on one turn. Leaving it would make every later turn
-                 ;; start inside a fence — or, for force-tool, force the same
-                 ;; terminal call every turn after.
-                 (dissoc :prefill :force-tool)
-                 (state/add-message "assistant" said)
-                 (state/record-mechanics signals))}))
+  "Fold the model's response into the branch.
+
+  Two layers, deliberately separate. The TAPE half — parse the fence, append
+  what the assistant actually said, clear the per-turn knobs — is
+  `infer/absorb`, a pure function of a tape value that a probe drives without
+  a branch anywhere in sight. The BRANCH half is the mechanics tally, which is
+  bookkeeping about the branch rather than about the conversation, and which a
+  probe deliberately does not touch: a bounce that parsed badly is not a
+  branch that called badly."
+  ([branch response] (absorb-response branch response nil))
+  ([branch response turn]
+   (let [{:keys [tape parsed signals said]}
+         (infer/absorb (infer/of-branch branch) response turn)]
+     {:parsed parsed
+      :signals signals
+      :said said
+      :branch (-> (infer/into-branch branch tape)
+                  (state/record-mechanics signals))})))
 
 (defn no-call-step
   "No usable call. Say exactly what was wrong; a bare \"try again\" produces
@@ -378,7 +373,7 @@
                            :usage (:usage response)})
     (-> branch
         (state/record-outcome {:category :mechanics :progress? false})
-        (state/add-message "user" msg)
+        (state/add-message "user" msg {:turn turn})
         ;; And make the next request end mid-fence, so prose is not an
         ;; available reply. Telling the model to emit a fence is the
         ;; suggesting form; this is the withholding form, which is the one
@@ -388,24 +383,42 @@
         ;; mechanics failure with the harness doing the reasoning.
         (assoc :prefill "```tool-call\n"))))
 
+(defn transition-effects
+  "The effect names a turn envelope triggers, per phases.edn `:transitions`.
+
+  A key is a get-in path into the envelope. The value says what the path has
+  to hold:
+
+    [effects…]        the path holds anything truthy
+    {value [effects…]} the path holds exactly `value`
+
+  The second form is what the table could not previously say, and it is what
+  an artifact trigger needs: `:claim-status` is truthy for `:confirmed`,
+  `:empirical` and `:sketch` alike, so a truthy test on it would fire the
+  confirmed branch's effects on an unverified plan. A status is a
+  vocabulary, not a flag, and a table that can only ask `is it set` cannot
+  key on one."
+  [envelope]
+  (mapcat (fn [[path outcome]]
+            (let [v (get-in envelope path)]
+              (if (map? outcome)
+                (get outcome v)
+                (when v outcome))))
+          (phases/transitions)))
+
 (defn apply-transitions
   "Apply the result-signal transitions the turn's result carries (drg-4026
   #3) — the claim-first state machine as a declarative table (phases.edn
-  :transitions) instead of cond-> clauses in the executor. A table entry's
-  key is a get-in path into the turn envelope; when it holds a truthy value
-  each named effect applies. Effect names dispatch here to state fns, data
-  cannot mutate the branch."
+  :transitions) instead of cond-> clauses in the executor. Effect names
+  dispatch here to state fns, because a table cannot mutate a branch."
   [result artifact branch]
-  (let [envelope {:result result :artifact artifact}]
-    (reduce (fn [b effect]
-              (case effect
-                :mark-green    (state/mark-green b)
-                :clear-reframe (state/clear-reframe b)
-                b))
-            branch
-            (mapcat (fn [[path effects]]
-                      (when (get-in envelope path) effects))
-                    (phases/transitions)))))
+  (reduce (fn [b effect]
+            (case effect
+              :mark-green    (state/mark-green b)
+              :clear-reframe (state/clear-reframe b)
+              b))
+          branch
+          (transition-effects {:result result :artifact artifact})))
 
 (defn tool-step
   "Dispatch the parsed call: phase policy first, then the tool, then the
@@ -453,12 +466,18 @@
                    (state/add-artifact branch (assoc a :turn turn))
                    branch)
          ;; A green ship-verify is the green point the safe-state rung
-         ;; rewinds to. No tool on the current surface emits :claim-status
-         ;; artifacts (the proof engines that did are gone), so the old
-         ;; :confirmed trigger keyed on a status that never occurred. Green
-         ;; work also ends a reframe: the withheld approach could not have
-         ;; produced it (vf-9wx). The signal→effect table itself is
-         ;; phases.edn :transitions data (drg-4026 #3).
+         ;; rewinds to, and green work also ends a reframe: the withheld
+         ;; approach could not have produced it (vf-9wx). The signal→effect
+         ;; table itself is phases.edn :transitions data (drg-4026 #3).
+         ;;
+;; The table now carries BOTH triggers, and they are different questions.
+         ;; :mark-green keys on the verify signal, because the green point the
+         ;; safe-state rung rewinds to is a fact about the WORKING TREE — that
+         ;; the suite was observed passing — and not about any claim.
+         ;; :clear-reframe keys on a CONFIRMED ARTIFACT, because that is what
+         ;; clear-reframe has always meant: the branch banked something the
+         ;; withheld approach could not have produced. Any tool that confirms
+         ;; a claim ends a reframe now, not only a green ship-verify.
          branch (apply-transitions result (:artifact result) branch)]
     ;; A green verify marks the green point the safe-state rung falls back
     ;; to. The snapshot is the turn cursor: the journal is the store
@@ -466,11 +485,29 @@
     ;; cursor is all the rung needs to name a rewindable state.
     {:branch branch :result result :tool tool}))
 
+(defn- observe-turn!
+  "Feed the live session tally with what this turn did and how the reply
+  parsed. Never allowed to throw: a counter must not be able to cost a turn."
+  [tool result signals]
+  (try
+    (session/observe-turn! {:tool tool
+                            :category (:category result)
+                            :signals signals})
+    (catch Throwable _ nil)))
+
 (defn journal-step!
   "The durable record of the turn: the turn row, any artifact (and its entry
   into the shared pool when it qualifies), any failure, any thesis. Side
   effects only; returns nil."
-  [{:keys [conn run-id] :as ctx} branch turn {:keys [parsed result tool said response]}]
+  [{:keys [conn run-id] :as ctx} branch turn {:keys [parsed result tool said response signals]}]
+  (observe-turn! tool result (or signals
+                                 ;; A turn that never reached a tool still has
+                                 ;; something to say: the parse flags are how
+                                 ;; the harness's OWN failure modes get counted,
+                                 ;; and those are the ones a supervisor is least
+                                 ;; able to infer from outcomes.
+                                 {:parse-error (= "__parse_error__" (:name parsed))
+                                  :auto-repaired (:auto-repaired? parsed)}))
   (journal/record-turn! conn run-id
                         {:branch-id (:id branch) :turn turn
                          :tool-name tool :args (:args parsed)
@@ -553,7 +590,7 @@
         branch (settle-predictions! conn branch turn [tool] before branch)
         branch (drain-directives! conn run-id branch turn)]
     (if (:done? result)
-      (state/add-message branch "user" (truncate (:result result)))
+      (state/add-message branch "user" (truncate (:result result)) {:turn turn})
       ;; Coverage answers whether the safe-state rung's fallback is honest:
       ;; the green cursor still points into a turn log the journal can
       ;; replay up to.
@@ -596,7 +633,7 @@
          (apply-effects decision turn max-turns
            (cond-> (-> branch
                      (dissoc :pending-directive)
-                     (state/add-message "user" body))
+                     (state/add-message "user" body {:turn turn}))
            decision (update :gate-history (fnil conj [])
                             {:gate (:gate decision) :turn turn})
            decision (update :open-predictions (fnil conj [])
@@ -615,26 +652,3 @@
            ;; default. A bare steer just prefills the fence.
            decision (assoc :force-tool (arbiter/force-tool-for decision)
                            :prefill (arbiter/prefill-for decision))))))))
-
-(defn run-turn
-  "Advance one branch by one turn. Returns the updated branch.
-
-  A composition of the named steps above, in the load-bearing order the ns
-  docstring states. The loop manifest composes the same steps as cells, so
-  the beam (which calls this directly, see karamazov-ioo.20) and the
-  manifest-driven driver share one implementation of every step."
-  [ctx branch turn]
-  (let [before branch
-        branch (phase-valve branch turn)
-        {:keys [ok response error]} (call-model ctx branch)]
-    (if-not ok
-      (provider-error-step ctx branch turn error)
-      (let [{:keys [branch parsed signals said]} (absorb-response branch response)]
-        (if (or (nil? parsed) (= "__parse_error__" (:name parsed)))
-          (no-call-step ctx branch turn {:parsed parsed :signals signals
-                                         :said said :response response})
-          (let [{:keys [branch result tool]} (tool-step ctx branch turn parsed)]
-            (journal-step! ctx branch turn {:parsed parsed :result result
-                                            :tool tool :said said
-                                            :response response})
-            (steer-step ctx before branch turn {:parsed parsed :result result})))))))

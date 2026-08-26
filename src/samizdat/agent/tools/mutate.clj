@@ -32,7 +32,9 @@
             [samizdat.agent.state :as state]
             [samizdat.agent.tools.base :as base]
             [samizdat.cells :as cells]
-            [samizdat.mutation :as mutation]))
+            [samizdat.mutation :as mutation]
+            [samizdat.store.userspace]
+            [samizdat.userspace :as userspace]))
 
 (defmethod base/run-tool "cells" [{:keys [branch]}]
   ;; What the loop is made of: the cells currently loaded, their effects, and
@@ -78,3 +80,105 @@
                       " file was restored to the last good version.\n\n"
                       (:reason r)
                       "\n\nFix the cell and call reload_cells again.")))))
+
+;; --- the project's own cells (userspace) -------------------------------------
+
+(def ^:private cell-usage
+  "Actions: list, show {name, version?}, save {name, clj}, versions {name}, revert {name, version}. A cell is one step of the loop, as Clojure. Save validates by compiling the loop and dry-running it before it stores, and stores a new VERSION in this project — the shipped template is never written.")
+
+(defn- render-versions [name]
+  (let [rows (userspace/versions :cell name)]
+    (if (seq rows)
+      (str/join "\n" (for [{:keys [version created_at]} rows]
+                       (str "v" version "  " created_at)))
+      (str "No stored versions of '" name "' in this project."
+           " It is still the shipped template."))))
+
+(defmethod base/run-tool "cell" [{:keys [branch conn run-id] :as ctx}]
+  ;; The project-scoped half of self-modification. `cells` lists what is
+  ;; loaded; this edits it. Every save is a new version in THIS project's
+  ;; userspace store, seeded from the harness's template on first read — so a
+  ;; loop this project evolves is its own, and no other project sees it.
+  (let [action (some-> (base/arg ctx :action) str str/trim str/lower-case not-empty)
+        name (some-> (base/arg ctx :name) str str/trim not-empty)]
+    (try
+      (case action
+        nil
+        (base/malformed branch (str "`cell` needs an `action`. " cell-usage))
+
+        "list"
+        (let [rows (userspace/names :cell)]
+          (base/ok branch
+                   (if (seq rows)
+                     (str/join "\n" (for [{:keys [name version versions]} rows]
+                                      (str name "  v" version " (" versions
+                                           (if (= 1 versions) " version)" " versions)"))))
+                     (str "This project has stored no cell versions yet — it is"
+                          " running the shipped templates. Any save starts its"
+                          " own copy."))))
+
+        "show"
+        (if-not name
+          (base/malformed branch (base/missing ctx :name))
+          (let [v (some-> (base/arg ctx :version) str str/trim not-empty parse-long)
+                body (if v
+                       (some-> (userspace/conn)
+                               (samizdat.store.userspace/load-version :cell name v)
+                               :body)
+                       (userspace/body :cell name))]
+            (if body
+              (base/ok branch (str name (when v (str " v" v)) ":\n\n" body))
+              (base/malformed branch (str "No cell '" name "'"
+                                          (when v (str " v" v)) "."
+                                          " `cell list` shows this project's;"
+                                          " `cells` shows what is loaded.")))))
+
+        "versions"
+        (if-not name
+          (base/malformed branch (base/missing ctx :name))
+          (base/ok branch (render-versions name)))
+
+        "save"
+        (let [body (base/arg ctx :clj)]
+          (cond
+            (not name) (base/malformed branch (base/missing ctx :name))
+            (str/blank? (str body)) (base/malformed branch (base/missing ctx :clj))
+            :else
+            (let [r (mutation/propose-cell!
+                     {:name name :body (str body)
+                      :loop-def (current-loop-def)
+                      :soak-input (soak-input)
+                      :conn conn :run-id run-id})]
+              (if (= :committed (:status r))
+                (base/ok branch
+                         (str "Saved cell '" name "' as v" (:version r)
+                              " in this project — it compiled, it dry-ran, and it"
+                              " is live on your next turn. The shipped template is"
+                              " unchanged; other projects still start from it.")
+                         :progress? true)
+                (base/fail branch
+                           (str "Cell '" name "' was NOT saved; the loop is"
+                                " unchanged and nothing entered this project's"
+                                " history.\n\n" (:reason r)
+                                "\n\nFix it and save again."))))))
+
+        "revert"
+        (let [v (some-> (base/arg ctx :version) str str/trim not-empty parse-long)]
+          (cond
+            (not name) (base/malformed branch (base/missing ctx :name))
+            (nil? v) (base/malformed branch (base/missing ctx :version))
+            :else
+            (if-let [nv (userspace/revert! :cell name v)]
+              (base/ok branch
+                       (str "Reverted cell '" name "' to the body of v" v
+                            ", stored as v" nv ". Reverting is itself an edit, so"
+                            " the version you left behind is still readable."
+                            " Call reload_cells to make it live.")
+                       :progress? true)
+              (base/malformed branch (str "No v" v " of cell '" name
+                                          "' in this project. " (render-versions name))))))
+
+        (base/malformed branch (str "Unknown cell action `" action "`. " cell-usage)))
+      (catch Throwable e
+        (base/fail branch (str "`cell " action "` refused: " (ex-message e)
+                               "\n\n" cell-usage))))))

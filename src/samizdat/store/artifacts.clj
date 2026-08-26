@@ -36,7 +36,9 @@
             [clojure.string :as str]
             [clojure.tools.logging :as log]
             [jdbc.core :as jdbc]
+            [samizdat.lexicon :as lexicon]
             [samizdat.llm.message :as message]
+            [samizdat.prompt :as prompt]
             [samizdat.store.db :as db]
             [samizdat.store.journal :as journal]))
 
@@ -182,10 +184,10 @@
 
   FTS5's query language treats several characters as operators, so raw model
   prose is not a safe query string. Words are extracted and quoted; anything
-  shorter than three characters is dropped as noise."
+  below the lexicon's search-token floor is dropped as noise."
   [text]
   (->> (str/split (str/lower-case (or text "")) #"[^a-z0-9]+")
-       (filter #(>= (count %) 3))
+       (filter #(>= (count %) (lexicon/tuning :claim-matching :min-search-token-length)))
        distinct
        (take 12)
        (map #(str "\"" % "\""))
@@ -212,7 +214,7 @@
                        q run-id limit])
           (catch Throwable e
             ;; Empty stays the contract, but a persistent fault must leave a
-            ;; trace (review2 #15).
+            ;; trace (provenance R2-15).
             (log/warn "artifacts/similar failed; returning empty:" (ex-message e))
             []))))))
 
@@ -222,39 +224,42 @@
    (db/fetch conn ["SELECT id, branch_id, turn, kind, tier, claim, code FROM shared_artifacts
                       WHERE run_id = ? ORDER BY id DESC LIMIT ?" run-id limit])))
 
-(def ^:private max-shared-code-chars
+(defn- max-shared-code-chars
   "How much of a shared artifact's code the block carries.
 
   A theorem STATEMENT is what a sibling needs in order to build on a lemma;
   the proof body is not. Generous enough for a Lean signature with a dozen
   hypotheses, small enough that five entries cannot crowd out the branch's own
-  context — the block re-renders every turn, so its size is a per-turn cost."
-  700)
+  context — the block re-renders every turn, so its size is a per-turn cost.
 
-(def ^:private max-ledger-claim-chars
-  "How much of a claim the ledger shows.
+  A function reading `:context-budget`, not a constant: it was 700 under this
+  same paragraph, which documents the number without making it reachable. How
+  much the model gets to see is the most project-specific setting in the
+  harness, and it belongs in one table with the rest of that question."
+  []
+  (lexicon/budget :shared-code-chars))
 
-  A claim is often a full mathematical statement — gen-18's average is around
-  340 characters, and its 79 confirmed artifacts render to ~6,800 tokens
-  unabridged. The ledger's job is to let a branch see WHAT is settled and
-  decide what to try; the exact statement is one `fetch_artifact` away, so the
-  headline is what belongs here."
-  180)
+(defn- max-ledger-claim-chars
+  "How much of a claim the ledger shows. `:context-budget :ledger-claim-chars`."
+  []
+  (lexicon/budget :ledger-claim-chars))
 
 (defn- shingles [s]
-  (let [toks (re-seq #"[a-z0-9]+" (str/lower-case (str s)))]
-    (if (< (count toks) 4)
+  (let [width (lexicon/tuning :claim-matching :shingle-width)
+        toks (re-seq #"[a-z0-9]+" (str/lower-case (str s)))]
+    (if (< (count toks) width)
       (set toks)
-      (set (map #(str/join " " %) (partition 4 1 toks))))))
+      (set (map #(str/join " " %) (partition width 1 toks))))))
 
 (defn near-duplicate?
-  "Whether two claims say the same thing — 4-word shingle Jaccard at or
-  above `threshold`, defaulting to the 0.6 `dedupe-claims` dedups at.
+  "Whether two claims say the same thing — shingle Jaccard at or above
+  `threshold`, defaulting to the lexicon's `:near-duplicate-threshold`.
 
   Gates the ledger's dedupe, which collapses claims that are the same theorem
   differently worded (see dedupe-claims). The sketch diversity gate that also
-  read it (vf-eaw) left with the proof harness's tool surface (review3 #9)."
-  ([a b] (near-duplicate? a b 0.6))
+  read it (vf-eaw) left with the proof harness's tool surface (provenance R3-9)."
+  ([a b] (near-duplicate? a b (lexicon/tuning :claim-matching
+                                               :near-duplicate-threshold)))
   ([a b threshold]
    (let [x (shingles a) y (shingles b)]
      (and (seq x) (seq y)
@@ -295,11 +300,14 @@
   only part a branch needs. The hypotheses say when a lemma applies and the
   tail says what it gives you; a middle is the safe thing to drop."
   [s]
-  (let [c (str/trim (str s))]
-    (if (<= (count c) max-ledger-claim-chars)
+  (let [c (str/trim (str s))
+        cap (max-ledger-claim-chars)]
+    (if (<= (count c) cap)
       c
-      (let [head (quot (* 2 max-ledger-claim-chars) 3)
-            tail (- max-ledger-claim-chars head)]
+      ;; Two thirds head, one third tail: the hypotheses say when a lemma
+      ;; applies and the tail says what it gives you.
+      (let [head (quot (* 2 cap) 3)
+            tail (- cap head)]
         (str (subs c 0 head) " … " (subs c (- (count c) tail)))))))
 
 (defn- ledger-line
@@ -327,36 +335,27 @@
   the encodings stay out of the block and cost a turn only when wanted."
   [{:keys [established ruled-out sketches inherited]}]
   (when (or (seq established) (seq ruled-out) (seq sketches) (seq inherited))
-    (str message/ledger-open "\n"
-         ;; NOT "what this run has settled": a sketch is precisely what it has
-         ;; not settled, and a heading is what a model skimming reads. The
-         ;; five worthless-but-confirmed artifacts this campaign has banked
-         ;; were each a case of unverified content being taken for verified,
-         ;; so the top line has to cover plans without endorsing them.
-         "## What this run has settled, and what it has only planned\n\n"
-         (when (seq established)
-           (str "### Established — engine-verified in this run\n"
-                (str/join "\n" (map (partial ledger-line "a#") (dedupe-claims established))) "\n\n"))
-         (when (seq ruled-out)
-           (str "### Ruled out — engine-REFUTED, do not re-attempt these\n"
-                (str/join "\n" (map (partial ledger-line "a#") (dedupe-claims ruled-out))) "\n\n"))
-         ;; Plans, kept out of both settled halves and under their own `p#`
-         ;; prefix: a sketch elaborates and its citations exist, but every
-         ;; `sorry` in it is a step still open, and a model skimming this
-         ;; block must not mistake a plan for something an engine checked.
-         ;; The same id space as `a#` (the artifacts table) — the prefix
-         ;; exists so the STATUS is on the handle.
-         (when (seq sketches)
-           (str "### Sketches — UNVERIFIED PLANS, not results; every step is still open\n"
-                (str/join "\n" (map (partial ledger-line "p#") (dedupe-claims sketches))) "\n\n"))
-         ;; Last: inherited results are true but were established elsewhere,
-         ;; and the done gate still requires in-run verification, so they are
-         ;; a starting point rather than something to ship on.
-         (when (seq inherited)
-           (str "### Inherited — confirmed by the run this one was seeded from\n"
-                (str/join "\n" (map (partial ledger-line "s#") (dedupe-claims inherited))) "\n\n"))
-         "Fetch any encoding with `fetch_artifact` and its id, e.g. `a#12`, `s#7` or `p#3`.\n"
-         message/ledger-close)))
+    ;; The SENTINELS stay compiled and the PROSE does not. message/ledger-open
+    ;; and ledger-close are what strip-stale-ledgers matches to drop every copy
+    ;; but the newest, so a supervisor editing the block's wording must not be
+    ;; able to break that by accident — while the wording itself is exactly the
+    ;; kind of thing a project should be able to change.
+    ;;
+    ;; What the template says, and why it is worded the way it is, moved with
+    ;; it into prompts/ledger.md: two sections rather than one list with a
+    ;; status column, sketches held out of both settled halves under their own
+    ;; `p#` prefix, and a top line that covers plans without endorsing them.
+    (let [lines (fn [prefix rows]
+                  (when (seq rows)
+                    (str/join "\n" (map (partial ledger-line prefix)
+                                        (dedupe-claims rows)))))]
+      (str message/ledger-open "\n"
+           (prompt/render "ledger"
+                          {:established (lines "a#" established)
+                           :ruled-out   (lines "a#" ruled-out)
+                           :sketches    (lines "p#" sketches)
+                           :inherited   (lines "s#" inherited)})
+           message/ledger-close))))
 
 (defn prefer-in-run
   "In-run artifacts first, seeded ones after, order preserved within each.
@@ -386,17 +385,18 @@
   dropped it."
   [entries]
   (when (seq entries)
-    (str "## Confirmed by other branches — engine-verified\n\n"
-         "Cite these by name and re-verify in one call; do not re-derive them.\n\n"
-         (str/join "\n"
-                   (for [{:keys [branch_id kind tier claim code]} (prefer-in-run entries)]
-                     (str "- [" branch_id " " (name kind) "/" (name tier) "] " claim
-                          (when-not (str/blank? (str code))
-                            (str "\n  ```\n  "
-                                 (let [c (str/trim (str code))]
-                                   (str/replace (if (> (count c) max-shared-code-chars)
-                                                  (str (subs c 0 max-shared-code-chars)
-                                                       "\n… [truncated]")
-                                                  c)
-                                                "\n" "\n  "))
-                                 "\n  ```"))))))))
+    (prompt/render
+     "shared-artifacts"
+     {:entries
+      (str/join "\n"
+                (for [{:keys [branch_id kind tier claim code]} (prefer-in-run entries)]
+                  (let [cap (max-shared-code-chars)]
+                    (str "- [" branch_id " " (name kind) "/" (name tier) "] " claim
+                         (when-not (str/blank? (str code))
+                           (str "\n  ```\n  "
+                                (let [c (str/trim (str code))]
+                                  (str/replace (if (> (count c) cap)
+                                                 (str (subs c 0 cap) "\n… [truncated]")
+                                                 c)
+                                               "\n" "\n  "))
+                                "\n  ```"))))))})))

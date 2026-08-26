@@ -22,7 +22,9 @@
             [samizdat.agent.state :as state]
             [samizdat.llm.client :as llm]
             [samizdat.store.journal :as journal]
+            [samizdat.prompt :as prompt]
             [samizdat.store.runs :as runs]
+            [samizdat.store.tasks :as tasks]
             [samizdat.workflow :as wf]))
 
 (defn- summarize [results]
@@ -67,17 +69,47 @@
   the bare sub-task kept for the result label, `suffix` the role prompt. A throw
   becomes an :error result rather than taking the whole fan-out down — one
   worker's crash is not the team's."
-  [{:keys [conn run-id] :as ctx} worker bid idx st prob suffix]
+  [{:keys [conn run-id] :as ctx} worker bid idx st prob suffix task-id]
   (try
     (runs/open-branch! conn run-id {:branch-id bid})
     (let [b (state/new-branch {:id bid :problem prob
                                :messages (turn/initial-messages prob suffix)})
-          out (myc/run-compiled worker ctx {:branch b :turn 1})]
-      {:worker idx :subtask st :branch bid
+          ;; The worker opens HOLDING its part of the board. Claimed here rather
+          ;; than left to the worker to claim itself, because the split already
+          ;; decided who does what — asking each worker to go and claim the row
+          ;; the planner made for it is a turn spent on bookkeeping, and a
+          ;; worker that forgot would work untracked.
+          ;;
+          ;; The claim is per-BRANCH (migration v12). Under the old per-run
+          ;; guard every worker on this fan-out would have claimed successfully
+          ;; and all of them would have believed they held it.
+          claimed (when task-id (tasks/claim! conn task-id run-id bid))
+          b (if claimed
+              (-> b
+                  (assoc :task {:id (:id claimed) :title (:title claimed)})
+                  (state/add-message
+                   "user"
+                   (str "[harness] " (prompt/render "task-claimed"
+                                       {:id (:id claimed) :title (:title claimed)
+                                        :contract (:contract claimed)
+                                        :tests (:tests claimed)}))
+                   {:pinned? true :task-id (:id claimed)}))
+              b)
+          out (myc/run-compiled worker ctx {:branch b :turn 1})
+          done? (= :done (:verdict out))]
+      ;; The board reflects what happened: a part that shipped is closed, a
+      ;; part that did not goes back so the supervisor can re-task it rather
+      ;; than it sitting attributed to a worker that has stopped.
+      (when claimed
+        (if done?
+          (tasks/close! conn (:id claimed))
+          (tasks/release! conn (:id claimed) bid)))
+      {:worker idx :subtask st :branch bid :task (:id claimed)
        :status (:verdict out)
        :answer (get-in out [:branch :final-answer])})
     (catch Throwable e
-      {:worker idx :subtask st :branch bid :status :error
+      (when task-id (try (tasks/release! conn task-id bid) (catch Throwable _ nil)))
+      {:worker idx :subtask st :branch bid :task task-id :status :error
        :answer (str "worker failed: " (ex-message e))})))
 
 (defn- ok?
@@ -93,14 +125,15 @@
         :run :subtasks), pass through — an explicit split wins. Otherwise one
         LLM call proposes at most :max-subtasks parts; fail-soft to a single
         worker on the whole problem when the call fails or yields no list."
-   :effects [:net]}
+   :effects [:net]
+   :requires [:config :conn :run-id]}
   (fn [{:keys [conn run-id config] :as ctx}
        {:keys [branch subtasks] :as data}]
     (if (seq subtasks)
       data
       (let [{:keys [llm-adapter llm-config]} (wf/role-ctx ctx :planner)
             max-parts (or (get-in config [:run :max-subtasks])
-                          planner/default-max-parts)
+                          (planner/default-max-parts))
             reply (try (:content (llm/chat llm-adapter llm-config
                                            [{:role "user"
                                              :content (planner/plan-prompt
@@ -117,7 +150,8 @@
         the shared run (so they coordinate through the mailbox). Join their
         answers into the manager branch and finish. A dataflow join, not a live
         actor: workers run to completion."
-   :effects [:net :db]}
+   :effects [:net :db]
+   :requires [:conn :run-id]}
   (fn [{:keys [conn run-id] :as ctx} {:keys [branch subtasks] :as data}]
     (let [tasks (vec (if (seq subtasks) subtasks [(:problem branch)]))
           worker (wf/worker-compiled)
@@ -135,13 +169,42 @@
                             (str s "\n\nA prior review sent this back. Address:\n"
                                  guidance)))
           bid-of (fn [i] (str "W" i (when (pos? rev) (str "v" rev))))
+          ;; One board row per part, created BEFORE the fan-out so the split is
+          ;; visible as work rather than only as five branches. The manager and
+          ;; the supervisor read the same board the workers hold, which is what
+          ;; makes "which parts are still open" a query instead of an inference
+          ;; from branch statuses.
+          ;;
+          ;; parent-id ties them to the feature: the board shows the shape of
+          ;; the split, not five unrelated tasks.
+          ;; Titles are BOUNDED. A task title is a board line, and the
+          ;; problem statement can be pages — an unbounded title makes the
+          ;; board unreadable at exactly the moment it matters most, which is
+          ;; when several parts are in flight. The full text lives in :body and
+          ;; :contract, which is what a worker reads.
+          title-of (fn [s] (let [t (str/trim (str/replace (str s) #"\s+" " "))]
+                             (if (> (count t) 100) (str (subs t 0 100) "…") t)))
+          parent (when (seq subtasks)
+                   (tasks/create! conn {:title (str "Feature: " (title-of (:problem branch)))
+                                        :body (str (:problem branch))
+                                        :type "epic" :run-id run-id}))
+          task-ids (mapv (fn [s]
+                           (tasks/create! conn {:title (title-of s)
+                                                :body (str s)
+                                                :parent-id parent
+                                                :run-id run-id
+                                                :contract (str s)}))
+                         tasks)
           results (->> (map-indexed vector tasks)
                        (mapv (fn [[i s]]
                                (future (run-worker ictx worker (bid-of i) i s
-                                                   (prob-of s) (worker-prompt i tasks)))))
+                                                   (prob-of s) (worker-prompt i tasks)
+                                                   (nth task-ids i nil)))))
                        (mapv deref))]
       (journal/note! conn run-id :team
                      {:data {:workers (count results) :revision rev
+                             :epic parent
+                             :tasks (vec (remove nil? task-ids))
                              :done (count (filter ok? results))}})
       (assoc data
              :subtasks tasks
@@ -156,7 +219,8 @@
         fresh branch (W<idx>r1). The retry replaces the original only if it does
         better. A bounded re-task, not an open loop — the supervisor's job is to
         catch a stalled part, not to grind. Re-joins the answers after."
-   :effects [:net :db]}
+   :effects [:net :db]
+   :requires [:conn :run-id]}
   (fn [{:keys [conn run-id] :as ctx} {:keys [branch results subtasks] :as data}]
     (let [tasks (vec subtasks)
           worker (wf/worker-compiled)
@@ -166,8 +230,14 @@
                             r
                             (let [i (:worker r)
                                   st (:subtask r)
+                                  ;; The retry re-claims the SAME board row the
+                                  ;; first attempt released, so a re-tasked part
+                                  ;; keeps its identity and its contract rather
+                                  ;; than becoming a second task for the same
+                                  ;; work.
                                   r2 (run-worker ictx worker (str "W" i "r1") i
-                                                 st st (worker-prompt i tasks))]
+                                                 st st (worker-prompt i tasks)
+                                                 (:task r))]
                               (if (ok? r2) r2 r))))
                         results)
           fixed (count (filter (fn [[a b]] (and (not (ok? a)) (ok? b)))

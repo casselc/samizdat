@@ -25,7 +25,7 @@
             [samizdat.repl :as repl]))
 
 (deftest close-session-removes-the-namespace
-  ;; code-review-2026-08 #6: one namespace per run, never removed — unbounded
+  ;; provenance CR1-6: one namespace per run, never removed — unbounded
   ;; growth on a long-lived serve process.
   (let [s (repl/new-session)]
     (repl/eval-code "(def close-session-leak-check 1)" s)
@@ -110,3 +110,37 @@
           r (repl/eval-code "(do (Thread/sleep 150) :slow-but-ok)" s 3000)]
       (is (:ok r))
       (is (= ":slow-but-ok" (:value r))))))
+
+(deftest a-root-that-is-not-the-working-directory-is-reported
+  ;; The seam's worst failure is a plausible wrong answer: source roots make
+  ;; the project requirable, but a relative path inside `eval` still resolves
+  ;; against the harness's own directory, and jolt has no chdir to fix that
+  ;; with. Live, that had the agent read samizdat's README, list samizdat's
+  ;; directory, and slurp samizdat's deps.edn believing all three were the
+  ;; project's. Nothing in the process notices, so the harness has to say so.
+  (testing "a root elsewhere is a mismatch, reported with both directories"
+    (let [m (repl/warn-if-not-cwd! "/tmp")]
+      (is (some? m))
+      (is (= "/tmp" (:root m)))
+      (is (not= (:root m) (:cwd m)))))
+  (testing "the ordinary self-hosting case is silent"
+    (is (nil? (repl/warn-if-not-cwd! ".")))))
+
+(deftest an-eval-cannot-leave-the-image-unable-to-read
+  ;; Reader features are process-wide and the agent sets them: the documented
+  ;; way to load a library that reads its :clj branches is set, require, set
+  ;; back. When the require throws — as it will while the agent is still
+  ;; working out which features it needs — the set-back never runs. Live, one
+  ;; such eval dropped "bb" from the image; `honey.sql` failed on `::wrapper`
+  ;; from that turn onward, every later attempt failed identically, and the
+  ;; run wrote the damage into long-term memory as a fact about the library.
+  (let [before (__reader-features)]
+    (testing "an eval sees the features it sets"
+      (is (= ["only"] (:value-read (assoc {} :value-read
+                                          (read-string (:value (repl/eval-code
+                                            "(__reader-features-set! [\"only\"]) (__reader-features)"))))))))
+    (testing "and the image is unchanged afterwards"
+      (is (= before (__reader-features))))
+    (testing "including when the eval throws mid-way, which is the live case"
+      (repl/eval-code "(__reader-features-set! [\"only\"]) (throw (ex-info \"boom\" {}))")
+      (is (= before (__reader-features))))))

@@ -15,6 +15,7 @@
 (ns cells.loop
   (:require [mycelium.cell :as cell]
             [samizdat.agent.loop :as turn]
+            [samizdat.agent.reflect :as reflect]
             [samizdat.agent.state :as state]
             [samizdat.store.journal :as journal]
             [samizdat.store.runs :as runs]))
@@ -23,7 +24,8 @@
   {:doc "Open the turn: capture the before-snapshot the settle step compares
         against, and run the explore-prologue release valve so its message
         lands before the model call."
-   :pure true}
+   :pure true
+   :requires []}
   (fn [_ctx {:keys [branch turn] :as data}]
     (assoc data
            :before branch
@@ -34,7 +36,8 @@
         the token cap before emitting a tool call. Produces :call {:ok
         :response} or {:ok false :error} — a provider failure is data, never an
         exception."
-   :effects [:net :db]}
+   :effects [:net :db]
+   :requires []}
   (fn [ctx {:keys [branch] :as data}]
     (assoc data :call (turn/call-model ctx branch))))
 
@@ -42,26 +45,30 @@
   {:doc "Fold the response into the branch: parse the fence, record mechanics
         signals, append what the assistant actually said. On a provider failure
         this passes the data through untouched for the error route."
-   :pure true}
-  (fn [_ctx {:keys [branch call] :as data}]
+   :pure true
+   :requires []}
+  (fn [_ctx {:keys [branch call turn] :as data}]
     (if-not (:ok call)
       data
       (let [{:keys [branch parsed signals said]}
-            (turn/absorb-response branch (:response call))]
+            (turn/absorb-response branch (:response call) turn)]
         (assoc data :branch branch :parsed parsed :signals signals :said said)))))
 
 (cell/defcell :loop/provider-error
   {:doc "A provider failure is not the branch's fault: journal it as neutral
         and tell the branch to try again."
-   :effects [:db]}
+   :effects [:db]
+   :requires []}
   (fn [ctx {:keys [branch turn call] :as data}]
-    (assoc data :branch (turn/provider-error-step ctx branch turn (:error call)))))
+    (assoc data :branch (turn/provider-error-step ctx branch turn
+                                                  (:error call) (:reason call)))))
 
 (cell/defcell :loop/no-call
   {:doc "The response carried no usable tool call: say exactly what was wrong,
         journal the turn as mechanics, and make the next request start
         mid-fence so prose is not an available reply."
-   :effects [:db]}
+   :effects [:db]
+   :requires []}
   (fn [ctx {:keys [branch turn parsed signals said call] :as data}]
     (assoc data :branch (turn/no-call-step ctx branch turn
                                            {:parsed parsed :signals signals
@@ -71,7 +78,8 @@
   {:doc "Phase policy first, then the tool, then the branch bookkeeping the
         outcome demands (outcome counters, artifact banking, repeat-failure
         escalation)."
-   :effects [:db :fs :proc]}
+   :effects [:db :fs :proc]
+   :requires []}
   (fn [ctx {:keys [branch turn parsed] :as data}]
     (merge data (turn/tool-step ctx branch turn parsed))))
 
@@ -79,7 +87,8 @@
   {:doc "The durable record of the turn: the turn row, any artifact and its
         entry into the shared pool, any failure, any thesis. Everything a gate
         reads and everything resume replays goes through here."
-   :effects [:db]}
+   :effects [:db]
+   :requires []}
   (fn [ctx {:keys [branch turn parsed result tool said call] :as data}]
     (turn/journal-step! ctx branch turn {:parsed parsed :result result
                                          :tool tool :said said
@@ -90,7 +99,8 @@
   {:doc "Predictions settle, then the single boundary: at most one steer,
         chosen in priority, plus the context block of shared artifacts and
         similar failures."
-   :effects [:db]}
+   :effects [:db]
+   :requires []}
   (fn [ctx {:keys [before branch turn parsed result] :as data}]
     (assoc data :branch (turn/steer-step ctx before branch turn
                                          {:parsed parsed :result result}))))
@@ -100,7 +110,8 @@
         or :exhausted at the turn cap. On :continue the per-turn products are
         dropped so the data map does not grow without bound. Reads only the
         branch and the configured cap — no side effects."
-   :pure true}
+   :pure true
+   :requires [:max-turns]}
   (fn [ctx {:keys [branch turn] :as data}]
     (let [max-turns (:max-turns ctx)
           verdict (cond
@@ -119,11 +130,33 @@
             ;; in-data trace is a debugging window, and a window has edges.
             (update :mycelium/trace #(vec (take-last 20 %))))))))
 
+(cell/defcell :memory/distil
+  {:doc "What this task leaves behind about the PROJECT.
+
+        Runs when a task ENDS, however it ended. A run that shipped knows how
+        the project is built; a run that gave up knows what wasted its turns,
+        and that is often the more valuable of the two — a gotcha recorded once
+        saves every later session the turn it costs to rediscover.
+
+        A STEP rather than an instruction. The prompt has asked the model to
+        `remember` project facts for a while and produced none: 46 turns of
+        live runs, zero calls. A node in the manifest runs whether or not the
+        model felt like it.
+
+        Fails safe to the data it was given: recording what was learned must
+        never be able to stop a finished task from finishing."
+   :effects [:net :db]
+   :requires [:conn :run-id :llm-adapter :llm-config]}
+  (fn [ctx {:keys [branch] :as data}]
+    (reflect/distil-task! ctx branch)
+    data))
+
 (cell/defcell :loop/finish
   {:doc "Close the run the way the verdict says: branch row, run row, and for
         an exhausted run the residual — what the branch believed it was close
         to when the budget ran out."
-   :effects [:db]}
+   :effects [:db]
+   :requires [:conn :run-id]}
   (fn [{:keys [conn run-id]} {:keys [branch turn verdict] :as data}]
     (case verdict
       (:done :abandoned)

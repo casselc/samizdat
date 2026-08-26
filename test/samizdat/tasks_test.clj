@@ -25,6 +25,7 @@
             [clojure.test :refer [deftest testing is]]
             [jolt.fs :as fs]
             [samizdat.agent.loop :as aloop]
+            [samizdat.workflow :as wf]
             [samizdat.agent.state :as state]
             [samizdat.agent.tools :as tools]
             [samizdat.llm.client :as llm]
@@ -132,13 +133,13 @@
           t2 (tasks/create! c {:title "already mine" :run-id rid :status "in_progress"})]
       (is (= [t1] (mapv :id (tasks/backlog c))))
       (testing "claim! assigns the run and marks in_progress"
-        (is (some? (tasks/claim! c t1 rid)))
+        (is (some? (tasks/claim! c t1 rid "B1")))
         (let [t (tasks/get-task c t1)]
           (is (= rid (:run_id t)))
           (is (= "in_progress" (:status t))))
         (is (empty? (tasks/backlog c))))
       (testing "a task claimed by one run refuses another"
-        (is (nil? (tasks/claim! c t1 other)))
+        (is (nil? (tasks/claim! c t1 other "B1")))
         (is (= rid (:run_id (tasks/get-task c t1)))))
       (testing "the board scopes to a run plus the backlog"
         (let [t3 (tasks/create! c {:title "unclaimed"})
@@ -149,7 +150,7 @@
               "another run's claimed tasks are not on this run's board"))))))
 
 (deftest a-claim-race-is-decided-by-the-row
-  ;; a#4 (docs/code-review.md): claim! used to read-then-write with no guard
+  ;; a#4 (docs/provenance.md): claim! used to read-then-write with no guard
   ;; on the write, so two branches whose reads both saw the unclaimed row
   ;; could both "win" — the second silently stealing the task. Simulate the
   ;; interleaved read: the second claim's get-task returns the stale
@@ -157,9 +158,9 @@
   (with-db [c]
     (let [id (tasks/create! c {:title "race"})
           stale (tasks/get-task c id)]
-      (is (= "run-1" (:run_id (tasks/claim! c id "run-1"))))
+      (is (= "run-1" (:run_id (tasks/claim! c id "run-1" "B1"))))
       (with-redefs [tasks/get-task (fn [_ _] stale)]
-        (is (nil? (tasks/claim! c id "run-2"))
+        (is (nil? (tasks/claim! c id "run-2" "B1"))
             "a stale read must not let the second writer steal the claim"))
       (is (= "run-1" (:run_id (tasks/get-task c id)))))))
 
@@ -289,16 +290,16 @@
                                                       :args {:action "create"
                                                              :title "prove the loop"
                                                              :contract "task rows appear"}}))]
-               (aloop/run-turn ctx b 1))
+               (wf/run-turn ctx b 1))
           id (:id (first (tasks/board c {:run-id rid})))]
       (is (some? id) "the scripted turn created a task")
       (with-redefs [llm/chat (fn [& _] (fence {:name "task"
                                                :args {:action "close" :id id}}))]
-        (aloop/run-turn ctx b1 2))
+        (wf/run-turn ctx b1 2))
       (is (= "done" (:status (tasks/get-task c id)))))))
 
 (deftest update-loses-to-a-write-that-lands-in-its-window
-  ;; review2 #1: update! was a read-then-write pair over two lock
+  ;; provenance R2-1: update! was a read-then-write pair over two lock
   ;; acquisitions, so a claim landing between them was silently erased by
   ;; the stale write — the a#4 class one def over from the guarded claim!.
   ;; The UPDATE must carry what the read saw and lose to a row that moved.
@@ -307,7 +308,7 @@
           stale (tasks/get-task c id)
           real-get tasks/get-task
           served-stale? (atom false)]
-      (is (= "run-9" (:run_id (tasks/claim! c id "run-9"))))
+      (is (= "run-9" (:run_id (tasks/claim! c id "run-9" "B1"))))
       (with-redefs [tasks/get-task
                     (fn [conn id]
                       (if (compare-and-set! served-stale? false true)
@@ -320,20 +321,20 @@
         (is (= "high" (:priority t)) "and the edit still lands")))))
 
 (deftest claim-does-not-resurrect-a-terminal-task
-  ;; review2 #14: a closed task with run_id NULL still satisfied
+  ;; provenance R2-14: a closed task with run_id NULL still satisfied
   ;; run_id IS NULL, so a claim flipped done back to in_progress — completed
   ;; work reappearing on the claiming run's board. Claiming is for available
   ;; work; reopening is an explicit status change through update!.
   (with-db [c]
     (let [id (tasks/create! c {:title "finished business"})]
       (tasks/close! c id "done")
-      (is (nil? (tasks/claim! c id "run-1")))
+      (is (nil? (tasks/claim! c id "run-1" "B1")))
       (let [t (tasks/get-task c id)]
         (is (= "done" (:status t)))
         (is (some? (:closed_at t)))))))
 
 (deftest create-rethrows-non-collision-failures-instead-of-retrying
-  ;; review2 #15: create!'s retry caught Throwable — retrying failures that
+  ;; provenance R2-15: create!'s retry caught Throwable — retrying failures that
   ;; can never succeed by retrying, then reporting them as an id-allocation
   ;; problem. Only a UNIQUE collision is retryable; the real failure must
   ;; propagate.

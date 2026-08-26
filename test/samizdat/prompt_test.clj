@@ -16,17 +16,27 @@
   hand-rolled str/replace chains used, so the move changed the renderer,
   not the templates."
   (:require [clojure.string :as str]
-            [clojure.test :refer [deftest is]]
+            [clojure.test :refer [deftest is testing]]
             [samizdat.agent.loop :as loop]
             [samizdat.agent.tools :as tools]
             [samizdat.prompt :as prompt]))
 
 (deftest every-tool-is-documented
+  ;; Matched as a WORD at the start of a documentation line, not as a
+  ;; substring. `str/includes?` counted a tool named `cell` as documented
+  ;; because the prompt contains the word `cells` — so a whole tool could be
+  ;; added, be invisible to the model, and this test would pass.
   (let [prompt (loop/system-prompt)
-        undocumented (remove #(str/includes? prompt %) (tools/tool-names))]
+        documented? (fn [nm]
+                      (re-find (re-pattern
+                                (str "(?m)^\\s*"
+                                     (java.util.regex.Pattern/quote (str nm))
+                                     "\\b"))
+                               prompt))
+        undocumented (remove documented? (tools/tool-names))]
     (is (empty? undocumented)
-        (str "these tools are dispatched by run-tool but never mentioned in the"
-             " prompt, so the model cannot call them: "
+        (str "these tools are dispatched by run-tool but are not documented on a"
+             " line of their own in the prompt, so the model cannot call them: "
              (str/join ", " undocumented)))))
 
 (deftest every-documented-tool-exists
@@ -88,3 +98,88 @@
   ;; filter in the placeholder would fire, where a replace chain would
   ;; leave it verbatim).
   (is (= "Y" (prompt/render-str "{{v|upper}}" {:v "y"}))))
+
+;; --- the prompt chain (LR-7) -------------------------------------------------
+
+(deftest a-chain-takes-the-first-present-level
+  ;; First-present-wins: a level REPLACES the text, it does not add to it.
+  (is (= "top" (prompt/resolve-chain [{:text "top"} {:text "bottom"}])))
+  (is (= "bottom" (prompt/resolve-chain [{:project "/nonexistent/nope.md"}
+                                         {:text "bottom"}]))
+      "an absent level inherits from the one below"))
+
+(deftest a-blank-level-means-explicitly-none-and-stops-the-walk
+  ;; This is the distinction the whole trichotomy rests on. Collapsing blank
+  ;; into absent would make it impossible to suppress a layer at all.
+  (is (nil? (prompt/resolve-chain [{:text "  "} {:text "bottom"}])))
+  (is (nil? (prompt/resolve-chain [{:text ""} {:file "system"}]))))
+
+(deftest an-exhausted-chain-is-nil-not-an-error
+  (is (nil? (prompt/resolve-chain [])))
+  (is (nil? (prompt/resolve-chain [{:project "/nonexistent/a"}
+                                   {:project "/nonexistent/b"}]))))
+
+(deftest a-file-level-resolves-through-io-resource
+  ;; Not a cwd-relative path: it has to work inside a built binary, where
+  ;; resources/ does not exist on disk.
+  (is (str/includes? (prompt/resolve-chain [{:file "system"}]) "tool call"))
+  (is (nil? (prompt/resolve-chain [{:file "no-such-prompt-anywhere"}]))))
+
+(deftest an-unknown-entry-kind-fails-loud
+  ;; The chain is runtime-editable, so a typo is a live possibility — and a
+  ;; silently dropped layer would look exactly like a suppressed one.
+  (is (thrown-with-msg? Exception #":project, :file or :text"
+                        (prompt/resolve-chain [{:flie "typo"}]))))
+
+(deftest a-project-file-overrides-the-shipped-prompt
+  (let [dir (java.io.File. ".samizdat/prompts")
+        f (java.io.File. dir "chain-test.md")]
+    (try
+      (.mkdirs dir)
+      (spit f "the project's own text")
+      (is (= "the project's own text"
+             (prompt/resolve-chain [{:project (.getPath f)} {:file "system"}])))
+      (testing "and an empty project file suppresses the layer entirely"
+        (spit f "")
+        (is (nil? (prompt/resolve-chain [{:project (.getPath f)} {:file "system"}]))))
+      (finally (.delete f)))))
+
+(deftest the-system-layer-is-declared-and-ends-at-the-shipped-file
+  (let [entries (:system (prompt/chains))]
+    (is (seq entries) "the system prompt goes through the chain")
+    (is (= {:file "system"} (last entries))
+        "the shipped prompt is the floor, so an unconfigured harness is unchanged")
+    (is (str/includes? (prompt/layer :system) "tool call"))))
+
+(deftest an-undeclared-layer-falls-back-to-its-own-prompt-file
+  ;; Adding a layer to prompt-chain.edn is opt-in; a layer with no chain
+  ;; behaves exactly as a plain prompt read.
+  (is (= (str/trim (prompt/prompt "crossover"))
+         (str/trim (prompt/layer :crossover)))))
+
+(deftest shipped-prompts-match-what-ships
+  ;; Enumerated rather than globbed, for the reason cells/shipped-cells is:
+  ;; `jolt build` bakes resources/ into the binary and an embedded resource
+  ;; has no filesystem path for a glob to walk, so a built binary run outside
+  ;; the project root would report that the harness has no prompts. An
+  ;; enumerated list cannot drift on its own — this is what pins it.
+  (let [on-disk (->> (file-seq (java.io.File. "resources/prompts"))
+                     (filter #(.isFile %))
+                     (map #(-> (.getPath %)
+                               (str/replace #"^resources/prompts/" "")
+                               (str/replace #"\.md$" "")))
+                     set)]
+    (is (seq on-disk) "resources/prompts is readable from the test's cwd")
+    (is (= on-disk (set prompt/shipped-prompts))
+        (str "prompt/shipped-prompts and resources/prompts disagree; missing: "
+             (sort (remove (set prompt/shipped-prompts) on-disk))
+             ", listed but absent: "
+             (sort (remove on-disk prompt/shipped-prompts))))))
+
+(deftest every-shipped-prompt-renders
+  ;; A template that cannot be parsed fails where it is USED — for a gate
+  ;; message that is mid-run, and for the system prompt it is the top of every
+  ;; branch. Cheap to check them all here instead.
+  (doseq [n prompt/shipped-prompts]
+    (is (string? (prompt/render-str (prompt/prompt n) {}))
+        (str "prompts/" n ".md does not render"))))

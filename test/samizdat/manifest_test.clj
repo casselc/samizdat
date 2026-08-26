@@ -25,7 +25,7 @@
             [samizdat.agent.tools.base :as base]
             [samizdat.agent.tools.manifest]
             [samizdat.store.db :as db]
-            [samizdat.store.workflows :as workflows]
+            [samizdat.store.userspace :as us]
             [samizdat.workflow :as wf]))
 
 (defn- with-db [f]
@@ -35,7 +35,7 @@
 (deftest factory-manifest-names-match-what-ships
   ;; wf/catalog used to glob a cwd-relative "resources/manifests", which found
   ;; nothing from a built binary or a process started elsewhere and silently
-  ;; served a catalogue with the factory half missing (the review3 #11 bug in
+  ;; served a catalogue with the factory half missing (the provenance R3-11 bug in
   ;; a second place). It now resolves an enumerated list through io/resource,
   ;; which cannot drift on its own — so pin the list against the directory.
   (let [on-disk (->> (file-seq (io/file "resources/manifests"))
@@ -58,9 +58,24 @@
   ;; what finally makes :run :loop reach a production run.
   (let [def' (wf/read-definition (slurp (io/resource "manifests/loop.edn")))
         turn (wf/turn-manifest def')]
-    (testing "the back edge and the finish hand-off both terminate the turn"
-      (is (= {:continue :end :done :end :abandoned :end :exhausted :end}
-             (:route (:edges turn)))))
+    (testing "the back edge terminates the turn"
+      (is (= :end (:continue (:route (:edges turn))))))
+    (testing "the slice is ONE turn — no path through it returns to :start"
+      ;; Stated as acyclicity rather than as a literal route map. The map
+      ;; version pinned {:done :end :abandoned :end :exhausted :end} and so
+      ;; failed the moment an ending was routed through a legitimate extra
+      ;; node (:distil) on its way out — a test that breaks on a correct
+      ;; change is a test that gets edited to match, which is no test. What
+      ;; the rewrite actually has to guarantee is that the slice terminates.
+      (let [targets (fn [to] (if (map? to) (vals to) [to]))
+            walk (fn walk [node seen]
+                   (cond
+                     (= :end node) true
+                     (contains? seen node) false
+                     :else (every? #(walk % (conj seen node))
+                                   (targets (get (:edges turn) node)))))]
+        (is (walk :start #{})
+            "every path from :start reaches :end without revisiting a node")))
     (testing "the finish node is dropped, not orphaned"
       (is (contains? (:cells def') :finish))
       (is (not (contains? (:cells turn) :finish)))
@@ -124,14 +139,14 @@
           (let [r (base/run-tool {:branch {:id "B1"} :conn conn :tool-name "manifest"
                                   :args {:action "save" :name "loop2" :edn good}})]
             (is (= :neutral (:category r)))
-            (is (= 1 (:version (workflows/load-latest conn "loop2"))))
+            (is (= 1 (:version (us/load-latest conn :manifest "loop2"))))
             (is (= "loop2" (:name (wf/load-loop! conn "loop2"))))))
         (testing "a manifest that cannot compile is refused, not stored"
           (let [r (base/run-tool {:branch {:id "B1"} :conn conn :tool-name "manifest"
                                   :args {:action "save" :name "bad"
                                          :edn "{:cells {:x :no-such-cell}}"}})]
             (is (= :failure (:category r)))
-            (is (nil? (workflows/load-latest conn "bad")) "nothing broken was stored")))))))
+            (is (nil? (us/load-latest conn :manifest "bad")) "nothing broken was stored")))))))
 
 (deftest a-composed-manifest-registers-and-compiles-its-sub-loops
   (with-db
@@ -165,7 +180,7 @@
         (is (re-find #":cells" (:result shown)) "shows the manifest as data")))))
 
 (deftest show-and-save-missing-their-name-are-mechanics-complaints
-  ;; code-review-2026-08 #1, same shape as the skill tool: base/missing was
+  ;; provenance CR1-1, same shape as the skill tool: base/missing was
   ;; handed `branch` instead of ctx and its string returned raw, dropping
   ;; :category/:branch from the result map.
   (with-db

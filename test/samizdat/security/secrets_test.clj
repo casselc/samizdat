@@ -162,3 +162,44 @@
     (testing "the model still directed the call — the symbolic ref is intact upstream"
       (is (str/includes? command "{{env/SECRET_API_KEY}}"))
       (is (not (str/includes? command canary))))))
+
+(deftest the-substring-pass-redacts-an-opaque-secret
+  ;; RFC-003 F4. This pass exists for secrets with no recognizable shape — a
+  ;; database password, a bearer token with no vendor prefix — and it was DEAD
+  ;; on every real call path: `known-values` returns a SET, and `distinct` on a
+  ;; set yields the first element as nil under this runtime, so the reduce
+  ;; iterated over nothing.
+  ;;
+  ;; It looked tested. The canary below starts with `sk-`, so the vendor-prefix
+  ;; REGEX caught it and the spec passed while asserting nothing about this
+  ;; pass. So this test uses a value with NO recognizable shape, and passes the
+  ;; known-values as the set the real caller passes.
+  (testing "a set, which is what known-values returns"
+    (is (= "value is [REDACTED] here"
+           (secrets/redact "value is opaqueSECRETvalue here" #{"opaqueSECRETvalue"}))))
+  (testing "and a seq, which is what a hand-written caller might pass"
+    (is (= "value is [REDACTED] here"
+           (secrets/redact "value is opaqueSECRETvalue here" ["opaqueSECRETvalue"]))))
+  (testing "the regex is not what is doing the work here"
+    (is (not (secrets/sensitive-value? "opaqueSECRETvalue"))
+        "no vendor prefix, no URL userinfo — only the substring pass can catch it")))
+
+(deftest spec-eval-output-is-inside-the-redaction-boundary
+  ;; RFC-003 F1. `eval` runs in the harness process, so it can read the
+  ;; environment and the resolved config directly — strictly more capability
+  ;; than the shell path, which gets a scrubbed env AND a redacted result.
+  ;; It had neither, and the security model asserted that no path from the
+  ;; environment reaches model space unredacted.
+  ;;
+  ;; This closes the ACCIDENTAL leak, which is the realistic one: a model
+  ;; prints a config map while debugging and a provider key lands in the branch
+  ;; messages and the journal permanently. Deliberate exfiltration is out of
+  ;; scope by design — in-process execution cannot be contained from inside the
+  ;; process — and RFC-003 says so rather than leaving it unhandled.
+  (let [canary "sk-CANARYcanarycanary00000"
+        env {"SOME_API_KEY" canary}
+        known (secrets/known-values env)
+        ;; What the eval tool now does to a payload on its way to the model.
+        payload (str "=> {:api-key \"" canary "\"}")]
+    (is (not (str/includes? (secrets/redact payload known) canary))
+        "a credential read in-process does not reach the transcript verbatim")))

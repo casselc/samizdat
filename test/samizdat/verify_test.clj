@@ -103,11 +103,11 @@
   (is (nil? (verify/verify-block {:verify-on? true :result {:green? true :output ""}
                                   :changed nil :require-test? true}))))
 
-;; --- run-verify: the trust boundary (review3 #1) ------------------------------
+;; --- run-verify: the trust boundary (provenance R3-1) ------------------------------
 ;;
 ;; The verify child must not inherit the parent's secrets, and its output is
 ;; model-bound: what run-verify returns has to pass the same redaction boundary
-;; the shell tool enforces (docs/security.md properties 1 and 2).
+;; the shell tool enforces (docs/RFCS/RFC-003-security-model.md properties 1 and 2).
 
 (deftest run-verify-spawns-with-a-scrubbed-environment
   (let [captured (atom nil)]

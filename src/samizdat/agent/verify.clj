@@ -16,7 +16,8 @@
   The runner is a thin effect; the DECISION (`verify-block`) and the command
   derivation (`focused-cmd`) are pure, so the gate is testable without spawning a
   process. Same split as planner.clj vs cells/team.clj."
-  (:require [clojure.string :as str]
+  (:require [samizdat.prompt :as prompt]
+            [clojure.string :as str]
             [samizdat.agent.gates :as gates]
             [samizdat.engine.proc :as proc]
             [samizdat.security.secrets :as secrets]
@@ -77,7 +78,7 @@
                       "(java.lang.System/exit (if (clojure.core/pos? (+ (:fail s) (:error s))) 1 0)))")]
         ;; single-quote the whole -e expression for sh -c; every namespace in
         ;; it came through ns-from-test-path's whitelist, so the expression
-        ;; genuinely has no single quotes of its own (review3 #1).
+        ;; genuinely has no single quotes of its own (provenance R3-1).
         (str (:cmd-prefix (conventions)) expr "'")))))
 
 (defn- tail
@@ -117,32 +118,42 @@
          "then call done.")
 
     (and result (:timeout? result))
-    (str "Your test run TIMED OUT. Something you changed likely loops or blocks. "
-         "Narrow it down — run a smaller piece at the REPL — then call done again.")
+    (prompt/prompt "verify-timeout")
 
     (and result (not (:green? result)))
-    (str "Your tests are not green yet:\n\n" (tail (:output result) 25)
-         "\n\nYou are NOT done until they pass. Read the failure, change the code, "
-         "re-run the test, and call done again only once it is green.")
+    (prompt/render "verify-red"
+      {:output (tail (:output result)
+                     (:test-output-lines (gates/threshold :context-budget)))})
 
     ;; Ran and green.
     (and result (:green? result)) nil
 
-    ;; verify on and the change looked fine, but the tests could not be run
-    ;; (git could not tell what changed) — trust rather than deadlock the loop.
-    :else nil))
+    ;; Verify is on, the change looked fine, and the tests could not be run —
+    ;; git could not say what changed, or nothing changed was a test namespace
+    ;; and no :verify-cmd was configured. The gate has no evidence either way.
+    ;;
+    ;; POLICY, not a fallthrough: gates.edn :verify-unknown. It was hardcoded
+    ;; to trust, on the reasoning that refusing would deadlock a loop whose git
+    ;; happened to fail — sound reasoning, and exactly how a misconfiguration
+    ;; became a false green (a live run shipped with five test errors because
+    ;; the baseline was never captured and this clause trusted). Which way it
+    ;; should go is a judgement about a particular project, and the supervisor
+    ;; is the role that has the evidence to make it.
+    :else
+    (when (= :refuse (gates/threshold :verify-unknown))
+      (prompt/prompt "verify-unknown"))))
 
 (defn run-verify
   "Run `cmd` in the project root and report whether it is green. Bounded by
   `timeout-ms` (default 10 min). Never throws — a spawn failure reads as
   not-green, which sends the branch back rather than shipping.
 
-  Trust boundary (docs/security.md): the child runs with the SCRUBBED process
+  Trust boundary (docs/RFCS/RFC-003-security-model.md): the child runs with the SCRUBBED process
   environment — never the parent's, which holds provider keys — and its output
   is model-bound, so it passes the redaction boundary before it is returned."
   [root cmd timeout-ms]
   (try
-    (let [r (proc/run {:timeout-ms (or timeout-ms 600000)
+    (let [r (proc/run {:timeout-ms (or timeout-ms (gates/threshold :verify-timeout-ms))
                        :env (secrets/scrubbed-process-env)}
                       "sh" "-c" (str "cd " (util/sh-quote root) " && " cmd))
           known (secrets/known-values (into {} (System/getenv)))]

@@ -52,8 +52,8 @@
   "Whether the character at `i` is preceded by an odd run of backslashes —
   escaped, so not a real delimiter. The run must be counted, not just the one
   character before: an escaped backslash before a quote leaves the quote real,
-  while an escaped quote leaves no string terminator at all (a#5,
-  docs/code-review.md)."
+  while an escaped quote leaves no string terminator at all (provenance A-5,
+  docs/provenance.md)."
   [s i]
   (loop [j (dec i), run 0]
     (if (or (neg? j) (not= \\ (nth s j)))
@@ -86,7 +86,7 @@
                        (if (>= e n)
                          ;; string-end returns n both when the final quote
                          ;; closes the string at EOF and when it is ESCAPED —
-                         ;; only an unescaped one actually closed it (a#5).
+                         ;; only an unescaped one actually closed it (provenance A-5).
                          (if (and (> e 0) (= (nth s (dec n)) \") (not (escaped? s (dec n))))
                            (recur n stack)               ; closed exactly at EOF
                            {:balance :unterminated-string :at i})

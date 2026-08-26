@@ -28,7 +28,15 @@
   when unsure — a false block wastes a whole turn.
 
   Everything here is pure and unit-testable; the cell that calls the model and
-  routes on the verdict lives in resources/cells/critic.clj."
+  routes on the verdict lives in resources/cells/critic.clj.
+
+  WHAT IS MECHANISM HERE, now that the prose and the severity vocabulary have
+  moved out: the PARSE PROTOCOL. The regexes that find the VERDICT line and the
+  findings block are the other half of the prompt template — they read the shape
+  the template asks for. So they travel WITH it: change the requested format in
+  prompts/ and change the reader here, in the same edit. That pairing is why
+  they are not policy in their own right, and why a project retuning what the
+  judge is told to say has to touch both."
   (:require [clojure.string :as str]
             [samizdat.agent.gates :as gates]
             [samizdat.prompt :as prompt]))
@@ -43,31 +51,43 @@
 
 (def verdicts #{:complete :incomplete :abstain})
 
+(defn- rules
+  "The judge's deterministic rules — what the reply should look like and what
+  counts as a test run, a code edit or an outside claim. gates.edn
+  `:judge-rules`, so a project retunes them without a rebuild."
+  []
+  (gates/threshold :judge-rules))
+
 (defn parse-verdict
-  "The verdict from a judge reply's VERDICT line. Whole-word and
-  negation-aware — INCOMPLETE contains COMPLETE, and \"NOT COMPLETE\" negates
-  it — with precedence negative > abstain > positive. FAIL-OPEN: an empty or
-  tokenless reply is :complete, because a judge that cannot answer must never
-  be able to wedge the loop."
+  "The verdict from a judge reply's verdict line.
+
+  Whole-word and negation-aware, because INCOMPLETE contains COMPLETE and
+  \"NOT COMPLETE\" negates it. Both the vocabulary and the precedence that
+  handles those two facts are `gates.edn :judge-rules :verdict-rules`, an
+  ordered list of [verdict words] applied first-match-wins — the words the
+  judge is ASKED for live in prompts/judge.md, which is userspace, so the
+  words it is READ for have to be editable in the same breath or a reworded
+  prompt silently stops parsing.
+
+  FAIL-OPEN via `:verdict-default`: an empty or tokenless reply is :complete,
+  because a judge that cannot answer must never be able to wedge the loop."
   [reply]
-  (let [head (or (some #(when (re-find #"(?i)\bVERDICT\b" %) %)
+  (let [{:keys [verdict-line-regex verdict-rules verdict-default]} (rules)
+        head (or (some #(when (re-find (re-pattern verdict-line-regex) %) %)
                        (str/split-lines (str reply)))
                  (first (str/split-lines (str reply)))
                  "")
         up (str/upper-case head)
         w? (fn [word] (boolean (re-find (re-pattern (str "\\b" word "\\b")) up)))]
-    (cond
-      (w? "INCOMPLETE") :incomplete
-      (and (w? "NOT") (w? "COMPLETE")) :incomplete
-      (w? "ABSTAIN") :abstain
-      (w? "COMPLETE") :complete
-      :else :complete)))
+    (or (some (fn [[verdict words]] (when (every? w? words) verdict))
+              verdict-rules)
+        verdict-default)))
 
 (defn findings
   "The FINDINGS section of a judge reply, verbatim, trimmed — or nil when it
   named none. What the critique passes back to the branch below the verdict."
   [reply]
-  (some-> (re-find #"(?is)FINDINGS:\s*(.+)$" (str reply))
+  (some-> (re-find (re-pattern (:findings-regex (rules))) (str reply))
           second str/trim not-empty))
 
 (defn- one-line [s n]
@@ -102,7 +122,6 @@
 
 ;; --- deterministic finalization gates (run before the LLM judge) -----------
 
-(defn- rules [] (gates/threshold :judge-rules))
 
 (defn- tool-used? [rows pred]
   (boolean (some (fn [r] (and (:tool_name r) (pred r))) rows)))
@@ -182,22 +201,32 @@
   "The judge's user message: the agent's rules, the evidence, the transcript,
   the diff of what the run changed, and the answer under review."
   [{:keys [rules transcript evidence answer diff]}]
-  (str "## The agent's rules\n\n" (one-line rules 6000)
-       "\n\n## Evidence (deterministic facts about the run)\n\n" evidence
-       (when (seq (str diff))
-         (str "\n\n## Diff of what this run changed\n\n```diff\n"
-              (str diff) "\n```"))
-       "\n\n## Transcript\n\n" (one-line transcript 12000)
-       "\n\n## The answer it wants to ship\n\n" (str answer)
-       "\n\nIs this task complete and correct? " (preamble)))
+  (let [budget (gates/threshold :context-budget)]
+    (prompt/render
+     "judge-user"
+     {:rules (one-line rules (:judge-rules-chars budget))
+      :evidence evidence
+      :diff (when (seq (str diff)) (str diff))
+      :transcript (one-line transcript (:judge-transcript-chars budget))
+      :answer (str answer)
+      :preamble (preamble)})))
 
 (defn blocking-findings
-  "The findings a review blocks on — those tagged [critical] or [high]. Returns
-  the whole findings text when any are, else nil. Medium/low findings are
-  advisory: worth passing back, not worth undoing a done for."
+  "The findings a review blocks on. Returns the whole findings text when any
+  finding carries a blocking severity, else nil.
+
+  WHICH SEVERITIES BLOCK is gates.edn :review-blocking-severities, not a regex
+  in this file. It was `[critical]` or `[high]`, which encoded two project
+  judgements as code: that those are the words a reviewer uses, and that
+  medium is advisory. A project whose reviews say [P0]/[P1], or one that wants
+  medium to block a ship, could not say so without a rebuild."
   [reply]
   (when-let [f (findings reply)]
-    (when (re-find #"(?i)\[(critical|high)\]" f) f)))
+    (let [severities (gates/threshold :review-blocking-severities)]
+      (when (and (seq severities)
+                 (re-find (re-pattern (str "(?i)\\[(" (str/join "|" severities) ")\\]"))
+                          f))
+        f))))
 
 (defn critique-message
   "The single consolidated note injected back into the branch when the judge
