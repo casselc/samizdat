@@ -224,12 +224,18 @@
                              :epic parent
                              :tasks (vec (remove nil? task-ids))
                              :done (count (filter ok? results))}})
+      ;; The JOIN lands on the branch — the feature loop's review/critique/
+      ;; verify gates read it — but no verdict and no :done here: marking the
+      ;; run done unconditionally at this point meant a team where every
+      ;; worker failed still finished :completed with a summary of failures
+      ;; as its answer (karamazov-blt.19), upstream of the false-completion
+      ;; memories in karamazov-mjb. In team.edn the verdict is
+      ;; :team/supervise's (after its retries); in feature.edn it is
+      ;; :feature/route's, behind both gates.
       (assoc data
              :subtasks tasks
              :results (vec results)
-             :verdict :done
-             :branch (assoc branch :status :done
-                            :final-answer (summarize results))))))
+             :branch (assoc branch :final-answer (summarize results))))))
 
 (cell/defcell :team/supervise
   {:doc "Watch the fan-out's results and re-task the parts that did not land: a
@@ -262,6 +268,23 @@
                                (map vector results retried)))]
       (journal/note! conn run-id :supervise
                      {:data {:retried (count (remove ok? results)) :fixed fixed}})
-      (assoc data
-             :results retried
-             :branch (assoc branch :final-answer (summarize retried))))))
+      ;; The verdict, decided AFTER the retries, from what actually landed. A
+      ;; team where nothing landed — retries included — ends :abandoned with
+      ;; no answer, so :loop/finish records an abandoned run rather than a
+      ;; completed one (karamazov-blt.19).
+      (if (some ok? retried)
+        (assoc data
+               :results retried
+               :verdict :done
+               :branch (assoc branch :status :done
+                              :final-answer (summarize retried)))
+        (assoc data
+               :results retried
+               :verdict :abandoned
+               ;; :final-answer cleared explicitly — the fan-out's join put
+               ;; the failure summary there for the reviewer's benefit, and
+               ;; :loop/finish reads a non-blank answer as a completion.
+               :branch (assoc branch :status :abandoned
+                              :final-answer nil
+                              :inactive-reason
+                              "every worker failed, retries included"))))))

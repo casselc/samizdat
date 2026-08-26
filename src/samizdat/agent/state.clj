@@ -160,6 +160,25 @@
 
 (defn active? [branch] (= :active (:status branch)))
 
+(defn turn-count
+  "How far into the RUN this branch is, in GLOBAL turns — the unit
+  `max-turns`, artifact `:turn` stamps and gate-history stamps are all
+  expressed in. Served from `:current-turn`, which the loop stamps at the top
+  of every turn; the length of the branch's own log is the fallback for a
+  branch no driver has touched (a fresh test branch), and the WRONG answer
+  for budget arithmetic on a live one — a fork's log starts nearly empty and
+  no-call turns append nothing (karamazov-blt.16)."
+  [branch]
+  (or (:current-turn branch) (count (:turns branch))))
+
+(defn own-turn-count
+  "How many turns THIS branch has itself taken — its experience, not its
+  position in the run's budget. What juvenile-grace and the prologue cap
+  mean by a turn: a fork born at round 18 is 0 turns OLD while being 18
+  turns IN."
+  [branch]
+  (count (:turns branch)))
+
 (defn confirmed-artifacts [branch]
   (filter #(= :confirmed (:claim-status %)) (:artifacts branch)))
 
@@ -178,7 +197,10 @@
   strategies naturally look like verify size N, fail at N+1, verify N+1, and
   culling them throws away the most valuable branch."
   [branch n]
-  (let [cutoff (- (count (:turns branch)) n)]
+  ;; Cutoff in GLOBAL turns — the unit the artifact stamps are in. Local
+  ;; (count :turns) made a fork read its parent's ten-round-old artifact as
+  ;; recent forever (karamazov-blt.16).
+  (let [cutoff (- (turn-count branch) n)]
     (boolean (some #(and (= :confirmed (:claim-status %))
                          (>= (:turn %) cutoff))
                    (:artifacts branch)))))
@@ -194,7 +216,9 @@
   branch to SHIP still read `confirmed-in-last`, because a measurement is not
   something to ship."
   [branch n]
-  (let [cutoff (- (count (:turns branch)) n)]
+  ;; Same unit note as confirmed-in-last: the cutoff and the stamps must both
+  ;; be global turns.
+  (let [cutoff (- (turn-count branch) n)]
     (boolean (some #(and (#{:confirmed :empirical} (:claim-status %))
                          (>= (:turn %) cutoff))
                    (:artifacts branch)))))
@@ -618,7 +642,8 @@
    (update branch :messages conj
            (merge {:role role :content content} (not-empty meta)))))
 
-(defn turn-count [branch] (count (:turns branch)))
+;; turn-count and own-turn-count are defined beside `active?`, above their
+;; budget-arithmetic callers (confirmed-in-last / banked-in-last).
 
 (defn describe
   "One line for logs and for the run summary."

@@ -296,7 +296,16 @@
   why. The message lands before the model call so the next response actually
   sees it."
   [branch turn]
-  (cond-> branch
+  (cond-> (assoc branch :current-turn turn)
+    ;; :current-turn is the branch's knowledge of the GLOBAL turn, stamped at
+    ;; the top of every turn (both drivers come through here). It is what
+    ;; state/turn-count serves, so budget arithmetic — last-call, wind-down,
+    ;; crossed-fractions, banked-in-last — runs in the same unit as max-turns
+    ;; and the artifact/gate stamps. (count :turns) undercounted it: no-call
+    ;; and provider-error turns append no :turns entry, and a FORK's log
+    ;; starts nearly empty, so a fork born at round 18 of 25 read as turn ~0,
+    ;; was never told to ship, and its parent's old artifacts read as
+    ;; \"recent\" forever (karamazov-blt.16).
     (state/explore-cap-expired? branch (gates/threshold :explore-cap) turn)
     (-> (state/enter-phase turn)
         (state/add-message

@@ -175,7 +175,10 @@
           (is (str/includes? (:result r) "hello-from-shell"))))
       (testing "a denied command never runs"
         (let [r (call "rm -rf /")]
-          (is (= :failure (:category r)))
+          ;; :mechanics, not :failure — a deny is the harness declining a
+          ;; well-formed call, and charging it to the cull counter was
+          ;; karamazov-blt.15.
+          (is (= :mechanics (:category r)))
           (is (str/includes? (str/lower-case (:result r)) "denied"))))
       (testing "an ask blocks until a human grants, then runs"
         (let [r (call "python3 --version")]

@@ -451,3 +451,72 @@
         (is (true? @seen) "the run was visible to the abort endpoint while live")
         (is (not (contains? @api-control/active "r-oai"))
             "and deregistered when it finished")))))
+
+(deftest the-last-active-branch-survives-beside-inactive-siblings
+  ;; karamazov-blt.17: the cull cell seeded its survivor count with (count
+  ;; advanced), which includes branches that went done/abandoned during the
+  ;; round's advance — so the LAST active branch saw phantom survivors and was
+  ;; cullable, emptying the beam. It also ran the cascade over already-inactive
+  ;; branches, rewriting their endings.
+  (cells/load-cells!)
+  (with-db [c]
+    (let [rid (runs/start-run! c {:problem "p"})
+          cullfn (:handler (cell/get-cell :beam/cull))
+          done-b {:id "B1" :status :done :final-answer "a" :messages [] :turns []}
+          failing (assoc (state/new-branch {:id "B2" :problem "p"})
+                         :consecutive-failures 99
+                         :turns (vec (repeat 9 {})))
+          data (cullfn {:conn c :run-id rid :turn 9}
+                       {:advanced [done-b failing] :turn 9})
+          [b1' b2'] (:culled data)]
+      (is (= :done (:status b1'))
+          "an already-inactive sibling's ending is not re-judged or rewritten")
+      (is (state/active? b2')
+          "the last ACTIVE branch is never culled — a done sibling is not a survivor"))))
+
+(deftest exhaust-ships-a-banked-answer-instead-of-discarding-it
+  ;; karamazov-blt.20: with :stop-on-first-done? false, a branch that shipped
+  ;; at round 10 while a sibling explored to the cap ended in finish-run!
+  ;; :failed nil — the banked answer never reached the run row.
+  (cells/load-cells!)
+  (with-db [c]
+    (let [rid (runs/start-run! c {:problem "p"})]
+      (runs/open-branch! c rid {:branch-id "B1"})
+      (runs/open-branch! c rid {:branch-id "B2"})
+      (let [done-b {:id "B1" :status :done :final-answer "the answer"
+                    :messages [] :turns []}
+            active-b (state/new-branch {:id "B2" :problem "p"})
+            exhaust (:handler (cell/get-cell :beam/exhaust))
+            data (exhaust {:conn c :run-id rid :max-turns 5}
+                          {:branches [done-b active-b] :active [active-b]})]
+        (is (= :completed (:status data)))
+        (is (= "the answer" (get-in data [:result :answer])))
+        (is (= "completed" (:status (runs/get-run c rid)))
+            "the run row records the completion, not a failure")))))
+
+(deftest a-forfeited-turns-thread-is-never-run-beside
+  ;; karamazov-blt.18: a turn that blew its deadline kept executing — it
+  ;; journals under the branch's id and shares its eval session — while the
+  ;; beam advanced the SAME branch again next round, interleaving two turns of
+  ;; one branch and making the journal diverge from the live state. The
+  ;; dangling future is remembered now, and the branch forfeits until it
+  ;; completes.
+  (let [calls (atom 0)]
+    (with-redefs [beam/advance-branch (fn [_ b _]
+                                        (if (= 1 (swap! calls inc))
+                                          (do (Thread/sleep 400) (assoc b :slow true))
+                                          (assoc b :fast true)))]
+      (let [in-flight (atom {})
+            ctx {:iterating-loop? true :turn-deadline-ms 50 :in-flight in-flight}
+            b (state/new-branch {:id "B1" :problem "p"})
+            [r1] (beam/advance-all ctx [b] 1)]
+        (is (= 1 (:timeouts r1)) "the slow turn forfeits")
+        (is (contains? @in-flight "B1") "and its dangling future is remembered")
+        (let [[r2] (beam/advance-all ctx [b] 2)]
+          (is (= 1 (:timeouts r2))
+              "the next round forfeits again rather than running beside it")
+          (is (= 1 @calls) "crucially, NO second turn ran while one dangled"))
+        (Thread/sleep 500)
+        (let [[r3] (beam/advance-all ctx [b] 3)]
+          (is (true? (:fast r3)) "once the dangling turn completes, the branch advances")
+          (is (not (contains? @in-flight "B1")) "and the memory is released"))))))
