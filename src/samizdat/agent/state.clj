@@ -592,6 +592,25 @@
   [branch entry]
   (update branch :turns conj entry))
 
+(defn unpin-task-statement
+  "Release `task-id`'s pinned statement back to the compaction pool.
+
+  A claim pins its statement so the branch's CURRENT task is never unloaded
+  (RFC-004); a task that is closed or set down is not current, and its
+  statement used to stay pinned forever — a branch that switched twice
+  carried three permanent 'your task is…' blocks, the earlier two wrong
+  (karamazov-swd). Un-pinning is a METADATA flip: llm.message/prepare
+  projects role and content only, so no wire byte changes and the prefix
+  cache is untouched; the statement then ages out of the verbatim window and
+  compacts to a digest line through the normal one-attempt in-place rewrite."
+  [branch task-id]
+  (update branch :messages
+          (fn [ms]
+            (mapv #(if (and (:pinned? %) (= task-id (:task-id %)))
+                     (dissoc % :pinned?)
+                     %)
+                  ms))))
+
 (defn repeating-failure?
   "Whether this branch's LAST turn was already this exact (tool, error) failure.
 

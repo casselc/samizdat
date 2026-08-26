@@ -281,7 +281,6 @@
           turns (group-by :branch_id turn-rows)
           artifacts (group-by :branch_id (journal/artifacts conn run-id))
           firings (group-by :branch_id (journal/gate-firings conn run-id))
-          sessions (atom [])
           ;; Same three keys run! sets. A resumed run works on the same tree
           ;; and needs the same file root; the eval session is genuinely new,
           ;; because the old process's namespace died with it and nothing in
@@ -305,7 +304,6 @@
                ;; changed is already committed to the tree it starts from.
                :git-baseline (gitdiff/baseline root)
                :repl-session (repl/new-session)
-               :sessions sessions
                :abort abort}
           branches (mapv (fn [row]
                            (let [b (rebuild-branch run row turns artifacts
