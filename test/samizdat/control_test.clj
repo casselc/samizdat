@@ -129,7 +129,8 @@
                               (let [rid (str (random-uuid))]
                                 (on-start rid)
                                 {:run-id rid :status :completed}))]
-      (let [r (api-control/start-run! {:conn c :config {:llm {:provider :local}}} {})
+      (let [r (api-control/start-run! {:conn c :config {:llm {:provider :local}}}
+                                      {:problem "p"})
             rid (:run_id (:body r))]
         (is (= "running" (:status (:body r))))
         (let [gone? (loop [n 0]
@@ -436,23 +437,70 @@
         (let [row (first (filter #(= "B2" (:id %)) (runs/branches c rid)))]
           (is (= "culled" (:status row)) "the row is closed, not a zombie"))))))
 
-(deftest a-chat-completion-run-is-registered-and-abortable
-  ;; blt.13: beam/run! was called with no :abort atom and no control/active
-  ;; registration, so POST /v1/runs/:id/abort answered 409 "no active run"
-  ;; for a genuinely running run, for its whole (potentially hours-long) life.
+(deftest a-resumed-branch-still-holds-its-task
+  ;; karamazov-blt.21: the claim survives the crash on its ROW, but the
+  ;; rebuilt branch came back with no :task — told "No task claimed", free to
+  ;; claim a SECOND task, with the old row in_progress and attributed to it
+  ;; forever: RFC-008's named worst state for a shared board.
   (with-db [c]
-    (let [seen (atom nil)]
-      (with-redefs [beam/run!
-                    (fn [{:keys [abort on-start]}]
-                      (is (some? abort) "an abort atom reaches the run")
-                      (on-start "r-oai")
-                      (reset! seen (contains? @api-control/active "r-oai"))
-                      {:status :completed :run-id "r-oai" :answer "a"})]
-        (openai/chat-completion {:conn c :config {:llm {:provider :local :model "m"}}}
-                                {:messages [{:role "user" :content "q"}]})
-        (is (true? @seen) "the run was visible to the abort endpoint while live")
-        (is (not (contains? @api-control/active "r-oai"))
-            "and deregistered when it finished")))))
+    (let [rid (runs/start-run! c {:problem "p" :max-turns 10 :beam-width 1})]
+      (runs/open-branch! c rid {:branch-id "B1"})
+      (let [t-id (tasks/create! c {:title "the part" :body "do it" :run-id rid})]
+        (is (some? (tasks/claim! c t-id rid "B1")))
+        (with-redefs [beam/run-rounds (fn [_ branches _] {:branches branches})]
+          (let [r (resume/resume! {:conn c :config {} :llm-adapter :a
+                                   :llm-config {} :run-id rid})
+                b (first (:branches r))]
+            (is (= t-id (get-in b [:task :id]))
+                "the branch knows what it holds again")
+            (is (some :pinned? (:messages b))
+                "and the pinned task statement is back in its context")))))))
+
+(deftest a-resumed-worker-keeps-its-own-problem
+  ;; karamazov-blt.23: sub-workflow branches (a decompose unit, a team worker)
+  ;; open on their own contract, stored on the branches row since v18 — and
+  ;; the rebuild must actually READ it. The first cut bound it and then kept
+  ;; using the run's problem anyway; this is the test that catches the
+  ;; half-wire.
+  (with-db [c]
+    (let [rid (runs/start-run! c {:problem "the whole feature"
+                                  :max-turns 10 :beam-width 1})]
+      (runs/open-branch! c rid {:branch-id "W0" :problem "part A only"})
+      (with-redefs [beam/run-rounds (fn [_ branches _] {:branches branches})]
+        (let [b (first (:branches (resume/resume! {:conn c :config {}
+                                                   :llm-adapter :a :llm-config {}
+                                                   :run-id rid})))]
+          (is (= "part A only" (:problem b))
+              "the branch's own contract, not the run-level feature text")
+          (is (some #(str/includes? (str (:content %)) "part A only")
+                    (:messages b))
+              "and its opening messages are rebuilt from it"))))))
+
+(deftest replay-applies-the-live-loops-call-discipline
+  ;; karamazov-blt.22: replay pushed EVERY journalled row through add-turn +
+  ;; record-outcome, but the live loop applies neither to a provider-error row
+  ;; and only record-outcome to a no-call row — so each provider error
+  ;; DECREMENTED consecutive-failures on replay and the resumed branch's
+  ;; counters diverged from the ones the run actually had.
+  (with-db [c]
+    (let [rid (runs/start-run! c {:problem "p" :max-turns 10 :beam-width 1})]
+      (runs/open-branch! c rid {:branch-id "B1"})
+      (journal/record-turn! c rid {:branch-id "B1" :turn 1 :tool-name "eval"
+                                   :args {} :result "boom" :category "failure"})
+      (journal/record-turn! c rid {:branch-id "B1" :turn 2
+                                   :tool-name "__provider_error__"
+                                   :result "timeout" :category "neutral"})
+      (journal/record-turn! c rid {:branch-id "B1" :turn 3
+                                   :tool-name "__no_call__"
+                                   :result "no fence" :category "mechanics"})
+      (with-redefs [beam/run-rounds (fn [_ branches _] {:branches branches})]
+        (let [r (resume/resume! {:conn c :config {} :llm-adapter :a
+                                 :llm-config {} :run-id rid})
+              b (first (:branches r))]
+          (is (= 1 (:consecutive-failures b))
+              "the provider error neither decrements nor resets the counter")
+          (is (= 1 (count (:turns b)))
+              "and only the real tool turn entered the branch's own log"))))))
 
 (deftest the-last-active-branch-survives-beside-inactive-siblings
   ;; karamazov-blt.17: the cull cell seeded its survivor count with (count
@@ -523,47 +571,20 @@
           (is (true? (:fast r3)) "once the dangling turn completes, the branch advances")
           (is (not (contains? @in-flight "B1")) "and the memory is released"))))))
 
-(deftest a-resumed-branch-still-holds-its-task
-  ;; karamazov-blt.21: the claim survives the crash on its ROW, but the
-  ;; rebuilt branch came back with no :task — told "No task claimed", free to
-  ;; claim a SECOND task, with the old row in_progress and attributed to it
-  ;; forever: RFC-008's named worst state for a shared board.
+(deftest a-chat-completion-run-is-registered-and-abortable
+  ;; blt.13: beam/run! was called with no :abort atom and no control/active
+  ;; registration, so POST /v1/runs/:id/abort answered 409 "no active run"
+  ;; for a genuinely running run, for its whole (potentially hours-long) life.
   (with-db [c]
-    (let [rid (runs/start-run! c {:problem "p" :max-turns 10 :beam-width 1})]
-      (runs/open-branch! c rid {:branch-id "B1"})
-      (let [t-id (tasks/create! c {:title "the part" :body "do it" :run-id rid})]
-        (is (some? (tasks/claim! c t-id rid "B1")))
-        (with-redefs [beam/run-rounds (fn [_ branches _] {:branches branches})]
-          (let [r (resume/resume! {:conn c :config {} :llm-adapter :a
-                                   :llm-config {} :run-id rid})
-                b (first (:branches r))]
-            (is (= t-id (get-in b [:task :id]))
-                "the branch knows what it holds again")
-            (is (some :pinned? (:messages b))
-                "and the pinned task statement is back in its context")))))))
-
-(deftest replay-applies-the-live-loops-call-discipline
-  ;; karamazov-blt.22: replay pushed EVERY journalled row through add-turn +
-  ;; record-outcome, but the live loop applies neither to a provider-error row
-  ;; and only record-outcome to a no-call row — so each provider error
-  ;; DECREMENTED consecutive-failures on replay and the resumed branch's
-  ;; counters diverged from the ones the run actually had.
-  (with-db [c]
-    (let [rid (runs/start-run! c {:problem "p" :max-turns 10 :beam-width 1})]
-      (runs/open-branch! c rid {:branch-id "B1"})
-      (journal/record-turn! c rid {:branch-id "B1" :turn 1 :tool-name "eval"
-                                   :args {} :result "boom" :category "failure"})
-      (journal/record-turn! c rid {:branch-id "B1" :turn 2
-                                   :tool-name "__provider_error__"
-                                   :result "timeout" :category "neutral"})
-      (journal/record-turn! c rid {:branch-id "B1" :turn 3
-                                   :tool-name "__no_call__"
-                                   :result "no fence" :category "mechanics"})
-      (with-redefs [beam/run-rounds (fn [_ branches _] {:branches branches})]
-        (let [r (resume/resume! {:conn c :config {} :llm-adapter :a
-                                 :llm-config {} :run-id rid})
-              b (first (:branches r))]
-          (is (= 1 (:consecutive-failures b))
-              "the provider error neither decrements nor resets the counter")
-          (is (= 1 (count (:turns b)))
-              "and only the real tool turn entered the branch's own log"))))))
+    (let [seen (atom nil)]
+      (with-redefs [beam/run!
+                    (fn [{:keys [abort on-start]}]
+                      (is (some? abort) "an abort atom reaches the run")
+                      (on-start "r-oai")
+                      (reset! seen (contains? @api-control/active "r-oai"))
+                      {:status :completed :run-id "r-oai" :answer "a"})]
+        (openai/chat-completion {:conn c :config {:llm {:provider :local :model "m"}}}
+                                {:messages [{:role "user" :content "q"}]})
+        (is (true? @seen) "the run was visible to the abort endpoint while live")
+        (is (not (contains? @api-control/active "r-oai"))
+            "and deregistered when it finished")))))

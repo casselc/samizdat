@@ -84,6 +84,23 @@ multi-minute job under the per-turn deadline and run five at once.
 
 ## API
 
+### `samizdat.manifests` and `samizdat.workflow`
+
+Reading, validating and compiling a manifest lives in **`samizdat.manifests`**
+(mechanism only: mycelium + the cell loader + the userspace seam, no driver),
+so the self-modification tools validate an edit EXACTLY the way the loader
+will — they cannot require `samizdat.workflow`, which reaches the tool
+dispatcher through the branch loop, and each once re-implemented a slice of
+the pipeline that drifted (2026-08 audit, blt.2/.3/.4/.6). `samizdat.workflow`
+delegates the moved names, so every caller below keeps working; it retains
+the drivers (`load-loop!`, `compile-turn-loop`, `run-turn`, `run!`) and the
+role plumbing. Two functions worth knowing apart:
+
+| fn | contract |
+|---|---|
+| `(manifests/compile-loop definition)` | The loader's full pipeline: registry reload, sub-workflow registration through userspace, ctx-key requires, derived constraints, mycelium pre-compile. |
+| `(manifests/compile-definition definition)` | The same WITHOUT the registry reload — what the mutation protocol validates through, because reloading would replace the candidate it just installed. |
+
 ### `samizdat.workflow`
 
 | fn | contract |
@@ -118,8 +135,8 @@ rethrown, so a broken edit never half-loads.
 
 | fn | contract |
 |---|---|
-| `(propose-cell! {:keys [name body loop-def soak-input compile-fn conn run-id]})` | Validate a candidate and commit it as a new version **only if it survives**. `{:status :committed :version n}` or `{:status :rolled-back :reason s}`. |
-| `(apply-cell-edit! {:keys [dirs loop-def soak-input compile-fn conn run-id]})` | The legacy file-based protocol: reload, validate, soak, commit or restore the file. |
+| `(propose-cell! {:keys [name body loop-def extra-defs soak-input compile-fn conn run-id]})` | Validate a candidate and commit it as a new version **only if it survives**. `:loop-def` is the ACTIVE stored loop (soaked); `:extra-defs` is every other shipped+stored manifest (compiled, not soaked) — a cell wired only into the beam or a team loop is invisible to the active loop, and validating one definition let an edit that broke every other workflow commit (blt.2). `{:status :committed :version n}`, `{:status :live-unsaved :reason :unbound}` when no store is bound, or `{:status :rolled-back :reason s}`. |
+| `(apply-cell-edit! {:keys [dirs loop-def soak-input compile-fn conn run-id]})` | The legacy file-based protocol: reload, validate, soak, commit or restore the file. Refuses a store-mode image (`:reason :store-mode-image`) — its checkpoint is file paths, and the production loader's is store names (blt.7). |
 
 ## Protocol
 

@@ -19,6 +19,10 @@
          :arbiter        :gate/arbiter
          :route          :loop/route
          :critic         :gate/critic
+         ;; Task reflection on every ending, as the factory loop has (blt.26)
+         ;; — this manifest's header says "everything is the default loop
+         ;; except the critic", and dropping distil was the silent exception.
+         :distil         :memory/distil
          :finish         :loop/finish}
 
  :edges {:start          :infer
@@ -34,11 +38,12 @@
          ;; A genuine done faces the critic first; everything else is unchanged.
          :route          {:continue  :start
                           :done      :critic
-                          :abandoned :finish
-                          :exhausted :finish}
+                          :abandoned :distil
+                          :exhausted :distil}
          ;; The critic either ships the done or sends the branch back to work.
-         :critic         {:ship   :finish
+         :critic         {:ship   :distil
                           :revise :start}
+         :distil         :finish
          :finish         :end}
 
  :dispatches {:parse [[:provider-error (fn [d] (not (:ok (:call d))))]

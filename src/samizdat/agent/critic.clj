@@ -75,14 +75,20 @@
         ;; Built from the rubric rather than written beside it. The names and
         ;; the range are gates.edn, and a pattern that named them again would
         ;; be a second copy that a retune silently leaves behind.
+        ;; \\d+ with a NUMERIC bounds check, not a character class built
+        ;; from the range: [1-10] parses as "1, hyphen, 0", so any retune of
+        ;; :critic-scale past 9 silently failed every parse and the critic
+        ;; went dark (karamazov-blt.38).
         pattern (re-pattern (str "(?i)SCORE\\s+("
                                  (str/join "|" (map name objs))
-                                 ")\\s*:\\s*([" min "-" max "])\\s*"))
+                                 ")\\s*:\\s*(\\d+)\\s*"))
         t (message/strip-think-blocks text)
         m (into {}
                 (keep (fn [line]
                         (when-let [[_ obj v] (re-matches pattern (str/trim line))]
-                          [(keyword (str/lower-case obj)) (parse-long v)])))
+                          (let [n (parse-long v)]
+                            (when (and n (<= min n max))
+                              [(keyword (str/lower-case obj)) n])))))
                 (str/split-lines t))]
     (when (= (count objs) (count m)) m)))
 

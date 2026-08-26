@@ -147,6 +147,12 @@ A block held at a fixed early position and rewritten when its subject changes
 invalidates every cached token behind it; one carrying anything per-turn means
 the cache never warms at all.
 
+One deliberate, bounded exception: `strip-stale-ledgers` (RFC-005) blanks the
+previous turn's settled-state block on the way to the wire, so the byte-stable
+prefix ends one ledger position earlier than the newest message. The cost is
+re-prefilling roughly one turn's tail per call; the alternative — every stale
+ledger riding along — grows the context by a full ledger per turn.
+
 ## Known gaps
 
 **F1 — the boundary fold has no production caller.** `apply-fold`, `fold-split`,

@@ -152,8 +152,13 @@
   ([ctx {:keys [journal?] :or {journal? true}}]
    (fn [{:keys [id prefill force-tool] :as tape}]
      (loop [attempt 1]
-       (let [budget (when-let [base (:max-tokens (:llm-config ctx))]
-                      (* base (bit-shift-left 1 (dec attempt))))
+       (let [base (or (:max-tokens (:llm-config ctx))
+                      ;; No configured cap: the FIRST attempt keeps the
+                      ;; provider's default, but a retry exists to buy room —
+                      ;; doubling nothing was a same-budget repeat (blt.38).
+                      (when (> attempt 1)
+                        (:retry-base-tokens (gates/threshold :context-budget))))
+             budget (when base (* base (bit-shift-left 1 (dec attempt))))
              r (try
                  {:ok true
                   :response (llm/chat (:llm-adapter ctx) (:llm-config ctx)

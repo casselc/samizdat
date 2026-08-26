@@ -35,6 +35,7 @@
             [jolt.time]
             [jolt.http.platform :as platform]
             [ring-chez.adapter :as adapter]
+            [samizdat.api.control :as api-control]
             [samizdat.agent.gates :as gates]
             [samizdat.agent.phases :as phases]
             [samizdat.lexicon :as lexicon]
@@ -158,7 +159,25 @@
   stop the Lisp task regardless of what the agent believed."
   []
   (when-let [s @system]
-    (doseq [[label f] [["http server" #(adapter/stop-server (:server s))]
+    (doseq [[label f] [;; Active runs FIRST, before anything they depend on
+                       ;; closes under them: set every abort flag and give the
+                       ;; run threads a bounded window to reach a boundary and
+                       ;; journal their ending. Tearing the db down while run
+                       ;; futures kept executing meant their writes — including
+                       ;; the crash record — landed on a closed handle, and a
+                       ;; restart!'s reconcile-orphans! marked still-executing
+                       ;; runs interrupted while their threads kept going
+                       ;; (karamazov-blt.14).
+                       ["active runs"
+                        #(let [runs @api-control/active]
+                           (doseq [[_ {:keys [abort]}] runs]
+                             (when abort (reset! abort true)))
+                           (doseq [[rid {:keys [future]}] runs]
+                             (when future
+                               (when (= ::hung (deref future 15000 ::hung))
+                                 (log/warn "run" rid "did not stop within 15s;"
+                                           "closing the system under it")))))]
+                       ["http server" #(adapter/stop-server (:server s))]
                        ["lsp clients" #(lsp-client/shutdown-all!)]
                        ;; Unbind BEFORE the connection closes: a userspace read
                        ;; against a closed handle would throw where the same

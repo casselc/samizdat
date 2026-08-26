@@ -203,10 +203,13 @@ mechanical catches that omission.
 
 ## Known gaps
 
-- Redaction has **one structural chokepoint** (`run-shell`) and one wrapper
-  (`tools/repl`). Any future tool returning host-derived content is outside the
-  boundary by default and nothing will say so. `base/ok` would be the place to
-  make it structural, at the cost of redacting content that was never sensitive.
+- ~~Redaction has one structural chokepoint (`run-shell`) and one wrapper
+  (`tools/repl`); a future tool is outside the boundary by default.~~ Closed:
+  `samizdat.agent.tools/run-tool` — the dispatch wrapper every tool result
+  passes through — redacts the envelope (`:result`, `:artifact`, `:failure`)
+  structurally, so a new tool is inside the boundary by default.
+  `run-shell`'s scrub-before-spawn and the repl wrapper remain as the
+  earlier, tighter layers on their paths.
 - `sensitive-value?` covers named vendor prefixes. A credential with no
   recognisable shape is caught only by the substring pass, which requires the
   value to be in `known-values` — so a secret the harness never saw in the

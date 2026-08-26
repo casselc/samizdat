@@ -158,10 +158,16 @@ that is measurable rather than arguable.
 
 ## Known gaps
 
-- `:withholds` is empty for both phases, so the phase machinery is wired and
-  inert. `phase-refusal` is consulted on every dispatch and always returns
-  `nil`.
+- ~~`:withholds` is empty, so the phase machinery is wired and inert.~~
+  Partly closed: `:withholds` stays empty, but phases.edn now carries a
+  populated `:refusals` table (per-branch conditions — the task-required rule
+  among them), and `phase-refusal` consults both. A refusal is `:mechanics`
+  with `:policy-refusal? true`, so it feeds the refusal counter, never the
+  cull counter (blt.15).
 - A prediction's `:window` is in turns, so a gate whose advice takes longer than
   its window to follow settles `:unmet` regardless of whether it worked.
-- `:transitions` carries one entry. An artifact-status trigger is available
-  (`ship.clj` emits `:claim-status :confirmed`) and unused.
+- ~~`:transitions` carries one entry; the artifact-status trigger is
+  unused.~~ Closed: both entries are live, and a typo'd effect name warns
+  loudly instead of no-oping (blt.38).
+- `settle` can return `:met-late` (acted on, one turn later than the window
+  asked); it counts as met wherever the tally is read.

@@ -163,9 +163,19 @@ re-querying for a row that is not there costs the same as one that is.
 
 - The base/userspace rule has no mechanical check. A behaviour added to `src/`
   will not fail a test.
-- `store/workflows.clj` remains as a shim over `:manifest` so `workflow` and the
-  manifest tool keep their `name`-only signatures. New code should use
-  `samizdat.userspace`.
 - Migration v11 copied the pre-existing `workflows` rows into `userspace` and
   left the old table in place. Nothing reads it; it is not dropped, so a
-  rollback to a pre-v11 binary still resolves.
+  rollback to a pre-v11 binary still resolves. The `store/workflows.clj` shim
+  that once fronted it is gone.
+
+## Refinement: the factory row is a mirror, not history
+
+"History is append-only" holds for every version the PROJECT wrote. The one
+deliberate exception (migration v17): a version-1 row whose `source` column
+says `factory` is the shipped template's mirror, and `seed!` UPDATEs it in
+place when a harness upgrade changes the template — that is how an upgrade
+reaches a project that never edited the piece. The moment a project saves its
+own version, the append-only discipline owns every row from there on. The
+`source` column is what tells the two apart; inferring it from the version
+number would risk overwriting a project's own v1, which is the one thing
+userspace exists to prevent.

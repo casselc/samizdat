@@ -450,7 +450,13 @@
             (case effect
               :mark-green    (state/mark-green b)
               :clear-reframe (state/clear-reframe b)
-              b))
+              ;; phases.edn is runtime-editable, so a typo'd effect name has
+              ;; to SAY something — a silent no-op reads as the transition
+              ;; working (blt.38).
+              (do (log/warn "phases.edn :transitions names an effect this loop"
+                            "does not implement:" effect
+                            "— known: :mark-green :clear-reframe")
+                  b)))
           branch
           (transition-effects {:result result :artifact artifact})))
 
@@ -614,7 +620,16 @@
            (if (and beam? (not scoped-here?))
              b ;; run-wide: the beam broadcasts it to every branch at the round top
              (do (interventions/resolve! conn run-id (:id d) :applied nil turn)
-                 (assoc b :pending-directive d)))
+                 ;; :payload-text = the parsed human words; the raw column is
+                 ;; a JSON blob the gate would render verbatim (blt.38).
+                 (assoc b :pending-directive
+                        (assoc d :payload-text
+                               (let [payload (or (try (json/read-str (str (:payload d))
+                                                                     :key-fn keyword)
+                                                      (catch Throwable _ nil))
+                                                 {})]
+                                 (or (:text payload)
+                                     (when (string? payload) payload)))))))
 
            "extend"
            (if beam?
@@ -667,7 +682,11 @@
   [{:keys [conn run-id max-turns] :as ctx} before branch turn {:keys [parsed result]}]
   (let [tool (:name parsed)
         branch (settle-predictions! conn branch turn [tool] before branch)
-        branch (drain-directives! ctx branch turn)
+        ;; Not on a done turn: the done path renders no steer, so a directive
+        ;; drained here was resolved "applied" and never shown (blt.38). Left
+        ;; pending, it reaches whoever can still act — another branch, or the
+        ;; queue's history as honestly undelivered.
+        branch (if (:done? result) branch (drain-directives! ctx branch turn))
         ;; The cap the gates reason against includes whatever `extend`
         ;; directives have granted this branch — otherwise last-call and the
         ;; turn-budget notices keep firing against the spent original cap

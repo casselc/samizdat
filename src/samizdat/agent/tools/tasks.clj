@@ -168,6 +168,13 @@
         (or (want :id) (want :reason)
             (let [held (holding conn branch)
                   reason (str (base/arg ctx :reason))]
+              (if (and held (= (:id held) (base/arg ctx :id)))
+                ;; Switching to what you already hold: a no-op, NOT a
+                ;; claim-then-release — the idempotent re-claim succeeded and
+                ;; the release then set the row back to open while the branch
+                ;; kept working it, so a sibling could claim the same task
+                ;; (karamazov-blt.34).
+                (base/ok branch (str "Already working on " (task-line held)))
               (if-let [t (tasks/claim! conn (base/arg ctx :id) run-id (:id branch))]
                 (do
                   ;; The task being set down goes back to the board rather than
@@ -190,12 +197,28 @@
                                 "\nRecorded why: " reason)
                            :progress? true))
                 (base/malformed branch (str "Cannot switch to " (base/arg ctx :id)
-                                       ": no such task, or another run holds it.")))))
+                                       ": no such task, or another run holds it."))))))
 
         "close"
         (or (want :id)
-            (if-not (tasks/get-task conn (base/arg ctx :id))
-              (base/malformed branch (str "No task " (base/arg ctx :id) "."))
+            (let [row (tasks/get-task conn (base/arg ctx :id))]
+              (cond
+                (not row)
+                (base/malformed branch (str "No task " (base/arg ctx :id) "."))
+
+                ;; Only the holder closes held work. Any branch could close a
+                ;; sibling's in-progress task — "tidying the board" away from
+                ;; under the branch working it (karamazov-blt.34). Unheld
+                ;; rows stay closable by anyone: cancelling backlog is
+                ;; bookkeeping, not theft.
+                (and (some? (:branch_id row))
+                     (not= (:branch_id row) (:id branch)))
+                (base/malformed branch
+                                (str "Task " (:id row) " is held by "
+                                     (:branch_id row) "; only the holder"
+                                     " closes it."))
+
+                :else
               (let [t (tasks/close! conn (base/arg ctx :id) (or (base/arg ctx :status) "done"))
                     ;; Closing the CURRENT task clears the slot, so the next
                     ;; context block asks for the next one instead of pointing
@@ -203,7 +226,7 @@
                     branch (cond-> branch
                              (= (:id t) (:id (:task branch))) (assoc :task nil))]
                 (base/ok branch (str "Closed " (task-line t))
-                         :progress? true))))
+                         :progress? true)))))
 
         (base/malformed branch (str "Unknown task action `" action "`. " task-usage)))
       (catch Throwable e

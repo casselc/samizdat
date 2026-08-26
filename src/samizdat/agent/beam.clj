@@ -398,9 +398,15 @@
          ("message" "review")
          (do (interventions/resolve! conn run-id (:id d) :applied nil turn)
              ;; Delivered as a directive on the branch, which the arbiter puts
-             ;; at priority zero — above every machine gate.
-             (assoc acc :branches
-                    (mapv #(if (matches? %) (assoc % :pending-directive d) %) bs)))
+             ;; at priority zero — above every machine gate. :payload-text is
+             ;; the parsed human words; the raw column is a JSON blob and the
+             ;; gate rendered it verbatim (blt.38).
+             (let [d' (assoc d :payload-text
+                             (let [payload (directive-payload d)]
+                               (or (:text payload)
+                                   (when (string? payload) payload))))]
+               (assoc acc :branches
+                      (mapv #(if (matches? %) (assoc % :pending-directive d') %) bs))))
 
          "fork"
          ;; A fork needs no scheduler machinery of its own: `:beam/spawn`
@@ -952,7 +958,16 @@
       (log/info "loop" loop-nm "is a whole-run workflow; beam width forced to 1"
                 "(asked for" (str requested-width ")")))
     (let [initial (mapv #(open-branch! ctx (str "B" (inc %)) nil nil 0) (range width))
-          result (run-rounds ctx initial 1)]
+          result (try (run-rounds ctx initial 1)
+                      (catch Throwable e
+                        ;; A crash is an outcome too: a workflow that crashes
+                        ;; five times showing "no runs" in the selection
+                        ;; history taught the chooser nothing (blt.38).
+                        (try (knowledge/record-workflow-outcome!
+                              conn {:workflow loop-nm :run-id run-id
+                                    :shipped? false})
+                             (catch Throwable _ nil))
+                        (throw e)))]
       ;; HOW THIS WORKFLOW WENT, for the next run's choice. A run only ever
       ;; sees its own attempt, so `direct attempts on this project keep getting
       ;; stuck` is not something any single run can notice — it has to be
