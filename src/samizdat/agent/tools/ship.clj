@@ -295,15 +295,29 @@
         require-test? (get-in ctx [:config :run :require-test?] true)
         verify-on? (and (nil? block)
                         (or verify-focused? (not (str/blank? (str verify-cmd)))))
-        ;; The execution boundary, probed ONCE up front (capability probe,
-        ;; no spawn): without the scoped primitive, gitdiff already answered
-        ;; cannot-tell (its git calls go through the same primitive) and
-        ;; run-verify would report unavailable — but the DECISION and the
-        ;; journal need the fact here, so the trust fallthrough for
-        ;; cannot-tell can never absorb a missing executor. An unavailable
-        ;; gate blocks; it never silently permits a ship.
-        unsupported? (and verify-on? (not (proc/scope-supported?)))
-        changed (when verify-on? (gitdiff/changed-files (:root ctx) (:git-baseline ctx)))
+        ;; The pre-verification probes — the execution-boundary capability
+        ;; probe (no spawn) and the scoped git diff of what the run changed
+        ;; (which DOES launch host git processes through the scoped
+        ;; primitive) — run under ONE lease permit, so a lease revoked before
+        ;; this point means no host process launches for a dead turn.  The
+        ;; permit's linearization is the same one the verifier launch below
+        ;; uses: probe-before-revocation is authorized and runs; revocation
+        ;; before the probe refuses with :stale and nothing spawns.  Legacy
+        ;; callers with no lease probe directly, as before.  Without the
+        ;; scoped primitive, gitdiff would answer cannot-tell and run-verify
+        ;; would report unavailable — the DECISION and the journal need the
+        ;; fact here, so the trust fallthrough for cannot-tell can never
+        ;; absorb a missing executor.  An unavailable gate blocks; it never
+        ;; silently permits a ship.
+        pre (when verify-on?
+              (base/run-with-turn-lease-permit!
+               ctx
+               (fn []
+                 {:unsupported? (not (proc/scope-supported?))
+                  :changed (gitdiff/changed-files (:root ctx)
+                                                  (:git-baseline ctx))})))
+        unsupported? (and verify-on? (:unsupported? pre))
+        changed (when verify-on? (:changed pre))
         ;; The structured request, derived (never composed): focused over
         ;; validated namespaces, the operator's configured fallback, a
         ;; refusal, an :invalid misconfiguration, or nothing to run.
@@ -319,9 +333,18 @@
         pre-doomed? (or (and (some? changed) (empty? changed))
                         (and require-test? (some? changed) (seq changed)
                              (not (some verify/test-file? changed))))
-        vresult (when (and verify-on? vrequest (not pre-doomed?))
-                  (verify/run-verify (:root ctx) vrequest
-                                     (get-in ctx [:config :run :verify-timeout-ms])))
+         vresult (when (and verify-on? vrequest (not pre-doomed?))
+                   ;; Permit issuance is the verifier-launch linearization
+                   ;; point and shares the lease monitor with revocation.  The
+                   ;; long verifier runs outside that monitor: revocation first
+                   ;; refuses without invoking run-verify; launch first remains
+                   ;; authorized and the scoped runner retains its normal
+                   ;; bounded process-tree drain behavior.
+                   (base/run-with-turn-lease-permit!
+                    ctx
+                    #(verify/run-verify
+                      (:root ctx) vrequest
+                      (get-in ctx [:config :run :verify-timeout-ms]))))
         verify-block (verify/verify-block
                       {:verify-on? verify-on? :result vresult
                        :request vrequest :unsupported? unsupported?

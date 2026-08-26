@@ -87,7 +87,7 @@
 
 (deftest lock-matches-wrapper-pins
   (testing "the lock restates bin/js1's pins exactly (no drift, no second truth)"
-    (is (= "279bca18bbf50f37b8574a4e6998dee40313cd26" (:jolt/sha lock)))
+    (is (= "4af2362176160f2ed0e366689d7232b1a38adfec" (:jolt/sha lock)))
     (is (= (:jolt/sha lock) (wrapper-var "JOLT_SHA")))
     (is (= (:jolt/branch lock) (wrapper-var "JOLT_BRANCH")))
     (is (= (:jolt/url lock) (wrapper-var "JOLT_URL")))

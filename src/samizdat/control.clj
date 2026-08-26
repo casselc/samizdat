@@ -35,7 +35,8 @@
   puts it above every machine gate (priority zero). It is delivered through the
   same interventions queue the HTTP control surface uses, so a REPL steer and a
   UI steer are the same event."
-  (:require [samizdat.store.db :as db]
+  (:require [samizdat.security.controller :as controller]
+            [samizdat.store.db :as db]
             [samizdat.store.interventions :as interventions]
             [samizdat.store.journal :as journal]
             [samizdat.store.runs :as runs]))
@@ -64,9 +65,22 @@
                            :branch-id branch-id :issued-by "repl"})))
 
 (defn extend!
-  "Raise a run's turn cap. For a run that is close but out of budget."
-  [conn run-id max-turns]
-  (runs/extend-budget! conn run-id max-turns))
+  "Raise a run's turn cap — the trusted controller path, and the only one
+  there is. For a run that is close but out of budget.
+
+  `authority` is (samizdat.security.controller/authority config): an
+  opaque handle minted from trusted controller config. It is deliberately
+  not optional and not a flag — an EDN {:trusted true} must never be able
+  to say this. The extension is idempotent per :request-id, monotonic,
+  ceiling-aware, and lands as one audited transaction (cap raise, reopen
+  of the exhausted branches, retained audit row). `opts` carries
+  :request-id (required — the idempotency key), :reason (required), and
+  optionally :principal."
+  ([conn authority run-id max-turns]
+   (extend! conn authority run-id max-turns {}))
+  ([conn authority run-id max-turns opts]
+   (controller/extend-budget!
+    authority conn (assoc opts :run-id run-id :new-max max-turns))))
 
 (defn pending
   "The directives waiting to be drained at the next boundary."

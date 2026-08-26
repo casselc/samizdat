@@ -30,36 +30,52 @@ pin records.
 | Component | Coordinate |
 |---|---|
 | Samizdat | this repo — current source is branch `js1-bounded-samizdat`; `bin/js1 check` reports the actual checkout state at run time |
-| Jolt runtime | `https://github.com/casselc/jolt` branch `js1-runtime-current-upstream` @ **`279bca18bbf50f37b8574a4e6998dee40313cd26`** ("test: wire current SCI evaluator gates"; the branch is rebased onto current upstream `edda7aec`, so the pre-rebase SHAs are superseded) |
+| Jolt runtime | `https://github.com/casselc/jolt` branch `js1-runtime-current-upstream` @ **`4af2362176160f2ed0e366689d7232b1a38adfec`** ("docs: record final Jolt runtime evidence"; the branch is rebased onto current upstream `4c0022d4`, so all pre-rebase SHAs — the previous pin `279bca18` included — are superseded) |
 | SCI | `borkdude/sci` **0.13.53**, vendored as the Jolt checkout's `vendor/sci` submodule @ **`32d62a5136ad3dc148588752f5bcc4cc30b14752`** |
 | SCI deps | from the submodule's own `deps.edn` at that commit: `borkdude/edamame` 1.5.39, `org.babashka/sci.impl.types` 0.0.3, `borkdude/graal.locking` 0.0.2, and `org.clojure/tools.reader` 1.5.2 transitively via edamame's POM |
 | jolt-crypto | `jolt-lang/jolt-crypto` @ **`1ab72aa5f73be7ec41f01086953ffb43ecd3d84e`** — the digest substrate's MessageDigest shim; pinned once in samizdat's `deps.edn` and read from there by `bin/js1` |
 
 Why this Jolt commit: it is the tip of the branch that re-derives
 `jolt.sandbox` — the isolated, capability-bounded SCI evaluator — onto
-**current upstream**, now rebased onto `edda7aec`. The rebase landed the
+**current upstream**: rebased first onto `edda7aec`, which landed the
 SCI follow-ups upstream (private `map`/`newline` compatibility vars,
 `Thread.getId`, `clojure.lang.Numbers` arithmetic statics, restored
 nested-interrupt polling, and a persistent-SCI evaluation test — PRs
-#721–#725), so the branch itself carries only: the evaluator
-re-derivation (`13e43418`, "feat: rederive JS1 evaluator on current
-upstream"), two scoped-process commits — `a5fb8a3b`, "feat: add scoped
-Linux process termination" (the JVM `ProcessBuilder`/`Process` surface
-over posix_spawn with waitpid/kill-driven exit/liveness/signalling) and
-`1f859e70`, "feat: bound scoped process output" (separately bounded
+#721–#725), and now onto `4c0022d4`, which picks up the upstream tail
+since (interruptible blocking waits, the ffi ncurses symbol-collision
+fix, dialect fixes, and source-less-JAR root handling — through PR
+#735). The branch itself carries only: the evaluator re-derivation
+(`c7766cd2`, "feat: rederive JS1 evaluator on current upstream"), the
+scoped-process commits — `71924827`, "feat: add scoped Linux process
+termination" (the JVM `ProcessBuilder`/`Process` surface over
+posix_spawn with waitpid/kill-driven exit/liveness/signalling) and
+`671a8bca`, "feat: bound scoped process output" (separately bounded
 stdout/stderr capture for the scoped run: `:out-bytes`/`:err-bytes`
 independent byte caps, a poll-bounded drain in the same loop that polls
-waitpid, and a fail-closed spawn gate so a capture pipe can never leak a
-wedged run) — and the tip `279bca18`, "test: wire current SCI evaluator
-gates", which wires the evaluator contract into opt-in make lanes
-(`js0sandbox`/`js0authority`/`scievaluator`) and adds discriminating
-`Numbers` checked-promote/unchecked-wrap/equiv rows to the sandbox suite.
+waitpid, and a fail-closed spawn gate so a capture pipe can never leak
+a wedged run) — the evaluator gates `05f3a553`, "test: wire current SCI
+evaluator gates" (opt-in make lanes `js0sandbox`/`js0authority`/
+`scievaluator` plus discriminating `Numbers`
+checked-promote/unchecked-wrap/equiv rows), `157243e4`, "fix: clean
+scoped processes on interruption" (every scoped-run exit — the
+cooperative per-round interrupt poll or an asynchronous escape from
+under `jolt.host/run-interruptible` — funnels through one dynamic-wind
+after-part that runs the same TERM→grace→KILL→confirm-empty ladder
+before any result or the interruption itself reaches the caller, with
+the root's pid armed under masked interrupts at spawn, so an
+interrupted run can no longer leak the owned process group or leave the
+root a zombie), and the docs-only tip `4af23621`, "docs: record final
+Jolt runtime evidence" (runtime evidence doc and a conformance-EDN
+update; no runtime code).
 
 `jolt.sandbox` is **byte-identical** to the previous pin across this
-rebase — no sandbox or language surface changed. The scoped-process
-commits are pinned because JS1 verification consumes this bounded,
-scoped process primitive as the trusted controller process-scope
-substrate. The re-derivation preserves the trusted, inert, versioned
+rebase — no sandbox or language surface changed (verified by diffing
+the trees at `279bca18` and `4af23621`: `jolt-core/jolt/sandbox.clj`
+and its sandbox suite did not move). The scoped-process commits — now
+including the interruption cleanup — are pinned because JS1
+verification consumes this bounded, scoped process primitive as the
+trusted controller process-scope substrate. The re-derivation
+preserves the trusted, inert, versioned
 language surface the JS1 safe doc/complete path and the
 `samizdat.agent.sandbox` RuntimeCoordinate are built on:
 
@@ -116,7 +132,7 @@ into the shared `~/.m2` repository; everything is offline afterwards.
 
     git clone <samizdat-remote> samizdat && cd samizdat
     git clone --branch js1-runtime-current-upstream https://github.com/casselc/jolt ../jolt
-    git -C ../jolt checkout 279bca18bbf50f37b8574a4e6998dee40313cd26
+    git -C ../jolt checkout 4af2362176160f2ed0e366689d7232b1a38adfec
     git -C ../jolt submodule update --init vendor/sci
     bin/js1 check
     bin/js1 smoke
@@ -194,14 +210,14 @@ time):
   has no coordinate to resolve; restore the dependency (it is an ordinary
   samizdat dep) — do not paper over it by hand-editing the wrapper.
 
-## Evidence (this workspace, 2026-08-24)
+## Evidence (this workspace, 2026-08-25)
 
     $ bin/js1 check
     js1 runtime stack: OK
       samizdat: /home/chuck/opencode/src/samizdat
                 git <captured checkout revision> (the command reports the actual checkout state)
       jolt:     /home/chuck/opencode/src/jolt
-                279bca18bbf50f37b8574a4e6998dee40313cd26 (https://github.com/casselc/jolt branch js1-runtime-current-upstream)
+                4af2362176160f2ed0e366689d7232b1a38adfec (https://github.com/casselc/jolt branch js1-runtime-current-upstream)
       sci:      /home/chuck/opencode/src/jolt/vendor/sci
                 32d62a5136ad3dc148588752f5bcc4cc30b14752 (borkdude/sci 0.13.53)
       sci deps: borkdude/edamame 1.5.39, org.babashka/sci.impl.types 0.0.3,
@@ -226,8 +242,9 @@ time):
     SANDBOX-TEST OK
 
 The smoke's 28/268 is byte-identical across every pin this lane has
-carried (pre- and post-rebase): `jolt.sandbox` is unchanged by the
-scoped-process commits and the rebase onto `edda7aec`, so the language
+carried (pre-rebase, post-rebase onto `edda7aec`, and now onto
+`4c0022d4`): `jolt.sandbox` is unchanged by the scoped-process commits
+— the interruption cleanup included — and the rebase, so the language
 surface and coordinate are preserved and no receipt, snapshot, or
 coordinate expectation moved with the pin. The smoke remains the same seam
 evidence the recorded direct invocation in `test/samizdat/sandbox_test.clj`'s

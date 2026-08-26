@@ -65,6 +65,8 @@
             [mycelium.validation-test]
             [mycelium.workflow-test]
             [samizdat.agent-test]
+            [samizdat.agent-turn-lease-test]
+            [samizdat.migrations-test]
             [samizdat.resume-test]
             [samizdat.js1-boundary-test]
             [samizdat.js1-wrapper-test]
@@ -160,6 +162,8 @@
     samizdat.evals-test
      samizdat.llm-test
      samizdat.agent-test
+      samizdat.agent-turn-lease-test
+      samizdat.migrations-test
       samizdat.resume-test
       samizdat.js1-boundary-test
       samizdat.js1-wrapper-test

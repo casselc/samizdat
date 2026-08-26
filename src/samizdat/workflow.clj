@@ -132,6 +132,70 @@
       :definition (read-definition (:edn row))
       :compiled (compile-loop (read-definition (:edn row)))})))
 
+;; The whole-run manifest owns :route back to :start and :loop/finish teardown;
+;; the beam owns those concerns across its branches. Derive one turn instead
+;; of maintaining a second manifest that can drift from the stored definition.
+
+(def start-node
+  "The manifest's entry node. A convention every shipped manifest follows and
+  mycelium's own compile assumes."
+  :start)
+
+(defn finish-nodes
+  "Nodes whose cell is :loop/finish — the whole-run teardown the beam owns."
+  [definition]
+  (set (keep (fn [[node cell]] (when (= :loop/finish cell) node))
+             (:cells definition))))
+
+(defn iterating?
+  "Whether one pass through this manifest's slice is one TURN — a single model
+  call the beam can schedule against siblings — or a whole-run workflow that
+  loops internally.
+
+  A per-turn manifest both contains :llm/infer and loops back to :start.
+  Orchestrator loops back but runs a nested worker job rather than one model
+  turn; team, feature, and decompose run straight through."
+  [definition]
+  (let [cells (set (vals (:cells definition)))
+        loops-back? (some (fn [[_ to]]
+                            (if (map? to)
+                              (some #(= start-node %) (vals to))
+                              (= start-node to)))
+                          (:edges definition))]
+    (boolean (and (contains? cells :llm/infer) loops-back?))))
+
+(defn turn-manifest
+  "`definition` reduced to ONE turn: edges back to the start node and edges
+  into :loop/finish are redirected to :end, and finish nodes are dropped.
+
+  Cells, dispatches, and constraints remain unchanged, so the same manifest
+  definition drives both the whole-run and beam paths."
+  [definition]
+  (let [finish (finish-nodes definition)
+        terminal (conj finish start-node)
+        retarget (fn [to] (if (contains? terminal to) :end to))]
+    (-> definition
+        (assoc :cells (into {} (remove (comp finish key)) (:cells definition)))
+        (assoc :edges
+               (into {}
+                     (for [[from to] (:edges definition)
+                           ;; The finish node's own outgoing edge goes with it.
+                           :when (not (contains? finish from))]
+                       [from (if (map? to)
+                               (into {} (map (juxt key (comp retarget val))) to)
+                               (retarget to))]))))))
+
+(defn compile-turn-loop
+  "Load the named manifest and compile its derived per-turn slice. Returns the
+  whole definition and shape classification alongside the compiled slice."
+  [conn name]
+  (let [{:keys [version definition]} (load-loop! conn name)]
+    {:name name
+     :version version
+     :definition definition
+     :iterating? (iterating? definition)
+     :compiled (compile-loop (turn-manifest definition))}))
+
 (defn compiled-manifest
   "Compile the named factory manifest to a runnable sub-loop. The seam a role
   cell uses to run a role's own loop (worker for an implementor, reviewer for a
@@ -299,6 +363,27 @@
                           {:js1/error :sandbox-unavailable :run-id run-id}
                           e)))))))
 
+(defn js1-assert-single-loop!
+  "Refuse a JS1-profiled run on a WHOLE-RUN (non-iterating) manifest, BEFORE
+   any model work is paid for.
+
+   team/feature/decompose (and orchestrator) do their own looping inside one
+   beam turn by fanning out role/worker SUBLOOPS as separate branches (W0,
+   R0, D1…) — and every one of them would evaluate into the run's ONE
+   persistent :main SCI instance, interleaving many durable histories under
+   one binding id.  That is the multi-branch shape
+   js1-assert-single-branch! refuses, one level down where a width guard
+   cannot see it.  Throws {:js1/error :whole-run-workflow-not-supported}."
+  [js1-active? loop-nm iterating?]
+  (when (and js1-active? (not iterating?))
+    (throw (ex-info (str "JS1 profile cannot run the '" loop-nm
+                         "' workflow: it is a whole-run workflow whose"
+                         " role/worker subloops would share the run's one"
+                         " persistent SCI binding across branches, and JS1 is"
+                         " single-player by construction")
+                    {:js1/error :whole-run-workflow-not-supported
+                     :loop (str loop-nm)}))))
+
 (defn run!
   "Run one branch to completion under the stored loop definition.
   Returns {:status :answer :branch :run-id (:residual)}."
@@ -306,9 +391,8 @@
   ;; JS1 is single-player by construction: one persistent :main instance,
   ;; one branch, one durable history.  A team manifest's subtask fan-out
   ;; (or an explicit multi-branch beam width) would share that instance
-  ;; across branches, so the shape is refused here — before the loop is
-  ;; compiled, before a run row exists, and above all before any model
-  ;; work is paid for.
+  ;; across branches, so the shape is refused here — before a run row
+  ;; exists, and above all before any model work is paid for.
   (js1-base/js1-assert-single-branch!
     (get-in config [:run :js1/profile])
     (max (or (get-in config [:run :beam-width]) 1)
@@ -316,6 +400,12 @@
   (let [max-turns (or max-turns (get-in config [:run :max-turns]) 40)
         loop-nm (active-loop-name config)
         {:keys [version compiled definition]} (load-loop! conn loop-nm)
+        ;; The width guard cannot see a fan-out INSIDE one branch: a
+        ;; whole-run manifest's role/worker subloops are that fan-out, one
+        ;; level down.  Refused after the (local, unpaid-for) compile,
+        ;; before the run row exists and before any model call.
+        _ (js1-assert-single-loop! (some? (get-in config [:run :js1/profile]))
+                                   loop-nm (iterating? definition))
         run-id (runs/start-run! conn {:problem problem
                                       :provider (:provider llm-config)
                                       :model (:model llm-config)

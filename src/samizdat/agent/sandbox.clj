@@ -70,7 +70,13 @@
 
     Timeout uses Jolt cooperative interrupt with an unraiseable host
     ceiling: jolt.host/run-interruptible checks the token from the host
-    side; SCI code cannot catch or suppress the interruption.
+    side; SCI code cannot catch or suppress the interruption.  A
+    caller-supplied token composes UNDER the ceiling — the guarded
+    evaluation runs on a private per-evaluation token the ceiling timer
+    and a caller-token relay both interrupt, so no caller (a model-held
+    turn lease included) can stretch an evaluation past the spec's
+    timeout, and the spec's timer can never fire a caller's shared token
+    after the guarded extent (evaluate-state!).
 
     Durable recorded evaluation (evaluate-recorded! / rebuild-binding!):
 
@@ -1213,40 +1219,100 @@
   (compare-and-set! (::evaluation-owner target) claim nil))
 
 (defn- evaluate-state!
-  "Run source after ownership has been acquired."
+  "Run source after ownership has been acquired.
+
+   Ceiling composition: the spec's :timeout-ms is an unraiseable ceiling
+   WHETHER OR NOT the caller supplies a token.  The guarded evaluation
+   always runs under a PRIVATE per-evaluation token, interrupted by exactly
+   one of:
+
+     - the ceiling timer, at :timeout-ms from the eval's start — the strict
+       timeout, reported as {:samizdat.sandbox/error :timeout}; or
+     - the relay of the caller's token (e.g. a controller TurnLease's) — a
+       revocation the caller performed, propagated as the raw Jolt
+       interrupt and never relabeled :timeout: the caller that cancelled
+       knows what it did.
+
+   The `cause` cell linearizes the two: the first interruption to land owns
+   the label, so a revocation noticed before the deadline is never
+   misreported as a timeout.
+
+   A caller-held token is NEVER interrupted by the spec's timer.  That is
+   what eliminates the late-fire race: a caller token is shared across the
+   turn's evaluations, so a timer wake landing after the guarded extent —
+   in the gap between the eval's return and the disarm — would otherwise
+   poison every later same-turn eval with a spurious interruption.  The
+   wake now lands on a token that dies with this evaluation.  The ceiling
+   still governs absolutely: nothing the caller holds can stretch the
+   evaluation past :timeout-ms."
   [target source opts]
   (let [state-atom (::state target)
         timeout-ms (:timeout-ms target)
-        token (:token opts)]
-    (if (or token (not timeout-ms) (zero? timeout-ms))
+        token (:token opts)
+        ceiling? (and timeout-ms (pos? timeout-ms))]
+    (if-not ceiling?
       (sandbox/evaluate! @state-atom source token)
       (let [tok (jolt.host/make-interrupt)
-            _ (let [t (Thread. (fn []
-                                (try
-                                  (Thread/sleep timeout-ms)
-                                  (jolt.host/interrupt! tok)
-                                  (catch Exception _ nil))))]
+            ;; nil | :ceiling | :caller — the first interrupter owns the
+            ;; label the catch below reads.
+            cause (atom nil)
+            ;; Ends the watcher once the guarded extent has ended.  A wake
+            ;; that already passed this check can only interrupt the private
+            ;; token, which is dead by then.
+            done (atom false)
+            deadline (+ (System/currentTimeMillis) timeout-ms)
+            watcher (fn []
+                      (loop []
+                        (let [ms-left (- deadline (System/currentTimeMillis))]
+                          (cond
+                            @done nil
+                            ;; A caller revocation outranks the ceiling when
+                            ;; both land between two polls: the canceller's
+                            ;; act is reported as itself, never relabeled.
+                            ;; Either fire ends the watch — the private token
+                            ;; is set, so the guarded eval is already dying.
+                            (and token (jolt.host/interrupted? token))
+                            (do (compare-and-set! cause nil :caller)
+                                (jolt.host/interrupt! tok))
+                            (<= ms-left 0)
+                            (do (compare-and-set! cause nil :ceiling)
+                                (jolt.host/interrupt! tok))
+                            :else
+                            (do (Thread/sleep (min 5 (max 1 ms-left)))
+                                (recur))))))
+            _ (let [t (Thread. watcher)]
                 (.setDaemon t true)
                 (.start t))]
         (try
           (sandbox/evaluate! @state-atom source tok)
           (catch Throwable e
-            (if (:jolt/interrupted (ex-data e))
+            (if (and (:jolt/interrupted (ex-data e)) (= :ceiling @cause))
               (throw (ex-info "Sandbox evaluation timed out"
                               {:samizdat.sandbox/error :timeout
                                :timeout-ms timeout-ms}
                               e))
-              (throw e))))))))
+              (throw e)))
+          (finally
+            (reset! done true)))))))
 
 (defn evaluate!
   "Evaluate `source` in `x` — a context (new), an Instance, or a Binding.
 
-   Optional opts:
-     :token — a Jolt interrupt token (jolt.host/make-interrupt).
-              When supplied, evaluation uses jolt.host/run-interruptible
-              so the token's interruption is an unraiseable host ceiling.
-              If no token is given and the target has a timeout, one is
-              created and scheduled automatically via a daemon thread.
+    Optional opts:
+      :token — a Jolt interrupt token (jolt.host/make-interrupt).
+               When supplied, evaluation uses jolt.host/run-interruptible
+               so the token's interruption is an unraiseable host ceiling.
+               The spec's :timeout-ms ceiling STILL applies, and still
+               composes over the caller's token: the evaluation runs under
+               a private per-evaluation token that the ceiling timer and a
+               caller-token relay interrupt, so a caller-held token (a
+               model-side turn lease, say) can narrow but never extend
+               evaluation past the authority fixed at bind time — and the
+               caller's token itself is never fired by the spec's timer,
+               so a completed evaluation cannot poison a later same-turn
+               one sharing that token.  If no token is given and the
+               target has a timeout, the ceiling still applies (same
+               private-token mechanism, no relay).
 
    No authority selection: authority is fixed at construction/bind time.
    Passing any of :profile, :preset, :capabilities,
@@ -1349,12 +1415,26 @@
   "Persist intent, run exactly once, then persist exactly one outcome.  A
    failure to append the outcome is deliberately not converted into an error
    outcome: the existing intent stays unsettled because the real world's state
-   is then unknown."
-  [store conn eval-id {:keys [id fn]} args]
-  (let [intent ((:record-intent! store) conn eval-id
-                {:op id :args (sandbox/inert args)})
+   is then unknown.
+
+   When `effect-permit!` is supplied by the trusted JS1 tool route, it fences
+   the durable intent append under the TurnLease monitor.  That append is the
+   semantic operation's initiation: once it exists the ensuing bounded host
+   operation is authorized even if revocation follows; if revocation won, the
+   callback is never entered and neither receipt nor host operation exists.
+   Only the intent append is synchronized — the host operation and outcome are
+   deliberately outside the lease monitor."
+  [store conn eval-id operation args effect-permit!]
+  (let [id (:id operation)
+        op-fn (:fn operation)
+        record-intent (fn []
+                        ((:record-intent! store) conn eval-id
+                         {:op id :args (sandbox/inert args)}))
+        intent (if effect-permit!
+                 (effect-permit! record-intent)
+                 (record-intent))
         outcome (try
-                  {:ok true :value (apply fn args)}
+                  {:ok true :value (apply op-fn args)}
                   (catch Throwable e
                     {:ok false :error e}))]
     (if (:ok outcome)
@@ -1423,7 +1503,11 @@
    and the durable record remains pending with its unsettled intent.  If the
    :failed terminal row itself cannot be appended, the record likewise stays
    pending and the instance is poisoned: a pending record blocks whole-history
-   rebuild, so the dirty context has no cure and must refuse evaluation."
+   rebuild, so the dirty context has no cure and must refuse evaluation.
+
+   Trusted opts may carry :effect-permit!, a callback used only around each
+   durable operation intent (the semantic launch boundary), never around SCI
+   evaluation or the host operation's potentially long computation."
   ([conn binding source] (evaluate-recorded! conn binding source nil))
   ([conn binding source opts]
    (require-binding! binding "evaluate-recorded!")
@@ -1439,9 +1523,11 @@
                       (assoc identity
                              :coordinate (current-coordinate target)
                              :source source))
-             hook (::effect-hook target)]
+              hook (::effect-hook target)
+              effect-permit! (:effect-permit! opts)]
          (reset! hook (fn [operation args]
-                        (run-recorded-effect! store conn eval-id operation args)))
+                         (run-recorded-effect! store conn eval-id operation args
+                                               effect-permit!)))
          (sandbox/set-mode! @(::state target) :normal)
          (try
            (let [outcome (try
@@ -1463,7 +1549,7 @@
                    (complete-failed-evaluation! store conn eval-id evaluation-error)
                    (catch Throwable completion-error
                      (reset! (::poisoned target) true)
-                     (throw (ex-info
+                      (throw (ex-info
                              "Evaluation failed and its durable record could not be completed; the record remains pending and the instance is poisoned"
                              {:samizdat.sandbox/error :durable-evaluation-incomplete
                               :eval-id eval-id}

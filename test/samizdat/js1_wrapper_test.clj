@@ -23,7 +23,7 @@
 (def ^:private wrapper (str project-dir "/bin/js1"))
 
 ;; The same pins bin/js1 enforces (docs/JS1_RUNTIME.md § Pins).
-(def ^:private expected-jolt-sha "279bca18bbf50f37b8574a4e6998dee40313cd26")
+(def ^:private expected-jolt-sha "4af2362176160f2ed0e366689d7232b1a38adfec")
 (def ^:private jolt-url "https://github.com/casselc/jolt")
 (def ^:private jolt-branch "js1-runtime-current-upstream")
 

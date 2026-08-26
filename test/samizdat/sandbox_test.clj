@@ -879,6 +879,36 @@
                          (slurp (str root "/once.txt"))))
                   ))))))))
 
+  (deftest recorded-operation-permit-fences-the-durable-intent-and-host-edit
+    ;; The real evaluate-recorded! seam, not the repl wiring stand-in: a denied
+    ;; launch permit must run before record-intent! and before project/edit.
+    (with-tmp
+      (fn [root]
+        (with-eval-store memory-eval-store
+          (fn []
+            (let [conn (memory-db)
+                  b (sb/bind! (sb/provider) "permit-denied"
+                              {:preset :project/develop :root root})
+                  permits (atom 0)
+                  data (thrown-data
+                        #(sb/evaluate-recorded!
+                          conn b
+                          "(project/edit \"denied.txt\" :absent \"no\")"
+                          {:effect-permit!
+                           (fn [_initiate]
+                             (swap! permits inc)
+                             (throw (ex-info "revoked"
+                                             {:samizdat.turn-lease/error
+                                              :stale})))}))
+                  record (get-in @conn [:records 1])]
+              (is (= :stale (:samizdat.turn-lease/error data)))
+              (is (= 1 @permits) "the sandbox consulted the launch fence once")
+              (is (= :failed (:status record)))
+              (is (empty? (:receipts record))
+                  "revocation before the permit produces no operation receipt")
+              (is (not (fs/exists? (str root "/denied.txt")))
+                  "and the semantic host edit never starts")))))))
+
   (deftest binding-mismatch-denies-before-load-or-operation
     (with-tmp
       (fn [root]
@@ -1120,6 +1150,113 @@
                     "committed state survived the interruption rollback")
                 (is (deny? #(sb/evaluate! b2 "interrupted-def"))
                     "the interrupted eval's partial def never became evaluator state"))))))))
+
+  (deftest spec-ceiling-governs-without-firing-a-caller-supplied-token
+    ;; B2 regression, revised composition: the model-facing eval path passes
+    ;; the turn lease's token as :token.  Previously a supplied token
+    ;; REPLACED the spec's :timeout-ms ceiling, so a model-side lease could
+    ;; stretch evaluation past the 30s evaluator ceiling fixed at bind time.
+    ;; The ceiling composes over the token — but interrupts a PRIVATE
+    ;; per-evaluation token, never the caller's: a caller token is shared
+    ;; across the turn's evaluations, and a ceiling fire on it (or a late
+    ;; timer wake landing after the guarded extent) would poison every
+    ;; later same-turn eval with a spurious interruption.
+    (with-tmp
+      (fn [root]
+        (let [p (sb/provider)
+              b (sb/bind! p "ceiling-work" {:preset :project/develop
+                                            :root root :timeout-ms 250})
+              token (jolt.host/make-interrupt)
+              ;; The bounded loop runs for seconds if nothing interrupts it,
+              ;; so a 250ms ceiling is the only way this returns early.
+              data (thrown-data
+                    #(sb/evaluate!
+                      b
+                      "(loop [i 20000000] (if (pos? i) (recur (dec i)) :done))"
+                      {:token token}))]
+          (is (= :timeout (:samizdat.sandbox/error data))
+              "the spec ceiling, not the caller's patience, ends the eval")
+          (is (not (jolt.host/interrupted? token))
+              "the caller's token is never the ceiling's target")
+          (is (= 2 (sb/evaluate! b "(+ 1 1)" {:token token}))
+              "a later eval sharing the caller token is unaffected"))))
+    ;; A caller-side interrupt (turn revocation racing in) is NOT the
+    ;; ceiling: it must surface as the raw Jolt interruption, not be
+    ;; relabeled :timeout — the canceller knows what it did.  (The loop
+    ;; source again: the cooperative check fires at evaluation safe
+    ;; points, which a trivial form may never reach.)
+    (with-tmp
+      (fn [root]
+        (let [p (sb/provider)
+              b (sb/bind! p "ceiling-work-2" {:preset :project/develop
+                                              :root root :timeout-ms 60000})
+              token (jolt.host/make-interrupt)
+              _ (jolt.host/interrupt! token)
+              data (thrown-data
+                    #(sb/evaluate!
+                      b
+                      "(loop [i 20000000] (if (pos? i) (recur (dec i)) :done))"
+                      {:token token}))]
+          (is (:jolt/interrupted data) "the caller's interruption surfaces")
+          (is (nil? (:samizdat.sandbox/error data))
+              "and is not mislabeled as a spec timeout")))))
+
+  (deftest a-late-ceiling-wake-cannot-interrupt-a-later-same-token-eval
+    ;; The review's timer race, closed structurally: the ceiling timer never
+    ;; targets the caller's token, so a wake arriving after the guarded eval
+    ;; completed cannot poison the next evaluation sharing that token.
+    ;; (Against the old composition the poisonous interleaving needed the
+    ;; timer to land in the eval-return→disarm gap; this pins the property
+    ;; the fix guarantees unconditionally.)
+    (with-tmp
+      (fn [root]
+        (let [p (sb/provider)
+              b (sb/bind! p "late-wake-work" {:preset :project/develop
+                                              :root root :timeout-ms 50})
+              token (jolt.host/make-interrupt)]
+          (is (= 2 (sb/evaluate! b "(+ 1 1)" {:token token}))
+              "the guarded eval completes well under the ceiling")
+          (Thread/sleep 200)
+          (is (not (jolt.host/interrupted? token))
+              "the late wake found no caller token to fire")
+          (is (= 3 (sb/evaluate! b "(+ 1 2)" {:token token}))
+              "the later same-token eval runs untainted")))))
+
+  (deftest spec-ceiling-governs-a-tokened-recorded-eval
+    ;; B2 at the seam the repl tool actually drives: evaluate-recorded!
+    ;; with a lease token times out at the spec ceiling, records :failed
+    ;; (never pending), and rolls back to committed state — and the lease's
+    ;; token is NOT the ceiling's target, so the turn's next evaluation is
+    ;; not poisoned by this one's timeout.
+    (with-tmp
+      (fn [root]
+        (with-eval-store memory-eval-store
+          (fn []
+            (let [conn (memory-db)
+                  p (sb/provider)
+                  b (sb/bind! p "ceiling-recorded-work"
+                              {:preset :project/develop
+                               :root root :timeout-ms 250})
+                  token (jolt.host/make-interrupt)]
+              (sb/evaluate-recorded! conn b "(def kept-before 1)")
+              (let [data (thrown-data
+                          #(sb/evaluate-recorded!
+                            conn b
+                            "(def lost 1) (loop [i 20000000] (if (pos? i) (recur (dec i)) :done))"
+                            {:token token}))]
+                (is (= :timeout (:samizdat.sandbox/error data))
+                    "the ceiling interrupts the tokened recorded eval")
+                (is (not (jolt.host/interrupted? token))
+                    "via the eval's private token — the lease's is untouched"))
+              (is (= :failed (:status (get-in @conn [:records 2])))
+                  "the ceiling interruption is durably failed, not pending")
+              (let [b2 (sb/bind! p "ceiling-recorded-work"
+                                 {:preset :project/develop
+                                  :root root :timeout-ms 250})]
+                (is (= 2 (sb/evaluate! b2 "(inc kept-before)"))
+                    "committed state survived the rollback")
+                (is (deny? #(sb/evaluate! b2 "lost"))
+                    "the interrupted eval's partial def never committed"))))))))
 
   (deftest uncompletable-failure-poisons-the-instance
     (with-tmp

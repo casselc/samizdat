@@ -53,7 +53,7 @@
  ;; the consumer evidence, not a build-time shortcut).
  :jolt-runtime {:url "https://github.com/casselc/jolt"
                 :branch "js1-runtime-current-upstream"
-                :sha "279bca18bbf50f37b8574a4e6998dee40313cd26"
+                 :sha "4af2362176160f2ed0e366689d7232b1a38adfec"
                 :submodule {:path "vendor/sci"
                             :sha "32d62a5136ad3dc148588752f5bcc4cc30b14752"
                             :version-file "resources/SCI_VERSION"

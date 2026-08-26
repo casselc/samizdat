@@ -131,11 +131,15 @@
             [clojure.tools.logging :as log]
             [samizdat.agent.beam :as beam]
             [samizdat.agent.gates :as gates]
+            [samizdat.agent.gitdiff :as gitdiff]
             [samizdat.agent.loop :as branch-loop]
             [samizdat.agent.state :as state]
             [samizdat.agent.tools.base :as js1-base]
+            [samizdat.repl :as repl]
+            [samizdat.store.db :as db]
             [samizdat.store.journal :as journal]
-            [samizdat.store.runs :as runs]))
+            [samizdat.store.runs :as runs]
+            [samizdat.workflow :as workflow]))
 
 (defn- parse-json [s]
   (when s
@@ -233,16 +237,50 @@
                       :notified-fractions (gates/crossed-fractions branch max-turns))]
     branch))
 
+(defn- cancellation-faulted?
+  "Whether the run was failed closed over an unquiesced turn worker.
+
+  Two durable sources, in retention order:
+
+  - the runs row's terminal_reason (migration v13), written by
+    runs/finish-run-cancellation-fault! in the same UPDATE that fails the
+    run. The runs row is never pruned, so the refusal survives the events
+    retention sweep — and any process restart — indefinitely;
+  - the :turn-cancellation-fault EVENT, the fault's detailed record, which
+    the sweep does prune. Kept as a fallback so a run faulted before the
+    column existed stays refused while its tail survives.
+
+  Durability is the point: the stale worker the fault names may still exist
+  and nothing in a fresh process can prove it gone, so neither a restart nor
+  a retention sweep may reopen the run. The event half is a targeted
+  existence query, not events-since: the fault lands at the END of the run's
+  event stream, where a cursor-limited tail read could miss it."
+  [conn run-id]
+  (or (= "turn-cancellation-fault"
+         (:terminal_reason (runs/get-run conn run-id)))
+      (boolean
+       (seq (db/fetch conn
+                      ["SELECT 1 AS x FROM events
+                         WHERE run_id = ? AND kind = 'turn-cancellation-fault'
+                         LIMIT 1"
+                        run-id])))))
+
 (defn resumable?
   "A run can be resumed when it exists and has not reached a terminal state.
 
   An aborted run STAYS aborted: abort is a person saying stop, and a resume is
   not a person changing their mind. A completed run shipped; the answer is the
-  record. Only a run still in flight — status 'running', or 'failed' from an
-  exhausted process that never got to tear down — is resumable."
+  record. A run failed by a turn CANCELLATION FAULT is likewise terminal for
+  resume purposes: its worker ignored revocation and was still live when the
+  run failed, so minting fresh authority for the same run could overlap a
+  worker nobody can prove has ended. The retained terminal_reason on the
+  runs row — not process memory, and not the prunable event tail — carries
+  that refusal. Only a run still in flight — status 'running', or 'failed'
+  from an exhausted process that never got to tear down — is resumable."
   [conn run-id]
   (when-let [r (runs/get-run conn run-id)]
-    (not (contains? #{"completed" "aborted"} (:status r)))))
+    (and (not (contains? #{"completed" "aborted"} (:status r)))
+         (not (cancellation-faulted? conn run-id)))))
 
 (defn- journal-preset
   "The journal stores event data as JSON, so the preset keyword reads back
@@ -482,21 +520,21 @@
 
 (defn resume!
   "Rebuild a run's branches from the journal and continue the beam's round
-   loop at the round after the last recorded turn, under the run's ORIGINAL
-   max-turns.
+    loop at the round after the last recorded turn, under the run's ORIGINAL
+    max_turns.
 
-   `:max-turns` is the one exception to the anchor rule, and it is explicit:
-   when passed AND larger than the recorded budget, the runs row is raised to
-   it and branches closed as `exhausted` reopen — they closed because the
-   budget ran out, not for cause, so more budget un-closes them. Culled,
-   abandoned, and done branches stay closed. The extension is journaled
-   (budget-extended, branch-reopened) and the rows are updated BEFORE the
-   branches are read back, so a crash mid-extension replays correctly. A
-   crash still cannot re-grant budget; only a caller asking for more can.
+    The budget anchor is absolute: a resume NEVER widens max_turns. The
+    runs row is the budget of record, and this function only ever reads
+    it. Raising the cap is a separate trusted-controller act
+    (samizdat.security.controller/extend-budget! — opaque authority,
+    idempotent per request id, monotonic, ceiling-aware), whose single
+    audited transaction raises the row AND reopens the exhausted branches
+    BEFORE the resume is asked for. A crash still cannot re-grant budget;
+    only the controller, on the record, can.
 
-   Pending interventions are already in their table; the existing
-   pending-directives drain picks them up at the first resumed boundary — this
-   function does not reimplement that path.
+    Pending interventions are already in their table; the existing
+    pending-directives drain picks them up at the first resumed boundary — this
+    function does not reimplement that path.
 
     JS1 fail-closed: if the journal contains a :js1-binding-created event,
     the resume reconstructs a JS1 binding, verifies every journaled
@@ -511,66 +549,95 @@
     refused before any work: JS1 is single-player by construction.
 
     Returns the beam/run-rounds result. Throws when the run is not resumable."
-  [{:keys [conn config llm-adapter llm-config run-id abort max-turns]}]
+  [{:keys [conn config llm-adapter llm-config run-id abort]}]
   (let [run (runs/get-run conn run-id)]
     (when-not (resumable? conn run-id)
       (throw (ex-info (str "run " run-id " is not resumable (status "
-                           (:status run) ")")
-                       {:run-id run-id :status (:status run)})))
-    ;; JS1 is single-player: a journaled JS1 binding on a width-N run
-    ;; (however it got there) is refused BEFORE the run is marked running
-    ;; again, before branches are rebuilt, before any model work.
-    (when (and (some #(= "js1-binding-created" (:kind %))
-                     (journal/events-since conn run-id 0))
-               (> (or (:beam_width run) 1) 1))
-      (js1-base/js1-assert-single-branch! true (:beam_width run)))
-    ;; The row said 'interrupted' (or 'failed'); it is about to be running
-    ;; again, and stalled? only watches runs whose status says so.
-    (runs/mark-running! conn run-id)
-    (when (and max-turns (> max-turns (:max_turns run)))
-      (runs/extend-budget! conn run-id max-turns)
-      (doseq [b (runs/branches conn run-id)
-              :when (= "exhausted" (:status b))]
-        (runs/reopen-branch! conn run-id (:id b))))
-    (let [max-turns (max (or max-turns 0) (:max_turns run))
-          width (:beam_width run)
-          turn-rows (journal/turns conn run-id)
-          turns (group-by :branch_id turn-rows)
-          artifacts (group-by :branch_id (journal/artifacts conn run-id))
-          firings (group-by :branch_id (journal/gate-firings conn run-id))
-          sessions (atom [])
-          ;; JS1 reconstruction: fail-closed on unavailable SCI, runtime/
-          ;; spec/identity mismatch, or malformed/unsettled history; the
-          ;; whole committed durable history replays into ONE fresh SCI
-          ;; context, so the model's definitions survive the crash.
-          root (or (get-in config [:run :root]) (System/getProperty "user.dir"))
-          js1 (reconstruct-run-js1-binding! conn run-id root)
-          ctx {:conn conn :run-id run-id :config config :problem (:problem run)
-               :llm-adapter llm-adapter :llm-config llm-config
-               ;; The trusted controller root must survive the handoff back
-               ;; into the beam scheduler.  JS1 project operations use the
-               ;; reconstructed binding's root, but done verification reads
-               ;; :root directly from this ctx; omitting it made a resumed
-               ;; GREEN repair call scope-run with an empty cwd.  This comes
-               ;; only from run config (or the controller cwd), never journal
-               ;; text or model data.
-               :root root
-               :max-turns max-turns :beam? (> width 1) :beam-width width
-               :sessions sessions
-               :abort abort
-               ;; JS1 profile flags — reconstructed from journal, never
-               ;; from model input.  :repl-session is nil when JS1 is
-               ;; active; the sandbox binding is the eval target.  The
-               ;; binding installs as a refreshable holder so a rollback
-               ;; between turns can be absorbed (tools.base/js1-binding).
-               :js1/profile (:profile js1)
-               :js1/binding (when-let [b (:binding js1)] (atom b))
-               :js1/provider (:provider js1)}
-          branches (mapv (fn [row]
-                           (rebuild-branch run row turns artifacts firings
-                                           max-turns))
-                         (runs/branches conn run-id))
-          ;; The anchor: rounds completed are the max turn in the journal, so
-          ;; the loop continues one past it. max-turns is the ORIGINAL budget.
-          start-turn (inc (reduce max 0 (map :turn turn-rows)))]
-      (beam/run-rounds ctx branches start-turn))))
+                            (:status run) ")")
+                      {:run-id run-id :status (:status run)})))
+    (let [;; One journal read serves both JS1 shape guards.
+          js1-evented? (boolean (some #(= "js1-binding-created" (:kind %))
+                                      (journal/events-since conn run-id 0)))
+          ;; The run's loop, compiled up front rather than in the ctx let:
+          ;; the shape guard needs `iterating?`, and a compile failure must
+          ;; refuse the resume before the row is marked running again.
+          loop-nm (workflow/active-loop-name config)
+          {turn-wf :compiled iterating? :iterating?}
+          (workflow/compile-turn-loop conn loop-nm)]
+      ;; JS1 is single-player: a journaled JS1 binding on a width-N run
+      ;; (however it got there) is refused BEFORE the run is marked running
+      ;; again, before branches are rebuilt, before any model work.
+      (when (and js1-evented? (> (or (:beam_width run) 1) 1))
+        (js1-base/js1-assert-single-branch! true (:beam_width run)))
+      ;; And single-LOOP: a journaled JS1 binding on a whole-run manifest
+      ;; would fan the one SCI instance out across the subloops' branches.
+      ;; Same refusal point — the width guard cannot see a fan-out inside
+      ;; one branch.
+      (workflow/js1-assert-single-loop! js1-evented? loop-nm iterating?)
+      ;; The row said 'interrupted' (or 'failed'); it is about to be running
+      ;; again, and stalled? only watches runs whose status says so.
+      (runs/mark-running! conn run-id)
+      ;; The budget anchor, read once from the row and never widened here:
+      ;; an extension is the controller's audited act, done before this
+      ;; resume is asked for, so an exhausted branch this loop rebuilds is
+      ;; only active again because the controller reopened it — never
+      ;; because a resume happened to be asked.
+      (let [max-turns (:max_turns run)
+            width (:beam_width run)
+            turn-rows (journal/turns conn run-id)
+            turns (group-by :branch_id turn-rows)
+            artifacts (group-by :branch_id (journal/artifacts conn run-id))
+            firings (group-by :branch_id (journal/gate-firings conn run-id))
+            sessions (atom [])
+            ;; Same three keys run! sets. A resumed run works on the same tree
+            ;; and needs the same file root.
+            root (or (get-in config [:run :root]) (System/getProperty "user.dir"))
+            ;; The per-turn manifest slice and its shape were compiled above,
+            ;; before mark-running!: a resume enters run-rounds directly, so
+            ;; without the slice it would silently fall back to the bare
+            ;; composition and finish a critic or feature run on the factory
+            ;; loop.
+            ;; JS1 reconstruction: fail-closed on unavailable SCI, runtime/
+            ;; spec/identity mismatch, or malformed/unsettled history; the
+            ;; whole committed durable history replays into ONE fresh SCI
+            ;; context, so the model's definitions survive the crash.
+            js1 (reconstruct-run-js1-binding! conn run-id root)
+            ctx {:conn conn :run-id run-id :config config :problem (:problem run)
+                 :llm-adapter llm-adapter :llm-config llm-config
+                 ;; The trusted controller root must survive the handoff back
+                 ;; into the beam scheduler.  JS1 project operations use the
+                 ;; reconstructed binding's root, but done verification reads
+                 ;; :root directly from this ctx; omitting it made a resumed
+                 ;; GREEN repair call scope-run with an empty cwd.  This comes
+                 ;; only from run config (or the controller cwd), never journal
+                 ;; text or model data.
+                 :root root
+                 :max-turns max-turns :beam? (> width 1) :beam-width width
+                 :turn-workflow turn-wf
+                 :iterating-loop? iterating?
+                 ;; Baselined at the RESUME, so a critic reviewing the resumed
+                 ;; run sees what the resumption changed. What the dead process
+                 ;; changed is already committed to the tree it starts from.
+                 :git-baseline (gitdiff/baseline root)
+                 ;; A non-JS1 resume gets a fresh live namespace; a JS1 resume
+                 ;; rebuilt its whole durable history into SCI above and must
+                 ;; never allocate or fall through to live eval.
+                 :repl-session (when-not js1 (repl/new-session))
+                 :sessions sessions
+                 :abort abort
+                 ;; JS1 profile flags — reconstructed from journal, never
+                 ;; from model input.  :repl-session is nil when JS1 is
+                 ;; active; the sandbox binding is the eval target.  The
+                 ;; binding installs as a refreshable holder so a rollback
+                 ;; between turns can be absorbed (tools.base/js1-binding).
+                 :js1/profile (:profile js1)
+                 :js1/binding (when-let [b (:binding js1)] (atom b))
+                 :js1/provider (:provider js1)}
+            branches (mapv (fn [row]
+                             (rebuild-branch run row turns artifacts firings
+                                             max-turns))
+                           (runs/branches conn run-id))
+            ;; The anchor: rounds completed are the max turn in the journal, so
+            ;; the loop continues one past it. max-turns is the ORIGINAL budget.
+            start-turn (inc (reduce max 0 (map :turn turn-rows)))]
+        (beam/run-rounds ctx branches start-turn)))))

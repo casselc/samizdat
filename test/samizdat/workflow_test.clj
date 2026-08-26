@@ -22,6 +22,7 @@
   hand-written loop did. Editing the stored definition changes the next run —
   that is the whole point."
   (:require [clojure.data.json :as json]
+            [samizdat.agent.beam :as beam]
             [samizdat.cells :as cells]
             [clojure.edn :as edn]
             [clojure.string :as str]
@@ -118,6 +119,136 @@
         (let [turns (journal/branch-turns c (:run-id r) "B1")]
           (is (= ["thesis" "done"] (mapv :tool_name turns))))
         (is (= "completed" (:status (runs/get-run c (:run-id r)))))))))
+
+(deftest the-beam-drives-the-manifest-too
+  ;; The fix for the review's biggest finding: the beam used to call
+  ;; samizdat.agent.loop's steps directly and never touch a manifest, so
+  ;; `:run :loop` was documented, parsed from HARNESS_LOOP, and read by
+  ;; nothing on the production path — every POST /v1/runs got the factory
+  ;; composition no matter what was configured, and critic/team/feature/
+  ;; decompose ran only under this suite. The beam now compiles the per-turn
+  ;; SLICE of the selected manifest and runs each branch through it.
+  (with-db [c]
+    (with-redefs [llm/chat (scripted
+                            (fence {:name "thesis"
+                                    :args {:goal "solve the problem"
+                                           :technique "direct"}})
+                            (fence {:name "done"
+                                    :args {:answer "the problem is solved directly"}}))]
+      (let [r (beam/run! {:conn c :config {:run {:beam-width 1}}
+                          :llm-adapter :a :llm-config {:max-tokens 16384}
+                          :problem "solve the problem" :max-turns 10 :beam-width 1})]
+        (is (= :completed (:status r)))
+        (is (= "the problem is solved directly" (:answer r)))
+        (testing "the branch ran the manifest's per-turn chain"
+          (is (= ["thesis" "done"]
+                 (mapv :tool_name (journal/branch-turns c (:run-id r) "B1")))))
+        (testing "the run records which loop drove it, like the other driver"
+          (let [note (->> (journal/events-since c (:run-id r) 0)
+                          (filter #(= "loop-workflow" (:kind %)))
+                          first)]
+            (is (some? note)
+                "a beam run journals its :loop-workflow provenance")))))))
+
+(deftest a-non-iterating-manifest-forces-beam-width-1
+  ;; team/feature/decompose are whole-run workflows: one pass is the branch's
+  ;; entire job, not one model call. Running five concurrently would multiply
+  ;; the job rather than explore five lines of one, so the beam overrides the
+  ;; requested width and says so in the run row.
+  (with-db [c]
+    (with-redefs [llm/chat (scripted (fence {:name "give_up"
+                                             :args {:reason "stub"}}))]
+      (let [r (beam/run! {:conn c :config {:run {:loop "team" :subtasks ["a"]}}
+                          :llm-adapter :a :llm-config {:max-tokens 16384}
+                          :problem "anything" :max-turns 4 :beam-width 5})]
+        (is (= 1 (:beam_width (runs/get-run c (:run-id r))))
+            "a whole-run manifest runs one branch regardless of the width asked for")))))
+
+(deftest beam-driven-whole-run-subloops-run-their-own-tool-calls
+  ;; The JS1 controller-review blocker, on the production path: the beam
+  ;; mints a per-turn lease for (run, branch, turn). A whole-run manifest
+  ;; runs the branch's ENTIRE job as one beam turn and fans out worker
+  ;; subloops as different branches (W0, then the supervisor's W0r1) at
+  ;; their own turn counts — and the B1/turn-1 lease used to ride the ctx
+  ;; down into those subloops, refusing every tool call they made as stale.
+  ;; The worker burned its whole turn budget on refusals and never even
+  ;; managed to give up. The lease is a per-turn boundary; a manifest with
+  ;; no per-turn iteration now carries none, and the subloops dispatch as
+  ;; the legacy non-JS1 callers they are.
+  (with-db [c]
+    (with-redefs [llm/chat (scripted (fence {:name "give_up"
+                                             :args {:reason "stub"}}))]
+      (let [r (beam/run! {:conn c :config {:run {:loop "team" :subtasks ["a"]}}
+                          :llm-adapter :a :llm-config {:max-tokens 16384}
+                          :problem "anything" :max-turns 4 :beam-width 5})]
+        (is (= :completed (:status r)))
+        (doseq [bid ["W0" "W0r1"]]
+          (let [turns (journal/branch-turns c (:run-id r) bid)]
+            (is (= ["give_up"] (mapv :tool_name turns))
+                (str bid " acts once and lands it"))
+            (is (= ["neutral"] (mapv :category turns))
+                (str bid "'s give_up lands as itself — not a stale-lease refusal"))
+            (is (not-any? #(str/includes? (str (:result %))
+                                          "Turn authority expired")
+                          turns)
+                (str "no tool call in " bid " was refused on the manager's lease"))))))))
+
+(deftest js1-whole-run-workflows-are-refused-before-any-budget-spend
+  ;; The other half of the blocker: JS1 is single-player AND single-loop.
+  ;; A whole-run manifest's role/worker subloops would share the run's one
+  ;; persistent SCI binding across branches, so the shape must die before
+  ;; the run row exists and before the model is ever called — on BOTH
+  ;; drivers, and on the resume path (resume_test covers that one).
+  (with-db [c]
+    (doseq [loop-nm ["team" "feature" "decompose"]]
+      (testing (str "beam/run! refuses JS1 + " loop-nm " before any spend")
+        (let [calls (atom 0)
+              runs-before (count (db/fetch c ["SELECT id FROM runs"]))]
+          (with-redefs [llm/chat (fn [& _]
+                                   (swap! calls inc)
+                                   (fence {:name "give_up"
+                                           :args {:reason "x"}}))]
+            (is (= :whole-run-workflow-not-supported
+                   (try
+                     (beam/run! {:conn c
+                                 :config {:run {:loop loop-nm
+                                                :js1/profile "single-player"
+                                                :subtasks ["a"]}}
+                                 :llm-adapter :a :llm-config {:max-tokens 16384}
+                                 :problem "p" :max-turns 4 :beam-width 1})
+                     nil
+                     (catch Throwable e (:js1/error (ex-data e)))))
+                "the whole-run shape, not the width — width is 1 here")
+            (is (zero? @calls) "no model call was paid for")
+            (is (= runs-before (count (db/fetch c ["SELECT id FROM runs"])))
+                "no run row was opened")))))
+    (testing "workflow/run! refuses the same shape just as early"
+      (let [calls (atom 0)
+            runs-before (count (db/fetch c ["SELECT id FROM runs"]))]
+        (with-redefs [llm/chat (fn [& _] (swap! calls inc) nil)]
+          (is (= :whole-run-workflow-not-supported
+                 (try
+                   (workflow/run! {:conn c
+                                   :config {:run {:loop "team"
+                                                  :js1/profile "single-player"
+                                                  :subtasks ["a"]}}
+                                   :llm-adapter :a :llm-config {}
+                                   :problem "p"})
+                   nil
+                   (catch Throwable e (:js1/error (ex-data e))))))
+          (is (zero? @calls))
+          (is (= runs-before (count (db/fetch c ["SELECT id FROM runs"])))
+              "no run row was opened"))))))
+
+(deftest the-single-loop-guard-admits-iterating-loops
+  ;; The guard exists to refuse a SHAPE, not the profile: JS1 on an
+  ;; iterating single-branch loop is the supported form, and a non-JS1
+  ;; whole-run workflow is nobody's business.
+  (is (nil? (workflow/js1-assert-single-loop! true "loop" true)))
+  (is (nil? (workflow/js1-assert-single-loop! false "team" false))
+      "a non-JS1 whole-run workflow is untouched")
+  (is (thrown? ExceptionInfo
+               (workflow/js1-assert-single-loop! true "team" false))))
 
 (deftest the-turn-cap-exhausts-through-the-manifest
   (with-db [c]

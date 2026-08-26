@@ -37,16 +37,20 @@
   (:require [clojure.data.json :as json]
             [clojure.string :as str]
             [clojure.tools.logging :as log]
+            [mycelium.core :as myc]
             [samizdat.agent.critic :as critic]
             [samizdat.agent.gates :as gates]
-             [samizdat.agent.loop :as branch-loop]
-             [samizdat.agent.state :as state]
-             [samizdat.agent.tools.base :as js1-base]
-             [samizdat.store.artifacts :as artifacts]
+            [samizdat.agent.gitdiff :as gitdiff]
+            [samizdat.agent.loop :as branch-loop]
+            [samizdat.agent.state :as state]
+            [samizdat.agent.tools.base :as js1-base]
+            [samizdat.repl :as repl]
+            [samizdat.store.artifacts :as artifacts]
             [samizdat.store.failures :as failures]
             [samizdat.store.interventions :as interventions]
             [samizdat.store.journal :as journal]
-            [samizdat.store.runs :as runs])
+            [samizdat.store.runs :as runs]
+            [samizdat.workflow :as workflow])
   (:refer-clojure :exclude [run!]))
 
 (defn- crossover-block
@@ -427,7 +431,8 @@
 
   This is the RAX-manager principle applied to a branch: the stop path must not
   depend on the component's cooperation. A branch that blows the deadline
-  forfeits the turn and the beam moves on.
+  forfeits the turn; the beam moves on only after the worker proves it exited.
+  An unquiesced worker fails the run closed rather than overlapping a new turn.
 
   Sized to the worst LEGITIMATE turn rather than to the typical one, because
   forfeiting a turn that was about to succeed is expensive twice over: the
@@ -439,6 +444,13 @@
   fixed by warming at startup rather than by this number."
   (or (some-> (System/getenv "HARNESS_TURN_DEADLINE_MS") parse-long)
       900000))
+
+(def default-turn-cancel-grace-ms
+  "How long the controller waits after revocation + interruption for the turn
+  worker to prove it has exited.  A result is never accepted after revocation.
+  If the worker does not quiesce inside this bound, the run fails closed rather
+  than minting overlapping authority for another turn."
+  2000)
 
 (defn- drain-directives!
   "Apply pending human directives at the boundary, and record what happened to
@@ -499,43 +511,125 @@
    branches
    directives))
 
+(defn advance-branch
+  "One turn for one branch.
+
+  The beam drives the selected manifest's compiled per-turn slice when one is
+  present. Callers without a workflow retain the fork's direct run-turn
+  behavior. Structural workflow failure abandons this branch rather than
+  taking down its siblings."
+  [ctx b turn]
+  (if-let [wf (:turn-workflow ctx)]
+    (let [data (myc/run-compiled wf ctx {:branch b :turn turn})
+          fail (fn [why]
+                 (log/warn "branch" (:id b) "turn" turn
+                           "loop workflow failed:" why)
+                 (assoc b :status :abandoned
+                        :inactive-reason (str "loop workflow failed: " why)))]
+      (cond
+        (myc/error? data) (fail (pr-str (myc/workflow-error data)))
+        (nil? (:branch data)) (fail "the turn returned no :branch")
+        :else (:branch data)))
+    (branch-loop/run-turn ctx b turn)))
+
 (defn- advance-all
   "One turn for every active branch, concurrently, each under a hard deadline.
 
   A branch that throws is abandoned rather than taking the beam down with it:
   one failing engine session must not cost the other four their work. A branch
-  that hangs loses only its own turn. Phase 1 proved five concurrent swipl
-  sessions hold, which is what makes this real parallelism rather than a loop
-  wearing futures."
+  that times out loses only its own turn IF cancellation is confirmed; if its
+  worker remains live after bounded grace, the run fails closed so no next-turn
+  authority can overlap it. Phase 1 proved five concurrent swipl sessions hold,
+  which is what makes this real parallelism rather than a loop wearing futures.
+
+  The deadline is skipped for a NON-ITERATING manifest (team, feature,
+  decompose): there a `turn` is the branch's entire job rather than one model
+  call, so the turn deadline would abandon the run partway through the work it
+  was asked to do. Those runs stop by the abort flag, which is the stop path
+  that never depended on cooperation anyway.
+
+  The per-turn lease is scoped the same way, and for the same reason. A
+  non-iterating manifest fans the branch's job out internally: its
+  worker/role subloops run as DIFFERENT branches (W0, R0, D1…) at their own
+  turn counts, so a lease minted for this branch at this turn would ride the
+  ctx down into those subloops and refuse every tool call they make as
+  stale — while authorizing nothing here, since the slice holds no
+  :tool/dispatch of its own. The lease is a per-turn authority boundary; a
+  manifest without per-turn iteration has nothing for it to bound. No JS1
+  context ever reaches this case (run! refuses JS1 on a whole-run manifest
+  before any work), so the withheld lease is never a JS1 authority gap."
   [ctx branches turn]
-  (let [deadline (or (:turn-deadline-ms ctx) default-turn-deadline-ms)
+  (let [iterating? (get ctx :iterating-loop? true)
+        deadline (when iterating?
+                    (or (:turn-deadline-ms ctx) default-turn-deadline-ms))
+        cancel-grace (or (:turn-cancel-grace-ms ctx)
+                         default-turn-cancel-grace-ms)
         pending (mapv (fn [b]
-                        [b (future
+                        (let [lease (when iterating?
+                                      (js1-base/mint-turn-lease
+                                       (:run-id ctx) (:id b) turn))
+                              quiesced (promise)
+                              ;; assoc nil deliberately: nothing a caller
+                              ;; threaded through may leak into a subloop.
+                              worker-ctx (assoc ctx :turn-lease lease)]
+                          [b lease quiesced
+                           (future
                              (try
-                               (branch-loop/run-turn ctx b turn)
-                               (catch Throwable e
-                                 (log/warn "branch" (:id b) "died on turn" turn
-                                           ":" (ex-message e))
-                                 (assoc b :status :abandoned
-                                        :inactive-reason
-                                        (str "branch error: " (ex-message e))))))])
+                               (try
+                                 (advance-branch worker-ctx b turn)
+                                 (catch Throwable e
+                                   (log/warn "branch" (:id b) "died on turn" turn
+                                             ":" (ex-message e))
+                                   (assoc b :status :abandoned
+                                          :inactive-reason
+                                          (str "branch error: " (ex-message e)))))
+                               (finally
+                                 ;; This promise, not Future.cancel's state, is
+                                 ;; the proof that the worker actually left.
+                                 ;; A cancelled Future can become terminal
+                                 ;; before uncooperative code exits.
+                                 (deliver quiesced true))))]))
                       branches)]
-    (mapv (fn [[b fut]]
-            (let [r (deref fut deadline ::timeout)]
-              (if (= ::timeout r)
-                (do (log/warn "branch" (:id b) "exceeded the turn deadline on turn" turn)
-                    ;; Not a verification failure: the branch did not get an
-                    ;; answer to be wrong about. It loses the turn and is told
-                    ;; so, and the dangling call is left to finish or not.
-                    (-> b
-                        (state/add-message
-                         "user"
-                         (str "[harness] Your previous turn exceeded the "
-                              (quot deadline 1000) "s deadline and was abandoned."
-                              " Keep your next response short and call a tool."))
-                        (update :timeouts (fnil inc 0))))
-                r)))
-          pending)))
+    (mapv (fn [[b lease quiesced fut]]
+             (let [r (if deadline (deref fut deadline ::timeout) @fut)]
+               (if (= ::timeout r)
+                 (do
+                   (log/warn "branch" (:id b) "exceeded the turn deadline on turn" turn)
+                   ;; Linearization order is load-bearing: authority is gone
+                   ;; before either Jolt's cooperative token or the worker
+                   ;; Future receives interruption.
+                   (js1-base/revoke-turn-lease! lease :deadline)
+                   (try (js1-base/interrupt-turn-lease! lease)
+                        (catch Throwable _ nil))
+                   (future-cancel fut)
+                   (if (= ::unquiesced
+                          (deref quiesced cancel-grace ::unquiesced))
+                     ;; No next turn may be minted for this branch/run.  The
+                     ;; stale worker still holds a revoked lease, so a delayed
+                     ;; eval effect/done call also fails at dispatch.
+                     (assoc b
+                            :status :abandoned
+                            :turn-cancellation-fault? true
+                            :inactive-reason
+                            (str "turn " turn " exceeded its deadline and did not"
+                                 " quiesce within the " cancel-grace
+                                 "ms cancellation grace; authority remains revoked"))
+                     ;; Confirmed quiescence permits a later turn with a fresh
+                     ;; lease.  This timed-out result is deliberately ignored,
+                     ;; even if it arrived during the grace window.
+                     (-> b
+                         (state/add-message
+                          "user"
+                          (str "[harness] Your previous turn exceeded the "
+                               (quot deadline 1000) "s deadline and was cancelled."
+                               " Keep your next response short and call a tool."))
+                         (update :timeouts (fnil inc 0)))))
+                 (do
+                   ;; A turn's authority ends with its worker; asynchronous
+                   ;; work retained by model code cannot spend it afterward.
+                   (js1-base/revoke-turn-lease! lease :turn-completed)
+                   r))))
+           pending)))
 
 (defn- dispose-branch-engines!
   "Release one branch's external sessions. The proof engines left; the seam
@@ -567,6 +661,42 @@
   (doseq [b branches :when (not (state/active? b))]
     (runs/close-branch! conn run-id (:id b) (:status b) (:inactive-reason b))
     (dispose-branch-engines! b)))
+
+(defn- cancellation-fault-result!
+  "Fail the branch AND run when a deadline worker did not quiesce.
+
+  `boundary-branches` includes directive updates from this boundary;
+  `advanced` replaces the workers that actually ran.  Every still-active
+  sibling is abandoned before the run becomes failed.  Most importantly this
+  returns from run-rounds instead of recurring, so no subsequent authority is
+  minted while the stale worker may still exist."
+  [{:keys [conn run-id] :as ctx} boundary-branches advanced turn]
+  (let [by-id (into {} (map (juxt :id identity)) advanced)
+        settled (mapv #(get by-id (:id %) %) boundary-branches)
+        faults (filterv :turn-cancellation-fault? settled)
+        fault-ids (mapv :id faults)
+        reason (str "run cancelled fail-closed after unquiesced turn worker(s): "
+                    (str/join ", " fault-ids))
+        cancelled (mapv #(if (state/active? %)
+                           (assoc % :status :abandoned :inactive-reason reason)
+                           %)
+                        settled)]
+    (journal/note! conn run-id :turn-cancellation-fault
+                   {:turn turn
+                    :data {:branches fault-ids
+                           :grace-ms (or (:turn-cancel-grace-ms ctx)
+                                         default-turn-cancel-grace-ms)
+                           :reason reason}})
+    (record-inactive! ctx cancelled)
+    ;; Retained, not just journaled: the row itself carries the fault, so the
+    ;; resume refusal survives the events retention sweep and any process
+    ;; restart (resume/resumable? reads terminal_reason first).
+    (runs/finish-run-cancellation-fault! conn run-id)
+    {:status :cancellation-fault
+     :run-id run-id
+     :branches cancelled
+     :fault {:kind :unquiesced-turn-worker
+             :turn turn :branches fault-ids}}))
 
 (defn- finish-now?
   "Should a shipped branch end the run? Returns the winning branch, or nil to
@@ -619,7 +749,8 @@
   Returns {:status :completed|:aborted|:exhausted :run-id :branches ...}.
   Teardown lives here rather than in the callers, so every engine session is
   disposed no matter how the run ended."
-  [{:keys [conn run-id max-turns abort sessions] :as ctx} branches start-turn]
+  [{:keys [conn run-id max-turns abort sessions repl-session] :as ctx}
+   branches start-turn]
   (let [live-branches (atom branches)]
     (try
       (loop [branches branches, turn start-turn]
@@ -678,44 +809,55 @@
             :else
             (let [directives (interventions/pending conn run-id)
                   active (drain-directives! ctx active directives turn)
-                  advanced (advance-all
-                            (assoc ctx :branch-count (count branches))
-                            (filterv state/active? active) turn)
-                  ;; Critic scores refresh on post-turn state, before any
-                  ;; retention decision reads them.
-                  advanced (ensure-scored ctx advanced turn)
-                  ;; Cull before forking, so a branch culled this turn does not
-                  ;; also get to spend the branch budget on children.
-                  ;; A branch is only culled if someone else would still be
-                  ;; running. Evaluated left to right against the count of
-                  ;; branches that survive the decision so far.
-                  culled (first
-                          (reduce (fn [[acc alive] b]
-                                    (let [sibs (keep #(when (and (state/active? %)
-                                                                 (not= (:id %) (:id b)))
-                                                        (get-in % [:critic :scores]))
-                                                     advanced)
-                                          b' (cull-or-keep (assoc ctx :turn turn) b (dec alive) sibs)]
-                                      [(conj acc b')
-                                       (if (state/active? b') alive (dec alive))]))
-                                  [[] (count advanced)]
-                                  advanced))
-                  _ (record-inactive! ctx culled)
                   inactive (filterv (complement state/active?) branches)
-                  all-now (into (vec inactive) culled)
-                  ;; Grow the frontier where the evidence is: after the cull,
-                  ;; so a freed slot can be refilled the same round.
-                  culled (repopulate ctx culled (count all-now) turn)
-                  [children updated]
-                  (reduce (fn [[acc bs] b]
-                            (if (and (state/active? b) (seq (:pending-branch-theses b)))
-                              (let [[kids parent] (spawn-children!
-                                                   ctx b (+ (count all-now) (count acc)) turn)]
-                                [(into acc kids) (conj bs parent)])
-                              [acc (conj bs b)]))
-                          [[] []]
-                          culled)]
-              (recur (into (into (vec inactive) updated) children) (inc turn))))))
+                  boundary-branches (into (vec inactive) active)
+                  advanced0 (advance-all
+                             (assoc ctx :branch-count (count branches))
+                             (filterv state/active? active) turn)]
+              (if (some :turn-cancellation-fault? advanced0)
+                ;; Terminal scheduler state: no critic/fork/recur, hence no
+                ;; next lease and no overlap with the unquiesced worker.
+                (cancellation-fault-result!
+                 ctx boundary-branches advanced0 turn)
+                (let [;; Critic scores refresh on post-turn state, before any
+                      ;; retention decision reads them.
+                      advanced (ensure-scored ctx advanced0 turn)
+                      ;; Cull before forking, so a branch culled this turn does
+                      ;; not also get to spend the branch budget on children.
+                      ;; A branch is only culled if someone else would still be
+                      ;; running. Evaluated left to right against the count of
+                      ;; branches that survive the decision so far.
+                      culled (first
+                              (reduce (fn [[acc alive] b]
+                                        (let [sibs (keep #(when (and (state/active? %)
+                                                                     (not= (:id %) (:id b)))
+                                                            (get-in % [:critic :scores]))
+                                                         advanced)
+                                              b' (cull-or-keep (assoc ctx :turn turn) b (dec alive) sibs)]
+                                          [(conj acc b')
+                                           (if (state/active? b') alive (dec alive))]))
+                                      [[] (count advanced)]
+                                      advanced))
+                      _ (record-inactive! ctx culled)
+                      all-now (into (vec inactive) culled)
+                      ;; Grow the frontier where the evidence is: after the
+                      ;; cull, so a freed slot can be refilled the same round.
+                      culled (repopulate ctx culled (count all-now) turn)
+                      [children updated]
+                      (reduce (fn [[acc bs] b]
+                                (if (and (state/active? b)
+                                         (seq (:pending-branch-theses b)))
+                                  (let [[kids parent] (spawn-children!
+                                                       ctx b
+                                                       (+ (count all-now)
+                                                          (count acc))
+                                                       turn)]
+                                    [(into acc kids) (conj bs parent)])
+                                  [acc (conj bs b)]))
+                              [[] []]
+                              culled)]
+                  (recur (into (into (vec inactive) updated) children)
+                         (inc turn))))))))
       ;; A run that dies must say so in the journal it is judged by.
       ;;
       ;; gen-11 threw here and the exception went to the process's stdout — a
@@ -746,7 +888,12 @@
         ;; still collect, and per-branch disposal still runs through
         ;; dispose-branch-engines!, so the coding tools' sessions (nREPL,
         ;; subprocesses) plug their disposal back in here.
-        (doseq [b @live-branches] (dispose-branch-engines! b))))))
+        (doseq [b @live-branches] (dispose-branch-engines! b))
+        (when repl-session
+          (try (repl/close-session repl-session)
+               (catch Throwable e
+                 (log/warn "closing the run's eval session failed:"
+                           (ex-message e)))))))))
 
 (defn run!
   "Run a beam to completion.
@@ -757,7 +904,13 @@
   [{:keys [conn config llm-adapter llm-config problem max-turns beam-width
            abort on-start seed-run quarantine] :as opts}]
   (let [max-turns (or max-turns (get-in config [:run :max-turns]) 40)
-        width (or beam-width (get-in config [:run :beam-width]) 5)
+        ;; Compile before opening the run row: loop shape decides the effective
+        ;; width, deadline/lease scope, and whether JS1 is admissible.
+        loop-nm (workflow/active-loop-name config)
+        {loop-version :version turn-wf :compiled iterating? :iterating?}
+        (workflow/compile-turn-loop conn loop-nm)
+        requested-width (or beam-width (get-in config [:run :beam-width]) 5)
+        width (if iterating? requested-width 1)
         ;; Seeding forces sharing on for this run regardless of the config
         ;; flag: seeds enter through the shared log's context blocks, and
         ;; seeds nobody reads would be dead rows.
@@ -770,7 +923,8 @@
         ;; JS1 propagation: a caller (beam/run! wired from the control
         ;; surface) or the run config may ask for a JS1 sandboxed run.
         js1-binding (:js1/binding opts)
-        js1-profile (:js1/profile opts)
+        js1-profile (or (:js1/profile opts)
+                        (get-in config [:run :js1/profile]))
         ;; JS1 is single-player: one persistent :main instance and one
         ;; durable history per work-id.  A width-N beam would evaluate N
         ;; branches into that one instance and interleave N durable
@@ -778,9 +932,11 @@
         ;; enforced mid-run.  Refused HERE: before the run row is opened,
         ;; before on-start fires, before any branch or provider call.
         _ (js1-base/js1-assert-single-branch!
-           (boolean (or js1-binding js1-profile
-                        (get-in config [:run :js1/profile])))
+           (boolean (or js1-binding js1-profile))
            width)
+        ;; The width guard cannot see fan-out inside a whole-run manifest.
+        _ (workflow/js1-assert-single-loop!
+           (boolean (or js1-binding js1-profile)) loop-nm iterating?)
         run-id (runs/start-run! conn {:problem problem
                                       :provider (:provider llm-config)
                                       :model (:model llm-config)
@@ -808,6 +964,25 @@
              :llm-adapter llm-adapter :llm-config llm-config
              :root root
              :max-turns max-turns :beam? (> width 1) :beam-width width
+             ;; The compiled per-turn manifest advance-branch drives, and
+             ;; whether it is a per-turn loop at all (which decides the turn
+             ;; deadline; see advance-all).
+             :turn-workflow turn-wf
+             :iterating-loop? iterating?
+             ;; Trusted scheduler dial (not model/config data): after a turn
+             ;; deadline, wait this long for actual worker exit before the
+             ;; whole run fails closed.
+             :turn-cancel-grace-ms (or (:turn-cancel-grace-ms opts)
+                                        default-turn-cancel-grace-ms)
+             ;; What this run changed, for the ship gate's focused verify and
+             ;; for a finalization critic reading the run's own diff.
+             :git-baseline (gitdiff/baseline root)
+             ;; One eval namespace per RUN: defs the agent makes with `eval`
+             ;; persist across its turns and die with the run. run-rounds
+             ;; closes it in the same finally that disposes the sessions. A
+             ;; JS1 context never allocates a live-eval namespace.
+             :repl-session (when-not (or js1-binding js1-profile)
+                             (repl/new-session))
              :sessions sessions
              :engine-sessions engine-sessions
              :abort abort
@@ -830,6 +1005,14 @@
     ;; journal poller handles that, and it is the honest picture — the branches
     ;; genuinely do not exist yet.
     (when on-start (on-start run-id))
+    (journal/note! conn run-id :loop-workflow
+                   {:data {:name loop-nm :version loop-version
+                           :iterating? iterating?
+                           :beam-width width
+                           :requested-beam-width requested-width}})
+    (when (not= width requested-width)
+      (log/info "loop" loop-nm "is a whole-run workflow; beam width forced to 1"
+                "(asked for" (str requested-width ")")))
     (let [initial (mapv #(open-branch! ctx (str "B" (inc %)) nil nil 0) (range width))]
       (run-rounds ctx initial 1))))
 

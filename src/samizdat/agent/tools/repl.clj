@@ -109,15 +109,35 @@
   "One recorded evaluation attempt against `binding`.  Returns the repl
   result shape plus, on a sandbox-domain failure, the structured error
   data so the caller can decide whether the binding was superseded."
-  [conn binding code]
+  [ctx conn binding code]
   (try
-    (let [evaluate! (sandbox-var "evaluate-recorded!")]
+    (let [evaluate! (sandbox-var "evaluate-recorded!")
+          lease (:turn-lease ctx)
+          ;; The lease's token travels so a revoked turn interrupts its own
+          ;; evaluation.  It composes UNDER the spec's ceiling inside the
+          ;; sandbox (evaluate-state!): with both present the ceiling timer
+          ;; interrupts THIS token at the spec's :timeout-ms, so the lease
+          ;; can never stretch an evaluation past the bind-time ceiling.
+          opts (cond-> {}
+                 (base/turn-lease-token lease)
+                 (assoc :token (base/turn-lease-token lease))
+                 lease
+                 ;; The sandbox invokes this around record-intent!, its actual
+                 ;; semantic operation-launch boundary.  The host operation
+                 ;; and outcome persistence run after the monitor is released.
+                 (assoc :effect-permit!
+                        (fn [initiate]
+                          (base/with-turn-lease-permit! ctx initiate))))]
       (if (nil? evaluate!)
         {:ok false
          :error "JS1 sandbox is unavailable; refusing live-eval fallback"
          :error-type "sandbox-unavailable"
          :out nil}
-        {:ok true :value (pr-str (:value (evaluate! conn binding code))) :out nil}))
+        ;; evaluate-recorded! already owns SCI evaluation, rollback and Jolt
+        ;; cooperative interruption.  The trusted permit callback only fences
+        ;; each operation's durable intent; it never surrounds SCI evaluation.
+        (let [result (evaluate! conn binding code opts)]
+          {:ok true :value (pr-str (:value result)) :out nil})))
     (catch ExceptionInfo e
       (let [d (ex-data e)]
         (if (:samizdat.sandbox/error d)
@@ -137,9 +157,12 @@
   record via the store adapter (evaluate-recorded!).  Returns the same
   shape as repl/eval-code: {:ok true/false, :value/:error, :out}.
 
-  The interrupt ceiling is the spec's :timeout-ms, fixed at bind time —
-  a model-supplied timeout is not an option here, exactly as it cannot
-  select any other authority.
+   The interrupt ceiling is the spec's :timeout-ms, fixed at bind time —
+   a model-supplied timeout is not an option here, exactly as it cannot
+   select any other authority.  When a turn lease supplies its token, the
+   ceiling still governs: the sandbox interrupts the provided token at the
+   ceiling rather than trusting it (see sandbox/evaluate-state!), so the
+   lease composes under the bind-time authority, never over it.
 
   Commit-only state means a FAILED evaluation rolled the instance back
   and published a fresh binding into the provider registry: the binding
@@ -163,7 +186,7 @@
                        (base/update-js1-binding! ctx fresh))
                      (catch Throwable _ nil)))]
     (loop [binding binding, retried? false]
-      (let [r (js1-eval-once conn binding code)]
+      (let [r (js1-eval-once ctx conn binding code)]
         (cond
           (:ok r) r
 

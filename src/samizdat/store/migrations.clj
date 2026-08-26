@@ -404,6 +404,58 @@
    "CREATE UNIQUE INDEX IF NOT EXISTS idx_eval_receipts_phase
       ON eval_receipts(eval_id, seq, phase)"])
 
+(def ^:private v12
+  ;; The retained, append-only budget-extension audit (JS1 budget authority).
+  ;;
+  ;; Raising a run's max_turns is the one lifecycle write that spends
+  ;; something irreplaceable — provider budget under a policy ceiling — so
+  ;; it cannot be a bare UPDATE plus a hope. Every landed extension appends
+  ;; one row here recording who asked, of what run, from what cap to what
+  ;; cap, why, and when; nothing in this table is ever updated or deleted
+  ;; (the events sweep prunes events, never this), so the run's budget
+  ;; history survives restarts and retention alike.
+  ;;
+  ;; request_id is UNIQUE across the whole table, not per run: a request id
+  ;; names one extension act by the controller, ever. The index is the
+  ;; structural form of idempotency — a replayed insert collides and the
+  ;; caller reads the recorded row back instead of applying a second
+  ;; effect — the same shape as idx_eval_completions_once, and it is what
+  ;; makes "retry the request safely" a property of the schema rather than
+  ;; of caller discipline.
+  ;;
+  ;; principal is an audit LABEL (who the controller says it acted for),
+  ;; never a credential: authorization was decided before this row exists,
+  ;; by the opaque authority handle in samizdat.security.controller. No
+  ;; token, digest, or secret of any kind reaches this table.
+  ["CREATE TABLE IF NOT EXISTS budget_extensions (
+      id            INTEGER PRIMARY KEY AUTOINCREMENT,
+      run_id        TEXT NOT NULL REFERENCES runs(id),
+      request_id    TEXT NOT NULL,
+      principal     TEXT NOT NULL,
+      old_max_turns INTEGER NOT NULL,
+      new_max_turns INTEGER NOT NULL,
+      reason        TEXT NOT NULL DEFAULT '',
+      created_at    TEXT NOT NULL
+    )"
+
+   "CREATE UNIQUE INDEX IF NOT EXISTS idx_budget_extensions_request
+      ON budget_extensions(request_id)"])
+
+(def ^:private v13
+  ;; runs.terminal_reason: the retained form of a terminal refusal.
+  ;;
+  ;; The first occupant is 'turn-cancellation-fault': the beam fails a run
+  ;; closed when a deadline-exceeded turn worker does not quiesce inside the
+  ;; cancellation grace, and resume must refuse that run forever — the
+  ;; unquiesced worker may still be live, so fresh authority could overlap
+  ;; it. The fault used to be recorded only as a journal EVENT, and the
+  ;; retention sweep (journal/prune-finished!, run from start-run!) deletes
+  ;; a finished run's events after the window — which quietly re-opened a
+  ;; faulted run to resume. The runs row is never pruned, so the refusal
+  ;; lives on it. Details (which branches, the grace) stay in the event for
+  ;; as long as the tail survives; the refusal bit does not expire with it.
+  ["ALTER TABLE runs ADD COLUMN terminal_reason TEXT"])
+
 (def migrations
   "Ordered. Index 0 is migration 1; PRAGMA user_version holds the count applied."
-  [v1 v2 v3 v4 v5 v6 v7 v8 v9 v10 v11])
+  [v1 v2 v3 v4 v5 v6 v7 v8 v9 v10 v11 v12 v13])

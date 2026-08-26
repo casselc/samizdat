@@ -35,6 +35,7 @@
             [samizdat.agent.gates :as gates]
             [samizdat.agent.state :as state]
             [samizdat.agent.tools :as tools]
+            [samizdat.agent.tools.base :as tools-base]
             [samizdat.llm.client :as llm]
             [samizdat.llm.fence :as fence]
             [samizdat.agent.skills :as skills]
@@ -398,9 +399,14 @@
         refusal (tools/phase-refusal
                  (assoc ctx :branch branch :turn turn
                         :tool-name tool :args (:args parsed)))
-        result (or refusal
-                   (tools/run-tool (assoc ctx :branch branch :turn turn
-                                          :tool-name tool :args (:args parsed))))
+         result (or refusal
+                    ;; Early shared refusal before ANY model tool method.  It
+                    ;; avoids needless stale work but is not the effect fence:
+                    ;; eval operations and done verification obtain a permit
+                    ;; at their actual semantic launch boundaries.
+                    (tools-base/dispatch-tool
+                     (assoc ctx :branch branch :turn turn
+                            :tool-name tool :args (:args parsed))))
         branch (-> (:branch result)
                    ;; Any attempt at an engine clears the search counter,
                    ;; including one that fails — trying is what the refusal

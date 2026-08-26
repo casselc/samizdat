@@ -95,6 +95,33 @@
 ;; an access that mutates.
 (defmacro with-writer [& body] `(with-conn ~@body))
 
+(defmacro with-transaction
+  "ALL-or-nothing DML on the shared connection: BEGIN IMMEDIATE, the body,
+  COMMIT — or ROLLBACK on any throw, rethrown to the caller.
+
+  The statement-count discipline elsewhere in the store serializes writes;
+  it does not group them. A lifecycle write that must land as one unit —
+  raise a run's cap, reopen its exhausted branches, append the audit row —
+  needs either every statement or none, and `branch error: ...`-style
+  partial writes are how a run ends up with a cap the audit cannot explain.
+  Same shape migrate! already uses for its version bump (review2 #3),
+  lifted here because more than migrations need it.
+
+  Holds the connection lock for the whole body (with-conn; reentrant, so
+  nested fetch/execute! calls ride the holder's lock — one writer, one
+  transaction). Never nest a with-transaction inside another: SQLite
+  refuses BEGIN within a transaction, loudly, which is the right failure."
+  [conn & body]
+  `(with-conn
+     (jdbc/execute! ~conn "BEGIN IMMEDIATE")
+     (try
+       (let [ret# (do ~@body)]
+         (jdbc/execute! ~conn "COMMIT")
+         ret#)
+       (catch Throwable t#
+         (try (jdbc/execute! ~conn "ROLLBACK") (catch Throwable _# nil))
+         (throw t#)))))
+
 (defn fetch
   "A serialized read. Everything that reads the shared connection goes through
   here rather than calling jdbc directly."

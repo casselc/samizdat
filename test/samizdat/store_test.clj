@@ -87,8 +87,8 @@
     (is (= (count migrations/migrations) (db/schema-version c)))
     (is (every? (set (db/table-names c))
                 ["runs" "branches" "turns" "artifacts" "failures"
-                 "gate_firings" "interventions" "events"
-                 "shared_artifacts"]))))
+                  "gate_firings" "interventions" "events"
+                  "shared_artifacts" "budget_extensions"]))))
 
 (deftest migrations-are-idempotent
   (with-db [c]
@@ -940,3 +940,136 @@
       (is (pos? (:n (db/fetch-one c ["SELECT COUNT(*) AS n FROM events
                                       WHERE run_id = ?" recent])))
           "a just-finished run keeps its events for the tail"))))
+
+;; --- budget authority: one transaction, one record --------------------------
+
+(deftest a-budget-extension-lands-as-one-transaction
+  ;; The cap, the reopened branches, and the retained audit are one act.
+  ;; Exhaustion is the only closing reason that names the budget, so more
+  ;; budget reopens exactly those branches — culled and done ones stay
+  ;; closed whatever the cap says, and active ones are untouched.
+  (with-db [c]
+    (let [rid (runs/start-run! c {:problem "p" :max-turns 5 :beam-width 1})]
+      (doseq [b ["B1" "B2" "B3" "B4"]]
+        (runs/open-branch! c rid {:branch-id b}))
+      (runs/close-branch! c rid "B1" :exhausted "turn cap")
+      (runs/close-branch! c rid "B2" :culled "dominated")
+      (runs/close-branch! c rid "B3" :done "shipped")
+      (let [r (runs/extend-budget! c {:run-id rid :request-id "req-t1"
+                                      :principal "operator" :old-max 5
+                                      :new-max 12 :reason "B1 is close"})]
+        (testing "the change map tells the whole story"
+          (is (:run-id r))
+          (is (= ["B1"] (:reopened r)) "exactly the exhausted branch"))
+        (testing "the cap moved"
+          (is (= 12 (:max_turns (runs/get-run c rid)))))
+        (testing "only exhaustion reopens"
+          (is (= "active" (:status (runs/get-branch c rid "B1"))))
+          (is (= "culled" (:status (runs/get-branch c rid "B2"))))
+          (is (= "done" (:status (runs/get-branch c rid "B3"))))
+          (is (= "active" (:status (runs/get-branch c rid "B4")))))
+        (testing "the audit row landed with it"
+          (is (= 1 (count (runs/extension-audit-for-run c rid)))))
+        (testing "the journal narrates the same act"
+          (is (some #(= "budget-extended" (str (:kind %)))
+                    (journal/events-since c rid 0)))
+          (is (some #(= "branch-reopened" (str (:kind %)))
+                    (journal/events-since c rid 0))))))))
+
+(deftest a-budget-extension-that-fails-mid-flight-writes-nothing
+  ;; Atomicity is a property of the write, not of the happy path: a throw
+  ;; after the audit insert and the cap raise have executed must still
+  ;; leave no cap, no reopen, and no audit row — otherwise a crashed
+  ;; extension is a budget change the record cannot explain, which is the
+  ;; one thing an audit exists to prevent.
+  (with-db [c]
+    (let [rid (runs/start-run! c {:problem "p" :max-turns 5 :beam-width 1})]
+      (runs/open-branch! c rid {:branch-id "B1"})
+      (runs/close-branch! c rid "B1" :exhausted "turn cap")
+      ;; The journal write is the last step of the transaction; blow it up
+      ;; so every durable write before it has to roll back.
+      (with-redefs [journal/note! (fn [& _]
+                                    (throw (ex-info "journal exploded"
+                                                    {:test :boom})))]
+        (is (thrown? Exception
+                     (runs/extend-budget!
+                      c {:run-id rid :request-id "req-t2"
+                         :principal "operator" :old-max 5
+                         :new-max 12 :reason "will not land"}))))
+      (is (= 5 (:max_turns (runs/get-run c rid))) "the cap never moved")
+      (is (= "exhausted" (:status (runs/get-branch c rid "B1")))
+          "the branch never reopened")
+      (is (nil? (runs/extension-audit c "req-t2"))
+          "the audit row is gone with the rollback")
+      (is (not-any? #(= "budget-extended" (str (:kind %)))
+                    (journal/events-since c rid 0))
+          "and nothing narrates a raise that did not happen"))))
+
+(deftest a-stale-extension-loses-to-the-row
+  ;; The old-max guard: the UPDATE only lands while the row still reads
+  ;; the cap the caller saw. A caller acting on a stale read loses here,
+  ;; with nothing written — the same row-decides rule as finish-run!
+  ;; (review2 #4), applied to the budget.
+  (with-db [c]
+    (let [rid (runs/start-run! c {:problem "p" :max-turns 5 :beam-width 1})]
+      (let [e (try (runs/extend-budget!
+                    c {:run-id rid :request-id "req-t3"
+                       :principal "operator" :old-max 4 :new-max 9
+                       :reason "stale read"})
+                   nil
+                   (catch Throwable t t))]
+        (is (some? e) "the guarded update refused the stale old-max")
+        (is (= :stale (-> e ex-data :budget/error))))
+      (is (= 5 (:max_turns (runs/get-run c rid))) "the row kept its cap")
+      (is (nil? (runs/extension-audit c "req-t3"))
+          "the reservation unwound with the rollback"))))
+
+(deftest a-terminal-run-cannot-be-extended-at-the-store-either
+  ;; The controller refuses terminal runs; the store is the backstop. A
+  ;; completed run's budget is part of its record — an audit row claiming
+  ;; a raise on a run that shipped would be a lie with a timestamp.
+  (with-db [c]
+    (let [rid (runs/start-run! c {:problem "p" :max-turns 5 :beam-width 1})]
+      (runs/finish-run! c rid :completed "done")
+      (is (thrown? Exception
+                   (runs/extend-budget! c {:run-id rid :request-id "req-t4"
+                                           :principal "operator" :old-max 5
+                                           :new-max 9 :reason "too late"})))
+      (is (= "completed" (:status (runs/get-run c rid))))
+      (is (= 5 (:max_turns (runs/get-run c rid))))
+      (is (empty? (runs/extension-audit-for-run c rid))))))
+
+(deftest an-extension-survives-a-restart
+  ;; Restart persistence, the point of "durable": a process that dies
+  ;; right after an extension must leave the raised cap, the reopened
+  ;; branch, and the retained audit readable by the next process that
+  ;; opens the file — a memory-only authority story would forget all
+  ;; three and re-grant the budget on the next ask.
+  (let [f (str "/tmp/samizdat-budget-restart-"
+               (System/nanoTime) ".sqlite3")]
+    (try
+      (let [c (db/open! f)
+            rid (runs/start-run! c {:problem "p" :max-turns 5 :beam-width 1})]
+        (runs/open-branch! c rid {:branch-id "B1"})
+        (runs/close-branch! c rid "B1" :exhausted "turn cap")
+        (runs/extend-budget! c {:run-id rid :request-id "req-t5"
+                                :principal "operator" :old-max 5 :new-max 15
+                                :reason "survives the crash"})
+        ;; finish so the run is at rest, then die
+        (runs/finish-run! c rid :failed nil)
+        (db/close c))
+      (let [c (db/open! f)]
+        (try
+          (let [row (first (runs/list-runs c 5))
+                audit (runs/extension-audit c "req-t5")]
+            (is (= 15 (:max_turns row))
+                "the raised cap is what the next process reads")
+            (is (some? audit) "and the audit row came with it")
+            (is (= 15 (:new_max_turns audit)))
+            (is (= "operator" (:principal audit)))
+            (is (= "active" (:status (runs/get-branch c (:run_id audit) "B1")))
+                "the reopened branch stayed reopened"))
+          (finally (db/close c))))
+      (finally
+        (doseq [suffix ["" "-wal" "-shm"]]
+          (.delete (java.io.File. (str f suffix))))))))

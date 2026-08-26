@@ -192,7 +192,18 @@
                   ;; branch goes inactive holding its answer while the rest
                   ;; keep exploring, and the best is ranked at the end.
                   :stop-on-first-done? (not= "0" (or (env "HARNESS_STOP_ON_FIRST_DONE")
-                                                     "1"))}}
+                                                     "1"))}
+        ;; Trusted-controller budget authority (JS1). An extension of a
+        ;; run's max_turns is the one write that spends provider budget
+        ;; under policy, so it answers to a dedicated authority — an opaque
+        ;; handle minted from THIS config (env or .samizdat/config.edn),
+        ;; never to anything a request body or tool call carries. The
+        ;; token value itself is never stored, journaled, or logged; see
+        ;; samizdat.security.controller. Unset token = no authority is
+        ;; minted anywhere and every extension is refused. The ceiling,
+        ;; when set, is the absolute max_turns any extension may grant.
+        :controller {:budget-token  (env "HARNESS_BUDGET_TOKEN")
+                     :budget-ceiling (env-long "HARNESS_BUDGET_CEILING")}}
       project
       overrides))))
 

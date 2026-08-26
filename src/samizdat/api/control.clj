@@ -169,37 +169,86 @@
   into an HTTP 200. The resumed run is registered under `active` with a fresh
   abort flag, so abort! can stop it like any other.
 
-  `body` may carry max_turns: an explicit budget extension that reopens
-  branches closed as exhausted. Omitted, the original budget stands."
+  A resume NEVER widens the budget. `body` may not raise max_turns: a body
+  asking for more than the run's recorded cap is refused (403 — the
+  request is well formed, it asks for an authority the API does not hold),
+  because extension is a trusted-controller act
+  (samizdat.security.controller), audited and idempotent, never a request
+  parameter. A max_turns at or below the recorded cap is simply ignored —
+  it never narrowed anything either. An unparseable or nonpositive
+  max_turns is not an ask at all and is refused as a bad request (400)
+  rather than silently dropped. Extension composes from the controller
+  side: raise the cap there first (one audited transaction, reopening the
+  exhausted branches), then call this."
   [{:keys [conn config]} run-id body]
   (if-not (resume/resumable? conn run-id)
     {:status 409 :body {:error {:message (str "run " run-id " is not resumable")
                                 :run_id run-id}}}
-    ;; A resume may name an arm too — a run that crashed on one model can be
-    ;; picked up on another, and saying nothing keeps the original.
-    (let [llm-config (run-llm-config (:llm config) body)
-          adapter (registry/adapter-for (:provider llm-config))
-          abort (atom false)
-          max-turns (or (:max_turns body) (:max-turns body))]
-      (future
-        (try
-          ;; Registered inside the run's thread before any work, for the same
-          ;; reason as start-run! (code-review-2026-08 #3): an assoc on the
-          ;; caller racing a completion dissoc stranded the entry.
-          (swap! active assoc run-id {:abort abort})
-          (let [r (resume/resume! {:conn conn :config config
-                                   :llm-adapter adapter
-                                   :llm-config llm-config
-                                   :run-id run-id :abort abort
-                                   :max-turns max-turns})]
-            (swap! active dissoc run-id)
-            r)
-          (catch Throwable e
-            (log/error "resume failed:" (ex-message e))
-            (swap! active dissoc run-id)
-            {:status :error :error (ex-message e)})))
-      {:body {:run_id run-id :status "resuming"
-              :max_turns (:max_turns (runs/get-run conn run-id))}})))
+    (let [recorded (:max_turns (runs/get-run conn run-id))
+          asked (or (:max_turns body) (:max-turns body))
+          ;; The only thing a body can do with max_turns here is be
+          ;; refused, so an unparseable one is refused as a bad request
+          ;; rather than throwing a 500 out of the comparison.
+          asked-num (when (some? asked)
+                      (try (Long/parseLong (str asked))
+                           (catch Throwable _ ::malformed)))]
+      (cond
+        (= ::malformed asked-num)
+        {:status 400
+         :body {:error {:message "max_turns must be an integer"}
+                :run_id run-id}}
+
+        ;; A nonpositive ask is malformed too, not a strange way to say
+        ;; "keep the cap": silently ignoring 0 or -5 would let a caller
+        ;; believe it had bounded the resume when nothing was bounded.
+        (and (some? asked-num) (not (pos? asked-num)))
+        {:status 400
+         :body {:error {:message "max_turns must be a positive integer"}
+                :run_id run-id}}
+
+        (and asked-num (> asked-num (long (or recorded 0))))
+        ;; 403, not 409 or 400: the run exists and is resumable — this
+        ;; request asks for a power the API surface does not hold, and a
+        ;; caller reading only the status code must not mistake the
+        ;; refusal for a resumed run. Honoring it (the old behavior: take
+        ;; the budget and resume) made every API client a budget
+        ;; authority, which is the hole this refusal closes.
+        {:status 403
+         :body {:error {:message (str "max_turns cannot be raised through the"
+                                      " resume API; run " run-id " is recorded"
+                                      " at " recorded ". Budget extension is a"
+                                      " trusted-controller act"
+                                      " (samizdat.security.controller).")}
+                :run_id run-id}}
+
+        :else
+        ;; A resume may name an arm too — a run that crashed on one model
+        ;; can be picked up on another, and saying nothing keeps the
+        ;; original.
+        (let [llm-config (run-llm-config (:llm config) body)
+              adapter (registry/adapter-for (:provider llm-config))
+              abort (atom false)]
+          (future
+            (try
+              ;; Registered inside the run's thread before any work, for the
+              ;; same reason as start-run! (code-review-2026-08 #3): an assoc
+              ;; on the caller racing a completion dissoc stranded the entry.
+              (swap! active assoc run-id {:abort abort})
+              (let [r (resume/resume! {:conn conn :config config
+                                       :llm-adapter adapter
+                                       :llm-config llm-config
+                                       :run-id run-id :abort abort})]
+                (swap! active dissoc run-id)
+                r)
+              (catch Throwable e
+                (log/error "resume failed:" (ex-message e))
+                (swap! active dissoc run-id)
+                {:status :error :error (ex-message e)})))
+          ;; The budget this resume runs under: the recorded cap, read
+          ;; BEFORE the future could rewrite anything. The caller no longer
+          ;; influences it — that number belongs to the controller's audit.
+          {:body {:run_id run-id :status "resuming"
+                  :max_turns recorded}})))))
 (defn- grant-pattern
   "The pattern from a grant payload. Accepts a map (what body-json yields), a
   bare string, or nil. Blank is not a pattern — an unset form posts empty
@@ -229,16 +278,23 @@
       {:status 400
        :body {:error {:message "a grant intervention needs payload.pattern — the shell glob to allow"
                      :run_id run-id}}})
-    (let [id (interventions/submit! conn run-id
-                                    {:branch-id (:branch_id body)
-                                     :kind (:kind body)
-                                     :payload (:payload body)
-                                     :issued-by (or (:issued_by body) "human")})]
-      {:body
-       {:id id
-        :status "pending"
-        ;; Said plainly rather than implied, because the difference between
-        ;; accepted and applied is the thing a UI most easily lies about.
-        :note "Queued. It applies at the branch's next turn boundary, not now."}})))
+    (if-not (contains? interventions/kinds (:kind body))
+      {:status 400
+       :body {:error {:message (str "Unknown intervention kind "
+                                    (pr-str (:kind body)) "; known: "
+                                    (str/join ", "
+                                              (sort (keys interventions/kinds))))}
+              :run_id run-id}}
+      (let [id (interventions/submit! conn run-id
+                                      {:branch-id (:branch_id body)
+                                       :kind (:kind body)
+                                       :payload (:payload body)
+                                       :issued-by (or (:issued_by body) "human")})]
+        {:body
+         {:id id
+          :status "pending"
+          ;; Said plainly rather than implied, because the difference between
+          ;; accepted and applied is the thing a UI most easily lies about.
+          :note "Queued. It applies at the branch's next turn boundary, not now."}}))))
 
 (defn kinds [] {:kinds interventions/kinds})

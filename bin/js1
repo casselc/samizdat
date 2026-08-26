@@ -31,29 +31,43 @@
 set -eu
 
 # ── The pinned JS1 runtime stack (docs/JS1_RUNTIME.md § Pins) ────────────────
-# casselc/jolt @ js1-runtime-current-upstream, tip 279bca18, rebased onto
-# current upstream edda7aec. The rebase moved the SCI host-seam
-# follow-ups upstream (private map/newline compat vars, Thread.getId,
-# Numbers arithmetic statics, restored nested interrupt polling, a
-# persistent-SCI evaluation test — PRs #721–#725), so the branch now
-# carries only: the evaluator re-derivation ("feat: rederive JS1
-# evaluator on current upstream", 13e43418), the scoped Linux process
-# termination commit ("feat: add scoped Linux process termination",
-# a5fb8a3b: ProcessBuilder/Process over posix_spawn with waitpid/kill
-# lifecycle), bounded structured output for that scoped run ("feat:
-# bound scoped process output", 1f859e70: :out-bytes/:err-bytes caps
-# with a poll-bounded, fail-closed drain — the trusted controller
-# process-scope primitive JS1 verification consumes), and the tip
-# ("test: wire current SCI evaluator gates", 279bca18: opt-in make lanes
+# casselc/jolt @ js1-runtime-current-upstream, tip 4af23621, rebased onto
+# current upstream 4c0022d4. An earlier rebase onto edda7aec had already
+# moved the SCI host-seam follow-ups upstream (private map/newline compat
+# vars, Thread.getId, Numbers arithmetic statics, restored nested
+# interrupt polling, a persistent-SCI evaluation test — PRs #721–#725);
+# this rebase picks up the upstream tail since, through PR #735
+# (interruptible blocking waits, the ffi ncurses symbol collision fix,
+# dialect fixes, source-less-JAR root handling). Every pre-rebase SHA is
+# superseded; the branch carries only its own commits, at new SHAs: the
+# evaluator re-derivation ("feat: rederive JS1 evaluator on current
+# upstream", c7766cd2), the scoped Linux process termination commit
+# ("feat: add scoped Linux process termination", 71924827:
+# ProcessBuilder/Process over posix_spawn with waitpid/kill lifecycle),
+# bounded structured output for that scoped run ("feat: bound scoped
+# process output", 671a8bca: :out-bytes/:err-bytes caps with a
+# poll-bounded, fail-closed drain — the trusted controller process-scope
+# primitive JS1 verification consumes), the evaluator gates ("test: wire
+# current SCI evaluator gates", 05f3a553: opt-in make lanes
 # js0sandbox/js0authority/scievaluator plus discriminating Numbers
-# statics rows). jolt.sandbox itself is byte-identical to the previous
-# pin — the sandbox surface did NOT change — and keeps the trusted inert
-# language-surface API — jolt.sandbox/language-surface and
+# statics rows), the scoped-process interruption fix ("fix: clean scoped
+# processes on interruption", 157243e4: every scoped-run exit — the
+# cooperative per-round interrupt poll or an asynchronous escape from
+# under jolt.host/run-interruptible — funnels through one dynamic-wind
+# after-part that runs the same TERM->grace->KILL->confirm-empty ladder
+# before any result or the interruption itself reaches the caller, with
+# the root pid armed under masked interrupts at spawn, so an interrupted
+# run can no longer leak the owned process group or leave the root a
+# zombie), and the docs-only tip ("docs: record final Jolt runtime
+# evidence", 4af23621: runtime evidence doc plus a conformance EDN
+# update — no runtime code). jolt.sandbox itself is byte-identical to
+# the previous pin — the sandbox surface did NOT change — and keeps the
+# trusted inert language-surface API — jolt.sandbox/language-surface and
 # jolt.sandbox/language-coordinate, language-surface-version 1, the same
 # 156-symbol reviewed vocabulary, and the js0-lang/v1 language / js0:
 # capability-and-receipt coordinate schemes the JS1 doc/complete surface
 # and RuntimeCoordinate are built on.
-JOLT_SHA=279bca18bbf50f37b8574a4e6998dee40313cd26
+JOLT_SHA=4af2362176160f2ed0e366689d7232b1a38adfec
 JOLT_BRANCH=js1-runtime-current-upstream
 JOLT_URL=https://github.com/casselc/jolt
 # Its vendor/sci submodule: borkdude/sci 0.13.53.  The version is checked

@@ -67,6 +67,31 @@
       (journal/note! conn run-id :run-finished {:data {:status status}}))
     n))
 
+(defn finish-run-cancellation-fault!
+  "Fail the run closed over an unquiesced turn worker, durably.
+
+  Same terminal guard as finish-run! ('running' only, decided by the row),
+  but the ONE UPDATE also sets terminal_reason: the resume refusal this
+  failure grounds must survive the events retention sweep
+  (journal/prune-finished!), and the runs row is never pruned. Two separate
+  writes would leave a crash window in which the row read 'failed' with the
+  refusal marker missing; one statement has no window. Journals
+  :run-finished exactly as finish-run! does when the row lands. The fault's
+  DETAILS (which branches, the grace) remain a :turn-cancellation-fault
+  event for as long as the tail survives; the refusal bit does not expire
+  with it. Returns rows written."
+  [conn run-id]
+  (let [n (db/with-writer
+            (db/execute! conn
+                         ["UPDATE runs SET status = 'failed', ended_at = ?,
+                                           terminal_reason = 'turn-cancellation-fault'
+                           WHERE id = ? AND status = 'running'"
+                          (db/now) run-id])
+            (db/change-count conn))]
+    (when (pos? n)
+      (journal/note! conn run-id :run-finished {:data {:status :failed}}))
+    n))
+
 (defn reconcile-orphans!
   "Mark every run still claiming to be running as interrupted. Returns how many.
 
@@ -192,15 +217,23 @@
                      {:branch-id branch-id :data {:status status :reason reason}}))
     n))
 
-(defn extend-budget!
-  "Raise a run's max_turns. Only ever called with an explicitly requested
-  value: the resume path keeps the original budget unless one is passed, so
-  a crash cannot re-grant turns — extension is a human act, journaled as one."
-  [conn run-id max-turns]
-  (db/with-writer
-    (db/execute! conn ["UPDATE runs SET max_turns = ? WHERE id = ?"
-                       max-turns run-id]))
-  (journal/note! conn run-id :budget-extended {:data {:max-turns max-turns}}))
+(defn extension-audit
+  "The retained budget-extension audit row for `request-id`, or nil.
+
+  The UNIQUE index makes request ids one-per-act, so this is also the
+  idempotency probe: a row here means the request already landed, and the
+  recorded outcome — not a second application — is the answer to a replay."
+  [conn request-id]
+  (db/fetch-one conn ["SELECT * FROM budget_extensions WHERE request_id = ?"
+                      request-id]))
+
+(defn extension-audit-for-run
+  "Every retained budget-extension row for a run, oldest first: the run's
+  durable budget history. Unlike events, these rows are never pruned —
+  they ARE the record, not a tail of it."
+  [conn run-id]
+  (db/fetch conn ["SELECT * FROM budget_extensions WHERE run_id = ?
+                   ORDER BY id" run-id]))
 
 (defn reopen-branch!
   "An exhausted branch back to active — the budget-extension path. Branches
@@ -212,6 +245,68 @@
                         WHERE run_id = ? AND id = ? AND status = 'exhausted'"
                        run-id branch-id]))
   (journal/note! conn run-id :branch-reopened {:branch-id branch-id}))
+
+(defn extend-budget!
+  "Raise a run's turn cap as ONE durable transaction: the runs row, the
+  reopen of exactly the branches closed `exhausted`, and an append-only
+  audit row land together or not at all.
+
+  This is the atomic WRITE, not the policy. Callers settle everything this
+  function assumes — the opaque controller authority, that the request id
+  is unused, that the raise is monotonic and within the ceiling, that the
+  run exists and is not terminal (samizdat.security.controller owns that
+  ladder); the store adds the two guards a row can keep for itself:
+
+  - old-max: the UPDATE only lands while the row still reads the cap the
+    caller saw, so a concurrent raise loses here (as :stale) rather than
+    double-applying;
+  - status NOT IN ('completed','aborted'): terminal rows never move again
+    (review2 #4's rule), extension included.
+
+  The audit row is inserted FIRST, so a request-id collision from a racing
+  writer rolls the whole transaction back and surfaces as a UNIQUE error
+  the caller reads as a replay. Throws {:budget/error ...} on a lost
+  guard; returns the change as a map for the audit trail's caller."
+  [conn {:keys [run-id request-id principal old-max new-max reason]}]
+  (db/with-transaction conn
+    ;; Reserve the request id before touching anything: if another writer
+    ;; already landed this exact request, the UNIQUE index throws here and
+    ;; the ROLLBACK undoes nothing that happened.
+    (db/execute! conn
+                 ["INSERT INTO budget_extensions
+                     (run_id, request_id, principal, old_max_turns,
+                      new_max_turns, reason, created_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?)"
+                  run-id request-id principal old-max new-max reason (db/now)])
+    (db/execute! conn
+                 ["UPDATE runs SET max_turns = ?
+                     WHERE id = ? AND max_turns = ?
+                       AND status NOT IN ('completed','aborted')"
+                  new-max run-id old-max])
+    (when (zero? (db/change-count conn))
+      (throw (ex-info (str "budget extension of " run-id " lost its guard: "
+                           "the row no longer reads max_turns " old-max)
+                      {:budget/error :stale
+                       :run-id run-id :expected-old old-max})))
+    ;; Exhaustion is the one closing reason that names the budget rather
+    ;; than the branch, so more budget reopens exactly those — culled,
+    ;; abandoned, and done branches stay closed whatever the cap does.
+    (let [exhausted (mapv :id (db/fetch
+                               conn
+                               ["SELECT id FROM branches
+                                  WHERE run_id = ? AND status = 'exhausted'"
+                                run-id]))]
+      (doseq [b exhausted]
+        (reopen-branch! conn run-id b))
+      ;; Journaled inside the transaction, so the narrative cannot claim an
+      ;; extension that rolled back. The data names the act and the audit
+      ;; key; it never carries the authority token (there is nothing a
+      ;; token could add — the audit row already says who and why).
+      (journal/note! conn run-id :budget-extended
+                     {:data {:old old-max :new new-max
+                             :request-id request-id :principal principal}})
+      {:run-id run-id :request-id request-id :principal principal
+       :old-max old-max :new-max new-max :reopened exhausted})))
 
 (defn set-thesis!
   "The branch's current structural plan. Overwriting is allowed — committing to

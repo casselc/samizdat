@@ -39,6 +39,149 @@
   is not."
   (:require [clojure.string :as str]))
 
+;; ─── Controller-owned turn authority ─────────────────────────────────────
+
+(declare js1-profile?)
+
+(defrecord TurnLease [id run-id branch-id turn state interrupt-token])
+
+(defn mint-turn-lease
+  "Mint the controller authority for exactly one scheduled branch turn.
+
+  The lease is deliberately not data supplied to a tool call: the scheduler
+  installs it at the top level of ctx, while model arguments remain under
+  :args.  JS1 cannot construct one through its projected vocabulary.  `state`
+  is the linearization cell.  Its monitor serializes effect-permit issuance
+  with the one :active -> :revoked transition."
+  [run-id branch-id turn]
+  (->TurnLease (str (random-uuid)) run-id branch-id turn
+               (atom {:status :active :permits-issued 0})
+               (jolt.host/make-interrupt)))
+
+(defn turn-lease?
+  [x]
+  (instance? TurnLease x))
+
+(defn turn-lease-status
+  "The lease's current terminal/active state keyword, or :invalid."
+  [lease]
+  (if (turn-lease? lease)
+    (:status @(:state lease))
+    :invalid))
+
+(defn active-turn-lease?
+  [lease]
+  (= :active (turn-lease-status lease)))
+
+(defn turn-lease-authorizes?
+  "True only for the exact run/branch/turn coordinate the controller minted."
+  [lease ctx]
+  (and (active-turn-lease? lease)
+       (= (:run-id lease) (:run-id ctx))
+       (= (:branch-id lease) (get-in ctx [:branch :id]))
+       (= (:turn lease) (:turn ctx))))
+
+(defn revoke-turn-lease!
+  "Atomically revoke a lease under the same monitor that issues effect permits.
+
+  The first caller owns the transition and its reason; later callers observe
+  the already-terminal state.  Returns true only for the active -> revoked
+  linearization.  A permit already issued is an effect whose initiation
+  linearized first; otherwise revocation wins and no later permit can issue.
+  Interruption is intentionally a separate operation so the scheduler can
+  (and does) revoke BEFORE interrupt."
+  [lease reason]
+  (when (turn-lease? lease)
+    (let [state (:state lease)]
+      (locking state
+        (when (= :active (:status @state))
+          (swap! state assoc :status :revoked :reason reason)
+          true)))))
+
+(defn interrupt-turn-lease!
+  "Interrupt the Jolt token carried by a revoked lease.  This is the existing
+  cooperative Jolt interruption path used by the SCI evaluator, not another
+  executor/runtime."
+  [lease]
+  (when (and (turn-lease? lease) (:interrupt-token lease))
+    (jolt.host/interrupt! (:interrupt-token lease))))
+
+(defn turn-lease-token
+  "The controller token passed to JS1's existing interruptible evaluator."
+  [lease]
+  (when (turn-lease? lease) (:interrupt-token lease)))
+
+(defn assert-active-turn-lease!
+  "Diagnostic active-state assertion, not an effect permit.  A stale/missing
+  lease is an authority failure.  Missing is allowed only for non-JS1 legacy
+  callers; scheduled JS1 turns always carry a lease.  Effect boundaries must
+  use with-turn-lease-permit! so revocation is serialized with initiation."
+  [ctx]
+  (let [lease (:turn-lease ctx)]
+    (when (or (and (js1-profile? ctx) (nil? lease))
+              (and (some? lease) (not (turn-lease-authorizes? lease ctx))))
+      (throw (ex-info "Turn authority is absent or revoked; refusing stale model effect"
+                      {:samizdat.turn-lease/error :stale
+                       :lease/status (turn-lease-status lease)})))
+    true))
+
+(defn with-turn-lease-permit!
+  "Linearize one short effect initiation with turn-lease revocation.
+
+  For a supplied lease, its state monitor is held while authority is checked,
+  an irrevocable permit number is issued, and `initiate` runs.  Revocation uses
+  the same monitor, so exactly one ordering exists:
+
+    * initiation/permit first: this effect was authorized and initiated; a
+      later revocation does not retroactively cancel it, or
+    * revocation first: initiation throws :stale and is never called.
+
+  `initiate` MUST contain only the semantic launch boundary (for recorded JS1
+  operations, the durable intent append), never the ensuing file/search/test
+  computation.  Its return value is returned unchanged.  Legacy non-JS1 calls
+  with no lease run `initiate` directly, preserving their old behavior."
+  [ctx initiate]
+  (let [lease (:turn-lease ctx)]
+    (cond
+      (nil? lease)
+      (do
+        (when (js1-profile? ctx)
+          (throw (ex-info "Turn authority is absent; refusing model effect"
+                          {:samizdat.turn-lease/error :stale
+                           :lease/status :invalid})))
+        (initiate))
+
+      (not (turn-lease? lease))
+      (throw (ex-info "Turn authority is invalid; refusing model effect"
+                      {:samizdat.turn-lease/error :stale
+                       :lease/status :invalid}))
+
+      :else
+      (let [state (:state lease)]
+        (locking state
+          (when-not (and (= :active (:status @state))
+                         (= (:run-id lease) (:run-id ctx))
+                         (= (:branch-id lease) (get-in ctx [:branch :id]))
+                         (= (:turn lease) (:turn ctx)))
+            (throw (ex-info "Turn authority is absent or revoked; refusing stale model effect"
+                            {:samizdat.turn-lease/error :stale
+                             :lease/status (:status @state)})))
+          ;; This state transition, under the revoker's monitor, is the launch
+          ;; linearization point.  The callback is deliberately still inside
+          ;; the monitor so a durable intent cannot lag behind its permit.
+          (swap! state update :permits-issued (fnil inc 0))
+          (initiate))))))
+
+(defn run-with-turn-lease-permit!
+  "Run a long synchronous effect under a short lease launch permit.
+
+  Permit issuance is the effect's linearized initiation.  `effect` starts
+  immediately afterward but runs OUTSIDE the lease monitor, so revocation is
+  never held behind verifier execution or another long computation."
+  [ctx effect]
+  (with-turn-lease-permit! ctx (constantly true))
+  (effect))
+
 ;; ─── JS1 profile ─────────────────────────────────────────────────────────
 
 (def ^:private js1-allowed-tools
@@ -144,6 +287,30 @@
 
 (defn fail [branch result & {:as extra}]
   (merge {:result result :category :failure :progress? false :branch branch} extra))
+
+(defn turn-lease-refusal
+  "A result-map refusal at the one model-tool dispatch boundary, or nil.
+
+  A supplied stale/invalid lease always refuses.  A scheduled JS1 context must
+  also have a lease; omission is a controller wiring fault and never a route
+  around the guard.  Legacy non-JS1 direct tool callers remain unchanged."
+  [{:keys [branch turn-lease] :as ctx}]
+  (when (or (and (js1-profile? ctx) (nil? turn-lease))
+            (and (some? turn-lease)
+                 (not (turn-lease-authorizes? turn-lease ctx))))
+    (fail branch
+          "Turn authority expired; this stale tool call was not dispatched."
+          :stale-lease? true
+          :lease-status (turn-lease-status turn-lease))))
+
+(defn dispatch-tool
+  "Early shared refusal boundary for model-issued tools.  Policy remains in
+  phase-refusal; authority is checked immediately before multimethod dispatch.
+  This is intentionally not the effect fence: eval operations and done verify
+  launches obtain synchronized permits at their semantic boundaries."
+  [ctx]
+  (or (turn-lease-refusal ctx)
+      (run-tool ctx)))
 
 (defn malformed
   "A call the harness could not act on because its arguments were wrong.
