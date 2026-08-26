@@ -706,6 +706,7 @@
         ;; interventions queue; it never touches a branch, so it cannot race
         ;; the round it is watching.
         ctx (assoc ctx :live-branches live-branches)
+        _ (session/mark-run! run-id)
         ctx (assoc ctx :stop-watch (watch/start! ctx))]
     (try
       (let [data (myc/run-compiled (beam-manifest conn config) ctx
@@ -748,20 +749,15 @@
         ;; Best effort and last: a failure to remember must never be able to
         ;; turn a finished run into a failed one.
         (try
-          (when-let [fs (seq (session/findings))]
-            (let [written (knowledge/distill! conn fs {:run-id run-id})]
-              (log/info "distilled" (count written) "session finding(s) into memory")))
-          ;; And what the supervisor's own changes concluded. This is the
-          ;; heredity of SELECTION: an experiment dies with the process, so a
-          ;; lever that was tried and made things worse would be forgotten and
-          ;; tried again — variation and measurement without inheritance is
-          ;; thrashing with statistics.
-          (when-let [es (seq (session/experiments))]
-            (let [written (knowledge/distill-verdicts! conn es {:run-id run-id})]
-              (when (seq written)
-                (log/info "recorded" (count written) "experiment verdict(s) into memory"))))
+          (let [{:keys [findings verdicts]}
+                (knowledge/distil-session! conn {:run-id run-id
+                                                 :findings (session/findings)
+                                                 :experiments (session/experiments)})]
+            (when (or (seq findings) (seq verdicts))
+              (log/info "distilled" (count findings) "finding(s) and"
+                        (count verdicts) "verdict(s) into memory")))
           (catch Throwable e
-            (log/warn "distilling session findings failed:" (ex-message e))))
+            (log/warn "distilling the session failed:" (ex-message e))))
         ;; The proof engines' teardown lived here: scheduler-opened sessions
         ;; from the `sessions` atom, plus everything a tool opened via
         ;; :engine-sessions, disposed no matter how the run ended. Per-branch

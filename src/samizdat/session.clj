@@ -353,6 +353,27 @@
 
 (defn- rate [n total] (if (pos? total) (/ (double n) total) 0.0))
 
+(defn run-window
+  "The tally for THIS RUN, or the whole session when the run was never marked.
+
+  Rates over an unbounded window under-react to recent change, and that is not
+  hypothetical: a live run starved of tokens produced an empty provider reply,
+  the counter recorded it correctly, and no finding fired — one bad turn in
+  thirty-six cumulative is under every threshold. The session had been healthy
+  for two runs and the arithmetic said so.
+
+  The RUN is the natural window, because `this run is going badly` is the
+  actionable statement and `this process has been fine on average` is not. The
+  full-session tally stays for the supervisor's cross-run view, where dilution
+  is the point rather than the problem."
+  [run-id]
+  (or (since (str "run:" run-id)) (snapshot)))
+
+(defn mark-run!
+  "Stamp the start of a run, so findings can be evaluated over it."
+  [run-id]
+  (mark! (str "run:" run-id)))
+
 (defn findings
   "Patterns in the session worth someone's attention, as data.
 

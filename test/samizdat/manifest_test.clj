@@ -58,9 +58,24 @@
   ;; what finally makes :run :loop reach a production run.
   (let [def' (wf/read-definition (slurp (io/resource "manifests/loop.edn")))
         turn (wf/turn-manifest def')]
-    (testing "the back edge and the finish hand-off both terminate the turn"
-      (is (= {:continue :end :done :end :abandoned :end :exhausted :end}
-             (:route (:edges turn)))))
+    (testing "the back edge terminates the turn"
+      (is (= :end (:continue (:route (:edges turn))))))
+    (testing "the slice is ONE turn — no path through it returns to :start"
+      ;; Stated as acyclicity rather than as a literal route map. The map
+      ;; version pinned {:done :end :abandoned :end :exhausted :end} and so
+      ;; failed the moment an ending was routed through a legitimate extra
+      ;; node (:distil) on its way out — a test that breaks on a correct
+      ;; change is a test that gets edited to match, which is no test. What
+      ;; the rewrite actually has to guarantee is that the slice terminates.
+      (let [targets (fn [to] (if (map? to) (vals to) [to]))
+            walk (fn walk [node seen]
+                   (cond
+                     (= :end node) true
+                     (contains? seen node) false
+                     :else (every? #(walk % (conj seen node))
+                                   (targets (get (:edges turn) node)))))]
+        (is (walk :start #{})
+            "every path from :start reaches :end without revisiting a node")))
     (testing "the finish node is dropped, not orphaned"
       (is (contains? (:cells def') :finish))
       (is (not (contains? (:cells turn) :finish)))

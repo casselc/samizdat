@@ -84,6 +84,8 @@
    "task-claimed"
    "task-current"
    "task-none"
+   "task-reflection"
+   "task-reflection-input"
    "task-required"
    "team-worker"
    "turn-deadline"

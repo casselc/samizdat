@@ -162,4 +162,28 @@
  ;; assert the number 3 and get refused for it. Narrow on purpose: only a
  ;; number directly after a known tool name. Kept as a string because EDN
  ;; has no regex literal; the consumers re-pattern it.
- "(?i)\\b(lean|mathlib|z3|swipl|swi-prolog|prolog|octave|clojure|jolt|python|node|java|deepseek)[\\s-]*[0-9]+(\\.[0-9]+)*"}
+ "(?i)\\b(lean|mathlib|z3|swipl|swi-prolog|prolog|octave|clojure|jolt|python|node|java|deepseek)[\\s-]*[0-9]+(\\.[0-9]+)*"
+ :empty-section
+ ;; What a model writes when it has nothing to put in a section it was asked
+ ;; to fill. A reflector told to leave GOTCHAS empty almost never leaves it
+ ;; empty — it writes "None." or "N/A" or a bracketed placeholder echoed back
+ ;; from the template, and every one of those becomes a memory the next run
+ ;; is shown unless it is recognised here.
+ ;;
+ ;; A regex PATTERN STRING, re-patterned at the use site, matched against a
+ ;; WHOLE line. Widening it starts eating real content — a memory that
+ ;; genuinely reads "N/A on this project" is a fact — so entries earn their
+ ;; place by being placeholders and nothing else.
+ "(?i)none\\.?|n/?a\\.?|\\[.*\\]"
+
+ :shell-refusal
+ ;; How the shell policy phrases a refusal. Read to turn a refused command
+ ;; into a durable project fact, which is worth more than it looks: it saves
+ ;; the next run the turn it would spend learning the same refusal.
+ ;;
+ ;; A regex PATTERN STRING, re-patterned at the use site. It matches the
+ ;; TOOL RESULT, so it has to track how the policy actually words itself —
+ ;; if the refusal text is reworded and this is not, the fact silently stops
+ ;; being recorded and nothing fails.
+ "(?i)needs approval|not on the allow list"
+}

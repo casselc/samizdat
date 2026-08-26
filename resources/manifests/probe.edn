@@ -25,6 +25,7 @@
          :journal        :journal/record
          :arbiter        :gate/arbiter
          :route          :loop/route
+         :distil         :memory/distil
          :finish         :loop/finish}
 
  :edges {:start          :probe
@@ -47,10 +48,15 @@
          :journal        :arbiter
          :arbiter        :route
          ;; The back edge: one turn ends where the next begins.
+         ;; Every ending goes through :distil first, exactly as the factory
+         ;; loop does — this manifest is a controlled comparison, and a probe
+         ;; run that quietly stopped forming project memories would make it a
+         ;; comparison of two different things.
          :route          {:continue  :start
-                          :done      :finish
-                          :abandoned :finish
-                          :exhausted :finish}
+                          :done      :distil
+                          :abandoned :distil
+                          :exhausted :distil}
+         :distil         :finish
          :finish         :end}
 
  :dispatches {:parse [[:provider-error (fn [d] (not (:ok (:call d))))]
@@ -84,4 +90,8 @@
               tool ran would steer on the previous turn's state."}
 
   {:type :must-precede :cell :parse :before :dispatch :enforced true
-   :protects "Nothing is dispatched that was not parsed out of a reply."}]}
+   :protects "Nothing is dispatched that was not parsed out of a reply."}
+
+  {:type :must-precede :cell :distil :before :finish :enforced true
+   :protects "A task that ended wrote down what it learned about the project
+              before the branch closed."}]}

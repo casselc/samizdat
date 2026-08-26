@@ -331,3 +331,56 @@
   (is (some #(= "another" (:name %)) (session/experiments))
       "blocking on an unfinished experiment would leave the supervisor unable
        to act for as long as the run is short"))
+
+(deftest both-drivers-distil-the-session
+  ;; Found live. The beam distilled at run end and workflow/run! — the
+  ;; single-branch driver, which is what the factory loop uses and therefore
+  ;; what most runs are — did not. A run completed, produced a finding, and
+  ;; formed no memory at all: the short-term half worked, the long-term half
+  ;; was never reached, and nothing said so.
+  ;;
+  ;; The bridge existing in one driver is the same as not existing, for every
+  ;; run that uses the other. So it is one function now, and this pins that it
+  ;; writes both halves.
+  (let [c (db/open! ":memory:")]
+    (try
+      (dotimes [_ 8] (session/observe-turn! {:tool "eval" :category :mechanics
+                                             :signals {:parse-error true}}))
+      (session/experiment! "x" {:change "a lever" :hypothesis "h"})
+      (dotimes [_ 8] (session/observe-turn! {:tool "eval" :category :success :signals {}}))
+      (let [{:keys [findings verdicts]}
+            (knowledge/distil-session! c {:run-id "r1"
+                                          :findings (session/findings)
+                                          :experiments (session/experiments)})]
+        (is (seq findings) "the patterns it measured")
+        (is (seq verdicts) "and the verdict on what the supervisor changed"))
+      (finally (db/close c)))))
+
+(deftest a-finding-is-evaluated-over-the-run-not-the-whole-session
+  ;; Found live, and it is the reason the starved run produced no finding: a
+  ;; run given 48 max-tokens returned an empty provider reply, the counter
+  ;; recorded it correctly, and nothing fired — one bad turn in thirty-six
+  ;; cumulative is under every threshold. The session had been healthy for two
+  ;; runs and the arithmetic said so.
+  ;;
+  ;; Rates over an unbounded window under-react to recent change. The RUN is
+  ;; the natural window, because "this run is going badly" is the actionable
+  ;; statement and "this process has been fine on average" is not.
+  (dotimes [_ 30] (session/observe-turn! {:tool "eval" :category :success :signals {}}))
+  (session/mark-run! "r3")
+  (dotimes [_ 4] (session/observe! [:provider :empty-reply])
+                 (session/observe-turn! {:tool "__provider_error__" :category :neutral
+                                         :signals {}}))
+  (is (empty? (session/findings))
+      "diluted across a long healthy session — correct for the supervisor's
+       cross-run view, useless for noticing that things just broke")
+  (is (some #(= :provider-empty-replies (:kind %))
+            (session/findings (session/run-window "r3")))
+      "and visible immediately over the run that is actually going wrong"))
+
+(deftest an-unmarked-run-falls-back-to-the-whole-session
+  ;; A caller that never marked — a test, a REPL call — must still get an
+  ;; answer rather than an empty window that reads as "nothing wrong".
+  (dotimes [_ 8] (session/observe-turn! {:tool "eval" :category :mechanics
+                                         :signals {:parse-error true}}))
+  (is (seq (session/findings (session/run-window "never-marked")))))

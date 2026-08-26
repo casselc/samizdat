@@ -113,7 +113,11 @@
   tests."
   [{:keys [conn run-id]} seen]
   (let [p (policy)
-        fresh (actionable (session/findings) @seen p)
+        ;; Evaluated over THIS RUN, not the whole session. A watcher is asking
+        ;; `is this going wrong now`, and a rate over every run the process has
+        ;; done answers a different question — one that says no for a long time
+        ;; after the answer became yes.
+        fresh (actionable (session/findings (session/run-window run-id)) @seen p)
         room (- (:max-interventions p) (count @seen))
         raising (take (max 0 room) fresh)]
     (doseq [f raising]
@@ -140,7 +144,15 @@
                   (catch Throwable e
                     ;; A watcher that throws keeps watching. It is an observer;
                     ;; its failure must cost the run nothing.
-                    (log/warn "watch pass failed:" (ex-message e))))))]
+                    ;;
+                    ;; Guarded on @running because `stop` clears the flag and
+                    ;; THEN cancels, so a watcher parked in its sleep unwinds
+                    ;; through here on the ordinary stop path. Logging that put
+                    ;; a warning at the end of every clean run — seven of them
+                    ;; in one suite — which is how a real warning becomes
+                    ;; invisible.
+                    (when @running
+                      (log/warn "watch pass failed:" (ex-message e)))))))]
       (fn stop []
         (reset! running false)
         (future-cancel f)

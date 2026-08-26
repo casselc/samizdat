@@ -68,6 +68,7 @@
             [samizdat.base-test]
             [samizdat.boundary-test]
             [samizdat.session-test]
+            [samizdat.reflect-test]
             [samizdat.watch-test]
             [samizdat.tasks-test]
             [samizdat.knowledge-test]
@@ -170,6 +171,7 @@
     samizdat.base-test
     samizdat.boundary-test
     samizdat.session-test
+    samizdat.reflect-test
     samizdat.watch-test
     samizdat.tasks-test
     samizdat.knowledge-test

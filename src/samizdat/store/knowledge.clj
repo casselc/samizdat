@@ -31,7 +31,8 @@
   because `db/fts5-available?` is a real question about the library that
   happens to be loaded, not a formality, and a harness that cannot remember
   is worse than one that remembers slowly."
-  (:require [clojure.string :as str]
+  (:require [clojure.data.json :as json]
+            [clojure.string :as str]
             [clojure.tools.logging :as log]
             [samizdat.lexicon :as lexicon]
             [samizdat.memory :as memory]
@@ -362,6 +363,128 @@
                                  :pattern-key pattern :confidence 0.7})]
          (record-outcome! conn id worked?)
          {:id id :lever change :verdict verdict :repeat? false})))))
+
+(defn curate!
+  "Decay the salience of memories that have gone unused, and return how many
+  moved.
+
+  CURATION, which nothing did. `memory/decayed` existed from the first day of
+  the salience model and was never called from anywhere — so salience only ever
+  climbed, every recall reinforced, and nothing ever fell. A ranking where
+  everything rises is a ranking that stops discriminating: after enough runs
+  the top of the list is whatever was written earliest, not what is worth
+  reading.
+
+  Skips the pinned, and skips anything used inside the window — being looked up
+  recently is exactly the signal that it should not decay. Floored rather than
+  allowed to reach zero: a memory that decayed to nothing would be
+  indistinguishable from one that was never important, and `this WAS worth
+  writing down and has not been needed since` is a different fact worth
+  keeping."
+  [conn]
+  (let [p (memory/policy)
+        cutoff (str (.minusSeconds (java.time.Instant/now)
+                                   (* 86400 (long (:recent-use-window-days p)))))
+        stale (db/fetch conn
+                        ["SELECT id, salience FROM knowledge
+                           WHERE pinned = 0
+                             AND (last_used_at IS NULL OR last_used_at < ?)
+                             AND salience > ?"
+                         cutoff (:decay-floor p)])]
+    (db/with-writer
+      (doseq [{:keys [id salience]} stale]
+        (db/execute! conn ["UPDATE knowledge SET salience = ? WHERE id = ?"
+                           (memory/decayed salience p) id])))
+    (count stale)))
+
+(defn- fact
+  "One derived project memory, rendered from its template in gates.edn
+  :project-facts. A plain `{{cmd}}` substitution rather than a selmer render:
+  the store sits below the prompt layer, and one placeholder does not justify
+  reaching up through it."
+  [k cmd]
+  (-> (get (lexicon/policy :project-facts) k)
+      (str/replace "{{cmd}}" (str cmd))))
+
+(defn distil-project!
+  "Write what this run DISCOVERED ABOUT THE PROJECT into long-term memory.
+
+  The gap this closes: every other distillation here is about the HARNESS —
+  patterns in how the loop ran, verdicts on changes the supervisor made. None
+  of it is about the codebase being worked on, so an implementor started every
+  session knowing nothing about the project and spent its first turns finding
+  out again where the source lives, how to run the tests, and which commands
+  the policy will refuse. Measured across the live runs: 46 turns, zero
+  `remember` calls, zero memories.
+
+  Derived from what the run DID, not from asking a model to summarise. A shell
+  command that exited zero is a fact about this project — that command works
+  here — and it needed no judgement to discover and needs none to record. A
+  command the policy refused is the same kind of fact from the other side, and
+  worth more than it looks: it saves the next run the turn it would spend
+  learning the same refusal.
+
+  `semantic`, because these are durable facts about the project rather than
+  episodes of a run: the test command does not stop being the test command
+  because this run ended. Pattern-keyed on the command, so a fact is written
+  once and corroborated across runs rather than duplicated."
+  [conn {:keys [run-id]}]
+  (let [rows (db/fetch conn
+                       ["SELECT tool_name, args, result, category FROM turns
+                          WHERE run_id = ? AND tool_name = ? ORDER BY turn"
+                        run-id "shell"])
+        command-of (fn [r] (try (some-> (json/read-str (str (:args r)) :key-fn keyword)
+                                        :command str str/trim not-empty)
+                                (catch Throwable _ nil)))
+        facts (->> rows
+                   (keep (fn [r]
+                           (when-let [cmd (command-of r)]
+                             (cond
+                               (= "success" (:category r))
+                               {:key (str "cmd-works:" cmd) :content (fact :cmd-works cmd)}
+
+                               (re-find (re-pattern (lexicon/wordlist :shell-refusal))
+                                        (str (:result r)))
+                               {:key (str "cmd-refused:" cmd) :content (fact :cmd-refused cmd)}))))
+                   distinct)]
+    (vec
+     (for [{:keys [key content]} facts
+           :let [existing (by-pattern conn key)]]
+       (if existing
+         (do (corroborate! conn (:id existing) run-id)
+             {:id (:id existing) :fact key :repeat? true})
+         {:id (remember! conn {:content content :kind "semantic" :run-id run-id
+                               :pattern-key key :confidence 0.8})
+          :fact key :repeat? false})))))
+
+(defn distil-session!
+  "Write everything this session concluded into long-term memory: the patterns
+  it measured, and the verdicts on the changes the supervisor made.
+
+  ONE function both drivers call, because it was in only one of them. The beam
+  distilled at run end and `workflow/run!` — the single-branch driver, which is
+  what the factory loop uses and therefore what most runs are — did not. A live
+  run completed, produced a finding, and formed no memory at all: the short-term
+  half worked, the long-term half was never reached, and nothing said so. The
+  bridge existing in one driver is the same as not existing, for every run that
+  uses the other.
+
+  Best effort in both halves: a failure to remember must never turn a finished
+  run into a failed one."
+  [conn {:keys [run-id findings experiments]}]
+  (let [written (when (seq findings) (distill! conn findings {:run-id run-id}))
+        verdicts (when (seq experiments)
+                   (distill-verdicts! conn experiments {:run-id run-id}))
+        ;; And what the run learned about the PROJECT, which is the half that
+        ;; was missing entirely: everything else here is the harness watching
+        ;; itself.
+        project (try (distil-project! conn {:run-id run-id})
+                     (catch Throwable _ nil))
+        ;; And curation, so the store does not become a ranking in which
+        ;; everything has risen.
+        decayed (try (curate! conn) (catch Throwable _ 0))]
+    {:findings (vec written) :verdicts (vec verdicts) :project (vec project)
+     :decayed decayed}))
 
 (defn standing
   "The memories with the highest standing, whatever they are about — what this

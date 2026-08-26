@@ -3,6 +3,8 @@
             [clojure.string :as str]
             [samizdat.memory :as memory]
             [samizdat.store.db :as db]
+            [samizdat.store.journal :as journal]
+            [samizdat.store.runs :as runs]
             ;; The tool namespaces register their defmethods on load, and this
             ;; test dispatches `forget` through the multimethod. Requiring only
             ;; `tools.base` left that registration to whichever other test
@@ -273,3 +275,43 @@
   ;; costs nothing on the common row.
   (let [id (knowledge/remember! @conn {:content "the deploy needs sudo" :kind "semantic"})]
     (is (nil? (:pattern_key (knowledge/get-by-id @conn id))))))
+
+(deftest a-run-leaves-behind-what-it-learned-about-the-project
+  ;; Everything else distilled here is the harness watching ITSELF — patterns
+  ;; in how the loop ran, verdicts on the supervisor's changes. None of it is
+  ;; about the codebase being worked on, so an implementor started every
+  ;; session knowing nothing and spent its first turns rediscovering where the
+  ;; source lives and which commands the policy refuses. Measured across the
+  ;; live runs: 46 turns, zero remember calls, zero memories.
+  (let [c @conn
+        rid (runs/start-run! c {:problem "p"})]
+    (runs/open-branch! c rid {:branch-id "B1"})
+    (journal/record-turn! c rid {:branch-id "B1" :turn 1 :tool-name "shell"
+                                 :args {:command "cat deps.edn"} :result "{:paths}"
+                                 :category "success"})
+    (journal/record-turn! c rid {:branch-id "B1" :turn 2 :tool-name "shell"
+                                 :args {:command "find . | head -5"}
+                                 :result "Command needs approval: not on the allow list"
+                                 :category "neutral"})
+    (let [facts (knowledge/distil-project! c {:run-id rid})]
+      (is (= 2 (count facts)))
+      (let [contents (map (comp :content #(knowledge/get-by-id c %) :id) facts)]
+        (is (some #(str/includes? % "`cat deps.edn` works") contents))
+        (is (some #(str/includes? % "refused by the shell policy") contents)
+            "a refusal is a fact from the other side, and saves the next run
+             the turn it would spend learning the same refusal")))
+
+    (testing "these are durable facts, not episodes — the test command does not
+              stop being the test command because this run ended"
+      (is (every? #(= "semantic" (:kind %))
+                  (filter :pattern_key (knowledge/recent c 20)))))
+
+    (testing "and a second run confirms rather than duplicating"
+      (let [rid2 (runs/start-run! c {:problem "p2"})]
+        (runs/open-branch! c rid2 {:branch-id "B1"})
+        (journal/record-turn! c rid2 {:branch-id "B1" :turn 1 :tool-name "shell"
+                                      :args {:command "cat deps.edn"} :result "x"
+                                      :category "success"})
+        (let [again (knowledge/distil-project! c {:run-id rid2})]
+          (is (every? :repeat? again))
+          (is (= 2 (:corroborations (knowledge/by-pattern c "cmd-works:cat deps.edn")))))))))

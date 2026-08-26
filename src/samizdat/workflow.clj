@@ -52,10 +52,12 @@
             [samizdat.agent.gitdiff :as gitdiff]
             [samizdat.agent.loop :as branch-loop]
             [samizdat.repl :as repl]
+            [samizdat.session :as session]
             [samizdat.watch :as watch]
             [samizdat.userspace :as userspace]
             [samizdat.agent.state :as state]
             [samizdat.store.journal :as journal]
+            [samizdat.store.knowledge :as knowledge]
             [samizdat.store.runs :as runs]
             [samizdat.store.userspace :as us])
   (:refer-clojure :exclude [run!]))
@@ -524,6 +526,8 @@
              :repl-session (repl/new-session)
              :max-turns max-turns}]
     (runs/open-branch! conn run-id {:branch-id "B1"})
+    ;; The window findings are evaluated over.
+    (session/mark-run! run-id)
     ;; The single-branch driver drains the same interventions queue the beam
     ;; does (loop/drain-directives!), so the watcher works here unchanged.
 
@@ -549,6 +553,15 @@
             (assoc :run-id run-id)))
       (finally
         (stop-watch)
+        ;; SHORT-TERM BECOMES LONG-TERM, here too. This driver runs the factory
+        ;; loop, which is what most runs use; distilling only in the beam meant
+        ;; the common path measured everything and remembered none of it.
+        (try
+          (knowledge/distil-session! conn {:run-id run-id
+                                           :findings (session/findings)
+                                           :experiments (session/experiments)})
+          (catch Throwable e
+            (log/warn "distilling the session failed:" (ex-message e))))
         ;; The run's eval namespace does not outlive the run
         ;; (provenance CR1-6): one namespace per run, never removed, was
         ;; unbounded growth on a serve process.

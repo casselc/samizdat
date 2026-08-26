@@ -656,6 +656,46 @@
         run that shipped unverified is no longer indistinguishable in the
         record from one that shipped green."}
 
+ :project-facts
+ {:value
+  {:cmd-works   "In this project `{{cmd}}` works."
+   :cmd-refused "In this project `{{cmd}}` is refused by the shell policy — do not spend a turn on it."}
+  :kind :policy :capability-tunable? false
+  :doc "THE WORDS A DERIVED PROJECT MEMORY IS WRITTEN IN.
+
+        These two lines are read by the model on every later run, so they are
+        prose the model sees and they belong here rather than compiled into
+        the store. `{{cmd}}` is the only substitution.
+
+        They are phrased as standing facts about the project rather than as
+        reports of an episode — \"works\", not \"worked once\" — because that is
+        what they are: a command that ran clean here is a property of this
+        checkout, and the next run should read it as one. The refusal line
+        carries its own instruction because a refusal the reader does not
+        recognise as final is a refusal they will spend a turn re-testing."}
+
+ :reflection
+ {:value
+  {:args-chars   160
+   :result-chars 240}
+  :kind :policy :capability-tunable? false
+  :doc "HOW MUCH OF A TURN THE REFLECTOR SEES, per turn of the transcript it
+        is asked to distil into project memories.
+
+        The two are separate because they are truncating different things.
+        :args-chars is the CALL — a path, a command, a patch header; 160 is
+        enough to identify what was done and not enough to paste a file into
+        the prompt. :result-chars is the OUTCOME, and it is larger because
+        the gotchas worth recording live in error text: a transcript of calls
+        without their outcomes cannot say what wasted time, which is most of
+        what a reflection is for.
+
+        Raising them buys fidelity and costs context on a prompt that already
+        carries every turn of the task. Lowering :result-chars is the one
+        that quietly hurts — the reflector stops seeing why a call failed and
+        writes vaguer memories, which is the failure mode this whole schema
+        exists to avoid."}
+
  :memory
  {:value
   {:kind-salience {:working 0.3 :episodic 0.45 :procedural 0.5

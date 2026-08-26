@@ -18,6 +18,7 @@
          :journal        :journal/record
          :arbiter        :gate/arbiter
          :route          :loop/route
+         :distil         :memory/distil
          :finish         :loop/finish}
 
  :edges {:start          :infer
@@ -31,10 +32,14 @@
          :journal        :arbiter
          :arbiter        :route
          ;; The back edge: one turn ends where the next begins.
+         ;; Every ending goes through :distil first. A run that gave up has
+         ;; the most valuable gotchas in it, so reflection is not a reward for
+         ;; success — it is what a finished task owes the next one.
          :route          {:continue  :start
-                          :done      :finish
-                          :abandoned :finish
-                          :exhausted :finish}
+                          :done      :distil
+                          :abandoned :distil
+                          :exhausted :distil}
+         :distil         :finish
          :finish         :end}
 
  :dispatches {:parse [[:provider-error (fn [d] (not (:ok (:call d))))]
@@ -68,6 +73,13 @@
 
   {:type :must-precede :cell :parse :before :dispatch :enforced true
    :protects "Nothing is dispatched that was not parsed out of a reply."}
+
+  {:type :must-precede :cell :distil :before :finish :enforced true
+   :protects "A task that ended wrote down what it learned about the project
+              before the branch closed. Asking the model to remember things
+              produced nothing across 46 turns of live runs; a step in the
+              graph runs whether or not it feels like it, and putting it before
+              :finish is what stops a future edit routing an ending around it."}
 
   {:enforced false
    :rule "settle before fire, inside :gate/arbiter"

@@ -15,6 +15,7 @@
 (ns cells.loop
   (:require [mycelium.cell :as cell]
             [samizdat.agent.loop :as turn]
+            [samizdat.agent.reflect :as reflect]
             [samizdat.agent.state :as state]
             [samizdat.store.journal :as journal]
             [samizdat.store.runs :as runs]))
@@ -128,6 +129,27 @@
             ;; quadratically over a run. The journal is the durable record; the
             ;; in-data trace is a debugging window, and a window has edges.
             (update :mycelium/trace #(vec (take-last 20 %))))))))
+
+(cell/defcell :memory/distil
+  {:doc "What this task leaves behind about the PROJECT.
+
+        Runs when a task ENDS, however it ended. A run that shipped knows how
+        the project is built; a run that gave up knows what wasted its turns,
+        and that is often the more valuable of the two — a gotcha recorded once
+        saves every later session the turn it costs to rediscover.
+
+        A STEP rather than an instruction. The prompt has asked the model to
+        `remember` project facts for a while and produced none: 46 turns of
+        live runs, zero calls. A node in the manifest runs whether or not the
+        model felt like it.
+
+        Fails safe to the data it was given: recording what was learned must
+        never be able to stop a finished task from finishing."
+   :effects [:net :db]
+   :requires [:conn :run-id :llm-adapter :llm-config]}
+  (fn [ctx {:keys [branch] :as data}]
+    (reflect/distil-task! ctx branch)
+    data))
 
 (cell/defcell :loop/finish
   {:doc "Close the run the way the verdict says: branch row, run row, and for
