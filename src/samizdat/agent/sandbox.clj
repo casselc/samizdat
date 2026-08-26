@@ -2144,3 +2144,29 @@
                        (concat (map (fn [cap] (str "project/" (name cap)))
                                     (capabilities x))
                                (reviewed-symbols)))))))
+
+(defn capability-briefs
+  "Prompt-ready, inert briefs for `x`'s EFFECTIVE projected operations —
+    the same union `operation-doc` answers from and `complete-capability`
+    enumerates: the authorized operation descriptors of `describe` (live
+    effective authority, never a bind-time snapshot), documented from the
+    host-owned operation-docs table.  Accepts anything `describe` accepts,
+    or an already-computed describe map.
+
+    Returns a sorted vector of {:name :arglists :doc :effect}, fully inert.
+    Nothing is evaluated and nothing is attested beyond the live authority,
+    so a prompt rendered from these briefs cannot drift from what `doc`,
+    `complete`, and dispatch itself would serve — the three read the one
+    catalog."
+  [x]
+  (let [d (describe-for-discovery x)
+        ops (:jolt.sandbox/operations d)
+        brief (fn [o]
+                ;; :op/id is the string form ":project/read"; re-keyword it.
+                (let [docs (get operation-docs (keyword (subs (:op/id o) 1)))]
+                  (when docs
+                    {:name (str "project/" (:op/name o))
+                     :arglists (vec (:arglists docs))
+                     :doc (:doc docs)
+                     :effect (:op/effect o)})))]
+    (vec (sort-by :name (keep brief ops)))))

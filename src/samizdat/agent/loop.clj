@@ -50,6 +50,8 @@
 
 (def max-result-chars 4000)
 
+(declare js1-system-prompt)
+
 (defn system-prompt
   "The system prompt, with the template catalogue substituted in.
 
@@ -61,16 +63,29 @@
   The tool documentation IS hand written, because a prompt is prose and
   generated prose reads like it. `samizdat.prompt-test` asserts every name in
   `tools/tool-names` appears here, so a new tool cannot be added without being
-  documented — that is what kept the whole Lean surface unreachable."
-  []
-  (-> (slurp (io/resource "prompts/system.md"))
-      ;; The SMT template catalogue left with the proof engines; the seam
-      ;; stays until the coding prompt replaces this file outright.
-      (str/replace "{{templates}}" "")
-      ;; The skill catalogue is always in the prompt but cheap — names and
-      ;; trigger descriptions only, never bodies — so the model knows what it
-      ;; can `skill load` and WHEN, without spending a turn to discover them.
-      (str/replace "{{skills}}" (skills/render-catalog))))
+  documented — that is what kept the whole Lean surface unreachable.
+
+  The 1-arity form dispatches on the context: a JS1-constrained ctx
+  (tools-base/js1-profile?) gets the bounded generated prompt
+  (js1-system-prompt) INSTEAD of this file — never this file plus a
+  disclaimer. The generic prompt advertises the whole tool surface, and a
+  JS1 model that read it spent its turns calling tools the gate could only
+  refuse (the self-hosting canary failure, 2026-08-26). The zero-arity form
+  always renders the generic prompt; prompt-digest and the prompt tests key
+  on it."
+  ([]
+   (-> (slurp (io/resource "prompts/system.md"))
+       ;; The SMT template catalogue left with the proof engines; the seam
+       ;; stays until the coding prompt replaces this file outright.
+       (str/replace "{{templates}}" "")
+       ;; The skill catalogue is always in the prompt but cheap — names and
+       ;; trigger descriptions only, never bodies — so the model knows what it
+       ;; can `skill load` and WHEN, without spending a turn to discover them.
+       (str/replace "{{skills}}" (skills/render-catalog))))
+  ([ctx]
+   (if (tools-base/js1-profile? ctx)
+     (js1-system-prompt ctx)
+     (system-prompt))))
 
 (defn judge-exemptions
   "The DO-NOT-FLAG list shipped to the audit and review judges. A var rather
@@ -84,6 +99,144 @@
   observability: a pass-rate change should be attributable to a file."
   []
   (str (hash [(system-prompt) (gates/config) (judge-exemptions)])))
+
+;; --- the bounded JS1 prompt --------------------------------------------------
+;;
+;; A JS1 run's model must never see the generic prompt: it advertises the
+;; whole tool surface, and the JS1 gate (tools-base/phase-refusal) can only
+;; refuse every one of those calls — the model orients by what the prompt
+;; advertises, and the canary burned 47 turns on refused names. The bounded
+;; prompt below REPLACES the generic one for a JS1-constrained ctx. Its two
+;; authorities are derived, not written:
+;;
+;;   - the tool surface is rendered from tools-base/js1-tool-prompt-docs,
+;;     keyed exactly over the gated vocabulary js1-allowed-tools, so the
+;;     advertised tools ARE the dispatchable tools;
+;;   - the project operations are rendered from the binding's effective
+;;     authority via sandbox/capability-briefs — the one catalog doc and
+;;     complete answer from — so the prompt cannot attest an operation the
+;;     binding cannot dispatch.
+;;
+;; Nothing here is a resource file: the prompt is a pure function of the
+;; gated vocabulary and the binding's ContextSpec, which is the whole point
+;; — prompt authority cannot drift from dispatch authority.
+
+(defn- sandbox-var
+  "Resolve a samizdat.agent.sandbox var at call time, so this namespace stays
+  loadable where the sandbox (and its SCI dependency) is absent — the same
+  seam tools.repl uses. Returns the var, or nil."
+  [var-name]
+  (try
+    (requiring-resolve (symbol "samizdat.agent.sandbox" var-name))
+    (catch Throwable _ nil)))
+
+(defn- js1-live-briefs
+  "The binding's effective operation briefs, live-derived through
+  sandbox/capability-briefs — the same catalog `doc` and `complete` serve.
+  nil when live derivation is impossible in this process: the sandbox ns
+  absent (no SCI — a state no real JS1 run reaches, since binding creation
+  fails closed without it), or the binding is not a live one (a spec-only
+  test fixture, say)."
+  [binding]
+  (when-let [f (sandbox-var "capability-briefs")]
+    (try (seq (f binding))
+         (catch Throwable _ nil))))
+
+(defn- js1-spec-capability-names
+  "The bind-time ContextSpec's capability names (\"project/...\"), sorted —
+  inert data read straight off the binding's spec map. Attenuation enters
+  only through the spec and the JS1 tool surface offers no revocation path,
+  so at open time this IS the effective set: the safe degraded rendering
+  when the live catalog cannot be read in this process."
+  [binding]
+  (sort (map (fn [c] (str "project/" (name c)))
+             (:capabilities (:spec binding)))))
+
+(defn- js1-operations-block
+  "The prompt's project-operations section. Derived per binding, so a
+  narrower binding's prompt never inherits a wider binding's prose: the
+  live catalog when readable, the inert spec's capability names otherwise,
+  and a fail-closed statement when the run holds no binding at all (the
+  eval tool will refuse; the prompt must not pretend otherwise)."
+  [binding]
+  (if (nil? binding)
+    (str "No sandbox binding is wired to this run: `eval` refuses to evaluate"
+         " and no project operations are available. That is a controller wiring"
+         " fault — report it with `done`; do not probe for a wider surface.")
+    (let [briefs (js1-live-briefs binding)]
+      (if briefs
+        (str "This binding's effective project operations — exactly what `doc` and"
+             " `complete` report — are:\n\n"
+             (str/join "\n"
+                       (for [b briefs]
+                         (str (:name b) " " (pr-str (:arglists b)) "\n    " (:doc b)
+                              (when (:effect b)
+                                (str "  Effect: " (clojure.core/name (:effect b)) "."))))))
+        (let [names (js1-spec-capability-names binding)]
+          (if (seq names)
+            (str "This binding's project operations are: " (str/join ", " names) "."
+                 " `doc` and `complete` report the same set; a name outside it is"
+                 " not granted. (Per-operation documentation is unavailable in"
+                 " this process.)")
+            (str "This binding grants no project operations; `eval` computes over"
+                 " the reviewed pure language only.")))))))
+
+(defn js1-system-prompt
+  "The bounded system prompt for a JS1-sandboxed context (:js1/profile set,
+  preset :project/develop or any other bound preset) — what a JS1 run's
+  model sees INSTEAD of the generic prompt.
+
+  Generated, not templated: the tool section is tools-base's gated
+  vocabulary (the only four tools dispatch accepts), and the operations
+  section is the binding's own effective authority. The prompt teaches the
+  persistent-EVALUATOR discipline (committed defs persist; a failed eval
+  commits nothing; define helpers and reuse them) and the one-fence-per-turn
+  mechanics, and it names nothing the ctx cannot do — no tool outside the
+  gated four, no project operation outside the effective ContextSpec."
+  [ctx]
+  (let [binding (tools-base/js1-binding ctx)
+        tools-block (str/join "\n"
+                              (map #(get tools-base/js1-tool-prompt-docs %)
+                                   (tools-base/js1-tool-vocabulary)))]
+    (str
+     "You are a Clojure developer working in a persistent, sandboxed evaluator"
+     " — a JS1 SCI context bound to one authorized project root. You are NOT in"
+     " the live harness image: there is no host process access and no network,"
+     " and the project is reachable only through the bounded operations listed"
+     " below, called from inside `eval` code. The four tools in this prompt are"
+     " the COMPLETE surface: any other tool name is refused before dispatch,"
+     " so never reach for a tool you do not see here."
+     "\n\n## Each turn\n\n"
+     "State your reasoning in prose, then emit exactly one tool call as a"
+     " fenced block:\n\n"
+     "```tool-call\n"
+     "{\"name\": \"eval\", \"args\": {\"code\": \"(+ 1 2)\"}}\n"
+     "```\n\n"
+     "The harness runs it and returns the result. Then you go again. Keep"
+     " every call's JSON small and valid: inside a JSON string every \" must"
+     " be \\\" and every newline \\n — a large payload with unescaped quotes is"
+     " the most common way a call fails to parse. Build big forms in small"
+     " steps rather than one giant call."
+     "\n\n## Tools\n\n"
+     tools-block
+     "\n\n## Project operations — ordinary calls inside `eval` code, never tools\n\n"
+     (js1-operations-block binding)
+     "\n\nAn operation not listed above is NOT granted to this binding and fails"
+     " at dispatch; the list — not your priors — is the authority."
+     "\n\n## The evaluator persists: define helpers, then reuse them\n\n"
+     "A successful eval's definitions COMMIT, and every later eval sees them."
+     " A failed eval commits nothing — names it defined before the error are"
+     " rolled back.\n\n"
+     "  1. eval {\"code\": \"(defn halve [n] (quot n 2))\"}   — defines halve; it persists\n"
+     "  2. eval {\"code\": \"(halve 84)\"}                     — => 21, reusing the committed def\n"
+     "  3. eval {\"code\": \"(def x 1) (no-such-fn)\"}         — fails; x does NOT exist afterwards\n\n"
+     "Work in that rhythm: small evals, helper by helper, reusing what already"
+     " committed instead of resending it. Let `doc` and `complete` answer what"
+     " exists rather than guessing at names, and compose your committed"
+     " helpers with the granted operations above."
+     "\n\n## Finishing\n\n"
+     "When the problem is answered — or answered as far as the run could take"
+     " it — call `done`. Nothing you have not evaluated counts.")))
 
 (defn shareable?
   "Whether a just-produced artifact belongs in the run's shared pool.
@@ -110,13 +263,51 @@
   system guidance appended for that workflow — which is how a manifest injects
   its own instructions at the start (a review workflow adds review guidance on
   top of the base prompt, keeping the whole tool surface). nil/blank leaves the
-  base prompt untouched."
-  ([problem] (initial-messages problem nil))
-  ([problem prompt-suffix]
-   [{:role "system" :content (cond-> (system-prompt)
-                               (not (str/blank? prompt-suffix))
-                               (str "\n\n" prompt-suffix))}
+  base prompt untouched.
+
+  The third argument is the run ctx. A JS1-constrained ctx replaces the base
+  prompt with the bounded js1-system-prompt OUTRIGHT — not generic plus a
+  trailing disclaimer: the disclaimer left the old tool surface advertised
+  above it, and the model read the surface, not the disclaimer. A
+  prompt-suffix is trusted workflow guidance and is still appended, after the
+  bounded prompt as it would be after the generic one. A nil ctx is the
+  generic behavior, byte for byte."
+  ([problem] (initial-messages problem nil nil))
+  ([problem prompt-suffix] (initial-messages problem prompt-suffix nil))
+  ([problem prompt-suffix ctx]
+   [{:role "system" :content (cond-> (system-prompt ctx)
+                                (not (str/blank? prompt-suffix))
+                                (str "\n\n" prompt-suffix))}
     {:role "user" :content (str "## Problem\n\n" problem "\n\nIssue your first tool call.")}]))
+
+(defn orient-messages
+  "Enforce the prompt boundary at the one seam where the run's ctx and the
+  outgoing request meet.
+
+  A JS1 branch can be opened by a driver that built its opening messages
+  without the ctx in hand (the one-arity initial-messages call sites), so
+  the generic prompt — advertising tools the JS1 gate can only refuse —
+  would otherwise reach the model. For a JS1-constrained ctx this replaces
+  the system message with the bounded prompt derived from the ctx's
+  effective authority (adding one when the conversation has none), so what
+  the model sees is always exactly the closed surface it may call. The
+  substitution is a pure function of the ctx, identical every turn: a branch
+  already opened on the bounded prompt re-renders to the same content.
+  Non-JS1 contexts return the messages untouched.
+
+  One observability note: the runs-row prompt-digest still hashes the generic
+  prompt for a JS1 run — it is computed before the binding exists. The
+  bounded prompt is derived from code plus the capability catalog, so its
+  provenance is the code revision and the journaled :js1-binding-created
+  data, not the digest."
+  [ctx messages]
+  (if (tools-base/js1-profile? ctx)
+    (let [prompt (system-prompt ctx)
+          messages (vec messages)]
+      (if (= "system" (:role (first messages)))
+        (assoc messages 0 {:role "system" :content prompt})
+        (into [{:role "system" :content prompt}] messages)))
+    messages))
 
 (defn- context-block
   "What the harness adds to the branch's view before its next turn: the
@@ -216,7 +407,11 @@
 
   Same sizing as the judge's: double the configured budget rather than repeat
   it, since a response that ran out of room needs room, and repeating the call
-  at the same cap reproduces the same truncation."
+  at the same cap reproduces the same truncation.
+
+  The messages pass through orient-messages first: for a JS1-constrained ctx
+  the model is always shown the bounded prompt, even when the branch was
+  opened by a driver that had no ctx in hand."
   [ctx branch]
   (loop [attempt 1]
     (let [budget (when-let [base (:max-tokens (:llm-config ctx))]
@@ -230,7 +425,8 @@
                                    ;; so the journal and a resume still hold
                                    ;; everything. Below the threshold this
                                    ;; returns the messages unchanged.
-                                   (message/compact (:messages branch)
+                                   (message/compact (orient-messages
+                                                     ctx (:messages branch))
                                                     (:turns branch))
                                    (cond-> {}
                                      budget (assoc :max-tokens budget)

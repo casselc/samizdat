@@ -344,6 +344,67 @@
       (spit (str dir "/tool-refresh.edn") (pr-str got))
       (println "TOOL-REFRESH-OK"))))
 
+(defn- phase-prompt!
+  "The bounded-prompt contract, against the REAL sandbox: the prompt a JS1
+  :project/develop context renders must teach exactly the gated tool
+  vocabulary and exactly the binding's effective project capabilities — the
+  SAME catalog doc/complete serve (so prompt authority cannot drift from
+  dispatch authority) — and none of the old surface.  Writes the prompts
+  and the structured outcomes for the suite to assert on."
+  [dir]
+  (require-sandbox!)
+  (require 'samizdat.agent.loop)
+  (require 'samizdat.agent.tools.base)
+  (fs/create-dirs (root-dir dir))
+  (let [provider-fn (resolve 'samizdat.agent.sandbox/provider)
+        bind-fn (resolve 'samizdat.agent.sandbox/bind!)
+        briefs-fn (resolve 'samizdat.agent.sandbox/capability-briefs)
+        complete-fn (resolve 'samizdat.agent.sandbox/complete-capability)
+        doc-fn (resolve 'samizdat.agent.sandbox/operation-doc)
+        prompt-fn (resolve 'samizdat.agent.loop/js1-system-prompt)
+        vocab-fn (resolve 'samizdat.agent.tools.base/js1-tool-vocabulary)
+        provider (provider-fn {:root (root-dir dir)})
+        binding (bind-fn provider work-id
+                         {:preset :project/develop
+                          :root (root-dir dir)
+                          :instance/key :main})
+        ctx {:js1/profile "single-player" :js1/binding binding}
+        prompt (prompt-fn ctx)
+        briefs (briefs-fn binding)
+        ;; An attenuated sibling: same preset narrowed by the controller to
+        ;; read/list only (a separate provider — same :main key would be a
+        ;; spec conflict).  Its prompt must not inherit :project/develop's
+        ;; full prose.
+        attenuated (bind-fn (provider-fn {:root (root-dir dir)}) "attenuated"
+                            {:preset :project/develop
+                             :root (root-dir dir)
+                             :capabilities #{:project/read :project/list}})
+        attenuated-briefs (briefs-fn attenuated)
+        attenuated-prompt (prompt-fn {:js1/profile "single-player"
+                                      :js1/binding attenuated})]
+    (when (empty? briefs)
+      (throw (ex-info "live capability-briefs returned nothing for a real binding"
+                      {})))
+    (spit (str dir "/prompt.txt") prompt)
+    (spit (str dir "/prompt-attenuated.txt") attenuated-prompt)
+    (spit (str dir "/prompt-outcomes.edn")
+          (pr-str
+           {:vocabulary (vec (vocab-fn))
+            ;; the tool-signature lines the prompt teaches
+            :tools-taught (vec (map second (re-seq #"(?m)^(\w+)\(\{" prompt)))
+            ;; the SAME-catalog chain: prompt <= briefs == describe ==
+            ;; complete-capability == operation-doc
+            :brief-names (mapv :name briefs)
+            :brief-effects (mapv :effect briefs)
+            :complete-project (complete-fn binding "project/")
+            :edit-doc-substring?
+            (str/includes? prompt (:doc (doc-fn binding "project/edit")))
+            :read-doc-substring?
+            (str/includes? prompt (:doc (doc-fn binding "project/read")))
+            :attenuated-brief-names (mapv :name attenuated-briefs)
+            :attenuated-complete (complete-fn attenuated "project/")}))
+    (println "PROMPT-OK")))
+
 (defn- phase-resume! [dir]
   (require-sandbox!)
   (install-file-store! dir)
@@ -441,6 +502,7 @@
       "mismatch-runtime" (phase-mismatch-runtime! dir)
       "unsettled" (phase-unsettled! dir)
       "tool-refresh" (phase-tool-refresh! dir)
+      "prompt" (phase-prompt! dir)
       (throw (ex-info "unknown phase" {:phase phase})))
     (System/exit 0)))
 
@@ -616,6 +678,75 @@
                      committed state -> rolled-back def denied -> out-of-band
                      rebuild absorbed transparently"))))
           (finally (fs/delete-tree dir) (fs/delete-tree (str dir "-tools"))))))))
+
+(deftest js1-prompt-is-the-closed-surface
+  ;; The canary-failure regression (artifacts/self-hosting-canary.edn): a JS1
+  ;; run's model was shown the generic prompt plus a trailing disclaimer and
+  ;; spent its turns calling grep/thesis/write_file/give_up into a gate that
+  ;; could only refuse.  The child renders the bounded prompt from a REAL
+  ;; :project/develop binding; these assertions read what it wrote.
+  (let [{:keys [ready?]} (prerequisites)]
+    (if (or (not ready?)
+            (not= "1" (jolt.host/getenv "SAMIZDAT_JS1_BOUNDARY_TEST")))
+      (is true (str "skipped: needs the jolt binary, Chez scheme, vendored"
+                    " SCI roots, the four SCI Maven jars, and"
+                    " SAMIZDAT_JS1_BOUNDARY_TEST=1"))
+      (let [base-cp (child-classpath)
+            cp (sci-classpath base-cp)
+            dir (str "/tmp/samizdat-js1-prompt-" (random-uuid))]
+        (fs/create-dirs dir)
+        (try
+          (let [{:keys [exit out err timeout]} (run-child! cp "prompt" dir)]
+            (is (not timeout) "prompt phase finished")
+            (is (= 0 exit) (str "prompt exit 0\nstdout: " out "\nstderr: " err))
+            (is (str/includes? out "PROMPT-OK"))
+            (let [o (slurp-edn (str dir "/prompt-outcomes.edn"))
+                  prompt (slurp (str dir "/prompt.txt"))
+                  attenuated (slurp (str dir "/prompt-attenuated.txt"))]
+              (testing "exactly the gated high-level tools are taught"
+                (is (= ["complete" "doc" "done" "eval"] (:vocabulary o)))
+                (is (= (set (:vocabulary o)) (set (:tools-taught o)))
+                    "the prompt's call signatures are the gated set"))
+              (testing "the prompt's operations are the effective ContextSpec"
+                (is (= ["project/edit" "project/list" "project/read"
+                        "project/search" "project/stat"]
+                       (:brief-names o)
+                       (:complete-project o))
+                    "prompt briefs and complete-capability read the one catalog")
+                (is (= #{:actuation :observation} (set (:brief-effects o)))
+                    "the briefs carry the op effects (edit actuates)")
+                (is (true? (:edit-doc-substring? o))
+                    "the prompt serves exactly what doc serves for project/edit")
+                (is (true? (:read-doc-substring? o)))
+                (doseq [c (:brief-names o)]
+                  (is (str/includes? prompt c) (str c " advertised"))))
+              (testing "no old-surface tool name appears anywhere"
+                (doseq [t ["branch_theses" "cells" "edit_file" "fetch_artifact"
+                           "fetch_turn" "give_up" "grep" "introspect" "lsp"
+                           "manifest" "message" "read_file" "recall"
+                           "reload_cells" "remember" "shell" "skill" "task"
+                           "thesis" "write_file"]]
+                  (is (not (str/includes? prompt t))
+                      (str "the bounded prompt never names " t))))
+              (testing "the live prompt carries the per-operation docs"
+                (is (str/includes? prompt "project/edit [[rel-path base new-content]]")
+                    "the anchored-edit arglist is taught, rendered exactly as doc serves it")
+                (is (str/includes? prompt "Effect: actuation.")))
+              (testing "the fence mechanics and the persistent-helper rhythm are taught"
+                (is (str/includes? prompt "```tool-call"))
+                (is (str/includes? prompt "(defn halve"))
+                (is (str/includes? prompt "persist"))
+                (is (str/includes? prompt "rolled back")))
+              (testing "an attenuated binding's prompt omits the ungranted operations"
+                (is (= ["project/list" "project/read"]
+                       (:attenuated-brief-names o)
+                       (:attenuated-complete o)))
+                (is (str/includes? attenuated "project/read"))
+                (is (str/includes? attenuated "project/list"))
+                (doseq [absent ["project/edit" "project/search" "project/stat"]]
+                  (is (not (str/includes? attenuated absent))
+                      (str absent " is not granted, so it is not advertised"))))))
+          (finally (fs/delete-tree dir)))))))
 
 ;; ─── child-mode entry ───────────────────────────────────────────────────────
 ;;

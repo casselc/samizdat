@@ -257,6 +257,52 @@
   []
   (sort js1-allowed-tools))
 
+(def js1-tool-prompt-docs
+  "The orientation text the bounded JS1 system prompt (agent.loop) teaches
+   for each permitted tool, keyed EXACTLY over js1-allowed-tools.
+
+   The gate above is what may dispatch; this map is what the model is told
+   exists.  Keeping the two in one namespace, keyed by the same names, is
+   what stops the bounded prompt from drifting back into advertising the
+   generic surface (the canary failure: a JS1 run's model spent its turns
+   calling tools the gate could only refuse).  The agent-test regression
+   asserts the key set IS the vocabulary, so a tool added to the gate
+   without orientation — or orientation for a tool the gate refuses — fails
+   the suite.
+
+   Each value is the full prompt entry: the call signature line, then the
+   indented teaching text.  The text must never name a tool outside the
+   gated set, and never name a concrete project operation — the granted
+   operations are derived per-binding from effective authority (sandbox/
+   capability-briefs), not written here, so a narrower binding's prompt
+   cannot inherit a wider binding's prose."
+  {"eval"
+   (str "eval({code})\n"
+        "    Evaluate Clojure source in the persistent sandboxed evaluator and\n"
+        "    see the value. This is the primary tool: all work happens here,\n"
+        "    including every project operation (called as ordinary functions\n"
+        "    from inside the code, never as tools). The evaluation is bounded\n"
+        "    by the context's fixed timeout; a caller-supplied timeout is not\n"
+        "    accepted.")
+   "doc"
+   (str "doc({symbol})\n"
+        "    The arglists and documentation of one available name: a granted\n"
+        "    project operation (\"project/...\" — the operations list below is\n"
+        "    the authority) or a reviewed pure-language symbol (\"map\"). A\n"
+        "    name doc does not document is a name you cannot call.")
+   "complete"
+   (str "complete({prefix})\n"
+        "    The available names starting with a prefix: \"project/\" lists\n"
+        "    the granted project operations, a bare prefix searches the\n"
+        "    reviewed pure language.")
+   "done"
+   (str "done({answer})\n"
+        "    Ship the final answer and end the run. The ship is gated: the\n"
+        "    answer must engage the problem and assert only what the run's\n"
+        "    evidence supports, and configured verification must pass first.\n"
+        "    A refusal says exactly what is missing; an honest partial answer\n"
+        "    that says what it leaves open is acceptable.")})
+
 (defn js1-assert-single-branch!
   "Refuse a JS1-profiled run at multi-branch width, BEFORE any model work.
 

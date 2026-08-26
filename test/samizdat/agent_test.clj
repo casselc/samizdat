@@ -1697,3 +1697,186 @@
           "with SCI present, a fake binding is refused as not-a-binding")
       (is (str/includes? result "refusing live-eval fallback")
           "without SCI the eval error names the trust boundary"))))
+
+;; --- the bounded JS1 prompt --------------------------------------------------
+;;
+;; The canary failure (artifacts/self-hosting-canary.edn, 2026-08-26): the JS1
+;; dispatch surface was correctly closed, but the model was shown the GENERIC
+;; system prompt plus a trailing disclaimer — and spent 47 turns calling
+;; grep, thesis, write_file and give_up, which the gate could only refuse.
+;; These tests pin the replacement: a bounded prompt that teaches exactly the
+;; gated vocabulary and the binding's effective project capabilities, and
+;; nothing else.
+
+(def ^:private js1-prompt-spec
+  "An inert EvaluatorSpec-shaped map for :project/develop — the ContextSpec
+   data a real binding carries on its face. The prompt's degraded derivation
+   reads exactly :capabilities off it; the live derivation (a real binding,
+   js1-boundary-test) reads the same set through describe."
+  {:samizdat.sandbox/kind :evaluator-spec
+   :preset :project/develop
+   :profile :agent/project-develop
+   :root "/tmp/js1-prompt-root"
+   :capabilities [:project/edit :project/list :project/read :project/search
+                  :project/stat]
+   :bounds {:max-read-chars 60000}
+   :timeout-ms 30000
+   :spec/coordinate "js1:prompt-test"})
+
+(defn- js1-prompt-ctx
+  "A JS1 ctx carrying a binding-shaped map with the given spec capabilities,
+   in the production holder shape (an atom, as beam wires it)."
+  [caps]
+  {:js1/profile "single-player"
+   :js1/binding (atom {:binding/id "bind:main:w" :work-id "w"
+                       :instance/key :main :instance/id "inst:main"
+                       :spec (assoc js1-prompt-spec
+                                    :capabilities (vec (sort-by str caps)))})})
+
+(def ^:private js1-develop-caps
+  [:project/edit :project/list :project/read :project/search :project/stat])
+
+(def ^:private old-surface-names
+  "The tool names the generic prompt advertises that the JS1 gate refuses —
+   the vocabulary of the canary failure (grep, thesis, write_file, give_up)
+   plus every other dispatchable-but-gated-out name."
+  ["branch_theses" "cells" "edit_file" "fetch_artifact" "fetch_turn" "give_up"
+   "grep" "introspect" "lsp" "manifest" "message" "read_file" "recall"
+   "reload_cells" "remember" "shell" "skill" "task" "thesis" "write_file"])
+
+(deftest the-js1-prompt-teaches-exactly-the-gated-vocabulary
+  (let [ctx (js1-prompt-ctx js1-develop-caps)
+        prompt (aloop/system-prompt ctx)]
+    (testing "the taught tool set IS the gated set, signature lines and all"
+      (is (= (set (tbase/js1-tool-vocabulary))
+             (set (map second (re-seq #"(?m)^(\w+)\(\{" prompt))))
+          "the prompt's call signatures are exactly eval/doc/complete/done")
+      (is (= ["complete" "doc" "done" "eval"] (tbase/js1-tool-vocabulary)))
+      (doseq [t ["eval" "doc" "complete" "done"]]
+        (is (str/includes? prompt (str t "({")) (str t " is taught"))))
+    (testing "the effective project capabilities are the :project/develop five"
+      (doseq [c ["project/read" "project/list" "project/search" "project/stat"
+                 "project/edit"]]
+        (is (str/includes? prompt c) (str c " is advertised"))))
+    (testing "no old-surface tool is advertised — the canary regression"
+      ;; The control first: the generic prompt DOES advertise them, or the
+      ;; absence assertion below proves nothing.
+      (let [generic (aloop/system-prompt)]
+        (doseq [t old-surface-names]
+          (is (str/includes? generic t)
+              (str "control: the generic prompt advertises " t))))
+      (doseq [t old-surface-names]
+        (is (not (str/includes? prompt t))
+            (str "the bounded prompt never names " t))))
+    (testing "the persistent-SCI helper discipline and the fence are taught"
+      (is (str/includes? prompt "```tool-call"))
+      (is (str/includes? prompt "(defn halve") "a helper definition example")
+      (is (str/includes? prompt "persist"))
+      (is (str/includes? prompt "rolled back")
+          "the commit-only rule: a failed eval's definitions do not persist"))))
+
+(deftest the-js1-prompt-never-advertises-an-absent-capability
+  ;; Prompt authority derives from the binding's own ContextSpec, so a
+  ;; narrower binding gets a narrower prompt — the anti-drift property.
+  (let [prompt (aloop/system-prompt
+                (js1-prompt-ctx [:project/read :project/list]))]
+    (is (str/includes? prompt "project/read"))
+    (is (str/includes? prompt "project/list"))
+    (doseq [absent ["project/edit" "project/search" "project/stat"]]
+      (is (not (str/includes? prompt absent))
+          (str absent " is not granted, so it is not advertised")))
+    (is (str/includes? prompt "eval({")
+        "the gated tools are still taught"))
+  (testing "a JS1 ctx with no binding at all still bounds the surface"
+    (let [prompt (aloop/system-prompt {:js1/profile "single-player"})]
+      (is (str/includes? prompt "No sandbox binding"))
+      (doseq [t old-surface-names]
+        (is (not (str/includes? prompt t)))))))
+
+(deftest the-js1-prompt-docs-cannot-drift-from-the-gate
+  ;; The structural invariant behind the bounded prompt: orientation exists
+  ;; for exactly the names phase-refusal permits.
+  (is (= (set (tbase/js1-tool-vocabulary))
+         (set (keys tbase/js1-tool-prompt-docs)))
+      "every gated tool is taught and every taught tool is gated")
+  (doseq [[nm entry] tbase/js1-tool-prompt-docs]
+    (is (str/starts-with? entry (str nm "({"))
+        (str "the entry for " nm " teaches its own call shape"))))
+
+(deftest the-generic-prompt-is-preserved-for-non-js1-contexts
+  (is (= (aloop/system-prompt)
+         (aloop/system-prompt nil)
+         (aloop/system-prompt {})
+         (aloop/system-prompt {:config {:run {}}})
+         (aloop/system-prompt {:repl-session ::anything}))
+      "nil, empty, and ordinary ctxs all render the generic prompt")
+  (testing "initial-messages arities are byte-identical without a JS1 ctx"
+    (is (= (aloop/initial-messages "p")
+           (aloop/initial-messages "p" nil)
+           (aloop/initial-messages "p" nil nil)))
+    (is (= (aloop/initial-messages "p" "EXTRA")
+           (aloop/initial-messages "p" "EXTRA" nil))))
+  (testing "a JS1 ctx replaces the system message with the bounded prompt"
+    (let [ctx (js1-prompt-ctx js1-develop-caps)
+          msgs (aloop/initial-messages "p" nil ctx)]
+      (is (= (aloop/system-prompt ctx) (:content (first msgs))))
+      (is (= "## Problem\n\np\n\nIssue your first tool call."
+             (:content (second msgs))))))
+  (testing "a trusted workflow suffix still appends under JS1"
+    (let [ctx (js1-prompt-ctx js1-develop-caps)
+          msgs (aloop/initial-messages "p" "EXTRA GUIDANCE" ctx)]
+      (is (str/ends-with? (:content (first msgs)) "EXTRA GUIDANCE"))
+      (is (str/starts-with? (:content (first msgs))
+                            "You are a Clojure developer working in a persistent, sandboxed evaluator")))))
+
+(deftest orient-messages-enforces-the-boundary-at-send-time
+  ;; The seam that fixes the canary path: beam opens a JS1 branch through the
+  ;; one-arity initial-messages (no ctx in hand), so the branch HOLDS the
+  ;; generic prompt — and the model must still never see it.
+  (let [ctx (js1-prompt-ctx js1-develop-caps)
+        generic-msgs (aloop/initial-messages "p")]
+    (testing "non-JS1 messages pass through untouched"
+      (is (= generic-msgs (aloop/orient-messages {} generic-msgs)))
+      (is (= generic-msgs (aloop/orient-messages nil generic-msgs))))
+    (testing "a JS1 ctx replaces the held system prompt with the bounded one"
+      (let [oriented (aloop/orient-messages ctx generic-msgs)]
+        (is (= "system" (:role (first oriented))))
+        (is (= (aloop/system-prompt ctx) (:content (first oriented))))
+        (is (= (rest generic-msgs) (rest oriented))
+            "only the system message is touched")
+        (is (= oriented (aloop/orient-messages ctx oriented))
+            "idempotent: re-orienting re-renders the same content")))
+    (testing "a JS1 conversation with no system message gets one prepended"
+      (let [oriented (aloop/orient-messages ctx [{:role "user" :content "p"}])]
+        (is (= "system" (:role (first oriented))))
+        (is (= (aloop/system-prompt ctx) (:content (first oriented))))
+        (is (= 2 (count oriented)))))))
+
+(deftest a-js1-model-call-sends-the-bounded-prompt
+  ;; End to end at the in-fence seam: call-model is where the frozen beam
+  ;; driver path (open-branch! -> one-arity initial-messages) meets the run
+  ;; ctx, so this is the assertion that a JS1 run's provider request carries
+  ;; the closed surface rather than the generic one.
+  (let [sent (atom nil)
+        fake-chat (fn [_adapter _config messages _opts]
+                    (reset! sent messages)
+                    {:content (str "```tool-call\n"
+                                   (json/write-str
+                                    {:name "done" :args {:answer "x"}})
+                                   "\n```")
+                     :finish-reason "stop"})
+        ;; What beam's open-branch! builds today: a branch holding the
+        ;; GENERIC prompt, because it had no ctx in hand.
+        branch (state/new-branch {:id "B1" :problem "p"
+                                  :messages (aloop/initial-messages "p")})]
+    (with-redefs [llm/chat fake-chat]
+      (aloop/call-model (js1-prompt-ctx js1-develop-caps) branch)
+      (is (= "system" (:role (first @sent))))
+      (is (str/includes? (:content (first @sent)) "project/edit")
+          "the model sees the effective capabilities")
+      (is (not (str/includes? (:content (first @sent)) "read_file"))
+          "the model never sees the old surface")
+      (testing "control: a non-JS1 call sends the generic prompt as held"
+        (reset! sent nil)
+        (aloop/call-model {} branch)
+        (is (str/includes? (:content (first @sent)) "read_file"))))))
