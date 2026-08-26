@@ -2228,3 +2228,49 @@
           :when (str/includes? (str (:when g)) "cadence")]
     (is (some? (:budget g))
         (str (:gate g) " fires on a cadence and has no :budget — nothing bounds it"))))
+
+(deftest a-production-refusal-feeds-the-refusal-counter-not-the-cull-counter
+  ;; karamazov-blt.15. The synthetic-input test above proves the COUNTER works;
+  ;; this proves a production path actually produces the pair it needs.
+  ;; Refusals used to go out as :failure, so a task-less branch refused N
+  ;; times by the work-needs-a-task rule died as "N consecutive failures" —
+  ;; the vf-jki lie in a sixth place.
+  (let [b (state/new-branch {:id "B" :problem "p"})
+        r (tools-base/phase-refusal {:branch b :tool-name "write_file"})]
+    (is (some? r) "the task-required rule refuses work from a task-less branch")
+    (is (= :mechanics (:category r)))
+    (is (true? (:policy-refusal? r)))
+    (let [b' (state/record-outcome b {:category (:category r)
+                                      :policy-refusal? (:policy-refusal? r)})]
+      (is (= 1 (:consecutive-policy-refusals b')))
+      (is (zero? (:consecutive-failures b'))
+          "a declined call is not evidence about the branch's line of inquiry"))))
+
+(deftest a-shell-deny-is-a-refusal-not-a-failure
+  ;; The hard-deny arm returned :failure while the tool's own comment claimed
+  ;; :neutral; every deny charged the counter that kills branches
+  ;; (karamazov-blt.15).
+  (let [b (state/new-branch {:id "B" :problem "p"})
+        r (tools-base/run-tool {:tool-name "shell" :branch b :root "/tmp"
+                          :args {:command "rm -rf /"}})]
+    (is (= :mechanics (:category r)))
+    (is (true? (:policy-refusal? r)))))
+
+(deftest budget-arithmetic-runs-in-global-turns
+  ;; karamazov-blt.16. max-turns, artifact stamps and gate-history stamps are
+  ;; all GLOBAL turns; (count :turns) is the branch's own experience. Mixing
+  ;; them meant a fork born at round 18 of 25 read as turn ~0 — never told to
+  ;; ship — while its parent's ten-round-old artifact read as "recent"
+  ;; forever, making it cull-exempt.
+  (let [fork (assoc (state/new-branch {:id "F" :problem "p"}) :current-turn 18)]
+    (is (= 18 (state/turn-count fork))
+        "the loop's per-turn stamp wins over the log length")
+    (is (zero? (state/own-turn-count fork))
+        "while the branch's own experience stays separate (juvenile-grace's unit)")
+    (let [b (update fork :artifacts conj {:claim-status :confirmed :turn 5})]
+      (is (false? (state/banked-in-last b 6))
+          "an artifact banked at global turn 5 is not recent at turn 18")
+      (is (true? (state/banked-in-last (assoc b :current-turn 9) 6))
+          "and IS recent when the run is actually at turn 9")))
+  (is (= 7 (:current-turn (aloop/phase-valve (state/new-branch {:id "B" :problem "p"}) 7)))
+      "phase-valve is where the stamp lands, at the top of every turn"))

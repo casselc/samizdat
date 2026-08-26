@@ -37,6 +37,29 @@
         (is (str/includes? (:answer r) "beta"))
         (is (str/includes? (:answer r) "2 workers"))))))
 
+(defn- worker-gives-up
+  "A worker that always gives up — nothing lands, retries included."
+  [_ _ _ & _]
+  {:content "```tool-call\n{\"name\":\"give_up\",\"args\":{\"reason\":\"cannot do it\"}}\n```"
+   :finish-reason "stop"})
+
+(deftest an-all-failed-team-run-does-not-report-completed
+  ;; karamazov-blt.19: the fan-out marked the run :done unconditionally, so a
+  ;; team where every worker failed still finished :completed with a summary
+  ;; of the failures as its answer — upstream of the false-completion
+  ;; memories in karamazov-mjb. The verdict now comes from :team/supervise,
+  ;; after its retries, from what actually landed.
+  (with-redefs [llm/chat worker-gives-up]
+    (let [conn (db/open! ":memory:")
+          r (workflow/run! {:conn conn
+                            :config {:run {:loop "team" :subtasks ["alpha"]}}
+                            :llm-adapter :a :llm-config {:max-tokens 16384}
+                            :problem "the feature" :max-turns 4})]
+      (is (not= :completed (:status r))
+          "a team where every worker failed must not read as a success")
+      (is (= "abandoned" (:status (db/fetch-one conn ["SELECT status FROM runs"])))
+          "the run row records the honest ending"))))
+
 (deftest team-with-no-subtasks-is-one-worker-on-the-whole-problem
   (with-redefs [llm/chat worker-dones-its-task]
     (let [conn (db/open! ":memory:")

@@ -44,10 +44,9 @@
             ;; and the harness declined it, which is a policy refusal like any
             ;; other and must not read as its mistake.
             (let [{:keys [open cap unsettled]} (ex-data e)]
-              (base/fail branch (msg {:too-many true :open open :cap cap
-                                      :unsettled (when (seq unsettled)
-                                                   (str/join ", " unsettled))})
-                         :policy-refusal? true))
+              (base/refusal branch (msg {:too-many true :open open :cap cap
+                                         :unsettled (when (seq unsettled)
+                                                      (str/join ", " unsettled))})))
             (throw e)))))))
 
 (defmethod base/run-tool "verdict" [{:keys [branch] :as ctx}]

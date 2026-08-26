@@ -1218,8 +1218,10 @@
          with. Fires on a cadence, not a condition, which is why it sits below
          every gate that fires because something is wrong."
    :when (and (state/active? branch)
-              (pos? (state/turn-count branch))
-              (zero? (mod (state/turn-count branch)
+              ;; The branch's OWN turns: a fork reflects on a fresh cadence
+              ;; rather than inheriting its parent's position (blt.16).
+              (pos? (state/own-turn-count branch))
+              (zero? (mod (state/own-turn-count branch)
                           (threshold :reflection-cadence))))
    :message-file "reflection"
    :prediction "the branch inspects or reshapes its loop"
@@ -1241,7 +1243,8 @@
          harness just asked of it."
    :when (and (= :build (:phase branch))
               (not (:any-progress? branch))
-              (>= (state/turn-count branch) (threshold :prologue-cap)))
+              ;; OWN turns: what THIS branch has produced nothing in (blt.16).
+              (>= (state/own-turn-count branch) (threshold :prologue-cap)))
    :message-file "prologue-cap"
    :message-suffix "\n\nYou are {{turn-count}} turns in with nothing verified."
    :prediction "the branch produces its first artifact"

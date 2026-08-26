@@ -394,7 +394,12 @@
                              :gave-up (boolean give-up?) :runaway runaway?}})
       (case decision
         :ship
-        (assoc data :feature/decision :ship)   ; -> finish, :completed
+        ;; The DECLARATION of done lives here, behind both gates — review
+        ;; pass + critic ship + a real diff + green tests — not in the
+        ;; fan-out join, which used to mark it unconditionally
+        ;; (karamazov-blt.19).
+        (assoc data :feature/decision :ship :verdict :done
+               :branch (assoc (:branch data) :status :done))   ; -> finish, :completed
 
         :abandon
         ;; Honest end, not a hollow completed. Any partial work stays on disk for

@@ -201,7 +201,9 @@
       ;; Juvenile grace. Progress and momentum are age-correlated, so a
       ;; newborn is dominated by its own parent one turn after being forked.
       ;; Let it express itself first.
-      (< (state/turn-count branch) (gates/threshold :juvenile-grace))
+      ;; The branch's OWN experience, not its position in the run: a fork
+      ;; born at round 18 is 0 turns old (blt.16).
+      (< (state/own-turn-count branch) (gates/threshold :juvenile-grace))
       (do (when (and conn run-id)
             (journal/note! conn run-id :cull-spared
                            {:branch-id (:id branch)
@@ -426,16 +428,27 @@
    :effects [:db]
    :requires []}
   (fn [ctx {:keys [advanced turn] :as data}]
+    ;; Only ACTIVE branches face the rule, and only they count as survivors.
+    ;; `advanced` also holds branches that went done/abandoned during this
+    ;; round's advance: counting them seeded `alive` high, so the LAST active
+    ;; branch saw phantom survivors and was cullable — the beam emptied and
+    ;; the run exhausted, violating the last-branch invariant. And running the
+    ;; cascade over an already-inactive branch rewrote its ending (:abandoned
+    ;; relabelled :culled with a fabricated mechanics reason) — the false-
+    ;; reason class this cell's own comments exist to prevent
+    ;; (karamazov-blt.17).
     (let [culled (first
                   (reduce (fn [[acc alive] b]
-                            (let [sibs (keep #(when (and (state/active? %)
-                                                         (not= (:id %) (:id b)))
-                                                (get-in % [:critic :scores]))
-                                             advanced)
-                                  b' (cull-or-keep (assoc ctx :turn turn)
-                                                   b (dec alive) sibs)]
-                              [(conj acc b') (if (state/active? b') alive (dec alive))]))
-                          [[] (count advanced)]
+                            (if-not (state/active? b)
+                              [(conj acc b) alive]
+                              (let [sibs (keep #(when (and (state/active? %)
+                                                           (not= (:id %) (:id b)))
+                                                  (get-in % [:critic :scores]))
+                                               advanced)
+                                    b' (cull-or-keep (assoc ctx :turn turn)
+                                                     b (dec alive) sibs)]
+                                [(conj acc b') (if (state/active? b') alive (dec alive))])))
+                          [[] (count (filter state/active? advanced))]
                           advanced))]
       ;; SHARPENING vs EXPANSION (papers/2608.17981v1 §4.5.4, after Yue et al.
       ;; on pass@k). A beam can fail two ways and they want opposite fixes:
@@ -572,21 +585,31 @@
         does not re-derive scope from the transcript."
    :effects [:db]
    :requires [:conn :max-turns :run-id]}
-  (fn [{:keys [conn run-id max-turns]} {:keys [branches active] :as data}]
-    (let [residuals (keep state/residual branches)
-          report (state/build-residual-report
-                  {:branches branches
-                   :failures (failures/recent conn run-id 10)
-                   :gate-tally (journal/gate-tally conn run-id)
-                   :max-turns max-turns})]
+  (fn [{:keys [conn run-id max-turns] :as ctx} {:keys [branches active] :as data}]
+    ;; A branch may have SHIPPED rounds ago while :stop-on-first-done? kept
+    ;; the beam exploring. The cap expiring is not a failure then: the banked
+    ;; answer ends the run, ranked by the same rubric :beam/complete uses.
+    ;; finish-run! :failed nil here discarded it (karamazov-blt.20).
+    (let [winner (beam/select-done-branch ctx (filterv :final-answer branches))]
       (doseq [b active]
         (runs/close-branch! conn run-id (:id b) :exhausted
                             (str "turn cap of " max-turns " reached")))
-      (doseq [r residuals]
-        (journal/note! conn run-id :residual {:branch-id (:branch r) :data r}))
-      (journal/note! conn run-id :residual-report {:data report})
-      (runs/finish-run! conn run-id :failed nil)
-      (assoc data :status :exhausted
-             :result {:status :exhausted :run-id run-id :branches branches
-                      :residuals (vec residuals) :report report
-                      :report-text (state/render-residual-report report)}))))
+      (if winner
+        (do (runs/finish-run! conn run-id :completed (:final-answer winner))
+            (assoc data :status :completed :done-branch winner
+                   :result {:status :completed :answer (:final-answer winner)
+                            :run-id run-id :branches branches}))
+        (let [residuals (keep state/residual branches)
+              report (state/build-residual-report
+                      {:branches branches
+                       :failures (failures/recent conn run-id 10)
+                       :gate-tally (journal/gate-tally conn run-id)
+                       :max-turns max-turns})]
+          (doseq [r residuals]
+            (journal/note! conn run-id :residual {:branch-id (:branch r) :data r}))
+          (journal/note! conn run-id :residual-report {:data report})
+          (runs/finish-run! conn run-id :failed nil)
+          (assoc data :status :exhausted
+                 :result {:status :exhausted :run-id run-id :branches branches
+                          :residuals (vec residuals) :report report
+                          :report-text (state/render-residual-report report)}))))))

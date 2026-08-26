@@ -529,31 +529,56 @@
   [ctx branches turn]
   (let [deadline (when (get ctx :iterating-loop? true)
                    (or (:turn-deadline-ms ctx) (turn-deadline-ms)))
+        ;; {branch-id future} of turns that blew their deadline and are STILL
+        ;; executing. A forfeited turn's thread cannot be interrupted (and
+        ;; killing it mid-journal-write would be worse), but it shares the
+        ;; branch's eval session and journals under its id — so advancing the
+        ;; same branch again while it runs interleaved two turns of one branch
+        ;; and made the journal diverge from the live state
+        ;; (karamazov-blt.18). The branch forfeits again instead, until the
+        ;; dangling call completes; the wait is bounded by the provider socket
+        ;; timeout and the tool timeouts inside the turn.
+        in-flight (:in-flight ctx)
+        forfeit (fn [b]
+                  (-> b
+                      (state/add-message
+                       "user"
+                       (str "[harness] " (prompt/render "turn-deadline"
+                                           {:seconds (quot (or deadline 0) 1000)})))
+                      (update :timeouts (fnil inc 0))))
         pending (mapv (fn [b]
-                        [b (future
-                             (try
-                               (advance-branch ctx b turn)
-                               (catch Throwable e
-                                 (log/warn "branch" (:id b) "died on turn" turn
-                                           ":" (ex-message e))
-                                 (assoc b :status :abandoned
-                                        :inactive-reason
-                                        (str "branch error: " (ex-message e))))))])
+                        (let [dangling (when in-flight (get @in-flight (:id b)))]
+                          (cond
+                            (and dangling (not (realized? dangling)))
+                            [b ::still-dangling]
+
+                            :else
+                            (do (when dangling (swap! in-flight dissoc (:id b)))
+                                [b (future
+                                     (try
+                                       (advance-branch ctx b turn)
+                                       (catch Throwable e
+                                         (log/warn "branch" (:id b) "died on turn" turn
+                                                   ":" (ex-message e))
+                                         (assoc b :status :abandoned
+                                                :inactive-reason
+                                                (str "branch error: " (ex-message e))))))]))))
                       branches)]
     (mapv (fn [[b fut]]
-            (let [r (if deadline (deref fut deadline ::timeout) @fut)]
-              (if (= ::timeout r)
-                (do (log/warn "branch" (:id b) "exceeded the turn deadline on turn" turn)
-                    ;; Not a verification failure: the branch did not get an
-                    ;; answer to be wrong about. It loses the turn and is told
-                    ;; so, and the dangling call is left to finish or not.
-                    (-> b
-                        (state/add-message
-                         "user"
-                         (str "[harness] " (prompt/render "turn-deadline"
-                                             {:seconds (quot deadline 1000)})))
-                        (update :timeouts (fnil inc 0))))
-                r)))
+            (if (= ::still-dangling fut)
+              (do (log/warn "branch" (:id b) "still executing a forfeited turn;"
+                            "skipping turn" turn "to keep its turns serial")
+                  (forfeit b))
+              (let [r (if deadline (deref fut deadline ::timeout) @fut)]
+                (if (= ::timeout r)
+                  (do (log/warn "branch" (:id b) "exceeded the turn deadline on turn" turn)
+                      ;; Not a verification failure: the branch did not get an
+                      ;; answer to be wrong about. It loses the turn and is told
+                      ;; so; the dangling call is REMEMBERED so the next round
+                      ;; does not run beside it.
+                      (when in-flight (swap! in-flight assoc (:id b) fut))
+                      (forfeit b))
+                  r))))
           pending)))
 
 (defn dispose-branch-engines!
@@ -881,6 +906,10 @@
              :repl-session (repl/new-session)
              :sessions sessions
              :engine-sessions engine-sessions
+             ;; {branch-id future} of forfeited turns still executing, so
+             ;; advance-all never runs a branch beside its own dangling turn
+             ;; (karamazov-blt.18).
+             :in-flight (atom {})
              :abort abort}]
     ;; Before the branches, not after. api.control/start-run! blocks until this
     ;; fires, so this line is how long POST /v1/runs takes — and open-branch!

@@ -35,6 +35,22 @@
 (defn fail [branch result & {:as extra}]
   (merge {:result result :category :failure :progress? false :branch branch} extra))
 
+(defn refusal
+  "A policy refusal: a WELL-FORMED call the harness declined.
+
+  :mechanics, not :failure — no claim was produced and nothing was tested, so
+  there is no evidence here about the branch's line of inquiry — plus
+  :policy-refusal? true, which is the pair `state/record-outcome` feeds the
+  refusal counter from. Refusals used to go out as `fail`, so no production
+  path ever produced that pair: the refusal counter could never move, the
+  cull record's 'every call declined by policy' arm was unreachable, and a
+  branch refused N times by the task-required rule died as 'N consecutive
+  failures' — the vf-jki mistake in a sixth place (karamazov-blt.15)."
+  [branch result & {:as extra}]
+  (merge {:result result :category :mechanics :progress? false
+          :policy-refusal? true :branch branch}
+         extra))
+
 (defn malformed
   "A call the harness could not act on because its arguments were wrong.
 
@@ -116,11 +132,10 @@
   [{:keys [branch tool-name] :as ctx}]
   (or
    (when (contains? (phases/withholds (:phase branch)) tool-name)
-     (fail branch
+     (refusal branch
            (str "`" tool-name "` is not available in the "
                 (name (:phase branch))
-                " phase. The phase-valve message says when that changes.")
-           :policy-refusal? true))
+                " phase. The phase-valve message says when that changes.")))
 
    ;; `condition` rather than destructuring `:when` — a local named `when`
    ;; shadows clojure.core/when for the whole body, and the shadowing is
@@ -130,12 +145,11 @@
              (clojure.core/when
               (and (contains? (set tools) tool-name)
                    (when-fn-holds? condition ctx))
-              (fail branch
-                    (prompt/render message-file
-                                   {:tool-name tool-name
-                                    :phase (some-> (:phase branch) name)})
-                    :policy-refusal? true
-                    :refusal-rule (:rule rule)))))
+              (refusal branch
+                       (prompt/render message-file
+                                      {:tool-name tool-name
+                                       :phase (some-> (:phase branch) name)})
+                       :refusal-rule (:rule rule)))))
          (phases/refusals))))
 
 

@@ -356,7 +356,12 @@
         known (secrets/known-values env command)]
     (case effect
       :deny
-      {:category :failure :progress? false
+      ;; :mechanics, not :failure: a deny is the harness declining a
+      ;; well-formed call, not evidence about the branch's line of inquiry —
+      ;; charging it to the cull counter was karamazov-blt.15. The shell tool
+      ;; stamps :policy-refusal? on top, which is what routes it to the
+      ;; refusal counter.
+      {:category :mechanics :progress? false
        :result (str "Command denied by policy: `" head "` is on the deny list."
                     " This cannot be overridden.")
        :policy {:effect :deny}}
