@@ -1,80 +1,51 @@
-# JS1 Cutover — REVISE
+# JS1 Findings - PASS
 
 ## Decision
 
-**REVISE.** JS1 is not approved for self-hosting or merge approval yet. The
-bounded evaluator architecture remains the intended design; the remaining
-gates are evidence gaps, not a decision to replace it.
+**PASS for JS1 only.** This decision accepts the bounded JS1 evaluator evidence
+at the final coordinates below. It does not approve or claim a self-hosting
+canary.
 
-## Baseline
+## Final Coordinates
 
-- Samizdat branch: `js1-bounded-samizdat` at
-  `8995e113`, whose recovery base `321661649e174bb748adeb6970dad6c166003343`
-  was rebased on current upstream `dae78547a66c80f31fa7a78d0f9483186a2b0af9`.
-- Current Jolt evaluator runtime:
-  `279bca18bbf50f37b8574a4e6998dee40313cd26` on
-  `js1-runtime-current-upstream`, rebased on upstream `edda7aec`.
-- Historical evidence remains distinct: JS0 freeze
-  `js0-functional-sci-upstream-freeze` at `04dd42db`, post-JS0 runtime
-  `619ef196`, and pre-current-upstream checkpoint
-  `js1-runtime-pre-upstream-sci-merge`.
+- Samizdat: pushed branch `js1-bounded-samizdat` at
+  `897cf534ffd12939c17048477c83fb4be4560672`.
+- Jolt: `4af2362176160f2ed0e366689d7232b1a38adfec`, based on upstream
+  `4c0022d4a8f0270fb8efc8393acf3882c459a823`.
 - SCI: `32d62a5136ad3dc148588752f5bcc4cc30b14752` (`0.13.53`).
 
 ## Executed Gates
 
 | Gate | Result |
 |---|---|
-| Full Samizdat Jolt suite | `1047` tests / `3658` assertions, zero failures/errors |
-| Direct bounded SCI sandbox | `28` tests / `268` assertions, zero failures/errors |
-| Durable evaluator store | `18` tests / `78` assertions, zero failures/errors |
-| Controlled OS-process recovery harness | `1` test / `30` assertions, zero failures/errors |
-| Static local SmolVM harness | `12` tests / `156` assertions, zero failures/errors |
-| Current Jolt gates | manifest / selfhost / scievaluator / testbin all pass |
-| Trusted verifier hardening | injection / env scrub / redaction / scoped cleanup pass |
+| Runtime coordinate check | `bin/js1 check` passed |
+| JS1 smoke | 32 tests / 286 assertions / zero failures/errors |
+| Full Samizdat suite | 1100 tests / 4071 assertions / zero failures/errors |
+| Live dogfood | 5 tests / 40 assertions / zero failures/errors |
 
-## Now Evidenced
+The live dogfood reached durable, quiescent RED, then underwent an intentional
+kill followed by fresh-process resume/recovery to GREEN. Its final evidence is
+recorded in [`JS1_LIVE_DOGFOOD.md`](JS1_LIVE_DOGFOOD.md).
 
-- Runtime, language-surface, capability-catalog, and receipt-protocol
-  coordinates are durable and checked before replay.
-- Receipts remain strict canonical data while arbitrary valid SCI final values
-  are rendered safely rather than incorrectly failing evaluation.
-- Only successful evaluations become persistent computational state; failed or
-  interrupted evaluations rebuild from committed history before reuse.
-- Whole committed history reconstructs into one fresh SCI context with exact
-  receipt consumption and zero repeated semantic world operations.
-- A controlled real OS-process boundary proves helper reconstruction, no replay
-  of an observation/edit, and fail-closed runtime/spec/pending-history cases.
-- Trusted verification uses a structured scoped request with explicit scrubbed
-  environment and bounded streams; output is redacted before model rendering,
-  and unavailable or malformed verification fails closed.
-- JS1 with multi-branch execution is refused; the current policy is one
-  logical persistent `:main` evaluator.
-- A live bounded-model run completed RED → deliberate SIGKILL → fresh-process
-  resume → persistent-helper proof → repair → GREEN. See
-  [`JS1_LIVE_DOGFOOD.md`](JS1_LIVE_DOGFOOD.md).
-- The frozen bbagent A3c comparison is recorded in
-  [`JS1_A3C_COMPARISON.md`](JS1_A3C_COMPARISON.md). JS1 retains the claimed
-  bounded-programming and no-repeat replay properties, not A3c guest isolation.
+## Historical Evidence
 
-## Remaining PASS Gates
+The following is historical only and is not a final-coordinate claim:
 
-- **Controller-budget authority and audit are not safe enough for PASS.** The
-  resume API currently accepts a budget extension without an authenticated
-  trusted principal; the cap update and event are not one durable atomic audit
-  record; a branch timeout stops waiting but does not prove cancellation of the
-  underlying turn. These are implementation blockers, not merely missing tests.
+- Samizdat `8995e113`.
+- Jolt `279bca18bbf50f37b8574a4e6998dee40313cd26`, upstream base `edda7aec`.
+- Historical live-dogfood run `709e2b2d-c0af-40e6-9d3e-0d9624217a2b`.
 
-## Standing Non-Claims
+## Explicit Non-Claims
 
-- No self-hosting canary has run; **SELF-HOSTING CANARY: PASS** is not claimed.
-- Jolt's own `selfhost` gate is not the JS1 self-hosting canary.
-- No `project/run`, generic shell, network, Git mutation, multi-agent binding,
-  JS2, or controller self-modification was added.
-- SCI is a Jolt runtime dependency; plain-JVM and non-Linux/platform lanes are
-  unexecuted.
-- No performance or latency claim is made.
-- A3c-style guest execution isolation, `project/run`, and clean-consumer
-  SmolVM execution remain unclaimed; the guest pack is `:unbuilt`.
-- Conversational turns remain separate from authoritative evaluator history;
-  `:js1-binding-created` journal records provide resume reconstruction identity,
-  but individual turns do not carry evaluator metadata.
+- The self-hosting canary was **NOT run**; **SELF-HOSTING CANARY: PASS** is not claimed.
+- No generic shell, `project/run`, network, Git mutation, JS2, multi-agent binding, or controller self-modification is claimed.
+- Non-Linux and plain-JVM lanes are unexecuted.
+- No performance claim is made.
+- A3c guest isolation and clean-consumer SmolVM are unclaimed.
+- Resume-loop provenance remains the current configuration/latest workflow, not a journaled version.
+- Whole-run manifests are unsupported for JS1 and refused.
+- One semantic operation authorized before `revoke!` may complete after revocation linearizes.
+
+Operational prerequisites, verification, and abort guidance are in
+[`SELF_HOSTING_HANDOFF.md`](SELF_HOSTING_HANDOFF.md). The staged-only canary
+prompt is [`SELF_HOSTING_CANARY_PROMPT.md`](SELF_HOSTING_CANARY_PROMPT.md).

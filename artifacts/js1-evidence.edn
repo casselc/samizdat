@@ -1,62 +1,38 @@
-;; JS1 closure evidence. Passing deterministic gates do not imply cutover.
-{:js1/decision :revise
- :js1/record-date "2026-08-25"
- :js1/baseline
+;; Final JS1 closure evidence. This is a JS1-only decision, not a self-hosting canary result.
+{:js1/decision :pass
+ :js1/record-date "2026-08-26"
+ :js1/final-coordinates
  {:samizdat {:branch "js1-bounded-samizdat"
-             :revision "8995e113"
-             :recovery-base "321661649e174bb748adeb6970dad6c166003343"
-             :upstream-base "dae78547a66c80f31fa7a78d0f9483186a2b0af9"
-             :closure-changes :committed}
-  :jolt {:revision "279bca18bbf50f37b8574a4e6998dee40313cd26"
-         :branch "js1-runtime-current-upstream"
-         :upstream-base "edda7aec"
-         :historical-js0-freeze "04dd42db"
-         :historical-post-js0-runtime "619ef196"}
+             :revision "897cf534ffd12939c17048477c83fb4be4560672"
+             :status :pushed}
+  :jolt {:revision "4af2362176160f2ed0e366689d7232b1a38adfec"
+         :upstream-base "4c0022d4a8f0270fb8efc8393acf3882c459a823"}
   :sci {:revision "32d62a5136ad3dc148588752f5bcc4cc30b14752"
         :version "0.13.53"}}
  :js1/executed-gates
- {:full-suite "1047 tests / 3658 assertions / 0 failures / 0 errors"
-  :bounded-sandbox "28 tests / 268 assertions / 0 failures / 0 errors"
-  :eval-store "18 tests / 78 assertions / 0 failures / 0 errors"
-  :os-process-boundary "1 test / 30 assertions / 0 failures / 0 errors"
-  :static-smolvm-harness "12 tests / 156 assertions / 0 failures / 0 errors"
-  :jolt-current-gates "manifest/selfhost/scievaluator/testbin all pass"
-  :verifier-hardening "injection/env-scrub/redaction/scoped-cleanup pass"}
- :js1/evidenced
- ["versioned runtime/spec/binding/receipt identity"
-  "strict operation receipts and bounded rendering of arbitrary SCI final values"
-  "commit-only SCI state with rollback after failed or interrupted evaluation"
-  "whole-history replay into one fresh SCI context"
-  "zero real semantic operations during replay"
-  "controlled actual OS-process recovery with helper persistence and no repeated observation/edit"
-  "fail-closed runtime/spec/pending-history recovery"
-  "single-player JS1 multi-branch refusal"
-  "structured verifier with scrubbed environment, bounded streams, redact-before-render, and fail-closed availability"
-  "live bounded-model RED/SIGKILL/fresh-resume/helper-reconstruction/repair/GREEN dogfood"
-  "frozen bbagent A3c comparison for bounded programming and no-repeat replay"]
+ {:runtime-check "bin/js1 check: pass"
+  :smoke "32 tests / 286 assertions / 0 failures / 0 errors"
+  :full-samizdat "1100 tests / 4071 assertions / 0 failures / 0 errors"
+  :live-dogfood "5 tests / 40 assertions / 0 failures / 0 errors"}
  :js1/live-dogfood
- {:provider :local
-  :model "Qwen3.6-27B-MTP-GGUF"
+ {:provider :local-lemonade
+  :model "Qwen3.6"
   :endpoint "http://localhost:13305/v1"
-  :run-id "709e2b2d-c0af-40e6-9d3e-0d9624217a2b"
-  :artifact-dir "~/.local/share/samizdat/js1-dogfood/run-1787629704126-ad047d12-b837-4330-b1ba-7e162c0034f0/artifacts"
-  :red-turn 10
-  :start-exit 137
-  :resume-exit 0
-  :semantic-counts {:project/list 2 :project/search 2 :project/read 4
-                    :project/stat 2 :project/edit 2}}
- :js1/a3c-comparison
- {:bbagent "bbagent-a3c / fc5e5b9"
-  :bb4t "bb4t-a3c / 227d3854"
-  :result "bounded programming and no-repeat replay retained; guest isolation unclaimed"}
- :js1/remaining-pass-gates
- ["trusted authenticated controller budget-extension authority"
-  "atomic durable retained budget-extension audit"
-  "actual cancellation proof for a timed-out controller turn"]
+  :run-id "44665e68-4d2c-45cd-9ca3-2e8c419168d8"
+  :artifact-dir "~/.local/share/samizdat/js1-dogfood/run-1787760644921-687736b3-7bea-404e-b6a8-a407cbe466c5/artifacts"
+  :result "durable quiescent RED, intentional kill, fresh-process resume/recovery, GREEN"}
+ :js1/historical-evidence
+ {:status :historical-only
+  :samizdat-revision "8995e113"
+  :jolt-revision "279bca18bbf50f37b8574a4e6998dee40313cd26"
+  :jolt-upstream-base "edda7aec"
+  :live-dogfood-run-id "709e2b2d-c0af-40e6-9d3e-0d9624217a2b"}
  :js1/non-claims
- ["no self-hosting canary"
-  "no project/run, generic shell, network, Git mutation, JS2, or multi-agent evaluator binding"
-  "plain-JVM and non-Linux/platform lanes unexecuted"
+ ["canary NOT run; SELF-HOSTING CANARY: PASS is not claimed"
+  "no generic shell, project/run, network, Git mutation, JS2, multi-agent binding, or controller self-modification"
+  "non-Linux and plain-JVM lanes unexecuted"
   "no performance claim"
-  "A3c guest execution isolation and clean-consumer SmolVM remain unclaimed (guest pack :unbuilt)"
-  "turn rows do not carry evaluator identity; computational history is authoritative in the eval store and binding journal"]}
+  "A3c guest isolation and clean-consumer SmolVM are unclaimed"
+  "resume-loop provenance remains the current configuration/latest workflow, not a journaled version"
+  "whole-run manifests are unsupported for JS1 and refused"
+  "one semantic operation authorized before revoke may complete after revocation linearizes"]}

@@ -1,36 +1,31 @@
-# JS1 Live Dogfood — Passed Evidence
+# JS1 Live Dogfood - Final Evidence
 
-This is live evidence, not a self-hosting canary or a JS1 PASS decision.
+This is final JS1 evidence. It is not a self-hosting canary result.
 
 ## Coordinate
 
-- Samizdat: `8995e113` on `js1-bounded-samizdat`.
-- Jolt: `279bca18bbf50f37b8574a4e6998dee40313cd26` on
-  `js1-runtime-current-upstream`.
+- Samizdat: pushed `js1-bounded-samizdat` at
+  `897cf534ffd12939c17048477c83fb4be4560672`.
+- Jolt: `4af2362176160f2ed0e366689d7232b1a38adfec`, upstream base
+  `4c0022d4a8f0270fb8efc8393acf3882c459a823`.
 - SCI: `32d62a5136ad3dc148588752f5bcc4cc30b14752` / `0.13.53`.
-- Provider/model: local OpenAI-compatible Lemonade
-  `http://localhost:13305/v1`, `Qwen3.6-27B-MTP-GGUF`.
-- Run: `709e2b2d-c0af-40e6-9d3e-0d9624217a2b`.
+- Provider/model: local Lemonade Qwen3.6 at `http://localhost:13305/v1`.
+- Run: `44665e68-4d2c-45cd-9ca3-2e8c419168d8`.
+- Artifacts:
+  `~/.local/share/samizdat/js1-dogfood/run-1787760644921-687736b3-7bea-404e-b6a8-a407cbe466c5/artifacts`.
 
 ## Result
 
-The bounded single-player model completed the scripted task through the JS1
-surface only. It reached durable RED verification at turn 10, was stopped only
-after the history was quiescent, and the producer process exited `137`. A fresh
-process resumed the same run, reconstructed the previously-defined SCI helper
-without redefinition, read the controller-produced red evidence, made the
-second anchored edit, and reached GREEN (`resume-exit 0`). The harness result
-was 5 tests / 40 assertions, zero failures/errors.
+The final run completed 5 tests / 40 assertions with zero failures/errors. It
+reached durable, quiescent RED, was intentionally killed, then resumed and
+recovered in a fresh process before reaching GREEN.
 
-The recorded semantic operations total two lists, two searches, four reads, two
-stats, and two anchored edits. The reconstruction counter remained unchanged:
-replay invoked zero project operations. The resumed phase added only the red
-evidence read, source stat, and green edit.
+This proves the stated JS1 dogfood recovery path only. It does not claim a
+self-hosting canary, generic execution, guest isolation, or a clean-consumer
+SmolVM lane.
 
-Artifacts are retained under:
+## Historical Evidence
 
-`~/.local/share/samizdat/js1-dogfood/run-1787629704126-ad047d12-b837-4330-b1ba-7e162c0034f0/artifacts`
-
-The target was a detached disposable worktree; the trusted source checkout was
-witnessed unchanged. This does not claim guest isolation, generic execution,
-or a self-hosting canary.
+The earlier run `709e2b2d-c0af-40e6-9d3e-0d9624217a2b` is historical evidence
+only. Its coordinates and artifacts do not replace or qualify the final
+coordinate above.
