@@ -203,7 +203,7 @@
              ;; problem. tape/due-indices deliberately knows nothing about
              ;; which leading messages are load-bearing, so the frame is
              ;; protected here, by the caller that owns it.
-             due (remove #(< % 2)
+             due (remove #(< % frame-size)
                          (tape/due-indices messages keep-pairs compactable-roles))]
          (reduce (fn [ms i]
                    (tape/compact-at ms i

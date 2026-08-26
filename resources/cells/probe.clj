@@ -27,6 +27,7 @@
             [samizdat.agent.infer :as infer]
             [samizdat.agent.phases :as phases]
             [samizdat.agent.state :as state]
+            [samizdat.agent.tools.base :as base]
             [samizdat.config :as config]
             [samizdat.llm.registry :as registry]
             [samizdat.prompt :as prompt]))
@@ -56,7 +57,14 @@
                 (:name parsed)
                 (not= "__parse_error__" (:name parsed))
                 (not (contains? (phases/withholds (:phase branch))
-                                (:name parsed))))))
+                                (:name parsed)))
+                ;; The REFUSALS table too, not just the (empty) withholds —
+                ;; the probe used to pay inference to steer the branch into
+                ;; exactly the refusal it exists to avoid (a task-less branch
+                ;; steered into write_file, then declined by the
+                ;; work-needs-a-task rule) (karamazov-blt.36).
+                (nil? (base/phase-refusal {:branch branch
+                                           :tool-name (:name parsed)})))))
 
 (defn- pick
   "The winning bounce, or nil.

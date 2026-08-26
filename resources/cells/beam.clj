@@ -534,8 +534,14 @@
 
         The trace is capped hard here. Every mycelium trace entry snapshots the
         whole data map, and this map holds every branch's entire message
-        history — an uncapped trace would be quadratic in the run."
-   :pure true
+        history — an uncapped trace would be quadratic in the run.
+
+        Declared EFFECTFUL although it touches no table: it reset!s the
+        driver's :live-branches teardown atom, and the :pure mark is
+        load-bearing — the mutation soak runs pure cells for real, so a soak
+        of this manifest would have clobbered the record the driver's finally
+        reads (karamazov-blt.35)."
+   :effects [:db]
    :requires [:live-branches]}
   (fn [ctx {:keys [inactive updated children] :as data}]
     (let [next-branches (into (into (vec inactive) updated) children)]

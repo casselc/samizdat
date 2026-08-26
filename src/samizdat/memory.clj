@@ -137,12 +137,15 @@
         (- (double (or salience (base-salience :note p))) (:disuse-decay p)))))
 
 (defn rank
-  "Memories, most worth reading first. Ties break on recency, because between
-  two memories of equal standing the newer one is the more likely to still be
-  true."
+  "Memories, most worth reading first. TIES KEEP THE CALLER'S ORDER: sort-by
+  is stable, so memories of equal standing stay in the order the text search
+  ranked them — bm25 relevance from the FTS path, newest-first from the LIKE
+  scan. The old created_at tie key threw that second opinion away (and
+  delivered oldest-first while its docstring promised recency —
+  karamazov-blt.38): a two-term bm25 winner lost its place to a one-term
+  match that happened to be newer."
   ([rows] (rank rows (policy) (java.time.Instant/now)))
   ([rows p now]
    (->> rows
-        (sort-by (juxt #(- (effective-salience % p now))
-                       #(str (:created_at %))))
+        (sort-by #(- (effective-salience % p now)))
         vec)))

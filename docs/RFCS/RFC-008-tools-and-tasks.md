@@ -119,14 +119,15 @@ indistinguishable from work that is progressing.
 | group | tools |
 |---|---|
 | REPL | `eval` `doc` `complete` |
-| files | `read` `write_file` `edit_file` `grep` |
+| files | `read_file` `write_file` `edit_file` `grep` |
 | shell | `shell` |
-| shipping | `done` `give_up` `branch_theses` |
+| shipping | `done` `give_up` `thesis` `branch_theses` |
 | board | `task` |
 | coordination | `message` |
-| memory | `remember` `recall` |
+| memory | `remember` `recall` `forget` `outcome` |
 | record | `fetch_turn` `fetch_artifact` |
-| self-modification | `cells` `cell` `reload_cells` `manifest` `introspect` `manual` |
+| self-modification | `cells` `cell` `reload_cells` `manifest` `policy` `prompt` `introspect` `manual` |
+| adaptation | `experiment` `verdict` |
 | skills | `skill` |
 | lsp | `lsp` |
 
@@ -176,13 +177,15 @@ per turn: context-block prepends "Current task: …" or "No task claimed."
 
 ## Known gaps
 
-- **The board is encouraged, not enforced.** The context block says "No task
-  claimed" and the prompt says work starts with a task, but nothing refuses a
-  tool call from an unclaimed branch. `phases.edn :withholds` is the mechanism
-  and is empty (RFC-007).
-- The result envelope has no schema. A tool returning a bare string instead of a
-  map NPE'd the loop once (`provenance CR1-1`); the helpers exist to prevent it
-  and nothing enforces their use.
+- ~~The board is encouraged, not enforced.~~ Closed: phases.edn's `:refusals`
+  table carries the work-needs-a-task rule, and a refusal is a policy
+  refusal (`:mechanics` + `:policy-refusal?`), not a failure (blt.15). The
+  claim also survives a resume (blt.21), a switch to the held task is a
+  no-op rather than a silent release, only the holder closes held work, and
+  setting a task's status to `open` clears its holder (blt.34).
+- The result envelope has no schema, but the dispatch wrapper backstops the
+  two observed failure shapes (a bare string, a map with no `:branch`) and
+  redacts the envelope structurally.
 - Pre-v12 claimed rows migrated with `branch_id NULL`, which reads as "on this
   board, nobody holding it" — claimable. The safe reading: the alternative is a
   task no branch can take because it is attributed to one that no longer exists.

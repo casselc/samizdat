@@ -524,6 +524,15 @@
                           AND u2.name = userspace.name
                           AND u2.version > 1)"])
 
+(def ^:private v18
+  ;; A branch's OWN problem. Sub-workflow branches do not work the run-level
+  ;; problem: a decompose unit's branch opens on its unit CONTRACT, a team
+  ;; worker on its sub-task. Nothing durable recorded that, so a resume
+  ;; rebuilt every branch on the top-level feature text with no role framing —
+  ;; re-aiming every worker at the wrong job (karamazov-blt.23). NULL means
+  ;; "the run's problem", which is what every branch before this column meant.
+  ["ALTER TABLE branches ADD COLUMN problem TEXT"])
+
 (def migrations
   "Ordered. Index 0 is migration 1; PRAGMA user_version holds the count applied."
-  [v1 v2 v3 v4 v5 v6 v7 v8 v9 v10 v11 v12 v13 v14 v15 v16 v17])
+  [v1 v2 v3 v4 v5 v6 v7 v8 v9 v10 v11 v12 v13 v14 v15 v16 v17 v18])

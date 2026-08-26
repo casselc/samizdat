@@ -131,6 +131,11 @@
                  body (assoc :body body)
                  type (assoc :type type)
                  status (assoc :status status :closed_at closed-at)
+                 ;; `open` MEANS claimable (RFC-008: branch_id NULL is the
+                 ;; claimable state). Setting status open while the holder
+                 ;; stayed attributed produced a row that read open but that
+                 ;; claim!'s guard refused to everyone (karamazov-blt.34).
+                 (= "open" status) (assoc :branch_id nil)
                  priority (assoc :priority priority)
                  parent-id (assoc :parent_id parent-id)
                  run-id (assoc :run_id run-id)

@@ -381,7 +381,13 @@
                                           (str/join " or "
                                                     (map #(str "`" % "`")
                                                          (complex-markers-in command))))})
-       :policy {:effect :ask :suggest (str head " *")}}
+       :policy {:effect :ask
+                ;; No grant unlocks a COMPLEX command (invariant 5 downgrades
+                ;; it to :ask even over a grant), so suggesting `head *` for
+                ;; one taught a fix that could not work — the observed
+                ;; same-wall-twice loop through the grant path (blt.38). The
+                ;; refusal text already teaches "issue these separately".
+                :suggest (when-not complex? (str head " *"))}}
 
       :allow
       (let [resolved (secrets/resolve-refs command env)

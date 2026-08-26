@@ -18,7 +18,9 @@
          :dispatch       :tool/dispatch
          :journal        :journal/record
          :arbiter        :gate/arbiter
-         :route          :loop/route}
+         :route          :loop/route
+         ;; Task reflection on every ending (blt.26).
+         :distil         :memory/distil}
 
  :edges {:start          :infer
          :infer          :parse
@@ -31,9 +33,10 @@
          :journal        :arbiter
          :arbiter        :route
          :route          {:continue  :start
-                          :done      :end
-                          :abandoned :end
-                          :exhausted :end}}
+                          :done      :distil
+                          :abandoned :distil
+                          :exhausted :distil}
+         :distil         :end}
 
  :dispatches {:parse [[:provider-error (fn [d] (not (:ok (:call d))))]
                       [:no-call (fn [d] (let [p (:parsed d)]

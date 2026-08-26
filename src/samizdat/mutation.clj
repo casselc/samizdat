@@ -72,6 +72,11 @@
                                                   (or soak-input {}))}
                        (catch Throwable e {:error (or (ex-message e) (str e))})))
             outcome (deref fut soak-timeout-ms ::timeout)]
+        (when (= ::timeout outcome)
+          ;; Best effort: a looping candidate otherwise burns a thread forever
+          ;; per rejected edit (blt.38). Cancellation may not interrupt a
+          ;; tight loop, but a cancellable wait dies here instead of never.
+          (try (future-cancel fut) (catch Throwable _ nil)))
         (cond
           (= ::timeout outcome)
           "soak did not terminate within the time budget — the edited cell may loop"

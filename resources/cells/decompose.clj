@@ -57,7 +57,9 @@
         base (gitdiff/baseline root)
         prob (:problem node)]
     (try
-      (runs/open-branch! conn run-id {:branch-id bid})
+      ;; The unit's contract is the branch's OWN problem, durably — what a
+      ;; resume rebuilds this branch's opening messages from (blt.23).
+      (runs/open-branch! conn run-id {:branch-id bid :problem prob})
       (let [b (state/new-branch {:id bid :problem prob
                                  :messages (turn/initial-messages prob (attempt-suffix node))})
             ;; The attempt's own baseline reaches the worker's ship gate, so the

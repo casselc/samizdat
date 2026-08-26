@@ -150,9 +150,12 @@ system/start!
 
 ## Known gaps
 
-- **Retention is partial.** `events/prune-finished!` exists; `turns`,
-  `artifacts`, `failures` and `gate_firings` grow forever in one shared file
-  (`provenance R2-11` was the finding; only the events half is addressed).
+- ~~Retention is partial: only events prune.~~ Closed:
+  `journal/prune-run-record!` sweeps the detail tables of runs older than
+  `gates.edn :retention :run-record-days`, at run start, FTS mirrors
+  included; the run row itself stays as an index. The knob defaults to nil —
+  the record is kept forever unless an operator decides otherwise, because
+  pruning ends replay and inspectability for the pruned run.
 - `workflows` remains after migration v11 copied its rows into `userspace`.
   Nothing reads it and it is not dropped, so a rollback to a pre-v11 binary
   still resolves.

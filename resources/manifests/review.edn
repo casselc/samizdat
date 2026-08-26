@@ -16,6 +16,8 @@
          :journal        :journal/record
          :arbiter        :gate/arbiter
          :route          :loop/route
+         ;; Task reflection on every ending, as the factory loop has (blt.26).
+         :distil         :memory/distil
          :finish         :loop/finish}
 
  :edges {:start          :infer
@@ -29,9 +31,10 @@
          :journal        :arbiter
          :arbiter        :route
          :route          {:continue  :start
-                          :done      :finish
-                          :abandoned :finish
-                          :exhausted :finish}
+                          :done      :distil
+                          :abandoned :distil
+                          :exhausted :distil}
+         :distil         :finish
          :finish         :end}
 
  :dispatches {:parse [[:provider-error (fn [d] (not (:ok (:call d))))]

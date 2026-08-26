@@ -88,7 +88,9 @@
   worker's crash is not the team's."
   [{:keys [conn run-id] :as ctx} worker bid idx st prob suffix task-id]
   (try
-    (runs/open-branch! conn run-id {:branch-id bid})
+    ;; The sub-task is the branch's OWN problem, durably — what a resume
+    ;; rebuilds this branch's opening messages from (blt.23).
+    (runs/open-branch! conn run-id {:branch-id bid :problem prob})
     (let [b (state/new-branch {:id bid :problem prob
                                :messages (turn/initial-messages prob suffix)})
           ;; The worker opens HOLDING its part of the board. Claimed here rather
@@ -142,7 +144,7 @@
         :run :subtasks), pass through — an explicit split wins. Otherwise one
         LLM call proposes at most :max-subtasks parts; fail-soft to a single
         worker on the whole problem when the call fails or yields no list."
-   :effects [:net]
+   :effects [:net :db]
    :requires [:config :conn :run-id]}
   (fn [{:keys [conn run-id config] :as ctx}
        {:keys [branch subtasks] :as data}]
@@ -169,7 +171,7 @@
         answers into the manager branch and finish. A dataflow join, not a live
         actor: workers run to completion."
    :effects [:net :db]
-   :requires [:conn :run-id]}
+   :requires [:config :conn :run-id]}
   (fn [{:keys [conn run-id] :as ctx} {:keys [branch subtasks] :as data}]
     (let [tasks (vec (if (seq subtasks) subtasks [(:problem branch)]))
           worker (wf/worker-compiled)
@@ -202,17 +204,26 @@
           ;; :contract, which is what a worker reads.
           title-of (fn [s] (let [t (str/trim (str/replace (str s) #"\s+" " "))]
                              (if (> (count t) 100) (str (subs t 0 100) "…") t)))
-          parent (when (seq subtasks)
-                   (tasks/create! conn {:title (str "Feature: " (title-of (:problem branch)))
-                                        :body (str (:problem branch))
-                                        :type "epic" :run-id run-id}))
-          task-ids (mapv (fn [s]
-                           (tasks/create! conn {:title (title-of s)
-                                                :body (str s)
-                                                :parent-id parent
-                                                :run-id run-id
-                                                :contract (str s)}))
-                         tasks)
+          ;; Created ONCE. A revise round re-enters this cell with the same
+          ;; parts; re-running create! each round left one epic and one full
+          ;; set of duplicate rows per revision, with the prior rounds'
+          ;; released rows still open — making "which parts are still open",
+          ;; the board's whole purpose, unanswerable (karamazov-blt.36). The
+          ;; ids ride the data map; a retry re-claims the SAME row the first
+          ;; attempt released.
+          parent (or (:team/epic data)
+                     (when (seq subtasks)
+                       (tasks/create! conn {:title (str "Feature: " (title-of (:problem branch)))
+                                            :body (str (:problem branch))
+                                            :type "epic" :run-id run-id})))
+          task-ids (or (not-empty (:team/task-ids data))
+                       (mapv (fn [s]
+                               (tasks/create! conn {:title (title-of s)
+                                                    :body (str s)
+                                                    :parent-id parent
+                                                    :run-id run-id
+                                                    :contract (str s)}))
+                             tasks))
           results (->> (map-indexed vector tasks)
                        (mapv (fn [[i s]]
                                (future (run-worker ictx worker (bid-of i) i s
@@ -235,6 +246,8 @@
       (assoc data
              :subtasks tasks
              :results (vec results)
+             :team/epic parent
+             :team/task-ids task-ids
              :branch (assoc branch :final-answer (summarize results))))))
 
 (cell/defcell :team/supervise

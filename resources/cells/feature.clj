@@ -203,7 +203,7 @@
         or a revise verdict means the loop is going back anyway. No :verify-cmd
         configured -> not applicable, passes."
    :effects [:proc :db]
-   :requires [:config :conn :root :run-id]}
+   :requires [:config :conn :git-baseline :root :run-id]}
   (fn [{:keys [conn run-id root config] :as ctx} data]
     (let [cmd (get-in config [:run :verify-cmd])]
       (cond

@@ -178,9 +178,18 @@ is permissiveness, which is why every reprieve is a loan with a clock.
 - **Beam width is not justified.** Nobody has measured five branches against
   one branch at five times the turn budget. `samizdat.bench.beam` is named as
   the comparison and **does not exist** — the directory is absent.
-- `dispose-branch-engines!` is a no-op seam. The proof engines it existed for
-  are gone; the coding tools open sessions (nREPL, subprocesses) that will want
-  per-branch disposal here.
-- `drain-directives!` recognises `pause`, `resume`, `extend` and `fork` and
-  rejects them explicitly as unwired. Rejecting beats accepting silently, but
-  they are advertised by the control API.
+- ~~`dispose-branch-engines!` is a no-op seam.~~ Closed: it disposes the
+  per-branch eval session.
+- ~~`drain-directives!` rejects pause/resume/extend/fork as unwired.~~ Closed
+  (2026-08 audit): all eight advertised kinds land. `pause`/`resume` are also
+  applied by `await-resume!` itself, since the beam parks there upstream of
+  the directives cell (blt.9); the per-turn drain leaves scheduler kinds
+  pending for the beam instead of eating them mid-round (blt.10); a human
+  `cull` closes the row and stays in the record (blt.11); `extend` rides the
+  branch (`:extended-turns`), persists to the runs row, and reaches the turn
+  slice's cap (blt.12).
+
+Two invariants the audit added to the table's spirit: a forfeited turn's
+still-running thread is never run beside (`advance-all`'s `:in-flight`
+quarantine, blt.18), and the cull cell counts only ACTIVE branches as
+survivors and never re-judges an inactive one (blt.17).

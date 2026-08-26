@@ -202,13 +202,24 @@
         fn* (count flines)
         starts (reductions + 0 (map #(inc (count %)) clines))]
     (when (and (pos? fn*) (<= fn* (count clines)))
-      (for [i (range (inc (- (count clines) fn*)))
-            :let [block (subvec (vec clines) i (+ i fn*))]
-            :when (every? true? (map #(= (str/trim %1) (str/trim %2)) block flines))]
-        (let [start (nth starts i)
-              end (reduce + start (concat (map count block)
-                                          (repeat (dec fn*) 1)))]
-          [start end])))))
+      ;; NON-OVERLAPPING, greedily from the top: a multi-line needle like
+      ;; "a\na" matches at consecutive lines of "a\na\na", and the reverse
+      ;; splice then wrote new-text into a region the previous replacement had
+      ;; already rewritten, corrupting the file under replace_all (blt.38).
+      (let [all (for [i (range (inc (- (count clines) fn*)))
+                      :let [block (subvec (vec clines) i (+ i fn*))]
+                      :when (every? true? (map #(= (str/trim %1) (str/trim %2))
+                                               block flines))]
+                  (let [start (nth starts i)
+                        end (reduce + start (concat (map count block)
+                                                    (repeat (dec fn*) 1)))]
+                    [start end]))]
+        (reduce (fn [acc [start end :as r]]
+                  (if (and (seq acc) (< start (second (peek acc))))
+                    acc
+                    (conj acc r)))
+                []
+                all)))))
 
 (defn- line-of [starts pos]
   (inc (count (take-while #(<= % pos) (rest starts)))))

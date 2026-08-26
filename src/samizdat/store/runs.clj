@@ -189,12 +189,16 @@
    (db/fetch conn ["SELECT * FROM runs ORDER BY started_at DESC LIMIT ?" limit])))
 
 (defn open-branch!
-  [conn run-id {:keys [branch-id parent-id created-at-turn]}]
+  "`:problem` is the branch's OWN problem when it differs from the run's — a
+  decompose unit's contract, a team worker's sub-task — and nil for a branch
+  working the run-level problem. It is what a resume rebuilds the branch's
+  opening messages from (karamazov-blt.23)."
+  [conn run-id {:keys [branch-id parent-id created-at-turn problem]}]
   (db/with-writer
     (db/execute! conn
-                   ["INSERT INTO branches (id, run_id, parent_id, status, created_at_turn)
-                     VALUES (?, ?, ?, 'active', ?)"
-                    branch-id run-id parent-id (or created-at-turn 0)]))
+                   ["INSERT INTO branches (id, run_id, parent_id, status, created_at_turn, problem)
+                     VALUES (?, ?, ?, 'active', ?, ?)"
+                    branch-id run-id parent-id (or created-at-turn 0) problem]))
   (journal/note! conn run-id :branch-opened
                  {:branch-id branch-id :data {:parent parent-id}})
   branch-id)

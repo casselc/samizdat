@@ -936,7 +936,13 @@
           :shell-output-chars  8000
           :shared-code-chars   700
           :ledger-claim-chars  180
-          :critic-claim-chars  400}
+          :critic-claim-chars  400
+          ;; The base output budget a truncation RETRY doubles from when the
+          ;; provider config sets no :max-tokens of its own — without it the
+          ;; "retry at a doubled budget" contract silently degraded to a
+          ;; same-budget repeat, reproducing the truncation it exists to
+          ;; escape (blt.38).
+          :retry-base-tokens   8192}
   :kind :cost-ceiling :capability-tunable? false
   :doc "HOW MUCH THE MODEL GETS TO SEE. Every one of these was a constant in
         code, and together they are the most project-specific numbers in the
@@ -1430,8 +1436,11 @@
          which is dirge PR 717's finding arriving as a design property rather
          than a bug fix."
    :when (some? directive)
+   ;; :payload-text is attached by the drains — the payload column is a JSON
+   ;; blob ({"text": "..."}), and rendering it raw framed `{"text":"[watch]
+   ;; ..."}` as the human's words (blt.38).
    :message-form (str "**A human has intervened in this run.**\n\n"
-                      (:payload directive)
+                      (or (:payload-text directive) (:payload directive))
                       "\n\nThis takes precedence over anything the harness has told"
                       " you. Act on it on this turn.")
    :prediction "the branch acts on the directive on the next turn"

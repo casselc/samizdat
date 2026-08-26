@@ -30,13 +30,18 @@
 ;; :decompose-max-parts) — cost ceilings, since each level of recursion
 ;; multiplies sub-agents.
 
-(def max-depth
+(defn max-depth
   "How deep the split recursion may go before a stuck unit is a hard failure
   rather than split again. Kept shallow: each level multiplies sub-agents, and a
-  unit that still won't pass its tests three levels down is not a size problem."
+  unit that still won't pass its tests three levels down is not a size problem.
+
+  A FUNCTION: a top-level def froze the gates.edn value at namespace load —
+  the exact bug generation-cache fixed everywhere else — so a retune (or the
+  project's own policy after bind) never took effect (blt.38)."
+  []
   (gates/threshold :decompose-max-depth))
 
-(def default-max-parts (gates/threshold :decompose-max-parts))
+(defn default-max-parts [] (gates/threshold :decompose-max-parts))
 
 (defn architect-prompt
   "Ask the architect to diagnose a stuck unit and choose to split it or hint a
@@ -59,8 +64,8 @@
      :last-answer (not-empty (str/trim (str last-answer)))
      :last-failure (not-empty (str/trim (str last-failure)))
      :force-split (boolean (or fresh-failed force-split))
-     :max-parts default-max-parts
-     :last-round (>= (or depth 0) (dec max-depth))}))
+     :max-parts (default-max-parts)
+     :last-round (>= (or depth 0) (dec (max-depth)))}))
 
 (defn- normalize-subtask [m]
   (let [name (some-> (or (get m "name") (get m :name)) str str/trim not-empty)
@@ -139,7 +144,7 @@
   node is a stable subassembly: it passed its own tests, so a parent that
   composes it never re-litigates it."
   [node depth {:keys [attempt recover fan max-depth] :as ops}]
-  (let [max-d (or max-depth samizdat.agent.decompose/max-depth)
+  (let [max-d (or max-depth (samizdat.agent.decompose/max-depth))
         r (attempt node)]
     (if (:passed? r)
       {:status :landed :answer (:answer r) :node node}
@@ -202,7 +207,7 @@
              ;; a decompose degrades to a fresh approach.
              want-split? (and (= decision "decompose")
                               (seq subtasks)
-                              (< depth (dec max-depth)))]
+                              (< depth (dec (max-depth))))]
          (cond
            want-split? {:kind :decompose :reason reason :subtasks subtasks}
            (or hint (= decision "fresh_approach"))

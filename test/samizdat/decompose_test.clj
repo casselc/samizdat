@@ -32,7 +32,7 @@
     (is (str/includes? p "FRESH_APPROACH"))))
 
 (deftest architect-prompt-forces-fresh-approach-at-the-depth-edge
-  (let [p (dec/architect-prompt {:problem "x"} {:depth (dec dec/max-depth)})]
+  (let [p (dec/architect-prompt {:problem "x"} {:depth (dec (dec/max-depth))})]
     (is (str/includes? p "MUST choose FRESH_APPROACH"))))
 
 (deftest parse-decision-reads-a-decompose
@@ -55,7 +55,7 @@
   (testing "a decompose too deep degrades to a fresh approach, not a split"
     (let [d (dec/parse-decision
              "{\"decision\":\"decompose\",\"subtasks\":[{\"name\":\"a\",\"description\":\"x\"}]}"
-             (dec dec/max-depth))]
+             (dec (dec/max-depth)))]
       (is (= :fresh-approach (:kind d)) "no split at the depth edge"))))
 
 (deftest parse-decision-degrades-a-subtaskless-decompose
@@ -114,7 +114,7 @@
     (is (contains? (set @attempts) "root/b"))))
 
 (deftest solve-fails-hard-at-the-depth-budget
-  (let [r (dec/solve {:id "x" :problem "p"} dec/max-depth
+  (let [r (dec/solve {:id "x" :problem "p"} (dec/max-depth)
                      {:attempt (constantly {:passed? false :failure "nope"})
                       :recover (fn [& _] {:kind :decompose :subtasks [{:name "a" :description "x"}]})
                       :fan seq-fan})]

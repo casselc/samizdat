@@ -785,8 +785,12 @@
                                         "\n  → " (:reason f)))))
       :gate-tally (when (seq (:gate-tally r))
                     (str/join "\n" (for [g (:gate-tally r)]
+                                     ;; met-late IS met — acting a turn later
+                                     ;; is acting. Omitting it rendered a gate
+                                     ;; that settled met-late 3x as "3 fired,
+                                     ;; 0 met" (blt.38).
                                      (str "- " (:gate g) ": " (:fired g) " fired, "
-                                          (or (:met g) 0) " met, "
+                                          (+ (or (:met g) 0) (or (:met-late g) 0)) " met, "
                                           (or (:unmet g) 0) " unmet, "
                                           (or (:open g) 0) " open"))))})))
 

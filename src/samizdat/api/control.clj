@@ -84,6 +84,13 @@
         beam-width (or (:beam_width body) (:beam-width body))
         seed-run (or (:seed_run body) (:seed-run body))
         quarantine (or (:quarantine body) (get body "quarantine"))]
+  ;; A {} body used to start a REAL run on a nil problem — a selection model
+  ;; call plus a full beam of provider spend answering nothing, while
+  ;; /v1/chat/completions 400s the same input (blt.38).
+  (if (str/blank? (str problem))
+    {:status 400
+     :body {:error {:message "a run needs a non-blank `problem`"
+                    :type "invalid_request_error"}}}
   (let [llm-config (run-llm-config (:llm config) body)
         adapter (registry/adapter-for (:provider llm-config))
         abort (atom false)
@@ -133,7 +140,7 @@
       ;; the status code read this as a started run, which is why gui.api's
       ;; start-run! had to unwrap the body to find out otherwise.
       {:status 503
-       :body {:error {:message "the run did not start within 30s"}}}))))
+       :body {:error {:message "the run did not start within 30s"}}})))))
 
 (defn abort!
   "Stop a run without asking it to cooperate. The flag is checked at the top of
@@ -235,6 +242,18 @@
       {:status 400
        :body {:error {:message "a grant intervention needs payload.pattern — the shell glob to allow"
                      :run_id run-id}}})
+    (if-let [run (let [r (runs/get-run conn run-id)]
+                   (when (or (nil? r)
+                             (contains? #{"completed" "aborted" "failed"} (:status r)))
+                     (or r ::absent)))]
+      ;; A directive against a run that does not exist or has ended would sit
+      ;; `pending` forever — the UI showing an intervention that will never
+      ;; resolve (blt.38).
+      (if (= ::absent run)
+        {:status 404 :body {:error {:message (str "no run " run-id)}}}
+        {:status 409 :body {:error {:message (str "run " run-id " is already "
+                                                  (:status run))
+                                    :run_id run-id}}})
     (if-not (contains? interventions/kinds (:kind body))
       ;; provenance R3-12: this reached submit!'s throw and surfaced as the
       ;; server's catch-all 500. An unknown kind is the client's mistake.
@@ -253,6 +272,6 @@
           :status "pending"
           ;; Said plainly rather than implied, because the difference between
           ;; accepted and applied is the thing a UI most easily lies about.
-          :note "Queued. It applies at the branch's next turn boundary, not now."}}))))
+          :note "Queued. It applies at the branch's next turn boundary, not now."}})))))
 
 (defn kinds [] {:kinds interventions/kinds})

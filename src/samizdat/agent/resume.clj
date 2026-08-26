@@ -150,6 +150,11 @@
   the safe-state rule from its 'otherwise' arm."
   [run branch-row turns artifacts firings max-turns]
   (let [branch-id (:id branch-row)
+        ;; The branch's OWN problem where it has one — a decompose unit's
+        ;; contract, a team worker's sub-task — else the run's. Rebuilding
+        ;; every branch on the run-level problem re-aimed every worker at the
+        ;; top-level feature text (karamazov-blt.23).
+        problem (or (not-empty (str (:problem branch-row))) (:problem run))
         branch-turns (get turns branch-id [])
         ;; The phase is rebuilt from the banked sketch artifacts: a sketch on
         ;; record means the branch left explore, and its turn is the phase
@@ -161,9 +166,9 @@
                            artifact-maps)
         base (-> (state/new-branch {:id branch-id
                                     :parent-id (:parent_id branch-row)
-                                    :problem (:problem run)
+                                    :problem problem
                                     :created-at-turn (:created_at_turn branch-row)
-                                    :messages (messages-from-turns (:problem run)
+                                    :messages (messages-from-turns problem
                                                                    branch-turns)})
                  (assoc :status (keyword (:status branch-row))
                         :inactive-reason (:inactive_reason branch-row)
