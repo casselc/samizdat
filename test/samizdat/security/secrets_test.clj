@@ -203,3 +203,16 @@
         payload (str "=> {:api-key \"" canary "\"}")]
     (is (not (str/includes? (secrets/redact payload known) canary))
         "a credential read in-process does not reach the transcript verbatim")))
+
+(deftest the-whole-github-token-family-is-redactable
+  ;; GITHUB_TOKEN/GH_TOKEN are deliberately SAFE_EXACT — gh must see them — so
+  ;; their values are never in known-values and the regex rail is the only
+  ;; thing between `echo $GITHUB_TOKEN` (which rides the echo allow) and the
+  ;; journal. The rail covered ghp_/github_pat_ only, while `gh auth login`
+  ;; issues gho_/ghu_/ghs_/ghr_ tokens (karamazov-blt.30).
+  (doseq [prefix ["ghp_" "gho_" "ghu_" "ghs_" "ghr_"]]
+    (let [tok (str prefix "AbCdEfGhIjKlMnOpQrStUvWxYz0123456789")]
+      (is (secrets/sensitive-value? tok)
+          (str prefix " is a high-confidence credential shape"))
+      (is (not (str/includes? (secrets/redact (str "token: " tok)) tok))
+          (str prefix " is caught by the regex rail with no known-values")))))

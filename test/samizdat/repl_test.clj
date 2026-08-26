@@ -119,9 +119,13 @@
   ;; directory, and slurp samizdat's deps.edn believing all three were the
   ;; project's. Nothing in the process notices, so the harness has to say so.
   (testing "a root elsewhere is a mismatch, reported with both directories"
+    ;; Compare CANONICALIZED paths on both sides: warn-if-not-cwd! resolves
+    ;; symlinks so the two directories it names are the real ones, and on
+    ;; macOS /tmp IS a symlink (to /private/tmp) — the raw-string expectation
+    ;; kept this suite permanently red there (karamazov-blt.37).
     (let [m (repl/warn-if-not-cwd! "/tmp")]
       (is (some? m))
-      (is (= "/tmp" (:root m)))
+      (is (= (str (.getCanonicalFile (java.io.File. "/tmp"))) (:root m)))
       (is (not= (:root m) (:cwd m)))))
   (testing "the ordinary self-hosting case is silent"
     (is (nil? (repl/warn-if-not-cwd! ".")))))

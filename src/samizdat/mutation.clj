@@ -217,11 +217,24 @@
           (fail reason)
           ;; COMMIT. The candidate is already live; this is what makes it
           ;; survive a restart and what another run will load.
+          ;;
+          ;; save! returns nil when no project store is bound (RFC-001), and
+          ;; that is NOT a commit: reporting :committed with a nil version had
+          ;; the tool telling the model "saved as v … live on your next turn"
+          ;; about an edit that vanishes on restart (karamazov-blt.8). It is
+          ;; not a rollback either — validate and soak passed, the candidate
+          ;; stays live in this image — so the caller hears exactly that.
           (let [v (userspace/save! :cell name body)]
-            (when (and conn run-id)
-              (journal/note! conn run-id :mutation-committed
-                             {:data {:cell name :version v}}))
-            (log/info "cell" name "committed as version" v)
-            {:status :committed :version v})))
+            (if (nil? v)
+              ;; :reason is a KEYWORD, not prose: the sentence the model reads
+              ;; is the tool's to render (prompts/cell-tool.md), same as every
+              ;; other model-facing word.
+              (do (log/warn "cell" name "is live but UNSAVED — no project store is bound")
+                  {:status :live-unsaved :reason :unbound})
+              (do (when (and conn run-id)
+                    (journal/note! conn run-id :mutation-committed
+                                   {:data {:cell name :version v}}))
+                  (log/info "cell" name "committed as version" v)
+                  {:status :committed :version v})))))
       (catch Throwable e
         (fail (str "the candidate did not load — " (or (ex-message e) (str e))))))))

@@ -25,6 +25,12 @@
   entity with a durable id rather than a value threaded through the loop,
   because an intervention has to be able to name one."
   (:require [clojure.data.json :as json]
+            ;; log is called from start-run!'s retention sweep. jolt resolves
+            ;; ns aliases lazily, so leaving this out loads fine and throws on
+            ;; the first run start that actually prunes — which made enabling
+            ;; :retention :run-record-days break every subsequent run start
+            ;; (karamazov-blt.31).
+            [clojure.tools.logging :as log]
             [jdbc.core :as jdbc]
             [samizdat.store.db :as db]
             [samizdat.store.journal :as journal]

@@ -110,3 +110,21 @@
       (try
         (is (= {} (config/project-config root)))
         (finally (delete-recursively (java.io.File. root)))))))
+
+(deftest redacted-masks-an-api-key-wherever-it-sits
+  ;; /health serves (config/redacted …), which masked [:llm :api-key] only. A
+  ;; role spec under :run :role-models may carry its own :api-key override —
+  ;; role-ctx merges it into the provider config — and it was served cleartext
+  ;; (karamazov-blt.29).
+  (let [cfg {:llm {:api-key "sk-top" :model "m"}
+             :run {:role-models {:critic {:provider :glm :model "g"
+                                          :api-key "sk-role"}}}
+             :db {:path "x"}}
+        r (config/redacted cfg)]
+    (is (= "***" (get-in r [:llm :api-key])))
+    (is (= "***" (get-in r [:run :role-models :critic :api-key]))
+        "a nested per-role key is masked too")
+    (is (= "g" (get-in r [:run :role-models :critic :model]))
+        "only the key is touched")
+    (is (= {:db {:path "x"}} (config/redacted {:db {:path "x"}}))
+        "a config with no key gains none")))

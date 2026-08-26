@@ -91,12 +91,25 @@ flowchart LR
     env --> eval
     secrets --> eval
     eval --> redact
+
+    lsp[lsp tool: clojure-lsp subprocess]
+    toolcall --> lsp
+    scrub --> lsp
+    lsp --> redact
 ```
 
 The `eval` node and its three edges were absent from this graph until this RFC
 was written, which is how the property they violated stayed believed for four
 review passes. `eval --> redact` is the fix (F1); before it, eval reached
 `result` directly.
+
+The `lsp` node repeated the omission: clojure-lsp was the one subprocess
+spawned with the full parent environment (and it re-spawns children of its
+own), and its file argument resolved with a bare `io/file`, outside the root
+confinement every file tool enforces. Both fixed in the 2026-08 audit
+(karamazov-blt.27, blt.28): it spawns through `scrub` and its paths go
+through `resolve-under-root`; its replies were already inside the envelope
+redaction.
 
 Reading the load-bearing solid edges:
 

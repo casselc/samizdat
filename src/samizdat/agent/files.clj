@@ -75,10 +75,14 @@
   []
   (:grep-ranges (gates/threshold :context-budget)))
 
-(defn- resolve-under-root
+(defn resolve-under-root
   "Canonicalize `path` under `root`; return the resolved absolute path string,
   or nil when it escapes the root. The canonical root is the boundary — a
-  `..` or an absolute path that lands outside it fails closed."
+  `..` or an absolute path that lands outside it fails closed.
+
+  Public because it is THE confinement primitive: every tool that turns a
+  model-supplied path into a filesystem read must come through here, and the
+  lsp tool rolling its own bare io/file was the escape (karamazov-blt.28)."
   [root path]
   (let [root* (str (fs/canonicalize root))
         target (str (fs/canonicalize (fs/path root path)))]

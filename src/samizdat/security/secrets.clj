@@ -79,10 +79,16 @@
   #"(?i)([a-z][a-z0-9+.-]*://[^:@/]+:)([^@\s]{1,512})(@)")
 
 (def ^:private vendor-gates
-  ["sk-" "AKIA" "ghp_" "github_pat_" "hf_" "xox" "xai-" "AIza"])
+  ;; gh[opusr]_ is the whole GitHub token family: ghp_ (classic PAT) plus the
+  ;; gho_/ghu_/ghs_/ghr_ OAuth-flow tokens `gh auth login` issues. The family
+  ;; matters doubly because GITHUB_TOKEN/GH_TOKEN are SAFE_EXACT — their
+  ;; values never enter known-values, so this regex rail is the only thing
+  ;; between `echo $GITHUB_TOKEN` and the journal (karamazov-blt.30).
+  ["sk-" "AKIA" "ghp_" "gho_" "ghu_" "ghs_" "ghr_" "github_pat_" "hf_"
+   "xox" "xai-" "AIza"])
 
 (def ^:private vendor-prefix-re
-  #"(?x)\b(?:sk-(?:live_|test_|proj-)?[a-zA-Z0-9+/=]{20,512}(?:-[a-zA-Z0-9+/=]{1,64}){0,16}|sk-ant-api[0-9]{2}-[A-Za-z0-9+/=]{90,512}[_-][A-Za-z0-9]{5}|AKIA[A-Z0-9]{16}|ghp_[A-Za-z0-9]{36,255}|github_pat_[A-Za-z0-9]{22,64}_[A-Za-z0-9]{59,255}|hf_[A-Za-z0-9]{34,255}|xox[bpras]-[0-9]{2,20}-[0-9]{2,20}-[0-9]{2,20}-[a-zA-Z0-9]{32,255}|xai-[A-Za-z0-9+/=]{20,512}(?:\.[A-Za-z0-9+/=]{1,128}){0,16}|AIza[0-9A-Za-z_-]{35})")
+  #"(?x)\b(?:sk-(?:live_|test_|proj-)?[a-zA-Z0-9+/=]{20,512}(?:-[a-zA-Z0-9+/=]{1,64}){0,16}|sk-ant-api[0-9]{2}-[A-Za-z0-9+/=]{90,512}[_-][A-Za-z0-9]{5}|AKIA[A-Z0-9]{16}|gh[opusr]_[A-Za-z0-9]{36,255}|github_pat_[A-Za-z0-9]{22,64}_[A-Za-z0-9]{59,255}|hf_[A-Za-z0-9]{34,255}|xox[bpras]-[0-9]{2,20}-[0-9]{2,20}-[0-9]{2,20}-[a-zA-Z0-9]{32,255}|xai-[A-Za-z0-9+/=]{20,512}(?:\.[A-Za-z0-9+/=]{1,128}){0,16}|AIza[0-9A-Za-z_-]{35})")
 
 (defn- has-vendor-gate? [s]
   (boolean (some #(str/includes? s %) vendor-gates)))

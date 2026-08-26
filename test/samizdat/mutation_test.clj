@@ -185,6 +185,33 @@
                          (journal/events-since c rid 0)))))
       (finally (us/unbind!) (db/close c)))))
 
+(deftest an-unbound-proposal-is-not-reported-committed
+  ;; userspace/save! returns nil when no project store is bound, and the
+  ;; commit branch used to report {:status :committed :version nil} — the tool
+  ;; then told the model "Saved as v … live on your next turn" about an edit
+  ;; that vanishes on restart (karamazov-blt.8). The candidate IS live in the
+  ;; image (it compiled and soaked), so this is not a rollback either; the
+  ;; caller hears exactly what happened.
+  (write-cells! (str @root "/cells") "(fn [_ d] (update d :n inc))")
+  (cells/load-cells! (:dirs (opts)))
+  (us/unbind!)
+  (let [r (mut/propose-cell!
+           {:name "mini"
+            :body (str "(ns cells.mini (:require [mycelium.cell :as cell]))\n"
+                       "(cell/defcell :mini/start {:doc \"start\" :pure true}\n"
+                       "  (fn [_ d] (update d :n + 7)))\n"
+                       "(cell/defcell :mini/end {:doc \"end\" :pure true}\n"
+                       "  (fn [_ d] (assoc d :verdict :done)))\n")
+            :loop-def mini-def
+            :soak-input {:n 0}})]
+    (is (= :live-unsaved (:status r))
+        "not :committed — nothing entered any project's history")
+    (is (nil? (:version r)))
+    (is (= :unbound (:reason r))
+        "the reason is data; the sentence is the tool's to render")
+    (is (= 7 (:n ((:handler (cell/get-cell :mini/start)) {} {:n 0})))
+        "the candidate stays live in this process, as validate and soak left it")))
+
 (deftest the-shipped-template-is-never-written
   (let [c (db/open! ":memory:")
         before (us/template :cell "loop")]

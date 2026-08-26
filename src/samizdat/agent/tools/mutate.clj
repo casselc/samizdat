@@ -33,6 +33,7 @@
             [samizdat.agent.tools.base :as base]
             [samizdat.cells :as cells]
             [samizdat.mutation :as mutation]
+            [samizdat.prompt :as prompt]
             [samizdat.store.userspace]
             [samizdat.userspace :as userspace]))
 
@@ -149,13 +150,24 @@
                       :loop-def (current-loop-def)
                       :soak-input (soak-input)
                       :conn conn :run-id run-id})]
-              (if (= :committed (:status r))
+              (case (:status r)
+                :committed
                 (base/ok branch
                          (str "Saved cell '" name "' as v" (:version r)
                               " in this project — it compiled, it dry-ran, and it"
                               " is live on your next turn. The shipped template is"
                               " unchanged; other projects still start from it.")
                          :progress? true)
+
+                ;; Validate and soak passed and the edit is live in this
+                ;; image, but nothing was persisted — telling the model it
+                ;; was "saved as v" here was a lie about durability
+                ;; (karamazov-blt.8).
+                :live-unsaved
+                (base/ok branch
+                         (prompt/render "cell-tool" {:live-unsaved true
+                                                     :name name}))
+
                 (base/fail branch
                            (str "Cell '" name "' was NOT saved; the loop is"
                                 " unchanged and nothing entered this project's"

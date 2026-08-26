@@ -36,7 +36,8 @@
             [clojure.java.io :as io]
             [clojure.string :as str]
             [jolt.process :as jp]
-            [samizdat.engine.proc :as proc])
+            [samizdat.engine.proc :as proc]
+            [samizdat.security.secrets :as secrets])
   (:import [java.io BufferedInputStream OutputStream]))
 
 ;; root -> {:proc :out :in :next-id :opened :diagnostics :pending}
@@ -152,11 +153,23 @@
 
 (defn- uri [path] (str "file://" (.getAbsolutePath (io/file path))))
 
+(defn spawn-spec
+  "What start! spawns, as data, so a test can hold the seam without a server.
+
+  The environment is the SCRUBBED one — the same seam the shell tool, verify
+  and gitdiff spawn through. clojure-lsp was the one subprocess inheriting the
+  full parent environment, and it re-spawns children of its own (classpath
+  resolution) that inherit whatever it got (karamazov-blt.27)."
+  []
+  {:cmd ["clojure-lsp" "listen"]
+   :opts {:env (secrets/scrubbed-process-env)}})
+
 (defn start!
   "Spawn clojure-lsp for `root` and run the initialize/initialized
   handshake. Returns the client map."
   [root]
-  (let [p (jp/process ["clojure-lsp" "listen"])
+  (let [{:keys [cmd opts]} (spawn-spec)
+        p (jp/process cmd opts)
         ^java.lang.Process osproc (:proc p)
         client {:proc p
                 :root root

@@ -993,3 +993,27 @@
       (journal/prune-run-record! c "2999-01-01T00:00:00Z")
       (is (empty? (failures/similar c rid "greedy bound"))
           "the index went with the rows"))))
+
+(deftest enabling-record-retention-does-not-break-run-start
+  ;; start-run! logged the sweep through an alias the ns never required; jolt
+  ;; resolves aliases lazily, so the ns loaded fine and the throw waited for
+  ;; the first run start that actually pruned something — at which point every
+  ;; subsequent start failed until the knob was reverted (karamazov-blt.31).
+  ;; The one code path that exercises the advertised retention feature is the
+  ;; one this drives.
+  (with-db [c]
+    (let [old (runs/start-run! c {:problem "old"})]
+      (runs/open-branch! c old {:branch-id "B1"})
+      (journal/record-turn! c old {:branch-id "B1" :turn 1 :tool-name "eval"
+                                   :args {} :result "r" :category "success"})
+      (runs/finish-run! c old "completed" "done")
+      (db/execute! c ["UPDATE runs SET ended_at = ? WHERE id = ?"
+                      (str (.minusSeconds (java.time.Instant/now) (* 40 86400)))
+                      old])
+      (with-redefs [lexicon/policy (fn [k] (get {:retention {:events-hours 24
+                                                             :run-record-days 30}}
+                                               k))]
+        (let [id (runs/start-run! c {:problem "next"})]
+          (is (some? id) "the sweep-and-log path starts the run")
+          (is (empty? (journal/turns c old))
+              "and the aged-out record was actually pruned"))))))
