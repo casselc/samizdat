@@ -28,7 +28,9 @@
             [clojure.string :as str]
             [clojure.test :refer [deftest testing is use-fixtures]]
             [samizdat.agent.state :as state]
+            [samizdat.agent.tools.repl :as repl-tools]
             [samizdat.llm.client :as llm]
+            [samizdat.repl :as repl]
             [samizdat.store.db :as db]
             [samizdat.store.journal :as journal]
             [samizdat.store.runs :as runs]
@@ -249,6 +251,116 @@
       "a non-JS1 whole-run workflow is untouched")
   (is (thrown? ExceptionInfo
                (workflow/js1-assert-single-loop! true "team" false))))
+
+(deftest js1-workflow-entry-advances-an-authorized-eval
+  ;; The dogfood regression, deterministically: workflow/run! with a JS1
+  ;; profile used to drive the whole-run manifest directly with NO
+  ;; :turn-lease in the ctx, so dispatch-tool stale-refused EVERY model tool
+  ;; call ("Turn authority expired; this stale tool call was not
+  ;; dispatched.") and the run could only burn its budget.  The JS1 entry
+  ;; now hands the run to the beam scheduler at forced width 1 — the one
+  ;; place the TurnLease lifecycle exists — so a scheduled turn's lease
+  ;; authorizes the eval, its token reaches the sandbox seam, and the
+  ;; recorded effect's durable intent launches under a lease permit.
+  ;;
+  ;; No SCI and no provider: the binding mint is redefined to an inert
+  ;; binding map (what SCI-backed creation returns), and the eval tool's
+  ;; sandbox resolution seam (repl-tools/sandbox-var, the same seam the
+  ;; turn-lease suite uses) supplies a fake evaluate-recorded!.
+  (with-db [c]
+    (let [observed (atom [])
+          permits (atom 0)
+          fake-bind (fn [_conn run-id _config _root]
+                      {:binding {:binding/id (str "bind:main:" run-id)
+                                 :instance/id "inst:main"
+                                 :work-id (str run-id)
+                                 :spec {:preset :project/develop}}
+                       :provider nil :profile "single-player"})
+          fake-evaluate! (fn [_conn _binding code opts]
+                           (swap! observed conj {:code code
+                                                 :token (:token opts)})
+                           ;; The recorded effect's intent boundary: issues
+                           ;; the synchronized permit (and throws :stale if
+                           ;; the turn's authority were gone).
+                           ((:effect-permit! opts) (fn [] (swap! permits inc)))
+                           {:value 3})]
+      (with-redefs-fn {#'workflow/js1-binding fake-bind
+                       #'repl-tools/sandbox-var
+                       (fn [var-name]
+                         (when (= var-name "evaluate-recorded!")
+                           fake-evaluate!))}
+        (fn []
+          (with-redefs [llm/chat (scripted
+                                  (fence {:name "eval"
+                                          :args {:code "(+ 1 2)"}})
+                                  (fence {:name "done"
+                                          :args {:answer "the problem is solved directly"}}))]
+            (let [r (workflow/run! {:conn c
+                                    :config {:run {:js1/profile "single-player"}}
+                                    :llm-adapter :a :llm-config {:max-tokens 16384}
+                                    :problem "solve the problem" :max-turns 5})]
+              (is (= :completed (:status r)))
+              (is (= "the problem is solved directly" (:answer r)))
+              (testing "the eval ADVANCED under the scheduled turn's lease"
+                (let [turns (journal/branch-turns c (:run-id r) "B1")]
+                  (is (= ["eval" "done"] (mapv :tool_name turns)))
+                  (is (= ["neutral" "success"] (mapv :category turns))
+                      "an authorized eval lands as itself (neutral) and done ships (success); the stale refusal was a :failure")
+                  (is (not-any? #(str/includes? (str (:result %))
+                                                "Turn authority expired")
+                                turns)
+                      "no call was stale-refused at dispatch-tool"))
+                (is (= ["(+ 1 2)"] (mapv :code @observed))
+                    "exactly one recorded eval reached the sandbox seam")
+                (is (some? (:token (first @observed)))
+                    "the eval carried the scheduled turn lease's interrupt token")
+                (is (= 1 @permits)
+                    "the recorded effect's intent launched under a lease permit"))
+              (testing "the run record shows the scheduled single-branch shape"
+                (let [run (runs/get-run c (:run-id r))]
+                  (is (= 1 (:beam_width run)))
+                  (is (= "completed" (:status run))))))))))))
+
+(deftest js1-workflow-teardown-returns-the-real-outcome
+  ;; The masking half of the regression: a JS1 run allocates no live-eval
+  ;; session (:repl-session nil), and the old finally's
+  ;; (repl/close-session nil) threw on (find-ns nil) — replacing the run's
+  ;; actual outcome (here, an honest :exhausted) with an empty-message
+  ;; exception from teardown.  close-session is now nil-safe by contract,
+  ;; and a JS1 run that never ships RETURNS its exhaustion.
+  (is (nil? (repl/close-session nil))
+      "close-session is a no-op on nil — the JS1 run has no live-eval session")
+  (let [s (repl/new-session)]
+    (repl/close-session s)
+    (is (nil? (repl/close-session s))
+        "and still idempotent on an already-removed name"))
+  (with-db [c]
+    (let [fake-bind (fn [_conn run-id _config _root]
+                      {:binding {:binding/id (str "bind:main:" run-id)
+                                 :instance/id "inst:main"
+                                 :work-id (str run-id)
+                                 :spec {:preset :project/develop}}
+                       :provider nil :profile "single-player"})
+          fake-evaluate! (fn [_conn _binding _code opts]
+                           ((:effect-permit! opts) (fn [] nil))
+                           {:value 1})]
+      (with-redefs-fn {#'workflow/js1-binding fake-bind
+                       #'repl-tools/sandbox-var
+                       (fn [var-name]
+                         (when (= var-name "evaluate-recorded!")
+                           fake-evaluate!))}
+        (fn []
+          (with-redefs [llm/chat (scripted
+                                  (fence {:name "eval"
+                                          :args {:code "(+ 1 1)"}}))]
+            (let [r (workflow/run! {:conn c
+                                    :config {:run {:js1/profile "single-player"}}
+                                    :llm-adapter :a :llm-config {:max-tokens 16384}
+                                    :problem "never finishes" :max-turns 2})]
+              (is (= :exhausted (:status r))
+                  "the run's real outcome is returned, not masked by teardown")
+              (is (= 2 (count (journal/branch-turns c (:run-id r) "B1"))))
+              (is (= "failed" (:status (runs/get-run c (:run-id r))))))))))))
 
 (deftest the-turn-cap-exhausts-through-the-manifest
   (with-db [c]

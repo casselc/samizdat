@@ -307,7 +307,7 @@
      :timeout-ms (:timeout-ms spec)
      :runtime-coordinate runtime-coordinate}))
 
-(defn- js1-binding
+(defn js1-binding
   "Create a JS1 sandbox binding for the run, or nil.
 
     Activated ONLY when config :run :js1/profile is set to a truthy value.
@@ -315,6 +315,12 @@
     :js1/profile — a display/journal label; the BINDING this function
     returns is the canonical signal the tool gate and eval routing both
     read (:js1/binding).
+
+    Called by the two run drivers: workflow/run! (historically) and, on the
+    scheduled JS1 path, beam/run! — which mints the run's binding right
+    after the run row exists (the work-id IS the run-id, and the journal
+    event needs the row). Public so beam can reach it; beam already
+    requires this namespace for the manifest compiler.
 
     Trust boundary: the config key is read once here by controller code;
     the model never sees or sets it.  The preset is hardcoded to
@@ -384,10 +390,49 @@
                     {:js1/error :whole-run-workflow-not-supported
                      :loop (str loop-nm)}))))
 
+(defn- run-js1!
+  "The production JS1 path: hand the run to the beam scheduler at forced
+   width 1.
+
+   JS1 is single-player AND scheduled by construction: one persistent :main
+   SCI instance, one branch, one durable history — and the scheduler is the
+   one place the per-turn authority boundary exists.  beam/advance-all mints
+   a fresh TurnLease per turn, installs it in the turn's ctx so dispatch-tool
+   authorizes the model's calls, carries its interrupt token into the
+   sandbox evaluator, fences every recorded effect's durable intent on a
+   synchronized permit, revokes the lease when the turn's worker quiesces,
+   and fails the run closed when a deadline worker does not.  The previous
+   composition drove the whole-run manifest straight from here with no lease
+   at all: every JS1 tool call was stale-refused at dispatch-tool, the run
+   could only burn its budget, and the finally's (repl/close-session nil)
+   masked even that outcome.  Re-deriving the lease lifecycle here instead
+   would be a parallel unscheduled copy of it — the two drivers would drift
+   on exactly the guarantees JS1 exists for.
+
+   The single-loop shape guard is NOT repeated here: beam/run! compiles the
+   manifest's per-turn slice and refuses a whole-run (non-iterating)
+   manifest under JS1 before the run row exists, with the same
+   {:js1/error :whole-run-workflow-not-supported} refusal.
+
+   samizdat.agent.beam is resolved at call time: beam requires THIS
+   namespace (the manifest loader/compiler), so a static require would be a
+   circular dependency.  Returns the beam scheduler's result map
+   ({:status :completed/:exhausted/... :answer :run-id :branches ...})."
+  [opts]
+  (require 'samizdat.agent.beam)
+  (let [beam-run! (resolve 'samizdat.agent.beam/run!)]
+    (beam-run! (assoc opts :beam-width 1))))
+
 (defn run!
   "Run one branch to completion under the stored loop definition.
-  Returns {:status :answer :branch :run-id (:residual)}."
-  [{:keys [conn config llm-adapter llm-config problem max-turns]}]
+  Returns {:status :answer :branch :run-id (:residual)}.
+
+  A JS1-profiled run never takes this direct path: it is single-player and
+  scheduled, so it is handed to the beam scheduler (run-js1!) after the
+  width guard below — that scheduler owns the TurnLease/deadline/effect
+  fence lifecycle the JS1 tool gate requires.  Non-JS1 runs drive the
+  whole-run manifest directly, exactly as before."
+  [{:keys [conn config llm-adapter llm-config problem max-turns] :as opts}]
   ;; JS1 is single-player by construction: one persistent :main instance,
   ;; one branch, one durable history.  A team manifest's subtask fan-out
   ;; (or an explicit multi-branch beam width) would share that instance
@@ -397,73 +442,59 @@
     (get-in config [:run :js1/profile])
     (max (or (get-in config [:run :beam-width]) 1)
          (count (get-in config [:run :subtasks]))))
-  (let [max-turns (or max-turns (get-in config [:run :max-turns]) 40)
-        loop-nm (active-loop-name config)
-        {:keys [version compiled definition]} (load-loop! conn loop-nm)
-        ;; The width guard cannot see a fan-out INSIDE one branch: a
-        ;; whole-run manifest's role/worker subloops are that fan-out, one
-        ;; level down.  Refused after the (local, unpaid-for) compile,
-        ;; before the run row exists and before any model call.
-        _ (js1-assert-single-loop! (some? (get-in config [:run :js1/profile]))
-                                   loop-nm (iterating? definition))
-        run-id (runs/start-run! conn {:problem problem
-                                      :provider (:provider llm-config)
-                                      :model (:model llm-config)
-                                      :max-turns max-turns
-                                      :beam-width 1
-                                      :prompt-digest (branch-loop/prompt-digest)})
-        branch (state/new-branch {:id "B1" :problem problem
-                                  :messages (branch-loop/initial-messages
-                                             problem (workflow-prompt definition))})
-        ;; The project root the file tools are confined to, and the shell tool
-        ;; runs in. Configurable so a run can target another checkout.
-        root (or (get-in config [:run :root]) (System/getProperty "user.dir"))
-         ;; JS1 binding: one persistent SCI instance for the whole run when
-         ;; explicitly configured. Its absence is allowed only for non-JS1.
-        js1 (js1-binding conn run-id config root)
-        ctx {:conn conn :run-id run-id :config config
-             :llm-adapter llm-adapter :llm-config llm-config
-             :root root
-             ;; A run-start git baseline so a finalization critic can review
-             ;; exactly what this run changed. Only captured for a non-default
-             ;; manifest — the factory loop has no critic to read it, and
-             ;; skipping it keeps the common path off git entirely.
-             :git-baseline (when (not= loop-nm loop-name) (gitdiff/baseline root))
-             ;; A per-run eval session, so defs the agent makes with `eval`
-             ;; persist across their turns (define, then use) — REPL-first
-             ;; development against the live image.
-             :repl-session (when-not js1 (repl/new-session))
-             :max-turns max-turns
-             ;; JS1 profile flags — set only here, read by phase-refusal.
-             ;; The binding is installed as a refreshable holder: a failed
-             ;; recorded eval rolls the instance back and supersedes the
-             ;; binding, and the eval tool resets the holder to the
-             ;; registry's current one (tools.base/update-js1-binding!).
-             :js1/profile (:profile js1)
-             :js1/binding (when-let [b (:binding js1)] (atom b))
-             :js1/provider (:provider js1)}]
-    (runs/open-branch! conn run-id {:branch-id "B1"})
-    ;; Which loop drove this run, durably: an agent reading a surprising run
-    ;; back needs to know which version of itself produced it.
-    (journal/note! conn run-id :loop-workflow
-                   {:data {:name loop-nm :version version}})
-    (try
-      (let [data (myc/run-compiled compiled ctx
-                                   (cond-> {:branch branch :turn 1}
-                                     ;; A team workflow fans out over these — one
-                                     ;; worker per sub-task. The single-branch
-                                     ;; loops ignore the key.
-                                     (seq (get-in config [:run :subtasks]))
-                                     (assoc :subtasks (get-in config [:run :subtasks]))))]
-        (when (myc/error? data)
-          ;; A structural failure mid-run is a harness bug, not a branch
-          ;; outcome; surface it rather than shipping a half-closed run.
-          (throw (ex-info "loop workflow failed structurally"
-                          {:run-id run-id :error (myc/workflow-error data)})))
-        (-> (select-keys data [:status :answer :branch :residual])
-            (assoc :run-id run-id)))
-      (finally
-        ;; The run's eval namespace does not outlive the run
-        ;; (code-review-2026-08 #6): one namespace per run, never removed, was
-        ;; unbounded growth on a serve process.
-        (repl/close-session (:repl-session ctx))))))
+  (if (get-in config [:run :js1/profile])
+    (run-js1! opts)
+    (let [max-turns (or max-turns (get-in config [:run :max-turns]) 40)
+          loop-nm (active-loop-name config)
+          {:keys [version compiled definition]} (load-loop! conn loop-nm)
+          run-id (runs/start-run! conn {:problem problem
+                                        :provider (:provider llm-config)
+                                        :model (:model llm-config)
+                                        :max-turns max-turns
+                                        :beam-width 1
+                                        :prompt-digest (branch-loop/prompt-digest)})
+          branch (state/new-branch {:id "B1" :problem problem
+                                    :messages (branch-loop/initial-messages
+                                               problem (workflow-prompt definition))})
+          ;; The project root the file tools are confined to, and the shell tool
+          ;; runs in. Configurable so a run can target another checkout.
+          root (or (get-in config [:run :root]) (System/getProperty "user.dir"))
+          ctx {:conn conn :run-id run-id :config config
+               :llm-adapter llm-adapter :llm-config llm-config
+               :root root
+               ;; A run-start git baseline so a finalization critic can review
+               ;; exactly what this run changed. Only captured for a non-default
+               ;; manifest — the factory loop has no critic to read it, and
+               ;; skipping it keeps the common path off git entirely.
+               :git-baseline (when (not= loop-nm loop-name) (gitdiff/baseline root))
+               ;; A per-run eval session, so defs the agent makes with `eval`
+               ;; persist across their turns (define, then use) — REPL-first
+               ;; development against the live image.  A JS1 run allocates no
+               ;; live-eval namespace; it never reaches this branch.
+               :repl-session (repl/new-session)
+               :max-turns max-turns}]
+      (runs/open-branch! conn run-id {:branch-id "B1"})
+      ;; Which loop drove this run, durably: an agent reading a surprising run
+      ;; back needs to know which version of itself produced it.
+      (journal/note! conn run-id :loop-workflow
+                     {:data {:name loop-nm :version version}})
+      (try
+        (let [data (myc/run-compiled compiled ctx
+                                     (cond-> {:branch branch :turn 1}
+                                       ;; A team workflow fans out over these — one
+                                       ;; worker per sub-task. The single-branch
+                                       ;; loops ignore the key.
+                                       (seq (get-in config [:run :subtasks]))
+                                       (assoc :subtasks (get-in config [:run :subtasks]))))]
+          (when (myc/error? data)
+            ;; A structural failure mid-run is a harness bug, not a branch
+            ;; outcome; surface it rather than shipping a half-closed run.
+            (throw (ex-info "loop workflow failed structurally"
+                            {:run-id run-id :error (myc/workflow-error data)})))
+          (-> (select-keys data [:status :answer :branch :residual])
+              (assoc :run-id run-id)))
+        (finally
+          ;; The run's eval namespace does not outlive the run
+          ;; (code-review-2026-08 #6): one namespace per run, never removed, was
+          ;; unbounded growth on a serve process.
+          (repl/close-session (:repl-session ctx)))))))

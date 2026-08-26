@@ -13,9 +13,11 @@
             [samizdat.agent.tools.ship]
             [samizdat.agent.verify :as verify]
             [samizdat.engine.proc :as proc]
+            [samizdat.llm.client :as llm]
             [samizdat.store.db :as db]
             [samizdat.store.journal :as journal]
-            [samizdat.store.runs :as runs]))
+            [samizdat.store.runs :as runs]
+            [samizdat.workflow :as workflow]))
 
 (defmacro with-db [[binding] & body]
   `(let [~binding (db/open! ":memory:")]
@@ -277,6 +279,67 @@
             "confirmed quiescence permits one fresh authoritative turn")
         (is (= 2 @calls))
         (is (= 1 @max-active) "the fresh turn never overlaps the cancelled one")))))
+
+(deftest workflow-js1-entry-mints-a-fresh-terminal-lease-per-turn
+  ;; The workflow JS1 entry IS the beam scheduler (workflow/run! dispatches
+  ;; to it at forced width 1): authority is minted per scheduled turn —
+  ;; never one ambient run lease — every minted lease is terminal by the
+  ;; time the run returns, and a recorded effect still launches under its
+  ;; turn's permit.  Deterministic: the binding mint and the sandbox
+  ;; resolution seam are redefined; no SCI, no provider.
+  (with-db [c]
+    (let [minted (atom [])
+          permits (atom 0)
+          original-mint base/mint-turn-lease
+          responses (atom [{:content "```tool-call\n{\"name\": \"eval\", \"args\": {\"code\": \"(+ 1 2)\"}}\n```"
+                            :finish-reason "stop"}
+                           {:content "```tool-call\n{\"name\": \"done\", \"args\": {\"answer\": \"the problem is solved directly\"}}\n```"
+                            :finish-reason "stop"}])
+          scripted (fn [& _]
+                     (let [[r & more] @responses]
+                       (when (seq more) (reset! responses more))
+                       r))
+          fake-bind (fn [_conn run-id _config _root]
+                      {:binding {:binding/id (str "bind:main:" run-id)
+                                 :instance/id "inst:main"
+                                 :work-id (str run-id)
+                                 :spec {:preset :project/develop}}
+                       :provider nil :profile "single-player"})
+          fake-evaluate! (fn [_conn _binding _code opts]
+                           ((:effect-permit! opts) (fn [] (swap! permits inc)))
+                           {:value 3})]
+      (with-redefs-fn {#'base/mint-turn-lease
+                       (fn [run-id branch-id turn]
+                         (let [l (original-mint run-id branch-id turn)]
+                           (swap! minted conj l)
+                           l))
+                       #'workflow/js1-binding fake-bind
+                       #'repl-tools/sandbox-var
+                       (fn [var-name]
+                         (when (= var-name "evaluate-recorded!")
+                           fake-evaluate!))}
+        (fn []
+          (with-redefs [llm/chat scripted]
+            (let [r (workflow/run! {:conn c
+                                    :config {:run {:js1/profile "single-player"}}
+                                    :llm-adapter :a :llm-config {:max-tokens 16384}
+                                    :problem "solve the problem" :max-turns 5})]
+              (is (= :completed (:status r)))
+              (is (= 2 (count @minted))
+                  "one lease per scheduled turn, no ambient run authority")
+              (is (= [[(:run-id r) "B1" 1] [(:run-id r) "B1" 2]]
+                     (mapv (fn [l] [(:run-id l) (:branch-id l) (:turn l)])
+                           @minted))
+                  "each lease names the exact run/branch/turn coordinate")
+              (is (= 2 (count (distinct (map :id @minted))))
+                  "leases are distinct authorities")
+              (is (every? #(= :revoked (base/turn-lease-status %)) @minted)
+                  "every minted lease is terminal when the run returns")
+              (is (= [:turn-completed :turn-completed]
+                     (mapv (fn [l] (:reason @(:state l))) @minted))
+                  "both turns ended normally — revocation at worker quiescence, none by deadline")
+              (is (= 1 @permits)
+                  "the recorded eval launched under its turn's effect permit"))))))))
 
 (deftest an-unquiesced-delayed-result-fails-the-run-with-no-next-authority
   (with-db [c]

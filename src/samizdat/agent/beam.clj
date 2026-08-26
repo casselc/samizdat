@@ -923,7 +923,8 @@
         ;; model data is never a source for this value.
         root (or (get-in config [:run :root]) (System/getProperty "user.dir"))
         ;; JS1 propagation: a caller (beam/run! wired from the control
-        ;; surface) or the run config may ask for a JS1 sandboxed run.
+        ;; surface, or workflow/run!'s JS1 dispatch) or the run config may
+        ;; ask for a JS1 sandboxed run.
         js1-binding (:js1/binding opts)
         js1-profile (or (:js1/profile opts)
                         (get-in config [:run :js1/profile]))
@@ -951,6 +952,17 @@
         ;; marked confirmed that the harness has since learned was not.
         _ (when seed-run (artifacts/seed-from-run! conn run-id seed-run
                                                    {:quarantine quarantine}))
+        ;; The JS1 sandbox binding: wired in by the caller, or minted here
+        ;; from the run config.  Minting needs the run row — the work-id IS
+        ;; the run-id, and :js1-binding-created is journaled against it for
+        ;; resume's reconstruction — so it runs after start-run!; a run that
+        ;; cannot bind throws HERE, before on-start announces the run and
+        ;; before any branch or provider call, and workflow/js1-binding fails
+        ;; closed rather than selecting the live REPL.  For a non-JS1 config
+        ;; it is a no-op returning nil, so the non-JS1 ctx is unchanged.
+        js1 (or (when-let [b js1-binding]
+                  {:binding b :provider (:js1/provider opts)})
+                (workflow/js1-binding conn run-id config root))
         ;; Every session ever opened, including forked children, so the
         ;; supervisor can tear them all down regardless of how the run ended.
         ;; The stop path must not depend on the agent's state — the RAX
@@ -993,8 +1005,8 @@
              ;; The binding installs as a refreshable holder so a rollback
              ;; can be absorbed between turns (tools.base/js1-binding).
              :js1/profile js1-profile
-             :js1/binding (when-let [b js1-binding] (atom b))
-             :js1/provider (:js1/provider opts)}]
+             :js1/binding (when-let [b (:binding js1)] (atom b))
+             :js1/provider (or (:provider js1) (:js1/provider opts))}]
     ;; Before the branches, not after. api.control/start-run! blocks until this
     ;; fires, so this line is how long POST /v1/runs takes — and open-branch!
     ;; spawns a Prolog session per branch, so putting it after made the endpoint

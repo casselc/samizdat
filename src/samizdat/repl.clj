@@ -50,9 +50,12 @@
   "Drop a session's namespace. Each run gets a fresh namespace so defs
   accumulate across its turns; without this a long-lived serve process kept
   one namespace (plus everything the agent defined in it) per run, forever
-  (code-review-2026-08 #6). Idempotent on an unknown or already-removed name."
+  (code-review-2026-08 #6). Idempotent on an unknown or already-removed name,
+  and a no-op on nil: a JS1 run allocates no live-eval session (its eval
+  target is the sandbox binding), so run teardown must tolerate the
+  session's absence rather than throw over the run's real outcome."
   [session]
-  (when (find-ns session)
+  (when (and (some? session) (find-ns session))
     (remove-ns session))
   nil)
 
