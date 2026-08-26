@@ -2,9 +2,11 @@
 
 ## Scope
 
-JS1 is **PASS** at the coordinates below. The self-hosting canary is **not
-run** and no canary PASS is claimed. This handoff authorizes an operator to
-stage and, only under separately approved operational control, run the canary.
+JS1 is **PASS** at the coordinates below. The first self-hosting canary was
+executed on 2026-08-26 and recorded **FAIL / HARNESS** in
+[`../artifacts/self-hosting-canary.edn`](../artifacts/self-hosting-canary.edn).
+No canary PASS is claimed. This handoff is historical staging material, not
+authorization to retry without a separate decision.
 
 ## Required Coordinates
 

@@ -1,0 +1,46 @@
+;; First actual self-hosting canary execution. This is a failure record, not a
+;; JS1 runtime-coordinate change and not a retry authorization.
+{:self-hosting-canary/decision :fail
+ :self-hosting-canary/failure-class :harness
+ :self-hosting-canary/record-date "2026-08-26"
+ :coordinates
+ {:samizdat-runtime "897cf534ffd12939c17048477c83fb4be4560672"
+  :samizdat-documentation "dc00dfe80ae58c85a76a4b6286947809f99d18d7"
+  :jolt "4af2362176160f2ed0e366689d7232b1a38adfec"
+  :sci "32d62a5136ad3dc148588752f5bcc4cc30b14752"
+  :sci-version "0.13.53"}
+ :preconditions
+ {:bin-js1-check :pass
+  :js1-smoke "32 tests / 286 assertions / 0 failures / 0 errors"
+  :full-suite "1100 tests / 4071 assertions / 0 failures / 0 errors"}
+ :controller
+ {:path "/home/chuck/opencode/src/samizdat-controller"
+  :revision "897cf534ffd12939c17048477c83fb4be4560672"
+  :unchanged true}
+ :target
+ {:path "/home/chuck/opencode/src/samizdat-canary-target"
+  :base "897cf534ffd12939c17048477c83fb4be4560672"
+  :changed false}
+ :provider {:kind :local
+            :endpoint "http://localhost:13305/v1"
+            :model "Qwen3.6-27B-MTP-GGUF"}
+ :task :js1-evaluator-history-diagnostic
+ :run
+ {:id "277fa7e0-4f2c-4d35-9d20-3c20a1fc78f2"
+  :database "/home/chuck/.local/share/samizdat/self-hosting-canary/run-897cf53-live.sqlite3"
+  :max-turns 1000
+  :terminal-status :interrupted
+  :turns-observed 47
+  :eval-statuses {:completed 19 :failed 7}
+  :semantic-operation-counts {}
+  :unsettled-intents []
+  :done-green false}
+ :failure
+ {:summary "The existing production loop did not make the closed JS1 tool surface practically usable for this implementation task."
+  :evidence ["The model emitted refused/non-JS1 tool names including grep, thesis, write_file, and give_up."
+             "No project/read/list/search/stat/edit intent was recorded."
+             "The disposable target remained unchanged; no focused test or verification GREEN occurred."
+             "The controller process was stopped after the bounded operator process limit; the retained run was reconciled as interrupted."]}
+ :nonclaims ["SELF-HOSTING CANARY: PASS is not claimed."
+             "No target patch was merged or retained as product code."
+             "No runtime, authority, prompt, budget, provider, or verifier change was made during the canary."]}
