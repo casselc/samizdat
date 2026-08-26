@@ -38,6 +38,7 @@
    "architect"
    "branch-cap"
    "branch-out"
+   "cell-tool"
    "critic"
    "critic-system"
    "crossover"

@@ -1,10 +1,12 @@
 (ns samizdat.lsp-test
   (:require [clojure.java.io :as io]
+            [clojure.string :as str]
             [clojure.test :refer [deftest is testing use-fixtures]]
             [samizdat.agent.tools.base :as base]
              [samizdat.agent.tools.lsp]
              [clojure.data.json :as json]
-             [samizdat.lsp.client :as client]))
+             [samizdat.lsp.client :as client]
+             [samizdat.security.secrets :as secrets]))
 
 ;; clojure-lsp is not installed on CI; every lsp-touching assert is gated so the
 ;; suite is trivially green there and meaningful on a machine that has it.
@@ -173,3 +175,31 @@
     (client/shutdown-all!)
     (is (empty? @(deref (var client/clients)))
         "every entry is gone, and the junk fake clients did not throw")))
+
+(deftest the-lsp-server-spawns-with-a-scrubbed-environment
+  ;; Every other subprocess seam (shell, verify, gitdiff) passes
+  ;; scrubbed-process-env; clojure-lsp inherited the whole parent environment,
+  ;; and it re-spawns children for classpath resolution that inherit whatever
+  ;; it got (karamazov-blt.27). RFC-003's flow graph gains the lsp node with
+  ;; this — a check cannot fail against a graph that omits its subject.
+  (let [{:keys [cmd opts]} (client/spawn-spec)]
+    (is (= ["clojure-lsp" "listen"] cmd))
+    (is (contains? opts :env) "the child environment is explicit, not inherited")
+    (is (= (secrets/scrubbed-process-env) (:env opts))
+        "and it is the scrubbed one — same seam as the shell tool")))
+
+(deftest the-lsp-tool-refuses-a-path-that-escapes-the-root
+  ;; read_file refuses ../..; the lsp tool resolved with a bare io/file, then
+  ;; slurped the result and handed the text to clojure-lsp (karamazov-blt.28).
+  (let [root (io/file "/tmp" "samizdat-lsp-escape-root")]
+    (.mkdirs root)
+    (with-redefs [client/available? (constantly true)]
+      (doseq [path ["../outside.clj" "/etc/hosts"]]
+        (let [r (base/run-tool {:tool-name "lsp"
+                                :branch {:id "B1"}
+                                :root (str root)
+                                :args {:op "diagnostics" :file path}})]
+          (is (= :mechanics (:category r))
+              (str path " is refused before anything is read"))
+          (is (str/includes? (str (:result r)) "root")
+              "the refusal names the boundary"))))))

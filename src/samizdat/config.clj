@@ -24,7 +24,8 @@
   In-process GGUF inference is not carried over — point HARNESS_BASE_URL at any
   OpenAI-compatible endpoint (including llama-server) instead."
   (:require [clojure.edn :as edn]
-            [clojure.string :as str]))
+            [clojure.string :as str]
+            [clojure.walk :as walk]))
 
 (defn deep-merge
   "Merge maps left to right, recursing when BOTH values are maps; any other
@@ -244,8 +245,19 @@
      overrides)))
 
 (defn redacted
-  "The config with the API key masked, for logging and for /health."
+  "The config with every :api-key masked, WHEREVER it sits, for logging and
+  for /health.
+
+  A walk rather than a path: [:llm :api-key] is not the only place a key
+  lives — a role spec under :run :role-models may carry its own :api-key
+  override (role-ctx merges it into the provider config), and the path
+  version served exactly that one cleartext (karamazov-blt.29). Masking by
+  key name means the next nested key is masked without anyone remembering
+  this function exists."
   [config]
-  (cond-> config
-    (get-in config [:llm :api-key])
-    (assoc-in [:llm :api-key] "***")))
+  (walk/postwalk
+   (fn [x]
+     (if (and (map? x) (some? (:api-key x)))
+       (assoc x :api-key "***")
+       x))
+   config))

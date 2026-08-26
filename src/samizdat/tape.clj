@@ -171,14 +171,22 @@
   Extended one message earlier when the k-th-from-last assistant reply is
   immediately preceded by the user turn that prompted it, so an exchange is
   never split down the middle. `nil` when there are k or fewer assistant turns
-  — nothing has aged out yet."
+  — nothing has aged out yet.
+
+  `k` of zero (or less) is an EMPTY window: keep nothing verbatim, so the
+  window begins one past the end of the tape and everything before it is due.
+  It is a coherent setting for a runtime-editable budget, and the previous
+  `nth` one past the assistant indices threw out of infer/render on every
+  model call until the edit was reverted (karamazov-blt.32)."
   [messages k]
   (let [a-idxs (assistant-indices messages)]
     (when (> (count a-idxs) k)
-      (let [a (nth a-idxs (- (count a-idxs) k))]
-        (if (and (pos? a) (= "user" (:role (nth messages (dec a)))))
-          (dec a)
-          a)))))
+      (if-not (pos? k)
+        (count messages)
+        (let [a (nth a-idxs (- (count a-idxs) k))]
+          (if (and (pos? a) (= "user" (:role (nth messages (dec a)))))
+            (dec a)
+            a))))))
 
 (def default-roles
   "Which roles compaction may rewrite, by default.

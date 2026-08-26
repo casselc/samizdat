@@ -3,10 +3,11 @@
 
 (ns samizdat.agent.tools.lsp
   "LSP tool: code navigation via clojure-lsp. Read-only inspection."
-  (:require [clojure.java.io :as io]
-            [clojure.string :as str]
+  (:require [clojure.string :as str]
+            [samizdat.agent.files :as files]
             [samizdat.agent.tools.base :as base]
-            [samizdat.lsp.client :as client]))
+            [samizdat.lsp.client :as client]
+            [samizdat.prompt :as prompt]))
 
 (def ^:private usage
   (str "lsp ops: definition|references|hover need file (project-relative), line, col (0-based); "
@@ -26,8 +27,13 @@
   (str (get-in d [:range :start :line]) ":" (get-in d [:range :start :character])
        " " (:severity d) ": " (:message d)))
 
-(defn- resolve-file [ctx]
-  (str (io/file (:root ctx) (base/arg ctx :file))))
+(defn- resolve-file
+  "The confined path, or nil when it escapes the project root. The bare
+  io/file version let `../` and absolute paths escape the boundary read_file
+  enforces, and ensure-open! then slurped whatever they named
+  (karamazov-blt.28)."
+  [ctx]
+  (files/resolve-under-root (:root ctx) (str (base/arg ctx :file))))
 
 (defn- parse-int-or-nil [s]
   (try (Integer/parseInt (str/trim (str s))) (catch Exception _ nil)))
@@ -55,22 +61,36 @@
     (let [op (some-> (base/arg ctx :op) str str/trim str/lower-case not-empty)]
       (if-not (#{"definition" "references" "hover" "diagnostics"} op)
         (base/malformed branch (str "lsp needs a valid :op. " usage))
-        (let [miss-file (base/missing ctx :file)]
-          (if miss-file
+        (let [miss-file (base/missing ctx :file)
+              file (when-not miss-file (resolve-file ctx))]
+          (cond
+            miss-file
             (base/malformed branch miss-file)
-            (let [file (resolve-file ctx)]
-              (if (= op "diagnostics")
+
+            (nil? file)
+            ;; The same sentence read_file's refusal renders, from the same
+            ;; template — one surface for one message class, and editable
+            ;; without a rebuild (the no-new-model-facing-prose ratchet).
+            (base/malformed branch
+                            (prompt/render "file-tool"
+                                           {:outside-root true
+                                            :path (str (base/arg ctx :file))
+                                            :verb "inspected"}))
+
+            (= op "diagnostics")
+            (let [c (client/client-for root)]
+              (if (nil? c)
+                (base/fail branch "could not start clojure-lsp for root")
+                (let [ds (client/diagnostics c file)]
+                  (base/ok branch (if (seq ds) (str/join "\n" (map render-diag ds)) "no problems")))))
+
+            :else
+            (let [err-pos (want-pos ctx)]
+              (if err-pos
+                (base/malformed branch err-pos)
                 (let [c (client/client-for root)]
                   (if (nil? c)
                     (base/fail branch "could not start clojure-lsp for root")
-                    (let [ds (client/diagnostics c file)]
-                      (base/ok branch (if (seq ds) (str/join "\n" (map render-diag ds)) "no problems")))))
-                (let [err-pos (want-pos ctx)]
-                  (if err-pos
-                    (base/malformed branch err-pos)
-                    (let [c (client/client-for root)]
-                      (if (nil? c)
-                        (base/fail branch "could not start clojure-lsp for root")
-                        (base/ok branch (lookup-op op c file
-                                                   (parse-int-or-nil (base/arg ctx :line))
-                                                   (parse-int-or-nil (base/arg ctx :col))))))))))))))))
+                    (base/ok branch (lookup-op op c file
+                                               (parse-int-or-nil (base/arg ctx :line))
+                                               (parse-int-or-nil (base/arg ctx :col))))))))))))))

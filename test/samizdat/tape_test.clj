@@ -161,3 +161,19 @@
     (is (= 3 (count (filter :compacted? out))))
     (is (empty? (tape/due-indices out 2))
         "and nothing is left due, so a second pass is a no-op")))
+
+(deftest a-zero-window-ages-out-the-whole-tape
+  ;; :context-budget :keep-pairs is runtime-editable and 0 is a coherent
+  ;; setting — keep nothing verbatim, compact everything. window-index used to
+  ;; nth one past the end of the assistant indices for it, throwing out of
+  ;; infer/render on every model call of every run until the edit was
+  ;; reverted (karamazov-blt.32).
+  (let [t [(tape/message "system" "s") (tape/message "user" "p")
+           (tape/message "user" "q1") (tape/message "assistant" "a1")
+           (tape/message "user" "q2") (tape/message "assistant" "a2")]]
+    (is (= (count t) (tape/window-index t 0))
+        "an empty verbatim window begins past the end of the tape")
+    (is (= [3 5] (tape/due-indices t 0))
+        "every assistant message has aged out")
+    (is (nil? (tape/window-index [] 0))
+        "no assistant turns still means nothing has aged out")))
