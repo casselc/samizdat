@@ -123,10 +123,35 @@
 
 ;; --- settling predictions ---------------------------------------------------
 
-(defn- progressed? [before after]
+(defn- progressed?
+  "Whether the branch advanced over this turn.
+
+  THE GATE MUST SETTLE ON WHAT IT ARMED ON. `progress-stalled` fires when
+  `:turns-since-progress` crosses a threshold, and that counter is reset by
+  any tool call reporting `:progress? true` — which on a coding run means
+  `write_file` and `edit_file`, because changing the tree is real work. It
+  used to settle on artifacts alone, and the only artifact a coding run
+  produces is a green test run through the ship gate. So the gate armed on one
+  definition of progress and was graded on a stricter one.
+
+  Measured across four live runs against a real project: `progress-stalled`
+  fired eight times and settled `unmet` eight times, and could not have
+  settled anything else — zero artifacts were produced in any of them. Turn 30
+  of one run fired the gate and turns 31 and 32 wrote files; the ledger
+  recorded the branch as ignoring it. That false zero is not cosmetic: it
+  feeds session findings, which feed the supervisor, which is the role that
+  retunes the loop. A GA mechanic reading a fabricated failure signal selects
+  against noise.
+
+  Artifacts still count — a green test is the strongest form of this — but a
+  reset counter counts too, and it is the one a coding branch can actually
+  reach."
+  [before after]
   (or (> (count (state/confirmed-artifacts after))
          (count (state/confirmed-artifacts before)))
-      (> (count (:artifacts after)) (count (:artifacts before)))))
+      (> (count (:artifacts after)) (count (:artifacts before)))
+      (< (or (:turns-since-progress after) 0)
+         (or (:turns-since-progress before) 0))))
 
 ;; The tool names each gate's settle reads as compliance (provenance R3-6). Tier
 ;; 1a: the table lives in gates.edn as :tool-vocab :settle-called — data,

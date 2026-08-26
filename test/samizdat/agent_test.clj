@@ -2183,3 +2183,48 @@
       (is (= :unmet (arbiter/settle p {:current-turn 1 :tools-called []
                                        :branch-before {} :branch-after {}}))
           "a zero grace restores the old two-outcome behaviour exactly"))))
+
+(deftest progress-stalled-settles-on-what-it-armed-on
+  ;; The gate fires when :turns-since-progress crosses a threshold, and that
+  ;; counter is reset by any tool reporting :progress? true — write_file and
+  ;; edit_file among them. It used to settle on ARTIFACTS, and the only
+  ;; artifact a coding run produces is a green test through the ship gate. So
+  ;; it armed on one definition of progress and was graded on a stricter one.
+  ;;
+  ;; Measured across four live runs against a real project: eight firings,
+  ;; eight `unmet`, and zero artifacts produced in any of them — the outcome
+  ;; could not have been anything else. One run fired the gate at turn 30 and
+  ;; wrote files at 31 and 32; the ledger recorded the branch as ignoring it.
+  ;; That false zero feeds session findings, which feed the supervisor, which
+  ;; is the role that retunes the loop on the evidence.
+  (let [firing {:gate :progress-stalled :turn 1 :window 3}
+        settle (fn [before after]
+                 (arbiter/settle firing {:current-turn 2 :tools-called ["write_file"]
+                                         :branch-before before :branch-after after}))]
+    (testing "a reset progress counter settles met, with no artifact in sight"
+      (is (= :met (settle (branch-with :turns-since-progress 9 :any-progress? true)
+                          (branch-with :turns-since-progress 0 :any-progress? true)))))
+    (testing "a still-climbing counter does not"
+      (is (nil? (settle (branch-with :turns-since-progress 9)
+                        (branch-with :turns-since-progress 10)))))
+    (testing "an artifact still settles it — a green test is the strongest form"
+      (is (= :met (settle (branch-with :turns-since-progress 9)
+                          (branch-with :turns-since-progress 10
+                                       :artifacts [{:claim "tests pass"
+                                                    :claim-status :confirmed :turn 2}])))))
+    (testing "and it still expires when the branch really does nothing"
+      (is (= :unmet (arbiter/settle firing
+                                    {:current-turn 20 :tools-called ["read_file"]
+                                     :branch-before (branch-with :turns-since-progress 9)
+                                     :branch-after (branch-with :turns-since-progress 28)}))))))
+
+(deftest every-nudge-that-fires-on-a-cadence-is-bounded
+  ;; A gate whose :when is a condition stops firing when the condition clears.
+  ;; One that fires on a CADENCE has no such brake, so an unbudgeted cadence
+  ;; gate nags for the whole run: reflection fired 11 times across four live
+  ;; runs with zero compliance, each firing a tax on the branch's context paid
+  ;; to ask again for something already declined ten times.
+  (doseq [g (gates/gates)
+          :when (str/includes? (str (:when g)) "cadence")]
+    (is (some? (:budget g))
+        (str (:gate g) " fires on a cadence and has no :budget — nothing bounds it"))))

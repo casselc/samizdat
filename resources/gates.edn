@@ -87,6 +87,26 @@
  {:value 3 :kind :re-fire-guard :capability-tunable? true
   :doc "How often the studying nudge may re-fire on one branch."}
 
+ :max-reflection-nudges
+ {:value 3 :kind :re-fire-guard :capability-tunable? false
+  :doc "How often the reflection nudge may re-fire on one branch.
+
+        It had no budget at all — it fires on a cadence rather than on a
+        condition, so nothing bounded it. Measured across four live runs: 11
+        firings, zero compliance. An unbounded nudge that nothing ever acts on
+        is a per-firing tax on the branch's context, paid to ask again for
+        something already declined ten times.
+
+        Not capability-tunable, for the same reason the cadence is not: the
+        tier under observation should not loosen the terms on which it is
+        invited to reshape the machinery observing it.
+
+        Three rather than one because the ask is legitimate — a run that never
+        reconsiders its own machinery keeps whatever friction it started with
+        — and the branch may only be in a position to act on it later in a
+        run. If the met-rate stays at zero with a budget, the ask itself is
+        aimed at the wrong role, and that is the next thing to change."}
+
  :max-stuck-hints
  {:value 3 :kind :re-fire-guard :capability-tunable? true
   :doc "How often the stuck hint may re-fire on one branch."}
@@ -1131,7 +1151,7 @@
  ;; and {{max-turns}} interpolate at fire time.
  [{:gate :reflection
    :priority 13
-   :budget nil
+   :budget :max-reflection-nudges
    :doc "A quiet-turn nudge to reflect on the loop itself. Lowest priority, so
          it is passed over whenever any real steer holds and surfaces only on a
          turn where nothing else does. The loop is a mycelium workflow the
@@ -1330,7 +1350,12 @@
            (boolean (some #(and (>= used %) (not (contains? notified %)))
                           (threshold :turn-budget-notices))))
    :message-suffix "**Turn budget**: you have used {{turn-count}} of {{max-turns}} turns. Land what you can verify rather than opening a new line of attack."
-   :prediction "the branch converges rather than starting something new"
+   ;; Says what it MEASURES. The rule reads :settle-called :turn-budget,
+   ;; which is #{"done" "give_up"} — terminating, not converging. A branch
+   ;; that edits and writes its way toward finishing was settling `unmet`
+   ;; against a prediction it had no way to satisfy short of stopping, and
+   ;; the met-rate is the only evidence any of this steering works.
+   :prediction "the branch ships or gives up"
    :window 3}
 
   ;; Tier 3b tranche 2: the six message-builder gates. Their :message-form is
