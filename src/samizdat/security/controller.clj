@@ -74,8 +74,10 @@
     this path;
   - the policy ceiling from the minting config: :over-ceiling past it;
   - the run itself: unknown (:unknown-run), terminal (:terminal-run — an
-    aborted run stays aborted, a completed run shipped, same rule as
-    resumable?).
+    aborted run stays aborted, a completed run shipped, and a run failed
+    closed over an unquiesced turn worker stays failed: the retained
+    terminal_reason on its row is the refusal, the same rule resumable?
+    keeps).
 
   What lands is ONE durable transaction (store.runs/extend-budget!): cap
   raised, exhausted branches reopened, and an append-only retained audit
@@ -274,6 +276,17 @@
                       (str "run " run-id " is " (:status run)
                            "; a terminal run's budget is part of its record"))
 
+              ;; Failed closed over an unquiesced turn worker: the retained
+              ;; terminal_reason (v13) is the refusal resume already keeps,
+              ;; and a raise here would reopen branches — fresh authority —
+              ;; under a worker nobody can prove has ended. An ordinary
+              ;; failed row carries NULL and extends exactly as it resumes.
+              (and (= "failed" (:status run)) (:terminal_reason run))
+              (refuse :terminal-run
+                      (str "run " run-id " failed closed ("
+                           (:terminal_reason run)
+                           "); a terminal run's budget is part of its record"))
+
               (<= new-max (:max_turns run))
               (refuse :not-monotonic
                       (str "an extension must RAISE the cap; run " run-id
@@ -290,4 +303,4 @@
                                        {:run-id run-id :request-id request-id
                                         :new-max new-max :reason reason
                                         :principal principal}
-                                       (:max_turns run)))))))))
+                                        (:max_turns run)))))))))

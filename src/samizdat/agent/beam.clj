@@ -446,7 +446,7 @@
       900000))
 
 (def default-turn-cancel-grace-ms
-  "How long the controller waits after revocation + interruption for the turn
+  "How long the beam waits after revocation + interruption for the turn
   worker to prove it has exited.  A result is never accepted after revocation.
   If the worker does not quiesce inside this bound, the run fails closed rather
   than minting overlapping authority for another turn."
@@ -746,9 +746,11 @@
   it. This is UCLA's persisted run-start anchor: the anchor is the turns
   table, and the budget is the runs row.
 
-  Returns {:status :completed|:aborted|:exhausted :run-id :branches ...}.
-  Teardown lives here rather than in the callers, so every engine session is
-  disposed no matter how the run ended."
+  Returns {:status :completed|:aborted|:exhausted|:cancellation-fault
+  :run-id :branches ...} — the last from cancellation-fault-result!, the
+  whole-run fail-closed over an unquiesced turn worker. Teardown lives here
+  rather than in the callers, so every engine session is disposed no matter
+  how the run ended."
   [{:keys [conn run-id max-turns abort sessions repl-session] :as ctx}
    branches start-turn]
   (let [live-branches (atom branches)]

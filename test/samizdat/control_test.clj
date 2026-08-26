@@ -353,6 +353,39 @@
           (is (= :bad-request (:code bad)))
           (is (nothing-changed? c fresh2)))))))
 
+(deftest extension-refuses-a-cancellation-faulted-run
+  ;; A run failed closed over an unquiesced turn worker is terminal for
+  ;; budget exactly as it is terminal for resume: the retained
+  ;; terminal_reason (v13) is the refusal, and a raise must not reopen its
+  ;; exhausted branches or write an audit row over a worker nobody can
+  ;; prove has ended. An ordinary failed run — the process died, the row
+  ;; carries no terminal_reason — extends exactly as it resumes.
+  (with-db [c]
+    (let [rid (runs/start-run! c {:problem "p" :max-turns 5 :beam-width 1})
+          a (authority-for)]
+      (runs/open-branch! c rid {:branch-id "B1"})
+      (runs/close-branch! c rid "B1" :exhausted "turn cap")
+      (runs/finish-run-cancellation-fault! c rid)
+      (let [r (controller/extend-budget!
+               a c {:run-id rid :request-id "req-g1" :new-max 20
+                    :reason "one lemma away"})]
+        (is (false? (:ok r)))
+        (is (= :terminal-run (:code r)))
+        (is (nothing-changed? c rid)
+            "no cap raise, no branch reopened, no audit row"))
+      (testing "an ordinary failed run still extends"
+        (let [ordinary (runs/start-run! c {:problem "q" :max-turns 5
+                                           :beam-width 1})]
+          (runs/open-branch! c ordinary {:branch-id "B1"})
+          (runs/close-branch! c ordinary "B1" :exhausted "turn cap")
+          (runs/finish-run! c ordinary :failed nil)
+          (let [r (controller/extend-budget!
+                   a c {:run-id ordinary :request-id "req-g2" :new-max 20
+                        :reason "the process died; the budget question is open"})]
+            (is (true? (:ok r)))
+            (is (= ["B1"] (:reopened r)))
+            (is (= 20 (:max_turns (runs/get-run c ordinary))))))))))
+
 (deftest the-token-never-reaches-any-record
   ;; The authority is configured, used, and audited; the token itself
   ;; appears in no audit row, no journal event, and no result map. The

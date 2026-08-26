@@ -260,8 +260,12 @@
   - old-max: the UPDATE only lands while the row still reads the cap the
     caller saw, so a concurrent raise loses here (as :stale) rather than
     double-applying;
-  - status NOT IN ('completed','aborted'): terminal rows never move again
-    (review2 #4's rule), extension included.
+  - status NOT IN ('completed','aborted') AND terminal_reason IS NULL:
+    terminal rows never move again (review2 #4's rule), extension
+    included — and terminal_reason is the retained terminal refusal (v13:
+    failed closed over an unquiesced turn worker), so the backstop refuses
+    exactly the rows resume refuses, while an ordinary failed row — NULL
+    reason, the process simply died — still extends.
 
   The audit row is inserted FIRST, so a request-id collision from a racing
   writer rolls the whole transaction back and surfaces as a UNIQUE error
@@ -281,7 +285,8 @@
     (db/execute! conn
                  ["UPDATE runs SET max_turns = ?
                      WHERE id = ? AND max_turns = ?
-                       AND status NOT IN ('completed','aborted')"
+                       AND status NOT IN ('completed','aborted')
+                       AND terminal_reason IS NULL"
                   new-max run-id old-max])
     (when (zero? (db/change-count conn))
       (throw (ex-info (str "budget extension of " run-id " lost its guard: "

@@ -1039,6 +1039,46 @@
       (is (= 5 (:max_turns (runs/get-run c rid))))
       (is (empty? (runs/extension-audit-for-run c rid))))))
 
+(deftest a-cancellation-faulted-run-cannot-be-extended-at-the-store-either
+  ;; The controller refuses a run failed closed over an unquiesced turn
+  ;; worker; the store backstop is the same retained marker resume reads
+  ;; (terminal_reason, v13), so the refusal holds even for a caller that
+  ;; never asked the controller. An ordinary failed run carries NULL and
+  ;; still extends, exactly as it resumes.
+  (with-db [c]
+    (let [rid (runs/start-run! c {:problem "p" :max-turns 5 :beam-width 1})]
+      (runs/open-branch! c rid {:branch-id "B1"})
+      (runs/close-branch! c rid "B1" :exhausted "turn cap")
+      (runs/finish-run-cancellation-fault! c rid)
+      (let [e (try (runs/extend-budget! c {:run-id rid :request-id "req-t6"
+                                           :principal "operator" :old-max 5
+                                           :new-max 9 :reason "too late"})
+                   nil
+                   (catch Throwable t t))]
+        (is (some? e) "the guarded update refused the faulted run")
+        (is (= :stale (-> e ex-data :budget/error))
+            "surfaced as a lost guard, same as any terminal row"))
+      (is (= "failed" (:status (runs/get-run c rid))))
+      (is (= "turn-cancellation-fault"
+             (:terminal_reason (runs/get-run c rid))))
+      (is (= 5 (:max_turns (runs/get-run c rid))))
+      (is (= "exhausted" (:status (runs/get-branch c rid "B1")))
+          "no branch reopened")
+      (is (empty? (runs/extension-audit-for-run c rid))
+          "no audit row claims a raise"))
+    (testing "an ordinary failed run — no terminal_reason — still extends"
+      (let [rid (runs/start-run! c {:problem "q" :max-turns 5 :beam-width 1})]
+        (runs/open-branch! c rid {:branch-id "B1"})
+        (runs/close-branch! c rid "B1" :exhausted "turn cap")
+        (runs/finish-run! c rid :failed nil)
+        (let [r (runs/extend-budget! c {:run-id rid :request-id "req-t7"
+                                        :principal "operator" :old-max 5
+                                        :new-max 9 :reason "ordinary failure"})]
+          (is (= 9 (:new-max r)))
+          (is (= ["B1"] (:reopened r)) "the exhausted branch reopened")
+          (is (= 9 (:max_turns (runs/get-run c rid))))
+          (is (= 1 (count (runs/extension-audit-for-run c rid)))))))))
+
 (deftest an-extension-survives-a-restart
   ;; Restart persistence, the point of "durable": a process that dies
   ;; right after an extension must leave the raised cap, the reopened
