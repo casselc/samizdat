@@ -290,10 +290,15 @@
   [{:keys [conn run-id branch args]}]
   (try
     (when (and conn run-id (:id branch))
-      (when-let [{:keys [branch turn tool]}
+      (when-let [{:keys [branch tool]}
                  (journal/changed-since-read conn run-id (:id branch) (str (:path args)))]
+        ;; No turn number in the notice. Branches on one run advance their own
+        ;; turn counters independently, so a worker on turn 19 was told a peer
+        ;; had acted "on turn 25" — accurate, and it reads like the future.
+        ;; "since you last read it" is the ordering that matters and the only
+        ;; one both branches share.
         (prompt/render "stale-write" {:branch branch :path (str (:path args))
-                                      :turn turn :tool tool})))
+                                      :tool tool})))
     (catch Throwable _ nil)))
 
 (defn with-stale
