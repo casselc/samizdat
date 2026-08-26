@@ -31,7 +31,8 @@
             [clojure.string :as str]
             [jolt.fs :as fs]
             [samizdat.lisp :as lisp]
-            [samizdat.prompt :as prompt]))
+            [samizdat.prompt :as prompt]
+            [samizdat.store.journal :as journal]))
 
 (def ^:private clojure-exts #{"clj" "cljc" "cljs" "cljd" "edn" "bb"})
 
@@ -269,6 +270,38 @@
                  :category :success :progress? true :branch branch
                  :fallback fallback}))))
         (miss branch (msg {:outside-root true :path path :verb "edited"}))))))
+
+(defn stale-note
+  "A line telling this branch that a sibling changed `path` after it last read
+  it, or nil.
+
+  A NOTICE, NOT A REFUSAL. Team workers share one working tree on purpose —
+  the parts of a feature belong in the same files — so two branches in one
+  file is the design working, not a fault to block. What the harness can say
+  is what it knows: somebody else has been in here since you looked. Deciding
+  which version wins is exactly the judgement it does not have.
+
+  It matters most on `write_file`, which replaces a whole file: a worker
+  writing from its own picture of what belongs there silently drops whatever a
+  sibling added. Live, three branches wrote src/kit/core.clj fifteen times
+  between them, twice on the same turn, and nothing said a word.
+
+  Best effort: a failure to look must never fail the write that succeeded."
+  [{:keys [conn run-id branch args]}]
+  (try
+    (when (and conn run-id (:id branch))
+      (when-let [{:keys [branch turn tool]}
+                 (journal/changed-since-read conn run-id (:id branch) (str (:path args)))]
+        (prompt/render "stale-write" {:branch branch :path (str (:path args))
+                                      :turn turn :tool tool})))
+    (catch Throwable _ nil)))
+
+(defn with-stale
+  "Append the sibling notice to a successful file result."
+  [result ctx]
+  (if-let [n (and (= :success (:category result)) (stale-note ctx))]
+    (update result :result str "\n\n" n)
+    result))
 
 (defn write-file
   "Write `content` to a file under the root, creating parent directories.

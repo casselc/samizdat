@@ -141,6 +141,86 @@
 
 ;; --- artifacts --------------------------------------------------------------
 
+(defn- path-of
+  "The `path` argument of a recorded turn, or nil. Args are stored as the JSON
+  the model sent, so this reads them back the same way."
+  [row]
+  (try (some-> (json/read-str (str (:args row)) :key-fn keyword) :path str not-empty)
+       (catch Throwable _ nil)))
+
+(defn sibling-writes
+  "What OTHER branches on this run have done to the tree: one entry per path,
+  naming every branch that has changed it and the turn it was last touched,
+  most recently touched first, capped at `limit`.
+
+  Per PATH rather than per write, and naming every collaborator rather than
+  the latest: the question a worker has is `who else is in this file`, and a
+  list of the last writer alone answers a different one. Live, three branches
+  changed src/kit/core.clj and reporting only the most recent would have named
+  one of them.
+
+  THE MAILBOX CARRIES WHAT A SIBLING SAID; THIS CARRIES WHAT IT DID. Team
+  workers share one working tree by design — the parts of a feature belong in
+  the same files — and the only thing that told a worker about its siblings was
+  mail they chose to send. Live, three workers wrote src/kit/core.clj fifteen
+  times between them, full-file `write_file` overwrites interleaved with
+  surgical `edit_file`s, two of them landing on the same turn. The tree came
+  out coherent because the last writer happened to hold a complete picture,
+  which is not a mechanism.
+
+  Derived from the journal rather than reported by the branches, so it cannot
+  drift from what actually happened and costs no turn to produce."
+  [conn run-id branch-id limit]
+  (->> (db/fetch conn ["SELECT branch_id, turn, tool_name, args FROM turns
+                      WHERE run_id = ? AND branch_id <> ?
+                        AND tool_name IN ('write_file', 'edit_file')
+                        AND category = 'success'
+                      ORDER BY turn DESC, id DESC"
+                    run-id (str branch-id)])
+       (keep (fn [r] (when-let [p (path-of r)]
+                       {:branch (:branch_id r) :turn (:turn r) :path p})))
+       (reduce (fn [acc {:keys [path branch turn]}]
+                 (let [i (first (keep-indexed #(when (= path (:path %2)) %1) acc))]
+                   (if i
+                     (update-in acc [i :branches] (fn [bs] (if (some #{branch} bs) bs (conj bs branch))))
+                     (conj acc {:path path :turn turn :branches [branch]}))))
+               [])
+       (take limit)
+       vec))
+
+(defn changed-since-read
+  "Whether a sibling changed `path` after this branch last READ it, and who.
+
+  Returns {:branch :turn :tool} for the most recent such change, or nil — nil
+  also when this branch has never read the path, because a branch writing a
+  file it has not looked at is a different problem and this one has nothing to
+  say about it.
+
+  This is the moment the shared tree actually bites: `write_file` replaces a
+  whole file, so a worker writing from its own picture of what belongs there
+  silently drops everything a sibling added since it last looked. The notice
+  is a NOTICE — the write goes through. Workers sharing a tree are
+  collaborating, and a harness that refuses the write decides for them which
+  version wins, which is exactly the judgement it does not have."
+  [conn run-id branch-id path]
+  (let [reads (db/fetch conn ["SELECT turn, args FROM turns
+                            WHERE run_id = ? AND branch_id = ?
+                              AND tool_name IN ('read_file', 'write_file', 'edit_file')
+                            ORDER BY turn DESC, id DESC"
+                           run-id (str branch-id)])
+        last-seen (some (fn [r] (when (= path (path-of r)) (:turn r))) reads)]
+    (when last-seen
+      (->> (db/fetch conn ["SELECT branch_id, turn, tool_name, args FROM turns
+                          WHERE run_id = ? AND branch_id <> ? AND turn >= ?
+                            AND tool_name IN ('write_file', 'edit_file')
+                            AND category = 'success'
+                          ORDER BY turn DESC, id DESC"
+                        run-id (str branch-id) (long last-seen)])
+           (keep (fn [r] (when (= path (path-of r))
+                           {:branch (:branch_id r) :turn (:turn r)
+                            :tool (:tool_name r)})))
+           first))))
+
 (defn record-artifact!
   "A machine-checked result.
 

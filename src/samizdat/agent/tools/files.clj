@@ -30,10 +30,13 @@
   (files/read-file ctx))
 
 (defmethod base/run-tool "write_file" [ctx]
-  (files/write-file ctx))
+  ;; The sibling notice rides the RESULT rather than gating the call: workers
+  ;; sharing a tree are collaborating, and which version should win is not the
+  ;; harness's judgement to make. See samizdat.agent.files/stale-note.
+  (files/with-stale (files/write-file ctx) ctx))
 
 (defmethod base/run-tool "edit_file" [ctx]
-  (files/edit-file ctx))
+  (files/with-stale (files/edit-file ctx) ctx))
 
 (defmethod base/run-tool "grep" [{:keys [branch root] :as ctx}]
   ;; Search the project's Clojure sources for a regex. :neutral — searching

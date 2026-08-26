@@ -146,6 +146,22 @@
     ;; worded differently — prompts/problem.md, not a `str` here.
     {:role "user" :content (prompt/render "problem" {:problem problem})}]))
 
+(defn- shared-tree
+  "The other branches' work on this run's tree, for the context block.
+
+  nil when nothing else has written — a solo run is every run of the factory
+  loop, and a heading over an empty list is a per-turn tax on the common case."
+  [conn run-id branch-id]
+  (when (and conn run-id branch-id)
+    (let [files (journal/sibling-writes
+                 conn run-id branch-id
+                 (:tree-lines (gates/threshold :context-budget)))]
+      (when (seq files)
+        (prompt/render "shared-tree"
+                       {:files (mapv (fn [f]
+                                       (assoc f :branches (str/join ", " (:branches f))))
+                                     files)})))))
+
 (defn- context-block
   "What the harness adds to the branch's view before its next turn: the
   failures most like what it just tried, and — when sharing is on — the
@@ -226,6 +242,14 @@
                                  (messages/render-inbox
                                   conn run-id (:id branch)
                                   (:inbox-lines (gates/threshold :context-budget)))
+                                 ;; And what the siblings DID, which the
+                                 ;; mailbox cannot say: it carries what a
+                                 ;; branch chose to announce, and a worker
+                                 ;; sharing a tree needs the ground truth.
+                                 ;; nil for a solo run, so the block's keep
+                                 ;; identity drops it and nothing changes for
+                                 ;; the loops that have one branch.
+                                 (shared-tree conn run-id (:id branch))
                                  (failures/render fhits)
                                  (artifacts/render ahits)])]
       {:block (when (seq blocks) (str/join "\n\n" blocks))

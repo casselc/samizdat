@@ -4,14 +4,31 @@
 ;; Multi-agent fan-out. Not wired into any single-branch loop; the `team`
 ;; manifest routes through it. Given a vector of sub-tasks, it runs a WORKER
 ;; sub-loop per sub-task — in parallel, each its own branch on the SHARED run,
-;; so the workers coordinate through the run's mailbox (message tool) and its
-;; shared artifact/failure pool. It joins their answers into the manager
-;; branch's final answer.
+;; so the workers share one WORKING TREE, the run's mailbox (message tool), and
+;; its artifact/failure pool. It joins their answers into the manager branch's
+;; final answer.
+;;
+;; SHARING THE TREE IS THE DESIGN, not a hazard to be isolated away: the parts
+;; of a feature belong in the same files, and two workers in one file is them
+;; collaborating. What they lacked was any way to SEE each other. The mailbox
+;; carries what a worker chose to announce; nothing carried what it did. Live,
+;; three workers wrote src/kit/core.clj fifteen times between them, full-file
+;; `write_file` overwrites interleaved with surgical `edit_file`s, two landing
+;; on the same turn — and the tree came out coherent only because the last
+;; writer happened to hold a complete picture.
+;;
+;; So there are now three channels, and only the first is self-reported:
+;;   mailbox        what a peer says it is doing (message tool)
+;;   shared tree    which files peers have actually changed, from the journal,
+;;                  in every worker's context block every turn
+;;   stale write    when a write lands on a file a peer moved since this
+;;                  worker last read it, the result says who and when
+;; The last two are ground truth and cost no turn to produce.
 ;;
 ;; This is the dataflow fan-out shape (futures + deref, workers run to
-;; completion): coordination is between-turn via the mailbox, not a live
-;; actor. The escapement-style parked-conversation actor (per-turn peer
-;; steering) is karamazov-oy1, a later, larger step.
+;; completion): coordination is between-turn, not a live actor. The
+;; escapement-style parked-conversation actor (per-turn peer steering) is
+;; karamazov-oy1, a later, larger step.
 (ns cells.team
   (:require [clojure.string :as str]
             [mycelium.cell :as cell]
@@ -147,7 +164,8 @@
 
 (cell/defcell :team/fan-out
   {:doc "Run a worker sub-loop per sub-task, in parallel, each its own branch on
-        the shared run (so they coordinate through the mailbox). Join their
+        the shared run, sharing one working tree and coordinating through the
+        mailbox, the shared-tree block and the stale-write notice). Join their
         answers into the manager branch and finish. A dataflow join, not a live
         actor: workers run to completion."
    :effects [:net :db]

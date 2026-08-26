@@ -929,6 +929,7 @@
           :judge-transcript-chars 12000
           :grep-ranges         20
           :inbox-lines         3
+          :tree-lines          8
           :keep-pairs          10
           :compaction-chars    50000
           :diff-chars          12000
@@ -955,6 +956,14 @@
                                 failure names itself at the end
         :judge-rules-chars      the harness's own rules, as the judge sees them
         :judge-transcript-chars the transcript under judgement
+        :tree-lines             files the shared-tree block names — the paths
+                                OTHER branches on this run have changed. Team
+                                workers share one working tree on purpose (the
+                                parts of a feature belong in the same files),
+                                and the mailbox only ever carried what a
+                                sibling chose to announce. One line per file
+                                rather than per write, so eight is a wide tree
+                                rather than eight edits.
         :grep-ranges            distinct line ranges a search reports
         :inbox-lines            unread messages previewed in the context block
         :keep-pairs             recent exchanges kept VERBATIM before

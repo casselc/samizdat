@@ -11,6 +11,12 @@ Coordinate; do not work blind. Your peers are the branch ids above (W0, W1, …)
   with `action:"send"` and a `body` saying what you're taking (omit `to` to
   broadcast, or set `to` to a peer's id). Say what you're changing, not just
   that you're busy.
+- **`write_file` replaces the whole file.** On any file a peer is also in, read
+  it first and use `edit_file`. Writing a shared file from your own memory of
+  what belongs in it silently deletes everything they added since you looked —
+  and it will look like it worked. Each turn you are shown which files your
+  peers have changed; when a write lands on a file that moved under you, you
+  are told who moved it. Read it back rather than writing over it again.
 - Read your inbox each turn — `message` with `action:"inbox"` — and answer
   questions peers send you. A part that depends on another worker's part is a
   question to ask, not a guess to make or work to duplicate.
