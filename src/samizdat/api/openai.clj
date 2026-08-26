@@ -28,6 +28,7 @@
   worth keeping precisely because it is the comparison anyone will ask for."
   (:require [clojure.string :as str]
             [samizdat.agent.beam :as beam]
+            [samizdat.api.control :as api-control]
             [samizdat.llm.client :as llm]
             [samizdat.llm.registry :as registry]
             [samizdat.store.journal :as journal]))
@@ -91,13 +92,28 @@
                                     {:usage (:usage r) :harness {:mode "raw"}})})
 
       :else
-      (let [r (beam/run! {:conn conn :config config
-                          :llm-adapter adapter :llm-config llm-config
-                          :problem problem
-                          :max-turns (or (:max_turns body) (:max-turns body)
-                                         (get-in config [:run :max-turns]))
-                          :beam-width (or (:beam_width body) (:beam-width body)
-                                          (get-in config [:run :beam-width]))})
+      ;; Registered in api.control/active like a run started by POST /v1/runs,
+      ;; so POST /v1/runs/:id/abort works on it — without the abort atom and
+      ;; the registration this run was unabortable for its whole (potentially
+      ;; hours-long) life (karamazov-blt.13). The request thread still blocks:
+      ;; that IS the OpenAI-compat contract this endpoint exists for.
+      (let [abort (atom false)
+            run-id* (atom nil)
+            r (try
+                (beam/run! {:conn conn :config config
+                            :llm-adapter adapter :llm-config llm-config
+                            :problem problem
+                            :abort abort
+                            :on-start (fn [rid]
+                                        (reset! run-id* rid)
+                                        (swap! api-control/active assoc rid {:abort abort}))
+                            :max-turns (or (:max_turns body) (:max-turns body)
+                                           (get-in config [:run :max-turns]))
+                            :beam-width (or (:beam_width body) (:beam-width body)
+                                            (get-in config [:run :beam-width]))})
+                (finally
+                  (when-let [rid @run-id*]
+                    (swap! api-control/active dissoc rid))))
             artifacts (journal/artifacts conn (:run-id r))
             answered (= :completed (:status r))]
         {:status 200
