@@ -198,3 +198,28 @@
         (is (str/includes? (:result r) "open"))
         (is (not (re-find (re-pattern (str free "[^\\n]*@")) (:result r)))
             "an unclaimed task shows no holder")))))
+
+(deftest a-superseded-task-statement-is-unpinned-for-compaction
+  ;; The claim pins its statement forever, and switch/close never released
+  ;; it — a branch that switched twice carried three permanent "your task
+  ;; is…" blocks, the earlier two wrong (karamazov-swd). Un-pinning is a
+  ;; metadata flip (prepare projects role+content only, so no wire byte
+  ;; changes); the stale statement then compacts away like any aged-out
+  ;; message, while the CURRENT task's statement stays pinned.
+  (with-run [c rid]
+    (let [t1 (tasks/create! c {:title "first" :contract "c1"})
+          t2 (tasks/create! c {:title "second" :contract "c2"})
+          b (:branch (run-task c rid (branch) {:action "claim" :id t1}))
+          b (:branch (run-task c rid b {:action "switch" :id t2
+                                        :reason "first was blocked"}))
+          by-task (fn [id] (first (filter #(= id (:task-id %)) (:messages b))))]
+      (testing "switch releases the old statement and pins the new one"
+        (is (false? (boolean (:pinned? (by-task t1))))
+            "the set-down task's statement is compactable now")
+        (is (str/includes? (:content (by-task t1)) "c1")
+            "its content is untouched — the flip is metadata only")
+        (is (true? (:pinned? (by-task t2)))))
+      (testing "closing the current task releases its statement too"
+        (let [b (:branch (run-task c rid b {:action "close" :id t2}))]
+          (is (false? (boolean (:pinned? (first (filter #(= t2 (:task-id %))
+                                                        (:messages b))))))))))))

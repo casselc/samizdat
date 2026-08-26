@@ -813,12 +813,10 @@
                         (count verdicts) "verdict(s) into memory")))
           (catch Throwable e
             (log/warn "distilling the session failed:" (ex-message e))))
-        ;; The proof engines' teardown lived here: scheduler-opened sessions
-        ;; from the `sessions` atom, plus everything a tool opened via
-        ;; :engine-sessions, disposed no matter how the run ended. Per-branch
-        ;; disposal still runs through dispose-branch-engines!, so the coding
-        ;; tools' sessions (nREPL, subprocesses) plug their disposal back in
-        ;; here.
+        ;; The proof engines' scheduler- and tool-opened session registries
+        ;; are gone with the engines (karamazov-w7w); what a branch holds now
+        ;; — its eval session — is disposed per branch, no matter how the
+        ;; run ended.
         (doseq [b @live-branches] (dispose-branch-engines! b))
         ;; The run's eval namespace does not outlive the run
         ;; (provenance CR1-6). Best effort, and only for a session this
@@ -882,15 +880,6 @@
                                                    {:quarantine quarantine}))
         ;; Every session ever opened, including forked children, so the
         ;; supervisor can tear them all down regardless of how the run ended.
-        ;; The stop path must not depend on the agent's state — the RAX
-        ;; manager could always halt the Lisp task no matter what it believed.
-        sessions (atom [])
-        ;; Same reason as `sessions` above, for the engines whose sessions a
-        ;; TOOL opens rather than the scheduler. Collecting those off the
-        ;; branches at the end assumed every branch value survives, and three
-        ;; paths discard one: the tool-level catch, the turn deadline, and a
-        ;; turn that throws. See tools/register-session! (vf-cfp).
-        engine-sessions (atom [])
         ;; The three ctx keys the manifest driver set and this one did not.
         ;; Every consumer defends with `(or root ".")` or a nil check, so the
         ;; omission was silent: `:run :root` was documented and ignored, every
@@ -920,8 +909,6 @@
              ;; persist across its turns and die with the run. run-rounds
              ;; closes it in the same finally that disposes the sessions.
              :repl-session (repl/new-session)
-             :sessions sessions
-             :engine-sessions engine-sessions
              ;; {branch-id future} of forfeited turns still executing, so
              ;; advance-all never runs a branch beside its own dangling turn
              ;; (karamazov-blt.18).

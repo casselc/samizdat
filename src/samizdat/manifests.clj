@@ -118,7 +118,7 @@
     :conn :run-id :config :llm-adapter :llm-config :root :max-turns :abort
     ;; What the beam driver adds
     :problem :beam? :beam-width :turn-workflow :iterating-loop? :git-baseline
-    :repl-session :sessions :engine-sessions :live-branches :in-flight})
+    :repl-session :live-branches :in-flight})
 
 (defn cell-requires
   "The ctx keys `cell-id` declares it reads. `:requires` is mycelium's own

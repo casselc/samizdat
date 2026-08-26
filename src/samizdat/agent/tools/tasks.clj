@@ -189,7 +189,11 @@
                                    {:branch-id (:id branch)
                                     :data {:from (:id held) :to (:id t)
                                            :reason reason}}))
-                  (base/ok (take-task branch t)
+                  (base/ok (take-task (cond-> branch
+                                        ;; the set-down task's statement stops
+                                        ;; being pinned (swd)
+                                        held (state/unpin-task-statement (:id held)))
+                                      t)
                            (str (if held
                                   (str "Set down " (:id held) " and claimed ")
                                   "Claimed ")
@@ -224,7 +228,11 @@
                     ;; context block asks for the next one instead of pointing
                     ;; at finished work.
                     branch (cond-> branch
-                             (= (:id t) (:id (:task branch))) (assoc :task nil))]
+                             (= (:id t) (:id (:task branch)))
+                             (-> (assoc :task nil)
+                                 ;; the finished statement stops being pinned,
+                                 ;; so compaction can fold it away (swd)
+                                 (state/unpin-task-statement (:id t))))]
                 (base/ok branch (str "Closed " (task-line t))
                          :progress? true)))))
 
