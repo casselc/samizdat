@@ -68,6 +68,58 @@
 ;; counts when the body is the DOCUMENTED shape, checked in json-fence below.
 (def ^:private json-fence-re #"(?s)```json\s*\r?\n(.*?)```")
 
+(defn close-unbalanced
+  "Append the `}` and `]` a tool-call body is missing, or return it unchanged.
+
+  Counts braces and brackets OUTSIDE string literals, with the same state
+  machine `repair-control-chars` uses — a `{` inside a content string is text,
+  not structure, and a naive count is wrong in exactly the case that matters
+  (a tool call whose argument is source code).
+
+  WHY THIS EXISTS. Observed live, twice in one fourteen-turn run: the model
+  emitted a complete `write_file` call whose body ended
+  `…\\n\"}` — the args object closed and the outer object did not. One
+  character missing, a whole turn lost, twice, on the two calls that carried
+  the run's actual work. The reply was not truncated (it finished cleanly
+  inside the fence); the model simply miscounted, which is what a model does
+  when the closing braces are eight hundred characters of escaped Clojure away
+  from their openers.
+
+  REFUSES TO REPAIR A BODY THAT ENDS INSIDE A STRING, and that guard is the
+  load-bearing half. A reply cut off by the token cap stops mid-content — the
+  string never closes — and appending braces there would produce a perfectly
+  valid `write_file` carrying HALF A FILE, which the tool would then write over
+  the whole one and report as a success. A parse error costs a turn; a silently
+  truncated file costs the work. Ending inside a string is precisely the shape
+  of a truncated reply, so it is where the repair stops.
+
+  Only ever ADDS closers: an unbalanced-the-other-way body (more closers than
+  openers) is a different mistake and is reported rather than guessed at. The
+  caller must still parse the result — this makes a parse possible, it does not
+  assert one succeeded — and a repaired call is flagged `:auto-repaired?`,
+  because a branch whose calls need repairing is a fact the mechanics tally
+  should see."
+  [^String input]
+  (let [n (count input)]
+    (loop [i 0, in-string? false, escaped? false, stack []]
+      (if (>= i n)
+        (if (and (seq stack) (not in-string?))
+          (str input (str/join (reverse stack)))
+          input)
+        (let [ch (.charAt input i)]
+          (cond
+            escaped? (recur (inc i) in-string? false stack)
+            (= \\ ch) (recur (inc i) in-string? true stack)
+            (= \" ch) (recur (inc i) (not in-string?) false stack)
+            in-string? (recur (inc i) true false stack)
+            (= \{ ch) (recur (inc i) false false (conj stack "}"))
+            (= \[ ch) (recur (inc i) false false (conj stack "]"))
+            (or (= \} ch) (= \] ch))
+            ;; A closer with nothing open is the other kind of imbalance and
+            ;; is not repairable by appending: bail out unchanged.
+            (if (empty? stack) input (recur (inc i) false false (pop stack)))
+            :else (recur (inc i) in-string? false stack)))))))
+
 (defn repair-control-chars
   "Escape literal control characters appearing INSIDE JSON string literals.
 
@@ -105,6 +157,13 @@
 
             :else
             (do (.append sb ch) (recur (inc i) in-string? false))))))))
+
+(defn repair-json
+  "One repair pass over a tool-call body: control characters inside strings,
+  then unbalanced closers. Order matters — the brace scan has to see the
+  string boundaries the control-char pass leaves intact."
+  [^String input]
+  (close-unbalanced (repair-control-chars input)))
 
 (defn- parse-error [msg extra]
   (merge {:name "__parse_error__" :args {} :parse-error msg} extra))
@@ -349,15 +408,16 @@
       (when (seq bodies)
       (let [body (peek bodies)
             n (count fenced)
-            repaired (repair-control-chars body)
+            repaired (repair-json body)
             ;; Computed from the TEXT, not from which parse path succeeded.
             ;; clojure.data.json accepts raw newlines and tabs inside string
             ;; values where JSON.parse rejects them, so keying this off the
             ;; fallback firing would leave the counter permanently zero — a
             ;; signal that is never fed reads identically to a behaviour that
             ;; never happens (dirge PR 740). What we want to measure is that
-            ;; the model emitted unescaped control characters, which is true
-            ;; whichever parser tolerated it.
+            ;; the model emitted a body needing repair — unescaped control
+            ;; characters, or a missing closer — which is true whichever
+            ;; parser tolerated it.
             needed-repair? (not= repaired body)
             base (cond-> {:fences n}
                    needed-repair? (assoc :auto-repaired? true)
@@ -388,15 +448,18 @@
              (str (:error first-try)
                   ". Common causes: (a) a raw newline inside a string value — use \\n,"
                   " (b) an unescaped quote inside a string — use \\\","
-                  " (c) an unescaped backslash — use \\\\.")
+                  " (c) an unescaped backslash — use \\\\,"
+                  " (d) a missing closing brace — count the `{` and `}`,"
+                  " the outer object needs one of its own after `args` closes.")
              base)
             (let [second-try (read-json repaired)]
               (if-not (:ok second-try)
                 (parse-error
                  (str (:error first-try)
-                      ". The harness auto-repaired literal control characters inside"
-                      " string values and the result still did not parse — escape"
-                      " \\n, \\r, \\t, \\\\ and \\\" inside string values.")
+                      ". The harness auto-repaired what it could (control"
+                      " characters inside strings, missing closers) and the"
+                      " result still did not parse — escape \\n, \\r, \\t,"
+                      " \\\\ and \\\" inside string values, and check the braces.")
                  base)
                 (let [parsed (:value second-try)]
                   (if (and (map? parsed)

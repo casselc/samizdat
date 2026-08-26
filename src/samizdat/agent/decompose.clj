@@ -47,29 +47,20 @@
   section is an empty ctx value and collapses cleanly."
   [{:keys [problem contract tests]}
    {:keys [attempts last-answer last-failure depth fresh-failed force-split]}]
+  ;; Values only. Every heading and every sentence of framing that used to be
+  ;; assembled here is in prompts/architect.md now, behind its own {% if %} —
+  ;; an architect prompt half in a template and half in `str` calls is a
+  ;; prompt a supervisor can only edit half of.
   (prompt/render "architect"
     {:attempts (or attempts "several")
-     :problem (str problem "\n")
-     :contract (if (seq (str contract))
-                 (str "\n### Its contract\n" contract "\n") "")
-     :tests (if (seq (str tests))
-              (str "\n### Its tests (the spec it must satisfy)\n" tests "\n") "")
-     :last-answer (if (seq (str last-answer))
-                    (str "\n### The most recent attempt\n" last-answer "\n") "")
-     :last-failure (if (seq (str last-failure))
-                     (str "\n### Why it failed\n" last-failure "\n") "")
-     :force-split (if (or fresh-failed force-split)
-                    (str "\n### A different angle was already tried and also failed\n"
-                         "Retrying with a hint did not work. Do NOT ask for another retry — the "
-                         "unit must be SPLIT into smaller sub-units now. Even a unit that looks "
-                         "like 'one thing' can be broken down (e.g. a focused test that pins the "
-                         "contract, plus the smallest change that makes it pass). Choose "
-                         "DECOMPOSE and list 2 or more sub-units.\n") "")
+     :problem (str problem)
+     :contract (not-empty (str/trim (str contract)))
+     :tests (not-empty (str/trim (str tests)))
+     :last-answer (not-empty (str/trim (str last-answer)))
+     :last-failure (not-empty (str/trim (str last-failure)))
+     :force-split (boolean (or fresh-failed force-split))
      :max-parts default-max-parts
-     :last-round (if (>= (or depth 0) (dec max-depth))
-                   (str "This is the LAST recovery round — the depth budget is nearly spent, "
-                        "so further splitting will be rejected. You MUST choose "
-                        "FRESH_APPROACH.\n\n") "")}))
+     :last-round (>= (or depth 0) (dec max-depth))}))
 
 (defn- normalize-subtask [m]
   (let [name (some-> (or (get m "name") (get m :name)) str str/trim not-empty)

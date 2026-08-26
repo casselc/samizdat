@@ -11,9 +11,15 @@
   error yields an empty diff, and the critic simply reviews completeness only."
   (:require [clojure.string :as str]
             [samizdat.engine.proc :as proc]
+            [samizdat.lexicon :as lexicon]
             [samizdat.security.secrets :as secrets]))
 
-(def max-diff-chars 12000)
+(defn max-diff-chars
+  "How much of the working-tree diff a branch and the judge are shown.
+  gates.edn `:context-budget :diff-chars` — how much the model gets to see is
+  one table, and this was a constant outside it."
+  []
+  (lexicon/budget :diff-chars))
 
 (defn- git [root & args]
   (let [r (apply proc/run {:timeout-ms 15000 :env (secrets/scrubbed-process-env)}
@@ -55,10 +61,11 @@
   "The unified diff of the run's changes since `baseline`, bounded to keep it
   out of a runaway prompt. Empty string when there is nothing to show."
   [root baseline]
-  (or (when (and root baseline)
-        (some-> (git root "diff" baseline)
-                (as-> d (if (> (count d) max-diff-chars)
-                          (str (subs d 0 max-diff-chars)
-                               "\n… (diff truncated at " max-diff-chars " chars)")
-                          d))))
-      ""))
+  (let [cap (max-diff-chars)]
+    (or (when (and root baseline)
+          (some-> (git root "diff" baseline)
+                  (as-> d (if (> (count d) cap)
+                            (str (subs d 0 cap)
+                                 "\n… (diff truncated at " cap " chars)")
+                            d))))
+        "")))

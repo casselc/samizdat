@@ -51,31 +51,43 @@
 
 (def verdicts #{:complete :incomplete :abstain})
 
+(defn- rules
+  "The judge's deterministic rules — what the reply should look like and what
+  counts as a test run, a code edit or an outside claim. gates.edn
+  `:judge-rules`, so a project retunes them without a rebuild."
+  []
+  (gates/threshold :judge-rules))
+
 (defn parse-verdict
-  "The verdict from a judge reply's VERDICT line. Whole-word and
-  negation-aware — INCOMPLETE contains COMPLETE, and \"NOT COMPLETE\" negates
-  it — with precedence negative > abstain > positive. FAIL-OPEN: an empty or
-  tokenless reply is :complete, because a judge that cannot answer must never
-  be able to wedge the loop."
+  "The verdict from a judge reply's verdict line.
+
+  Whole-word and negation-aware, because INCOMPLETE contains COMPLETE and
+  \"NOT COMPLETE\" negates it. Both the vocabulary and the precedence that
+  handles those two facts are `gates.edn :judge-rules :verdict-rules`, an
+  ordered list of [verdict words] applied first-match-wins — the words the
+  judge is ASKED for live in prompts/judge.md, which is userspace, so the
+  words it is READ for have to be editable in the same breath or a reworded
+  prompt silently stops parsing.
+
+  FAIL-OPEN via `:verdict-default`: an empty or tokenless reply is :complete,
+  because a judge that cannot answer must never be able to wedge the loop."
   [reply]
-  (let [head (or (some #(when (re-find #"(?i)\bVERDICT\b" %) %)
+  (let [{:keys [verdict-line-regex verdict-rules verdict-default]} (rules)
+        head (or (some #(when (re-find (re-pattern verdict-line-regex) %) %)
                        (str/split-lines (str reply)))
                  (first (str/split-lines (str reply)))
                  "")
         up (str/upper-case head)
         w? (fn [word] (boolean (re-find (re-pattern (str "\\b" word "\\b")) up)))]
-    (cond
-      (w? "INCOMPLETE") :incomplete
-      (and (w? "NOT") (w? "COMPLETE")) :incomplete
-      (w? "ABSTAIN") :abstain
-      (w? "COMPLETE") :complete
-      :else :complete)))
+    (or (some (fn [[verdict words]] (when (every? w? words) verdict))
+              verdict-rules)
+        verdict-default)))
 
 (defn findings
   "The FINDINGS section of a judge reply, verbatim, trimmed — or nil when it
   named none. What the critique passes back to the branch below the verdict."
   [reply]
-  (some-> (re-find #"(?is)FINDINGS:\s*(.+)$" (str reply))
+  (some-> (re-find (re-pattern (:findings-regex (rules))) (str reply))
           second str/trim not-empty))
 
 (defn- one-line [s n]
@@ -110,7 +122,6 @@
 
 ;; --- deterministic finalization gates (run before the LLM judge) -----------
 
-(defn- rules [] (gates/threshold :judge-rules))
 
 (defn- tool-used? [rows pred]
   (boolean (some (fn [r] (and (:tool_name r) (pred r))) rows)))
@@ -190,14 +201,15 @@
   "The judge's user message: the agent's rules, the evidence, the transcript,
   the diff of what the run changed, and the answer under review."
   [{:keys [rules transcript evidence answer diff]}]
-  (str "## The agent's rules\n\n" (one-line rules (:judge-rules-chars (gates/threshold :context-budget)))
-       "\n\n## Evidence (deterministic facts about the run)\n\n" evidence
-       (when (seq (str diff))
-         (str "\n\n## Diff of what this run changed\n\n```diff\n"
-              (str diff) "\n```"))
-       "\n\n## Transcript\n\n" (one-line transcript (:judge-transcript-chars (gates/threshold :context-budget)))
-       "\n\n## The answer it wants to ship\n\n" (str answer)
-       "\n\nIs this task complete and correct? " (preamble)))
+  (let [budget (gates/threshold :context-budget)]
+    (prompt/render
+     "judge-user"
+     {:rules (one-line rules (:judge-rules-chars budget))
+      :evidence evidence
+      :diff (when (seq (str diff)) (str diff))
+      :transcript (one-line transcript (:judge-transcript-chars budget))
+      :answer (str answer)
+      :preamble (preamble)})))
 
 (defn blocking-findings
   "The findings a review blocks on. Returns the whole findings text when any

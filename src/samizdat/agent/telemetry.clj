@@ -10,7 +10,9 @@
 
   Pure over already-extracted facts + journal rows, so it is testable without a
   run. The supervisor is a general reasoning agent; this only gives it eyes."
-  (:require [clojure.string :as str]))
+  (:require [clojure.string :as str]
+            [samizdat.lexicon :as lexicon]
+            [samizdat.prompt :as prompt]))
 
 (defn- s [x] (when x (str/lower-case (str (if (keyword? x) (name x) x)))))
 
@@ -30,40 +32,56 @@
                     :shipped? (boolean (some #(= "done" (s (:tool_name %))) rs))}])))
        (into (sorted-map))))
 
+(defn- health-policy []
+  (lexicon/policy :run-health))
+
+(defn- signal
+  "One run-health sentence, rendered from gates.edn `:run-health :signals`."
+  ([k] (signal k {}))
+  ([k ctx]
+   (prompt/render-str (get-in (health-policy) [:signals k]) ctx)))
+
 (defn signals
   "The suboptimality flags the digest calls out explicitly, so the supervisor
   does not have to re-derive the obvious: a stage crashed, nothing shipped, a
-  thrashing branch, the reviewer bouncing the work, a run deep into revisions."
+  thrashing branch, the reviewer bouncing the work, a run deep into revisions.
+
+  The CONDITIONS are here and the SENTENCES are not. Which facts about a run
+  deserve the supervisor's attention is mechanism — it is the same question
+  whatever the project builds — while the words that carry them, and the two
+  numbers behind the thrash judgement, are `gates.edn :run-health`."
   [{:keys [results review revision errors hollow? tests-passed? verify-note
            at-cap? soft-cap]} health]
   (let [total (count results)
-        shipped (count (filter #(= :done (:status %)) results))]
+        shipped (count (filter #(= :done (:status %)) results))
+        {:keys [thrash-min-turns thrash-mechanics-rate]} (health-policy)]
     (cond-> []
       (seq errors)
-      (into (map #(str "STAGE CRASHED — " %) errors))
+      (into (map #(signal :stage-crashed {:detail %}) errors))
 
       hollow?
-      (conj "NO FILES CHANGED — done was called but the working tree is unchanged; nothing was actually built")
+      (conj (signal :hollow))
 
       (and (pos? total) (zero? shipped))
-      (conj "NO IMPLEMENTOR SHIPPED — the implement round produced nothing verified")
+      (conj (signal :nobody-shipped))
 
       (and (some? tests-passed?) (not tests-passed?) (not hollow?))
-      (conj (str "TESTS FAILING — " (or verify-note "the tests did not pass")))
+      (conj (signal :tests-failing
+                    {:detail (or verify-note (signal :tests-failing-fallback))}))
 
       at-cap?
-      (conj (str "REVISION CAP REACHED — " revision " revisions (soft cap " soft-cap
-                 ") with no verified solution. This is a soft stop for YOU to decide: "
-                 "keep solving with a new approach, or STOP if it is a genuine dead end."))
+      (conj (signal :revision-cap {:revision revision :soft-cap soft-cap}))
 
-      (some (fn [[_ h]] (and (>= (:turns h) 4) (>= (:mechanics-rate h) 0.33))) health)
-      (conj "THRASH — a branch spent a third+ of its turns on empty/mis-parsed calls")
+      (some (fn [[_ h]] (and (>= (:turns h) thrash-min-turns)
+                             (>= (:mechanics-rate h) thrash-mechanics-rate)))
+            health)
+      (conj (signal :thrash))
 
       (= :revise review)
-      (conj "REVIEWER BOUNCED — the reviewer sent the work back")
+      (conj (signal :reviewer-bounced))
 
       (>= (or revision 0) 1)
-      (conj (str "REVISING — this feature is on revision " revision)))))
+      (conj (signal :revising {:revision revision})))))
 
 (defn digest
   "The run-health block the supervisor reads. `facts` = {:results :review
@@ -73,16 +91,17 @@
         total (count results)
         shipped (count (filter #(= :done (:status %)) results))
         sigs (signals facts health)]
-    (str "## Run health (revision " (or revision 0) ")\n\n"
-         "Implementors: " shipped "/" total " shipped. Outcomes: "
-         (pr-str (frequencies (map :status results))) "\n"
-         "Reviewer: " (or (s review) "n/a") "   Critic: " (or (s critic) "n/a") "\n\n"
-         "Per branch (turns / mechanics-thrash / shipped?):\n"
-         (str/join "\n"
-                   (for [[b h] health]
-                     (str "- " b ": " (:turns h) " turns, "
-                          (:mechanics h) " thrash, shipped=" (:shipped? h))))
-         "\n\nSignals:\n"
-         (if (seq sigs)
-           (str/join "\n" (map #(str "- " %) sigs))
-           "- none flagged; the loop looks healthy"))))
+    (prompt/render
+     "run-health"
+     {:heading (signal :heading {:revision (or revision 0)})
+      :shipped shipped
+      :total total
+      :outcomes (pr-str (frequencies (map :status results)))
+      :reviewer (or (s review) "n/a")
+      :critic (or (s critic) "n/a")
+      :per-branch (str/join "\n"
+                            (for [[b h] health]
+                              (str "- " b ": " (:turns h) " turns, "
+                                   (:mechanics h) " thrash, shipped=" (:shipped? h))))
+      :signals (when (seq sigs)
+                 (str/join "\n" (map #(str "- " %) sigs)))})))

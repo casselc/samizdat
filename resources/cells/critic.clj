@@ -54,7 +54,8 @@
         completeness and a review of the run's diff. COMPLETE with no critical
         finding ships; anything else re-activates the branch, injects one
         [critic] note, and re-enters. Bounded and fail-open."
-   :effects [:net :db]}
+   :effects [:net :db]
+   :requires [:conn :git-baseline :llm-adapter :llm-config :root :run-id]}
   (fn [{:keys [conn run-id root git-baseline llm-adapter llm-config]}
        {:keys [branch turn] :as data}]
     (let [attempts (or (:critic/attempts data) 0)

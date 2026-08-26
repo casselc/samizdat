@@ -70,11 +70,14 @@
             [samizdat.agent.loop :as branch-loop]
             [samizdat.agent.state :as state]
             [samizdat.prompt :as prompt]
+            [samizdat.session :as session]
+            [samizdat.watch :as watch]
             [samizdat.repl :as repl]
             [samizdat.store.artifacts :as artifacts]
             [samizdat.store.failures :as failures]
             [samizdat.store.interventions :as interventions]
             [samizdat.store.journal :as journal]
+            [samizdat.store.knowledge :as knowledge]
             [samizdat.store.runs :as runs]
             [samizdat.workflow :as workflow])
   (:refer-clojure :exclude [run!]))
@@ -125,7 +128,14 @@
 (defn- open-branch!
   [{:keys [conn run-id] :as ctx} id parent thesis turn]
   (let [parent-id (:id parent)
-        b (seed-branch ctx parent id thesis turn)]
+        ;; One eval namespace per BRANCH. A child forks its parent's, so the
+        ;; conversation it inherits stays true — it can call what it can read
+        ;; itself defining — while anything either defines afterwards stays
+        ;; its own. dispose-branch-engines! closes it when the branch ends.
+        b (assoc (seed-branch ctx parent id thesis turn)
+                 :repl-session (if parent
+                                 (repl/fork-session (:repl-session parent))
+                                 (repl/new-session)))]
     (runs/open-branch! conn run-id {:branch-id id :parent-id parent-id
                                     :created-at-turn turn})
     (if thesis
@@ -244,6 +254,62 @@
   (or (some-> (System/getenv "HARNESS_TURN_DEADLINE_MS") parse-long)
       (gates/threshold :turn-deadline-ms)))
 
+(defn round-max-turns
+  "The turn cap this round compares against: the run's, plus whatever `extend`
+  directives have raised it by.
+
+  A function rather than a ctx read, because `extend` has to be able to move
+  it and ctx is immutable for the life of the run."
+  [ctx data]
+  (or (:max-turns data) (:max-turns ctx)))
+
+(defn await-resume!
+  "Block while the run is paused, returning as soon as it resumes or aborts.
+
+  Re-reads `interventions/paused?` on every pass rather than trusting the
+  round's data map: the resume is a row a human writes from ANOTHER PROCESS
+  while this loop is inside the wait, so a snapshot taken before the wait
+  began is exactly the value that can never change. Reading the flag once
+  would be an infinite loop with a poll in it.
+
+  Polls rather than waits on a condition for the same reason — there is no
+  in-process event to signal on. The interval is `gates.edn :pause-poll-ms`.
+  The abort flag is checked on every pass, because a paused run that could not
+  be aborted out of would be a wedge with a friendly name.
+
+  Returns the number of times it waited, so a test can tell waiting from not
+  waiting without watching the clock."
+  [{:keys [conn run-id abort] :as _ctx}]
+  (if-not (and conn run-id)
+    0
+    (loop [waited 0]
+      (if (and (interventions/paused? conn run-id)
+               (not (and abort @abort)))
+        (do (Thread/sleep (gates/threshold :pause-poll-ms))
+            (recur (inc waited)))
+        waited))))
+
+(defn- rejected
+  "Record a refused directive with its reason.
+
+  The reason is prose a person reads in the run view, so it is
+  prompts/directive-rejected.md and not a string here — the same seam the
+  cull refusal already used, which is what made the ones written inline look
+  like an oversight rather than a choice. One template keyed by reason rather
+  than five files, because they are one sentence each and belong together."
+  [conn run-id d turn reason-ctx]
+  (interventions/resolve! conn run-id (:id d) :rejected
+                          (prompt/render "directive-rejected" reason-ctx)
+                          turn))
+
+(defn- directive-payload
+  "A directive's JSON payload as a map, or {} — a payload that will not parse
+  is a malformed request, not a reason to take the round down."
+  [d]
+  (or (try (json/read-str (str (:payload d)) :key-fn keyword)
+           (catch Throwable _ nil))
+      {}))
+
 (defn drain-directives!
   "Apply pending human directives at the boundary, and record what happened to
   each.
@@ -258,11 +324,21 @@
   reason rather than obeyed. That is a guard on an irreversible action rather
   than a judgement about the branches: obeying it would end the run in a way
   the person almost certainly did not intend, and rather than guessing we say
-  so."
+  so.
+
+  Returns `{:branches :max-turns :paused?}`. It used to return the branch
+  vector alone, which was why four of the eight kinds `interventions/kinds`
+  advertises to a human were rejected here as `not wired to a scheduler action
+  yet`: `pause`, `resume` and `extend` are facts about the RUN and had nowhere
+  to go, and rejecting them explicitly beat accepting them silently but left
+  the control API promising something the scheduler would not do. `:max-turns`
+  and `:paused?` are nil when no directive touched them, so the caller keeps
+  whatever it had."
   [{:keys [conn run-id]} branches directives turn]
   (reduce
-   (fn [bs d]
+   (fn [{:keys [branches] :as acc} d]
      (let [kind (:kind d)
+           bs branches
            target (:branch_id d)
            matches? (fn [b] (or (nil? target) (= target (:id b))))
            alive (count (filter state/active? bs))]
@@ -282,43 +358,94 @@
                   (prompt/render "directive-refused"
                     {:last-branch (<= alive 1) :alive alive})
                   turn)
-                 bs)
+                 acc)
              (do (interventions/resolve! conn run-id (:id d) :applied nil turn)
-                 (mapv #(if (and (matches? %) (state/active? %))
-                          (assoc % :status :culled :inactive-reason "culled by a human")
-                          %)
-                       bs))))
+                 (assoc acc :branches
+                        (mapv #(if (and (matches? %) (state/active? %))
+                                 (assoc % :status :culled
+                                        :inactive-reason "culled by a human")
+                                 %)
+                              bs)))))
 
          "retract"
          ;; Applied here rather than at submit time so it lands on a turn
          ;; boundary like every other directive — a branch mid-turn is holding
          ;; a ledger it read before the change, and rewriting under it would
          ;; make the two disagree for exactly one turn.
-         (let [payload (try (json/read-str (str (:payload d)) :key-fn keyword)
-                            (catch Throwable _ nil))
+         (let [payload (directive-payload d)
                aid (or (:artifact_id payload) (:artifact-id payload))]
            (if (and aid (artifacts/retract! conn run-id aid
                                             (or (:reason payload) "retracted by a human")))
              (interventions/resolve! conn run-id (:id d) :applied nil turn)
-             (interventions/resolve! conn run-id (:id d) :rejected
-                                     (str "no confirmed artifact " (pr-str aid)
-                                          " in this run")
-                                     turn))
-           bs)
+             (rejected conn run-id d turn
+                       {:retract-unknown true :artifact-id (pr-str aid)}))
+           acc)
 
          ("message" "review")
          (do (interventions/resolve! conn run-id (:id d) :applied nil turn)
              ;; Delivered as a directive on the branch, which the arbiter puts
              ;; at priority zero — above every machine gate.
-             (mapv #(if (matches? %) (assoc % :pending-directive d) %) bs))
+             (assoc acc :branches
+                    (mapv #(if (matches? %) (assoc % :pending-directive d) %) bs)))
 
-         ;; pause / resume / extend / fork are recognized but not yet wired to
-         ;; a scheduler action. Rejecting explicitly beats accepting silently.
-         (do (interventions/resolve! conn run-id (:id d) :rejected
-                                     (str kind " is not wired to a scheduler action yet")
-                                     turn)
-             bs))))
-   branches
+         "fork"
+         ;; A fork needs no scheduler machinery of its own: `:beam/spawn`
+         ;; already turns a branch's `:pending-branch-theses` into siblings
+         ;; under the total cap, and it runs after the cull in the same round.
+         ;; So a human's fork is the same object a branch's own
+         ;; `branch_theses` call produces, and it inherits the cap, the
+         ;; parent's conversation and the `:forked-at` stamp for free.
+         (let [payload (directive-payload d)
+               thesis (or (:thesis payload) (:goal payload))
+               parents (filter #(and (matches? %) (state/active? %)) bs)]
+           (if-not (and (seq (str thesis)) (seq parents))
+             (do (rejected conn run-id d turn
+                           (if (seq parents)
+                             {:fork-no-thesis true}
+                             {:fork-no-branch true}))
+                 acc)
+             (do (interventions/resolve! conn run-id (:id d) :applied nil turn)
+                 ;; The FIRST matching parent only. An untargeted fork across
+                 ;; five branches would spend the whole branch budget on one
+                 ;; click, and the cap would then silently decide which
+                 ;; children survived — a person asking for a fork is asking
+                 ;; for a fork.
+                 (let [parent (first parents)]
+                   (assoc acc :branches
+                          (mapv #(if (= (:id %) (:id parent))
+                                   (update % :pending-branch-theses
+                                           (fnil conj []) {:goal (str thesis)
+                                                           :from-human? true})
+                                   %)
+                                bs))))))
+
+         "extend"
+         ;; Raise the turn cap for the rest of the run. Carried in the round's
+         ;; data map rather than written to the run row: the cap is what THIS
+         ;; scheduler loop compares against, a resume re-reads its budget from
+         ;; the control API anyway, and a row that disagreed with the live
+         ;; value would be the worse of the two to have.
+         (let [payload (directive-payload d)
+               by (or (:turns payload) (:by payload) (:max_turns payload))
+               n (when (number? by) (long by))]
+           (if-not (and n (pos? n))
+             (do (rejected conn run-id d turn {:extend-no-turns true})
+                 acc)
+             (do (interventions/resolve! conn run-id (:id d) :applied nil turn)
+                 (update acc :max-turns (fnil + 0) n))))
+
+         ("pause" "resume")
+         ;; Run-level and last-writer-wins: two pauses are one pause, and a
+         ;; resume in the same drain as a pause means the person changed their
+         ;; mind before the round started. The scheduler reads this at the top
+         ;; of the next round, so in-flight turns finish — which is what
+         ;; `interventions/kinds` promises.
+         (do (interventions/resolve! conn run-id (:id d) :applied nil turn)
+             (assoc acc :paused? (= "pause" kind)))
+
+         (do (rejected conn run-id d turn {:unknown-kind true :kind kind})
+             acc))))
+   {:branches branches :max-turns nil :paused? nil}
    directives))
 
 (defn advance-branch
@@ -415,14 +542,33 @@
                 r)))
           pending)))
 
-(defn- dispose-branch-engines!
-  "Release one branch's external sessions. The proof engines left; the seam
-  stays because the coding tools open sessions of their own (nREPL
-  connections, subprocesses) that will want per-branch disposal here. Safe to
-  call twice by contract: disposal must be a no-op on an already-dead
-  session, and the run-end teardown still sweeps everything in case a branch
-  never reached this path."
-  [_b]
+(defn dispose-branch-engines!
+  "Release one branch's external sessions.
+
+  The proof engines this existed for are gone and it was a no-op seam for a
+  while — RFC-006 listed it as a gap and named what would fill it. What
+  filled it is the eval session, which is now per BRANCH rather than per run.
+
+  That change is an isolation fix as much as a disposal one. One namespace
+  per run meant five competing branches shared one set of defs: a helper B1
+  defined was callable from B2, which had never defined it and whose own
+  history did not mention it — so B2 could work for reasons invisible in its
+  transcript, and stop working on a replay that did not include B1. The beam's
+  premise is that branches are independent lines of inquiry.
+
+  clojure-lsp is deliberately NOT disposed here: its clients are keyed by
+  ROOT, every branch of a run shares one root, and one server per root is
+  correct. `system/stop!` sweeps those.
+
+  Safe to call twice by contract — `repl/close-session` is idempotent on an
+  unknown name — and the run-end teardown still sweeps every branch in case
+  one never reached this path."
+  [b]
+  (when-let [session (:repl-session b)]
+    (try (repl/close-session session)
+         (catch Throwable e
+           (log/warn "closing branch" (:id b) "eval session failed:"
+                     (ex-message e)))))
   nil)
 
 (defn record-inactive!
@@ -555,7 +701,12 @@
   re-granting the N turns before it. Returns {:status :run-id :branches …}."
   [{:keys [conn run-id config repl-session] :as ctx} branches start-turn]
   (let [live-branches (atom branches)
-        ctx (assoc ctx :live-branches live-branches)]
+        ;; The watcher starts with the round and stops in the finally below,
+        ;; however the run ends. It observes and submits directives through the
+        ;; interventions queue; it never touches a branch, so it cannot race
+        ;; the round it is watching.
+        ctx (assoc ctx :live-branches live-branches)
+        ctx (assoc ctx :stop-watch (watch/start! ctx))]
     (try
       (let [data (myc/run-compiled (beam-manifest conn config) ctx
                                    {:branches branches :turn start-turn})]
@@ -586,6 +737,31 @@
           ;; were written against the branch's own exception.
           (throw throwable)))
       (finally
+        ;; The watcher stops with the run, however the run ended.
+        (when-let [stop (:stop-watch ctx)] (stop))
+        ;; SHORT-TERM BECOMES LONG-TERM. The session tally dies with the
+        ;; process; a pattern that held across the run is a candidate for
+        ;; something the next run should start out knowing, and this is the
+        ;; only moment at which the whole run has happened and the tally is
+        ;; still there to read.
+        ;;
+        ;; Best effort and last: a failure to remember must never be able to
+        ;; turn a finished run into a failed one.
+        (try
+          (when-let [fs (seq (session/findings))]
+            (let [written (knowledge/distill! conn fs {:run-id run-id})]
+              (log/info "distilled" (count written) "session finding(s) into memory")))
+          ;; And what the supervisor's own changes concluded. This is the
+          ;; heredity of SELECTION: an experiment dies with the process, so a
+          ;; lever that was tried and made things worse would be forgotten and
+          ;; tried again — variation and measurement without inheritance is
+          ;; thrashing with statistics.
+          (when-let [es (seq (session/experiments))]
+            (let [written (knowledge/distill-verdicts! conn es {:run-id run-id})]
+              (when (seq written)
+                (log/info "recorded" (count written) "experiment verdict(s) into memory"))))
+          (catch Throwable e
+            (log/warn "distilling session findings failed:" (ex-message e))))
         ;; The proof engines' teardown lived here: scheduler-opened sessions
         ;; from the `sessions` atom, plus everything a tool opened via
         ;; :engine-sessions, disposed no matter how the run ended. Per-branch
@@ -663,6 +839,11 @@
         ;; namespace, never closed, shared by every run on the box. That is
         ;; the leak provenance CR1-6 fixed on the other driver only.
         root (or (get-in config [:run :root]) (System/getProperty "user.dir"))
+        ;; Make the project's own namespaces requirable from `eval` before any
+        ;; branch takes a turn. The system prompt's whole first section is
+        ;; REPL-first against the project under work, and without this that
+        ;; instruction is unreachable the moment :run :root is not the harness.
+        _ (repl/ensure-project-roots! root)
         ctx {:conn conn :run-id run-id :config config :problem problem
              :llm-adapter llm-adapter :llm-config llm-config
              :max-turns max-turns :beam? (> width 1) :beam-width width

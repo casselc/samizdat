@@ -50,6 +50,10 @@
   (secrets/redact (str s) (secrets/known-values (into {} (System/getenv)))))
 
 (defmethod base/run-tool "eval" [{:keys [branch repl-session] :as ctx}]
+  ;; The BRANCH's session when it has one, the run's otherwise. Per-branch is
+  ;; what keeps two competing branches from seeing each other's defs; the run
+  ;; session remains the answer for a single-branch driver and for a resume
+  ;; that rebuilt a branch without one.
   ;; Evaluate Clojure in the live harness image. REPL-first development: the
   ;; agent tries a form, sees the value and output, and iterates before
   ;; committing it to a file. :neutral — evaluating establishes nothing on its
@@ -58,7 +62,8 @@
   (if-let [m (base/missing ctx :code)]
     (base/malformed branch m)
     (let [timeout (some-> (base/arg ctx :timeout-ms) str str/trim not-empty parse-long)
-          r (repl/eval-code (str (base/arg ctx :code)) repl-session timeout)]
+          session (or (:repl-session branch) repl-session)
+          r (repl/eval-code (str (base/arg ctx :code)) session timeout)]
       (if (:ok r)
         (base/ok branch (scrubbed (str "=> " (:value r)
                                        (when (seq (:out r)) (str "\n" (:out r))))))

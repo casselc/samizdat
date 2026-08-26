@@ -125,7 +125,8 @@
         :run :subtasks), pass through — an explicit split wins. Otherwise one
         LLM call proposes at most :max-subtasks parts; fail-soft to a single
         worker on the whole problem when the call fails or yields no list."
-   :effects [:net]}
+   :effects [:net]
+   :requires [:config :conn :run-id]}
   (fn [{:keys [conn run-id config] :as ctx}
        {:keys [branch subtasks] :as data}]
     (if (seq subtasks)
@@ -149,7 +150,8 @@
         the shared run (so they coordinate through the mailbox). Join their
         answers into the manager branch and finish. A dataflow join, not a live
         actor: workers run to completion."
-   :effects [:net :db]}
+   :effects [:net :db]
+   :requires [:conn :run-id]}
   (fn [{:keys [conn run-id] :as ctx} {:keys [branch subtasks] :as data}]
     (let [tasks (vec (if (seq subtasks) subtasks [(:problem branch)]))
           worker (wf/worker-compiled)
@@ -217,7 +219,8 @@
         fresh branch (W<idx>r1). The retry replaces the original only if it does
         better. A bounded re-task, not an open loop — the supervisor's job is to
         catch a stalled part, not to grind. Re-joins the answers after."
-   :effects [:net :db]}
+   :effects [:net :db]
+   :requires [:conn :run-id]}
   (fn [{:keys [conn run-id] :as ctx} {:keys [branch results subtasks] :as data}]
     (let [tasks (vec subtasks)
           worker (wf/worker-compiled)

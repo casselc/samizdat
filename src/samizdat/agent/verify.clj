@@ -128,9 +128,20 @@
     ;; Ran and green.
     (and result (:green? result)) nil
 
-    ;; verify on and the change looked fine, but the tests could not be run
-    ;; (git could not tell what changed) — trust rather than deadlock the loop.
-    :else nil))
+    ;; Verify is on, the change looked fine, and the tests could not be run —
+    ;; git could not say what changed, or nothing changed was a test namespace
+    ;; and no :verify-cmd was configured. The gate has no evidence either way.
+    ;;
+    ;; POLICY, not a fallthrough: gates.edn :verify-unknown. It was hardcoded
+    ;; to trust, on the reasoning that refusing would deadlock a loop whose git
+    ;; happened to fail — sound reasoning, and exactly how a misconfiguration
+    ;; became a false green (a live run shipped with five test errors because
+    ;; the baseline was never captured and this clause trusted). Which way it
+    ;; should go is a judgement about a particular project, and the supervisor
+    ;; is the role that has the evidence to make it.
+    :else
+    (when (= :refuse (gates/threshold :verify-unknown))
+      (prompt/prompt "verify-unknown"))))
 
 (defn run-verify
   "Run `cmd` in the project root and report whether it is green. Bounded by

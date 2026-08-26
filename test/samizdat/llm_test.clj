@@ -27,6 +27,7 @@
             [clojure.test :refer [deftest testing is are]]
             [jolt.http-client :as http]
             [samizdat.llm.adapter :as adapter]
+            [samizdat.llm.adapter.openai :as openai]
             [samizdat.llm.client :as client]
             [samizdat.llm.fence :as fence]
             [samizdat.llm.message :as message]
@@ -344,7 +345,7 @@
     "{not json at all")
 
   (testing "the error text names the causes the repair pass does not cover"
-    (let [p (fence/parse-tool-call (fenced "{\"name\": \"x\", \"args\": {\"a\": \"un\"escaped\"}}"))]
+    (let [p (fence/parse-tool-call (fenced "{\"name\": \"x\", \"args\": {\"a\": \"un\"escaped\"}"))]
       (is (= "__parse_error__" (:name p)))
       (is (str/includes? (:parse-error p) "unescaped quote")))))
 
@@ -376,8 +377,10 @@
     (let [body "{\"name\": \"x\", \"args\": {\"p\": \"a\\\\\"}}"]
       (is (= "a\\" (get-in (fence/parse-tool-call (fenced body)) [:args :p])))))
 
-  (testing "repair on a body that is broken beyond control characters still fails"
-    (let [p (fence/parse-tool-call (fenced "{\"name\": \"x\", \"args\": {\"c\": \"a\nb\""))]
+  (testing "a body that ends INSIDE a string is not repaired — that is what a
+            reply cut off by the token cap looks like, and completing it would
+            hand write_file half a file to overwrite the whole one with"
+    (let [p (fence/parse-tool-call (fenced "{\"name\": \"x\", \"args\": {\"c\": \"a\nb"))]
       (is (= "__parse_error__" (:name p)))
       (is (:auto-repaired? p) "the repair was attempted and is recorded even though it failed"))))
 
@@ -1041,3 +1044,115 @@
       (is (:unfenced? p)))
     (is (nil? (fence/parse-tool-call "```tool-call\nI will search for it"))
         "and an opener over prose is still no call at all")))
+
+;; --- identifying a llama.cpp endpoint ---------------------------------------
+
+(deftest a-llama-cpp-endpoint-is-identified-by-asking-not-by-config-key
+  ;; RFC-005 recorded that :local was decided by which config key an endpoint
+  ;; sat under, so a llama-server configured as :openai silently got no prefix
+  ;; pinning. The naive repair — send cache_prompt everywhere and let servers
+  ;; ignore it — is worse than the gap: dirge measured strict OpenAI-compatible
+  ;; servers answering 422 on the whole request over one unknown field, so a
+  ;; field sent hopefully is a session that cannot make a single request.
+  (let [hosted (openai/openai-family {:id :openai :label "O"})
+        req {:messages [] :max-tokens 10 :cache-key "B1"}]
+    (testing "a hosted endpoint's body is untouched"
+      (let [body (adapter/chat-body hosted {:base-url "u"} req)]
+        (is (nil? (:cache_prompt body)))
+        (is (nil? (:chat_template_kwargs body)))
+        (is (nil? (:id_slot body)))))
+
+    (testing "the same adapter, once /props identified it, gets the knobs"
+      (let [body (adapter/chat-body hosted {:base-url "u" :llama-cpp? true} req)]
+        (is (true? (:cache_prompt body)))))))
+
+(deftest thinking-is-off-by-default-on-a-local-endpoint
+  ;; llama.cpp has Qwen-family reasoning ON by default and `/no_think` in the
+  ;; PROMPT does not disable it — the chat template decides, not the text. A
+  ;; local model can therefore spend its whole output budget thinking and
+  ;; return a reply with neither content nor a tool call. This layer already
+  ;; treats that reply as an error rather than an empty answer, which is the
+  ;; right reading and does nothing to prevent it.
+  (let [local (openai/openai-family {:id :local :label "L"})
+        req {:messages [] :max-tokens 10 :cache-key "B1"}]
+    (is (= {:enable_thinking false}
+           (:chat_template_kwargs (adapter/chat-body local {:base-url "u"} req))))
+    (testing "and a reasoning model asked to reason is still a valid config"
+      (is (nil? (:chat_template_kwargs
+                 (adapter/chat-body local {:base-url "u" :thinking? true} req)))))))
+
+(deftest an-id-slot-is-pinned-only-from-an-explicit-table
+  ;; A slot count is a property of how the server was launched; inventing an
+  ;; index evicts another conversation's warm prefix to serve a guess.
+  (let [local (openai/openai-family {:id :local :label "L"})
+        req {:messages [] :max-tokens 10 :cache-key "B1"}]
+    (is (nil? (:id_slot (adapter/chat-body local {:base-url "u"} req))))
+    (is (= 3 (:id_slot (adapter/chat-body local {:base-url "u" :slots {"B1" 3}} req))))
+    (is (nil? (:id_slot (adapter/chat-body local {:base-url "u" :slots {"other" 3}} req))))))
+
+(deftest the-probe-answers-nil-for-anything-that-is-not-llama-cpp
+  ;; Unreachable, not-llama.cpp and malformed are the same answer, and none of
+  ;; them is a reason not to start.
+  (with-redefs [http/get (fn [& _] {:status 404 :body "not found"})]
+    (is (nil? (client/probe-llama-cpp {:base-url "http://x/v1"}))))
+  (with-redefs [http/get (fn [& _] {:status 200 :body "{\"object\":\"list\"}"})]
+    (is (nil? (client/probe-llama-cpp {:base-url "http://x/v1"}))
+        "a 200 without total_slots is some other server"))
+  (with-redefs [http/get (fn [& _] (throw (ex-info "connection refused" {})))]
+    (is (nil? (client/probe-llama-cpp {:base-url "http://x/v1"}))))
+  (with-redefs [http/get (fn [& _] {:status 200 :body "{\"total_slots\": 4}"})]
+    (is (= {:llama-cpp? true :total-slots 4}
+           (client/probe-llama-cpp {:base-url "http://x/v1"}))
+        "and total_slots is the server saying how it was launched")))
+
+;; --- repairing a tool call the model nearly got right -----------------------
+
+(deftest a-missing-closing-brace-is-repaired-not-refused
+  ;; Observed live, TWICE in one fourteen-turn run, on the two calls carrying
+  ;; the run's actual work: the model emitted a complete write_file whose args
+  ;; object closed and whose outer object did not. The reply was not truncated
+  ;; — it finished cleanly inside the fence — the model simply miscounted,
+  ;; which is what happens when the closing braces are eight hundred
+  ;; characters of escaped Clojure away from their openers.
+  ;;
+  ;; Fourteen percent of that run's turns died on one absent character the
+  ;; harness could supply deterministically.
+  (let [reply (str "```tool-call\n"
+                   "{\"name\": \"write_file\", \"args\": {\"path\": \"src/todo/core.clj\","
+                   " \"content\": \"(ns todo.core)\\n\\n(defn add [ts t] (conj ts {:t t}))\"}"
+                   "\n```")
+        parsed (fence/parse-tool-call reply)]
+    (is (= "write_file" (:name parsed)))
+    (is (= "src/todo/core.clj" (get-in parsed [:args :path])))
+    (is (str/includes? (get-in parsed [:args :content]) "(defn add"))
+    (is (true? (:auto-repaired? parsed))
+        "a branch whose calls need repairing is a fact the mechanics tally
+         should see, so the repair is never silent")))
+
+(deftest the-brace-repair-only-adds-and-only-outside-strings
+  (testing "a brace inside a content string is text, not structure — the case
+            that matters, since the argument is usually source code"
+    (is (= "{\"content\": \"{{{ [[[ \"}"
+           (fence/close-unbalanced "{\"content\": \"{{{ [[[ \"}"))))
+
+  (testing "an escaped quote does not end the string"
+    (is (= "{\"a\": \"say \\\"{\\\" here\"}"
+           (fence/close-unbalanced "{\"a\": \"say \\\"{\\\" here\"}"))))
+
+  (testing "already balanced is untouched"
+    (is (= "{\"a\": [1 2]}" (fence/close-unbalanced "{\"a\": [1 2]}"))))
+
+  (testing "too many closers is a different mistake and is left to be reported"
+    (is (= "{\"a\": 1}}" (fence/close-unbalanced "{\"a\": 1}}"))))
+
+  (testing "nested openers close in the right order — a stack, not a count"
+    (is (= "{\"a\": {\"b\": [1]}}" (fence/close-unbalanced "{\"a\": {\"b\": [1"))))
+
+  (testing "a body ending inside a string is refused, however unbalanced"
+    (is (= "{\"a\": \"unfinished" (fence/close-unbalanced "{\"a\": \"unfinished")))))
+
+(deftest a-body-that-cannot-be-repaired-still-explains-itself
+  (let [parsed (fence/parse-tool-call "```tool-call\n{\"name\": not-json}\n```")]
+    (is (= "__parse_error__" (:name parsed)))
+    (is (str/includes? (:parse-error parsed) "brace")
+        "the complaint names the missing-closer cause alongside the others")))

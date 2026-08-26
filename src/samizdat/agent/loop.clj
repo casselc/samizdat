@@ -45,6 +45,7 @@
             [samizdat.agent.tools :as tools]
             [samizdat.agent.skills :as skills]
             [samizdat.prompt :as prompt]
+            [samizdat.session :as session]
             [samizdat.store.artifacts :as artifacts]
             [samizdat.store.failures :as failures]
             [samizdat.store.interventions :as interventions]
@@ -134,7 +135,9 @@
    [{:role "system" :content (cond-> (system-prompt)
                                (not (str/blank? prompt-suffix))
                                (str "\n\n" prompt-suffix))}
-    {:role "user" :content (str "## Problem\n\n" problem "\n\nIssue your first tool call.")}]))
+    ;; The opening user turn is prose the model reads and a project may want
+    ;; worded differently — prompts/problem.md, not a `str` here.
+    {:role "user" :content (prompt/render "problem" {:problem problem})}]))
 
 (defn- context-block
   "What the harness adds to the branch's view before its next turn: the
@@ -281,17 +284,32 @@
 
 (defn provider-error-step
   "A provider failure is not the branch's fault and must not count against it
-  as a verification failure."
-  [{:keys [conn run-id]} branch turn error]
-  (log/warn "branch" (:id branch) "turn" turn "model call failed:" error)
-  (journal/record-turn! conn run-id
-                        {:branch-id (:id branch) :turn turn
-                         :tool-name "__provider_error__" :result error
-                         :category "neutral"})
-  (state/add-message branch "user"
-                     (str "[harness] The provider call failed: " error
-                          " Try again.")
-                     {:turn turn}))
+  as a verification failure.
+
+  It IS counted against the run, though, which is different and was missing.
+  `:provider` existed in the session tally and nothing ever wrote to it — dead
+  structure, and the exact trap the fence parser's own comment warns about: a
+  signal that is never fed reads identically to a behaviour that never
+  happens. A run losing half its turns to empty replies scored as neutral,
+  because a provider error is journalled `:neutral` (correctly — the BRANCH
+  did nothing wrong) and nothing else looked at it.
+
+  Counted by REASON, because the responses differ. An empty reply means the
+  model spent its whole budget thinking and wants more tokens or reasoning
+  turned off; a refused connection wants waiting. Telling a supervisor only
+  that `the provider failed` gives it nothing to act on."
+  ([ctx branch turn error] (provider-error-step ctx branch turn error nil))
+  ([{:keys [conn run-id]} branch turn error reason]
+   (session/observe! [:provider (or reason :call-failed)])
+   (log/warn "branch" (:id branch) "turn" turn "model call failed:" error)
+   (journal/record-turn! conn run-id
+                         {:branch-id (:id branch) :turn turn
+                          :tool-name "__provider_error__" :result error
+                          :category "neutral"})
+   (state/add-message branch "user"
+                      (str "[harness] The provider call failed: " error
+                           " Try again.")
+                      {:turn turn})))
 
 (defn absorb-response
   "Fold the model's response into the branch.
@@ -358,24 +376,42 @@
         ;; mechanics failure with the harness doing the reasoning.
         (assoc :prefill "```tool-call\n"))))
 
+(defn transition-effects
+  "The effect names a turn envelope triggers, per phases.edn `:transitions`.
+
+  A key is a get-in path into the envelope. The value says what the path has
+  to hold:
+
+    [effects…]        the path holds anything truthy
+    {value [effects…]} the path holds exactly `value`
+
+  The second form is what the table could not previously say, and it is what
+  an artifact trigger needs: `:claim-status` is truthy for `:confirmed`,
+  `:empirical` and `:sketch` alike, so a truthy test on it would fire the
+  confirmed branch's effects on an unverified plan. A status is a
+  vocabulary, not a flag, and a table that can only ask `is it set` cannot
+  key on one."
+  [envelope]
+  (mapcat (fn [[path outcome]]
+            (let [v (get-in envelope path)]
+              (if (map? outcome)
+                (get outcome v)
+                (when v outcome))))
+          (phases/transitions)))
+
 (defn apply-transitions
   "Apply the result-signal transitions the turn's result carries (drg-4026
   #3) — the claim-first state machine as a declarative table (phases.edn
-  :transitions) instead of cond-> clauses in the executor. A table entry's
-  key is a get-in path into the turn envelope; when it holds a truthy value
-  each named effect applies. Effect names dispatch here to state fns, data
-  cannot mutate the branch."
+  :transitions) instead of cond-> clauses in the executor. Effect names
+  dispatch here to state fns, because a table cannot mutate a branch."
   [result artifact branch]
-  (let [envelope {:result result :artifact artifact}]
-    (reduce (fn [b effect]
-              (case effect
-                :mark-green    (state/mark-green b)
-                :clear-reframe (state/clear-reframe b)
-                b))
-            branch
-            (mapcat (fn [[path effects]]
-                      (when (get-in envelope path) effects))
-                    (phases/transitions)))))
+  (reduce (fn [b effect]
+            (case effect
+              :mark-green    (state/mark-green b)
+              :clear-reframe (state/clear-reframe b)
+              b))
+          branch
+          (transition-effects {:result result :artifact artifact})))
 
 (defn tool-step
   "Dispatch the parsed call: phase policy first, then the tool, then the
@@ -427,16 +463,14 @@
          ;; approach could not have produced it (vf-9wx). The signal→effect
          ;; table itself is phases.edn :transitions data (drg-4026 #3).
          ;;
-         ;; This comment used to say that nothing on the current surface emits
-         ;; :claim-status artifacts, as the reason the trigger keys on the
-         ;; verify signal rather than on :confirmed. That stopped being true:
-         ;; tools/ship.clj emits {:claim-status :confirmed} on a green
-         ;; ship-verify, so the artifact machinery downstream of it is LIVE —
-         ;; cross-branch sharing admits those artifacts, and the winner
-         ;; rubric's confirmed-count and engine-diversity components rank on
-         ;; them. Keying on the verify signal is still right (it is the direct
-         ;; observation rather than an inference from an artifact), but not for
-         ;; the reason that was written here. RFC-001 F1.
+;; The table now carries BOTH triggers, and they are different questions.
+         ;; :mark-green keys on the verify signal, because the green point the
+         ;; safe-state rung rewinds to is a fact about the WORKING TREE — that
+         ;; the suite was observed passing — and not about any claim.
+         ;; :clear-reframe keys on a CONFIRMED ARTIFACT, because that is what
+         ;; clear-reframe has always meant: the branch banked something the
+         ;; withheld approach could not have produced. Any tool that confirms
+         ;; a claim ends a reframe now, not only a green ship-verify.
          branch (apply-transitions result (:artifact result) branch)]
     ;; A green verify marks the green point the safe-state rung falls back
     ;; to. The snapshot is the turn cursor: the journal is the store
@@ -444,11 +478,29 @@
     ;; cursor is all the rung needs to name a rewindable state.
     {:branch branch :result result :tool tool}))
 
+(defn- observe-turn!
+  "Feed the live session tally with what this turn did and how the reply
+  parsed. Never allowed to throw: a counter must not be able to cost a turn."
+  [tool result signals]
+  (try
+    (session/observe-turn! {:tool tool
+                            :category (:category result)
+                            :signals signals})
+    (catch Throwable _ nil)))
+
 (defn journal-step!
   "The durable record of the turn: the turn row, any artifact (and its entry
   into the shared pool when it qualifies), any failure, any thesis. Side
   effects only; returns nil."
-  [{:keys [conn run-id] :as ctx} branch turn {:keys [parsed result tool said response]}]
+  [{:keys [conn run-id] :as ctx} branch turn {:keys [parsed result tool said response signals]}]
+  (observe-turn! tool result (or signals
+                                 ;; A turn that never reached a tool still has
+                                 ;; something to say: the parse flags are how
+                                 ;; the harness's OWN failure modes get counted,
+                                 ;; and those are the ones a supervisor is least
+                                 ;; able to infer from outcomes.
+                                 {:parse-error (= "__parse_error__" (:name parsed))
+                                  :auto-repaired (:auto-repaired? parsed)}))
   (journal/record-turn! conn run-id
                         {:branch-id (:id branch) :turn turn
                          :tool-name tool :args (:args parsed)

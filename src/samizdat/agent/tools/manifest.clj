@@ -35,7 +35,7 @@
             [mycelium.core :as myc]
             [samizdat.agent.tools.base :as base]
             [samizdat.cells :as cells]
-            [samizdat.store.workflows :as workflows]))
+            [samizdat.store.userspace :as us]))
 
 (defn- register-subworkflows! [definition]
   ;; Mirrors samizdat.workflow/register-subworkflows! — kept here rather than
@@ -62,7 +62,7 @@
   "Actions: list, show {name, version?}, save {name, edn}. A manifest is the loop as data — a :cells map, :edges, and dispatch predicates. Save validates by compiling before it stores; the run that uses it is chosen by config :run :loop.")
 
 (defn- render-list [conn]
-  (let [rows (workflows/names conn)]
+  (let [rows (us/names conn :manifest)]
     (if (seq rows)
       (str/join "\n"
                 (for [{:keys [name version versions]} rows]
@@ -92,9 +92,9 @@
             (str/blank? (str name)) (base/malformed branch (base/missing ctx :name))
             :else
             (if-let [row (if v
-                           (workflows/load-version conn name v)
-                           (workflows/load-latest conn name))]
-              (base/ok branch (str name " v" (:version row) ":\n\n" (:edn row)))
+                           (us/load-version conn :manifest name v)
+                           (us/load-latest conn :manifest name))]
+              (base/ok branch (str name " v" (:version row) ":\n\n" (:body row)))
               (base/malformed branch (str "No manifest " name
                                           (when v (str " v" v)) ".")))))
 
@@ -106,7 +106,7 @@
             (str/blank? (str edn-text)) (base/malformed branch (base/missing ctx :edn))
             :else
             (do (validate! edn-text)
-                (let [v (workflows/save! conn name edn-text)]
+                (let [v (us/save! conn :manifest name edn-text)]
                   (base/ok branch
                            (str "Saved manifest '" name "' v" v " — it compiles."
                                 " A run configured for '" name "' (config :run :loop)"

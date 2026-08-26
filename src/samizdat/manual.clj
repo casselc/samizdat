@@ -49,6 +49,7 @@
   (:require [clojure.edn :as edn]
             [clojure.java.io :as io]
             [clojure.string :as str]
+            [samizdat.prompt :as prompt]
             [samizdat.userspace :as userspace]))
 
 (def resource-name "manual.edn")
@@ -123,11 +124,14 @@
   []
   (str/join "\n\n"
             (for [{:keys [group entries]} (groups)]
-              (str "## " group "\n"
-                   (str/join "\n"
-                             (for [{:keys [name arglists summary]} entries]
-                               (str "  " name " " (pr-str arglists) "\n"
-                                    "      " summary)))))))
+              (str/trimr
+               (prompt/render
+                "manual-group"
+                {:group group
+                 :entries (str/join "\n"
+                                    (for [{:keys [name arglists summary]} entries]
+                                      (str "  " name " " (pr-str arglists) "\n"
+                                           "      " summary)))})))))
 
 (defn find-entry
   "The entry for `sym` (a symbol or string), or nil — for a caller that wants

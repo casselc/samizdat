@@ -23,7 +23,8 @@
   per-phase refusal the branch loop consults before dispatch. Tool groups
   require this namespace; nothing here requires a group back."
   (:require [clojure.string :as str]
-            [samizdat.agent.phases :as phases]))
+            [samizdat.agent.phases :as phases]
+            [samizdat.prompt :as prompt]))
 
 (defmulti run-tool
   (fn [ctx] (:tool-name ctx)))
@@ -81,31 +82,75 @@
                             (str "\"" (name k) "\": \"<" (name k) ">\"")))
            "}}\n```"))))
 
-(defn phase-refusal
-  "The one place that owns per-phase tool policy, consulted by the branch loop
-  BEFORE run-tool dispatch. Returns a result map refusing the call, or nil
-  when it may proceed.
+(defn- when-fn-holds?
+  "Whether a compiled `:when` form holds for this call. A rule with no
+  condition always holds, so an unconditional withhold needs no ceremony."
+  [when-fn ctx]
+  (or (nil? when-fn) (boolean (when-fn ctx))))
 
-  The policy is phases.edn data (drg-4026 #34): each phase's :withholds set.
-  Empty today — the proof harness's explore/build policy (withhold Lean until
-  a sketch, withhold sketch once building) left with its tool surface — but
-  the table is consulted, so the coding loop's phase policy plugs back in as
-  a data edit rather than new code. Any refusal returned from here carries
-  `:policy-refusal? true` so the cull record can tell a declined call from a
-  malformed fence."
-  [{:keys [branch tool-name] :as _ctx}]
-  (when (contains? (phases/withholds (:phase branch)) tool-name)
-    (fail branch
-          (str "`" tool-name "` is not available in the "
-               (name (:phase branch))
-               " phase. The phase-valve message says when that changes.")
-          :policy-refusal? true)))
+(defn phase-refusal
+  "The one place that owns tool-withholding policy, consulted by the branch
+  loop BEFORE run-tool dispatch. Returns a result map refusing the call, or
+  nil when it may proceed.
+
+  Two tables, both phases.edn data (drg-4026 #34), because the question has
+  two shapes:
+
+  `:withholds` is per PHASE — which tools this phase forbids outright. Empty
+  today; the proof harness's explore/build policy left with its tool surface,
+  and the table is still consulted so a coding loop's phase policy plugs back
+  in as a data edit rather than as new code.
+
+  `:refusals` is per BRANCH — an ordered table of conditions, each a form
+  seeing `branch` and `tool-name`. This is what the phase table could not
+  express and what RFC-008's gap needed: the board was `encouraged, not
+  enforced` because nothing could refuse a call from a branch holding no
+  task, and whether a branch holds a task is a fact about the branch and not
+  about its phase. Adding it here rather than in the task tool keeps every
+  withholding decision in one place and one table.
+
+  Any refusal from either path carries `:policy-refusal? true`, so a cull
+  record can tell a declined call from a malformed fence — the branch made a
+  well-formed call and the harness declined it, which is not evidence about
+  its line of inquiry."
+  [{:keys [branch tool-name] :as ctx}]
+  (or
+   (when (contains? (phases/withholds (:phase branch)) tool-name)
+     (fail branch
+           (str "`" tool-name "` is not available in the "
+                (name (:phase branch))
+                " phase. The phase-valve message says when that changes.")
+           :policy-refusal? true))
+
+   ;; `condition` rather than destructuring `:when` — a local named `when`
+   ;; shadows clojure.core/when for the whole body, and the shadowing is
+   ;; silent until the form it swallows is evaluated.
+   (some (fn [{:keys [tools message-file] :as rule}]
+           (let [condition (:when rule)]
+             (clojure.core/when
+              (and (contains? (set tools) tool-name)
+                   (when-fn-holds? condition ctx))
+              (fail branch
+                    (prompt/render message-file
+                                   {:tool-name tool-name
+                                    :phase (some-> (:phase branch) name)})
+                    :policy-refusal? true
+                    :refusal-rule (:rule rule)))))
+         (phases/refusals))))
 
 
 ;; --- unknown ----------------------------------------------------------------
 
 (defmethod run-tool :default [{:keys [branch tool-name]}]
-  (fail (update-in branch [:mechanics :unknown-tools] inc)
+  ;; (fnil inc 0), not inc: the counter starts absent, and `inc` on nil throws.
+  ;; state/new-branch seeds the tally so a production branch survived it, but
+  ;; a resumed branch, a hand-built one, or any branch whose mechanics map has
+  ;; not been touched yet did not — and an unknown tool name is exactly what a
+  ;; model produces when it hallucinates a capability, so the one path that
+  ;; exists to handle a bad call was itself the crash. The dispatch seam turns
+  ;; a throw into a :mechanics result now (RFC-008), which would have masked
+  ;; this rather than fixed it.
+  (fail (update-in branch [:mechanics :unknown-tools] (fnil inc 0))
         (str "No tool named `" tool-name "`. Available: "
              (str/join ", " (sort (remove #{:default} (keys (methods run-tool)))))
              ".")))

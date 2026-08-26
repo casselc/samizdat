@@ -399,6 +399,398 @@
         tolerates a much wider split than one with a single build. Config
         :run :max-subtasks still overrides for one run."}
 
+ :retention
+ {:value {:events-hours 24
+          :run-record-days nil}
+  :kind :policy :capability-tunable? false
+  :doc "HOW LONG THE DATABASE KEEPS A FINISHED RUN. One project, one file, and
+        it only ever grew.
+
+        :events-hours — the tail buffer. Events are not a record: every kind
+        that matters is also written to a durable table, and their only readers
+        are the live tail and last-progress-at. The window exists because a
+        client tailing a run reads its :run-finished entry to learn the run
+        ended, so events have to outlive the run itself by long enough for
+        that. This was (* 24 3600) inline in store/runs.clj.
+
+        :run-record-days — the RECORD: turns, artifacts, failures, gate
+        firings and the messages between branches. nil means keep forever, and
+        that is the default, deliberately.
+
+        Deleting these is not the same kind of act as deleting events, and the
+        difference is the whole reason one defaults on and the other defaults
+        off. RFC-009's central property is that a resume rebuilds branch state
+        by REPLAY — everything a gate reads is journalled — and that a crashed
+        run stays inspectable. Pruning turns ends both for that run: it becomes
+        a row saying something happened, with no account of what.
+
+        So this is an operator's decision about disk, not a default anyone
+        should inherit. When it is set, only runs that are finished AND older
+        than the window are touched, the `runs` row itself always survives (an
+        index of what happened, without the bulk), and the FTS mirrors go with
+        their rows — an orphaned index entry would keep ranking against
+        nothing, which is worse than either keeping or deleting cleanly."}
+
+ :corroboration
+ {:value {:min-runs 2}
+  :kind :threshold :capability-tunable? false
+  :doc "HOW MANY DISTINCT RUNS A PATTERN NEEDS BEFORE IT JUSTIFIES CHANGING THE
+        LOOP.
+
+        One run is an observation, not a pattern. A single run can go wrong for
+        reasons that have nothing to do with the harness — a flaky provider, an
+        unlucky task, a model having a bad day — and a supervisor that retunes
+        on one run's evidence is fitting the noise. It will then measure the
+        retune against the next run, which is also one run, and so on.
+
+        Adopted from backpass (VISION.md): `a new instruction needs
+        corroboration from at least two distinct sessions, and one session
+        never counts twice however often it is re-analyzed`. The DISTINCT is
+        the load-bearing word — a second sighting inside the same run is the
+        same evidence counted twice.
+
+        Two is deliberately the lowest bar that is still a bar. It is not a
+        claim that two runs prove anything; it is the difference between a
+        pattern and an afternoon, and raising it costs the supervisor its
+        ability to react at all on a short campaign.
+
+        Below the bar a finding is still SHOWN — it may be the only warning
+        anyone gets — and it is marked as uncorroborated, so acting on it is a
+        deliberate choice rather than a mistake."}
+
+ :fitness
+ {:value
+  {:weights {:tool-success     1.0
+             :tool-failure    -1.0
+             :tool-mechanics  -1.5
+             :parse-error     -2.0
+             :no-fence        -2.0
+             :truncated       -1.0
+             :auto-repaired   -0.25
+             :verify-green     3.0
+             :verify-red      -1.0
+             :verify-skipped  -2.0
+             :gate-met         0.5
+             :gate-met-late    0.25
+             :gate-unmet      -0.5
+             :provider-empty  -2.0
+             :provider-failed -1.5
+             :provider-retry  -0.5}
+   :min-turns-for-verdict 6
+   :meaningful-delta 0.15
+   :max-open-experiments 1}
+  :kind :policy :capability-tunable? false
+  :doc "THE SELECTION PRESSURE. One number per turn saying how well the loop is
+        running, so that a change to the loop can be judged against something
+        other than a feeling.
+
+        The supervisor mutates the loop — a cell, a manifest, a prompt, a
+        threshold — and userspace keeps every version. That is variation and
+        heredity. Without a fitness function there is no SELECTION: nothing
+        distinguishes a change that helped from one that was merely made, and a
+        supervisor accumulates edits the way a codebase accumulates workarounds.
+
+        The weights are the value judgements, and they are here rather than in
+        code because they are exactly the thing a project should argue with.
+        The ones worth defending:
+
+        :tool-mechanics is worse than :tool-failure. A failed call TESTED
+        something and came back negative; a malformed one produced no evidence
+        at all and cost the same turn. A loop that cannot tell those apart will
+        optimise toward making no claims.
+
+        :parse-error and :no-fence are the heaviest negatives. A turn that
+        never reached a tool is a turn spent entirely on the harness's own
+        overhead, and it is the failure mode most within the harness's power to
+        fix.
+
+        :verify-skipped is worse than :verify-red. Red means the gate ran and
+        caught something — that is the gate WORKING. Skipped means it was asked
+        and could not answer, and the work shipped anyway.
+
+        :truncated is negative but light, and separate from the parse errors it
+        resembles: the repair is more tokens, not more steering, so it should
+        push on a different lever.
+
+        :provider-empty is as heavy as a parse error and for the same reason —
+        a reply with neither content nor reasoning is a turn spent entirely on
+        overhead. It is separate from :provider-failed because the responses
+        differ: an empty reply means the model spent its budget thinking and
+        wants more tokens or reasoning off, while a failed call wants waiting.
+        A retry that eventually succeeded still costs, so it counts, lightly.
+
+        Per TURN, not per run, so runs of different lengths compare.
+
+        :max-open-experiments — how many measured-but-unsettled changes may be
+        in flight. One, because two changes measured over the same interval
+        tell you nothing about either, and this is ENFORCED rather than asked:
+        the prompt has always said one change per round, and a rule the model
+        can decline is not a rule. Settling a verdict (revert or keep) frees
+        the slot.
+
+        :min-turns-for-verdict — below this, a delta is noise and the honest
+        verdict is `too early`. :meaningful-delta — how much per-turn fitness
+        must move before a change counts as having done anything, rather than
+        the supervisor reading its own preferences into the third decimal."}
+
+ :watch
+ {:value {:enabled? true
+          :poll-ms 4000
+          :severities ["high"]
+          :max-interventions 3}
+  :kind :policy :capability-tunable? false
+  :doc "THE WATCHER: a thread that observes a run while it runs and speaks when
+        something is going wrong, the way a person watching a coding harness
+        does.
+
+        The supervisor ROLE is a manifest node, so it runs between rounds, in
+        sequence, and only in the workflows that wire it. A run losing every
+        turn to empty provider replies reaches no round boundary quickly, and
+        the node never gets a look. This is the other half: continuous
+        observation, reacting while the pattern is still forming.
+
+        It intervenes through the same interventions queue a human uses, so a
+        directive still lands on a turn boundary and never touches a branch
+        mid-turn. `issued-by` is `watch` instead of `human`; nothing else
+        differs.
+
+        :severities — only these are worth interrupting for. Most findings are
+        worth SEEING and only some are worth a turn: a supervisor reading a
+        block can weigh a medium finding, while a branch mid-task handed one is
+        just distracted.
+
+        :max-interventions — per run. Every directive costs the branch a turn
+        reading it, so an observer with no budget is an observer that can spend
+        the whole run explaining why the run is going badly. Three, and a
+        finding is raised at most once either way.
+
+        :poll-ms — how often it looks. Fast enough to catch a pattern while it
+        is forming, slow enough that it is not re-deciding on every turn.
+
+        :enabled? false turns it off entirely, which is the right setting for a
+        run whose whole purpose is to reproduce a failure."}
+
+ :session-findings
+ {:value {:mechanics-rate 0.25
+          :repair-rate 0.2
+          :truncation-rate 0.15
+          :verify-skip-rate 0.5
+          :tool-failure-rate 0.5
+          :min-tool-calls 4
+          :min-gate-firings 3
+          :min-green-runs 2
+          :min-culled-with-evidence 2
+          :provider-trouble-rate 0.2
+          :details
+          {:calls-not-parsing "a large share of turns produce no usable tool call"
+           :calls-need-repair "the harness is repairing the model's tool calls often — the calls work, but the model is not writing them cleanly"
+           :replies-truncated "replies are hitting the token cap before emitting a call. The fix is MORE TOKENS, not more steering: the model never got far enough to call anything"
+           :shipping-unverified "the ship gate is being asked and cannot answer — work is shipping without its tests having been run"
+           :verification-working "the ship gate is running the tests and they are passing"
+           :tool-failing "`{{tool}}` fails more often than it works"
+           :gate-ignored "the `{{gate}}` gate has fired {{fired}} times and nothing it asked for has happened"
+           :provider-empty-replies "the provider keeps returning replies with neither content nor reasoning — the model is spending its whole output budget thinking and never reaching a tool call. The fix is MORE TOKENS or reasoning turned off for this endpoint, not more steering: raise :context-budget, or set :thinking? false if this is a local llama.cpp endpoint"
+           :provider-unreliable "provider calls are failing or needing retries often. This is the endpoint, not the loop — no prompt or manifest change will help, and turns spent here are turns the run does not get back"
+           :selection-losing-evidence "branches are being culled while holding CONFIRMED artifacts — the beam found evidence and the retention rule threw it away. This is a SHARPENING failure, not an expansion one: widening the beam will not help, and the fix is the critic rubric or the cull thresholds"}}
+  :kind :threshold :capability-tunable? false
+  :doc "WHEN A LIVE SESSION TALLY BECOMES SOMETHING THE SUPERVISOR SHOULD SEE.
+
+        samizdat.session counts what happens as it happens — turns, tools by
+        outcome, fences that did not parse, gates that fired and whether what
+        they asked for happened, whether the ship gate could run. These are
+        the thresholds at which a count stops being noise and becomes a
+        finding.
+
+        They are thresholds and not judgement, deliberately. What to DO about
+        a quarter of turns producing no usable call is the supervisor's call
+        and depends on the run; noticing that it is happening should not be.
+        A supervisor that has to measure before it can think will mostly not
+        bother, which is how a harness ends up guessing where its problems
+        are.
+
+        :mechanics-rate    share of turns yielding no usable tool call
+        :repair-rate       share the harness had to repair to use
+        :truncation-rate   share cut off by the token cap. Its own signal
+                           because the fix is more tokens, not more steering —
+                           reading it as a model too weak to call a tool would
+                           be the wrong repair entirely.
+        :verify-skip-rate  share of ship attempts where the gate was asked and
+                           could not answer
+        :tool-failure-rate a single tool failing more often than it works
+        :min-tool-calls    before a tool's rate means anything
+        :min-gate-firings  before a gate's silence means anything
+        :min-green-runs    before `verification is working` is worth saying
+
+        The last one is not symmetry for its own sake: a supervisor shown only
+        what is broken will keep changing things that are working."}
+
+ :verify-unknown
+ {:value :trust
+  :kind :policy :capability-tunable? false
+  :doc "WHAT TO DO WHEN THE SHIP GATE CANNOT TELL. `:trust` ships, `:refuse`
+        blocks and says why.
+
+        The case: verification is configured, but the tests could not be run —
+        git could not say what changed, or nothing among the changed files was
+        a test namespace and no :verify-cmd was set. The gate has no evidence
+        either way.
+
+        `:trust` was a hardcoded fallthrough, on the reasoning that refusing
+        would deadlock a loop whose git happened to fail. That reasoning is
+        sound and it is also exactly how a misconfiguration became a false
+        green: a live run shipped {:test 19 :pass 49 :error 5} because the
+        baseline was never captured, the rung was silently inert, and the
+        gate trusted.
+
+        Which way this should default is a JUDGEMENT ABOUT THIS PROJECT, not
+        a fact about harnesses, and it is the supervisor's to make. In a
+        project where git is reliable and the tests are the point, :refuse
+        turns a silent false green into a loud complaint. In one where the
+        verify command is flaky or the tree is not a git checkout, :trust
+        keeps the loop moving. The supervisor has the evidence to tell those
+        apart — how often runs shipped and were wrong, whether the gate ever
+        actually ran — and `remember` to carry the finding to the next run.
+
+        Whichever it is, the decision is now RECORDED: the ship-verify note
+        fires with :ran false and a reason whether or not the tests ran, so a
+        run that shipped unverified is no longer indistinguishable in the
+        record from one that shipped green."}
+
+ :memory
+ {:value
+  {:kind-salience {:working 0.3 :episodic 0.45 :procedural 0.5
+                   :semantic 0.6 :identity 0.75 :overview 0.95
+                   :note 0.5}
+   :default-confidence 0.6
+   :use-reinforcement 0.05
+   :recent-use-bonus 0.15
+   :recent-use-window-days 14
+   :disuse-decay 0.05
+   :decay-floor 0.1
+   :salience-cap 0.95
+   :effectiveness-weight 0.15
+   :effectiveness-cap 0.3
+   :confidence-weight 0.25
+   :recall-limit 8}
+  :kind :policy :capability-tunable? false
+  :doc "HOW A MEMORY EARNS ITS PLACE. Adopted from dirge's salience model
+        (src/extras/salience.rs), with one deliberate difference: there the
+        constants are compiled, and here they are not — the supervisor is the
+        role that reads memories and acts on them, so it is the role that
+        should be able to retune what counts as worth remembering.
+
+        Effective salience is
+          salience
+          + recent-use-bonus   (used within recent-use-window-days)
+          + effectiveness      (log-damped net of success over failure,
+                                weighted and capped)
+          + confidence         ((confidence - default) * confidence-weight)
+
+        :kind-salience is the base by KIND, and the ordering is the claim:
+        who we are outranks what is true, which outranks how to do things,
+        which outranks what happened once, which outranks what we are doing
+        right now. :overview sits above all of it — the one orientation note
+        per project — and :note is the unclassified default, parked with
+        :procedural because an uncategorised memory is almost always a
+        how-to.
+
+        SALIENCE AND CONFIDENCE ARE DIFFERENT AXES and collapsing them loses
+        the distinction that matters: a fact can be important but contested,
+        or trivial but certain. Confidence is weighted low (0.25 over a [0,1]
+        range is a ±0.1 swing) so it acts as a tiebreak within a tier rather
+        than letting a contested claim jump above a durable one.
+
+        Effectiveness is the axis that makes memory a LOOP rather than a
+        list: acting on a memory and reporting whether it worked moves it.
+        Log-damped so the first confirmation counts for most of what
+        confirmation can buy (+1 ≈ +0.045, +9 ≈ +0.15) and a memory cannot
+        be voted to the top by repetition.
+
+        Reinforcement and decay are small on purpose — 0.05 a step means a
+        memory needs to be used repeatedly to climb a tier, and needs to be
+        ignored for a long time to fall one. A memory system that moved
+        faster than the evidence would be a memory system that forgets what
+        it learned last week because this week is busy."}
+
+ :prediction-grace-turns
+ {:value 4
+  :kind :threshold :capability-tunable? false
+  :doc "How many turns past its window a gate's prediction stays open, waiting
+        to see whether the advice was taken LATE.
+
+        A prediction's :window is in turns, and a gate whose advice takes
+        longer than its window to follow used to settle :unmet regardless of
+        whether it eventually worked — so the tally could not tell a gate
+        nobody obeys from one whose advice is sound and slow. Those want
+        opposite responses: the first should be reworded or removed, the
+        second should have its window widened.
+
+        Within the window a prediction settles :met. Within the grace it
+        settles :met-late — the advice worked, later than asked. Past both it
+        settles :unmet, which now means what it says: it did not happen.
+
+        Four turns because most of what a gate asks for costs at least one
+        turn to attempt and one to verify, and a branch that has not moved on
+        it in four is not moving on it."}
+
+ :pause-poll-ms
+ {:value 500
+  :kind :cost-ceiling :capability-tunable? false
+  :doc "How often a paused run checks whether it has been resumed.
+
+        `pause` is applied at a round boundary and the scheduler then waits at
+        the top of the next round, so nothing is scheduled while it holds and
+        whatever was in flight has already finished — which is exactly what
+        interventions/kinds promises a human.
+
+        There is nothing to wait on but a row another process writes, so this
+        is a poll. Short enough that a resume feels immediate to the person who
+        clicked it; long enough that a run left paused overnight is not
+        spinning. The abort flag is read on the same pass, so a paused run
+        stays stoppable."}
+
+ :run-health
+ {:value
+  {:thrash-min-turns 4
+   :thrash-mechanics-rate 0.33
+   :signals
+   {:stage-crashed "STAGE CRASHED — {{detail}}"
+    :hollow "NO FILES CHANGED — done was called but the working tree is unchanged; nothing was actually built"
+    :nobody-shipped "NO IMPLEMENTOR SHIPPED — the implement round produced nothing verified"
+    :tests-failing "TESTS FAILING — {{detail}}"
+    :tests-failing-fallback "the tests did not pass"
+    :revision-cap "REVISION CAP REACHED — {{revision}} revisions (soft cap {{soft-cap}}) with no verified solution. This is a soft stop for YOU to decide: keep solving with a new approach, or STOP if it is a genuine dead end."
+    :thrash "THRASH — a branch spent a third+ of its turns on empty/mis-parsed calls"
+    :reviewer-bounced "REVIEWER BOUNCED — the reviewer sent the work back"
+    :revising "REVISING — this feature is on revision {{revision}}"
+    :heading "## Run health (revision {{revision}})"}}
+  :kind :policy :capability-tunable? false
+  :doc "WHAT THE SUPERVISOR IS TOLD ABOUT A RUN'S HEALTH, and the two numbers
+        behind the one signal that is a judgement rather than a fact.
+
+        Every signal here was a string literal in telemetry.clj. They are the
+        supervisor's whole picture of how a run is going — the sentences it
+        decides on — and a project working on something other than a
+        feature/implement/review loop wants different ones. A sentence in
+        compiled code is exactly as unreachable as a threshold in compiled
+        code.
+
+        :thrash-min-turns       a branch must have taken this many turns
+                                before its mechanics rate means anything. Below
+                                it, one malformed call out of two reads as 50%
+                                thrash and says nothing.
+        :thrash-mechanics-rate  the fraction of a branch's turns spent on
+                                empty or mis-parsed calls that counts as
+                                thrashing.
+
+        The signals are selmer templates. {{detail}} carries the specific —
+        which stage crashed, what the verifier said — and the rest is the
+        framing. :tests-failing-fallback is what {{detail}} becomes when the
+        verifier left no note, so the sentence still reads as a sentence.
+
+        Not capability-tunable: these are what the supervisor SEES, and a run
+        in trouble is the last one that should be shown less of it."}
+
  :context-budget
  {:value {:tool-result-chars   4000
           :file-read-chars     60000
@@ -408,7 +800,12 @@
           :grep-ranges         20
           :inbox-lines         3
           :keep-pairs          10
-          :compaction-chars    50000}
+          :compaction-chars    50000
+          :diff-chars          12000
+          :shell-output-chars  8000
+          :shared-code-chars   700
+          :ledger-claim-chars  180
+          :critic-claim-chars  400}
   :kind :cost-ceiling :capability-tunable? false
   :doc "HOW MUCH THE MODEL GETS TO SEE. Every one of these was a constant in
         code, and together they are the most project-specific numbers in the
@@ -433,6 +830,24 @@
         :keep-pairs             recent exchanges kept VERBATIM before
                                 compaction unloads them (LR-4)
         :compaction-chars       total content before compaction engages at all
+        :diff-chars             the working-tree diff a branch and the judge
+                                are shown
+        :shell-output-chars     one shell command's output. Separate from
+                                :tool-result-chars, and larger, because a
+                                build log's useful part is at the end of a
+                                great deal of noise
+        :shared-code-chars      how much of a sibling's artifact CODE the
+                                shared block carries. A theorem STATEMENT is
+                                what a sibling needs in order to build on a
+                                lemma; the proof body is not
+        :ledger-claim-chars     how much of a claim the settled-state ledger
+                                shows. gen-18 averaged ~340 characters per
+                                claim and its 79 confirmed artifacts render to
+                                ~6,800 tokens unabridged; the ledger's job is
+                                to let a branch see WHAT is settled, and the
+                                exact statement is one `fetch_artifact` away
+        :critic-claim-chars     how much of a claim the critic is shown per
+                                artifact when scoring a branch
 
         The ANSWER under judgement is deliberately absent from this list: it is
         the thing being judged, and truncating it could hide the very flaw the
@@ -445,6 +860,36 @@
         trades context for evidence, and a struggling run is the last one that
         should be handed more context on the harness's own initiative. A
         PROJECT raising them deliberately is a different act."}
+
+ :critic-cumulative-objectives
+ {:value [:progress]
+  :kind :threshold :capability-tunable? false
+  :doc "The objectives that ACCUMULATE over a branch's life, and which a cull
+        decision therefore must not compare on.
+
+        A cumulative score rises with age and nothing else, so comparing on it
+        lets any mature branch dominate any young one indefinitely — the age
+        bias the juvenile grace period only postpones. It is also the wrong
+        question: what a branch already confirmed is in the log and cannot be
+        lost by culling it, so survival turns on where the line is GOING and
+        on what it uniquely covers.
+
+        Derived, not listed: the survival set is :critic-objectives minus
+        this. It was a second hardcoded vector, so retuning the rubric left
+        the cull reading the old one."}
+
+ :critic-scale
+ {:value {:min 1 :max 5}
+  :kind :threshold :capability-tunable? false
+  :doc "The range a critic score may take. Read by BOTH halves of the loop —
+        prompts/critic.md asks for it and critic.clj's parser accepts it —
+        so widening the rubric cannot leave the parser behind. It was a
+        `[1-5]` literal inside the parser's regex while the objective NAMES
+        were already data here, which meant :critic-objectives was
+        advertised as retunable and was not: adding a fifth objective left
+        the pattern matching only the original four, and parse-scores fails
+        CLOSED, so every scoring silently returned nil and the retention
+        cascade fell through to its no-scores rule."}
 
  :critic-objectives
  {:value [:progress :momentum :distinctness :viability] :kind :threshold
@@ -479,7 +924,28 @@
  ;; touching src. Regexes are stored as strings (EDN has no regex literal);
  ;; re-pattern at read.
  {:value
-  {:test-run-regex
+  {;; What the judge's REPLY is expected to look like. The prompt asking for
+   ;; this shape is prompts/judge.md, which is userspace — so while these
+   ;; lived in judge.clj a supervisor could reword the request and silently
+   ;; break the parser reading the answer, with no error anywhere: an
+   ;; unmatched verdict falls through to :complete, which fails OPEN. The
+   ;; two halves are one decision and belong in one editable place.
+   :verdict-line-regex "(?i)\\bVERDICT\\b"
+   :findings-regex "(?is)FINDINGS:\\s*(.+)$"
+   ;; Ordered, first match wins, and each entry is a verdict with the words
+   ;; that must ALL appear on the verdict line for it to apply. The order IS
+   ;; the precedence rule: negative before abstain before positive, because
+   ;; INCOMPLETE contains COMPLETE and "NOT COMPLETE" negates it. A plain
+   ;; word-set per verdict could not express either.
+   :verdict-rules [[:incomplete ["INCOMPLETE"]]
+                   [:incomplete ["NOT" "COMPLETE"]]
+                   [:abstain ["ABSTAIN"]]
+                   [:complete ["COMPLETE"]]]
+   ;; What an empty or tokenless reply means. FAIL-OPEN on purpose: a judge
+   ;; that cannot answer must never be able to wedge the loop.
+   :verdict-default :complete
+
+   :test-run-regex
    "(?i)-M:test|-A:test|run-tests|\\bjolt\\s+test\\b|\\bpytest\\b|\\bcargo\\s+test\\b|\\bnpm\\s+test\\b"
    :code-ext-regex "(?i)\\.(clj|cljc|cljs|edn|py|ts|js|rs|go)$"
    :claim-regex "(?i)\\b(tested|all tests pass|passing|verified|ran the (tests|suite))\\b"
@@ -532,7 +998,21 @@
   {:value
    [{:name :answer-exists
      :when (str/blank? (str answer))
-     :message "Supply an `answer` to ship."}
+     ;; Shows the CALL, not just the missing name. base/missing already works
+     ;; this way, on the reasoning that a bare list of argument names teaches
+     ;; nothing — gen-20 B1 called proof_start without its arguments five
+     ;; times, three producing the byte-identical message, and was culled for
+     ;; it. This rung was the last place still saying only the name, and it
+     ;; cost two live runs: both did the work, passed their tests, closed
+     ;; their task, then spent their remaining turns calling `done` empty and
+     ;; ended :exhausted with nothing shipped.
+     :message-form (str "`done` needs an `answer` — the text a person reads as"
+                        " the result of this run. Not a status line: say what"
+                        " you built and what shows it works.\n\n"
+                        "```tool-call\n"
+                        "{\"name\": \"done\", \"args\": {\"answer\":"
+                        " \"<what you built, and the evidence for it>\"}}\n"
+                        "```")}
     {:name :figure-coverage
      :when (and (seq evidence) (seq uncovered-numbers))
      :message-form (str "Your answer states figures no artifact supports: "

@@ -36,6 +36,8 @@
   redaction boundary meet on the shell tool path."
   (:require [clojure.string :as str]
             [samizdat.engine.proc :as proc]
+            [samizdat.lexicon :as lexicon]
+            [samizdat.prompt :as prompt]
             [samizdat.security.secrets :as secrets]
             [samizdat.store.grants :as grants]
             [samizdat.util :as util]))
@@ -258,12 +260,40 @@
                  :else (or base-hit default-effect))
         ;; A complex command cannot ride an allow: downgrade allow → ask, but a
         ;; deny still stands.
+        promoted? (and complex? (= :allow (or base-hit default-effect))
+                       (not deny-hit) (not grant-hit))
         effect (if (and complex? (= :allow effect)) :ask effect)]
-    {:effect effect :head head :raw raw}))
+    ;; `:promoted?` — this command WOULD have been allowed on its head and was
+    ;; downgraded for being compound. Returned because the refusal has to be
+    ;; able to say so: without it the message reads "`ls` is not on the allow
+    ;; list", which is false and sent a live run round the same wall twice.
+    {:effect effect :head head :raw raw :complex? complex? :promoted? promoted?}))
 
 ;; --- the shell tool ---------------------------------------------------------
 
-(def ^:private max-output-chars 8000)
+(defn- max-output-chars
+  "How much of a command's output the model sees. gates.edn
+  `:context-budget :shell-output-chars`.
+
+  How much the model gets to see is one table, and this was a constant
+  outside it — larger than `:tool-result-chars` for a good reason (a build
+  log's useful part is at the end of a great deal of noise) that nobody
+  reading either number could see, because they were not in the same place.
+
+  A truncation limit, not a security control: the redaction boundary is
+  applied to what remains, not to what is cut, so raising this cannot expose
+  anything redaction would have caught."
+  []
+  (lexicon/budget :shell-output-chars))
+
+(defn- complex-markers-in
+  "Which compound-command constructs `raw` actually contains, so a refusal can
+  name the one the model used instead of listing every possibility."
+  [raw]
+  (->> [["&&" "&&"] ["||" "||"] ["|" "|"] [";" ";"] ["$(" "$(...)"]
+        ["`" "backticks"] ["<(" "<(...)"] [">" ">"]]
+       (keep (fn [[needle label]] (when (str/includes? raw needle) label)))
+       distinct))
 
 (defn run-shell
   "Run a shell command through the full gate: decide, then (on allow) resolve
@@ -284,7 +314,7 @@
   (let [command (str (:command args))
         env (or (:env ctx) (into {} (System/getenv)))
         session (if (and conn run-id) (grants/for-run conn run-id) {:grants []})
-        {:keys [effect head]} (decide session command)
+        {:keys [effect head complex? promoted?]} (decide session command)
         known (secrets/known-values env command)]
     (case effect
       :deny
@@ -294,10 +324,20 @@
        :policy {:effect :deny}}
 
       :ask
+      ;; The refusal has to teach the fix, or it is just a wall. Observed live
+      ;; twice in one run: the model opened with `ls -la && cat README.md`,
+      ;; was refused, and four turns later tried
+      ;; `find . -type f | head -50 && echo --- && …` — the same shape, because
+      ;; nothing in the first refusal said that being COMPOUND was the reason.
+      ;; It reads as "the shell is closed" rather than "issue these separately".
       {:category :neutral :progress? false :needs-approval true
-       :result (str "Command needs approval: `" command "`.\n"
-                    "This is not on the allow list. A human must grant it"
-                    " (allow-always for `" head " *`) before it can run.")
+       :result (prompt/render "shell-refused"
+                              {:command command :head head :complex? complex?
+                               :promoted promoted?
+                               :markers (when complex?
+                                          (str/join " or "
+                                                    (map #(str "`" % "`")
+                                                         (complex-markers-in command))))})
        :policy {:effect :ask :suggest (str head " *")}}
 
       :allow
@@ -325,7 +365,8 @@
             ;; truncate-middle keeps the head AND tail, because the end of a
             ;; command's output (a test summary, an exit line) is as load-
             ;; bearing as the start.
-            redacted (util/truncate-middle (secrets/redact out known) max-output-chars)]
+            redacted (util/truncate-middle (secrets/redact out known)
+                                           (max-output-chars))]
         ;; A missing exit code is a spawn that did not report one, which is
         ;; not evidence the command succeeded. `(or (:exit r) 0)` read it as
         ;; success, the opposite of what run-verify does with the same shape;

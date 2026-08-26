@@ -1,7 +1,14 @@
 (ns samizdat.knowledge-test
   (:require [clojure.test :refer [deftest is testing use-fixtures]]
             [clojure.string :as str]
+            [samizdat.memory :as memory]
             [samizdat.store.db :as db]
+            ;; The tool namespaces register their defmethods on load, and this
+            ;; test dispatches `forget` through the multimethod. Requiring only
+            ;; `tools.base` left that registration to whichever other test
+            ;; namespace happened to load first, so the test passed in the
+            ;; suite and failed alone.
+            [samizdat.agent.tools :as tools]
             [samizdat.agent.tools.base :as base]
             [samizdat.store.knowledge :as knowledge]))
 
@@ -14,13 +21,51 @@
     (is (string? id))
     (is (pos? (count id)))))
 
-(deftest recall-finds-by-substring
+(deftest recall-finds-what-matches-and-nothing-else
+  ;; The ORDER is deliberately not asserted here, and that is the point of
+  ;; this test being split from the two below it. recall ranks by bm25 where
+  ;; FTS5 is available and by recency where it is not, so a test that pinned
+  ;; one order would pass or fail on which libsqlite3 happens to be loaded —
+  ;; which is a property of the machine, not of the code.
   (knowledge/remember! @conn {:content "fred likes fish"})
   (java.lang.Thread/sleep 1100)
   (knowledge/remember! @conn {:content "fred hates dogs" :kind "fact"})
   (knowledge/remember! @conn {:content "barney likes birds"})
-  (is (= ["fred hates dogs" "fred likes fish"]
-         (mapv :content (knowledge/recall @conn "fred")))))
+  (is (= #{"fred hates dogs" "fred likes fish"}
+         (set (mapv :content (knowledge/recall @conn "fred")))))
+  (is (empty? (knowledge/recall @conn "wilma"))))
+
+(deftest recall-ranks-by-relevance-when-fts-is-available
+  ;; Why the ordering changed at all: a substring scan has no ranking to
+  ;; offer, so "newest first" was the only ordering available, not a chosen
+  ;; one. bm25 is what the index exists for, and it is what failures/similar
+  ;; and the shared-artifact pool already order by.
+  (when (db/fts5-available? @conn)
+    (knowledge/remember! @conn {:content "the deploy script needs sudo"})
+    (java.lang.Thread/sleep 1100)
+    (knowledge/remember! @conn {:content "unrelated note about sudo policy and the deploy of other things"})
+    (let [hits (mapv :content (knowledge/recall @conn "deploy script"))]
+      (is (= 2 (count hits)))
+      (is (= "the deploy script needs sudo" (first hits))
+          "the row matching both terms outranks the one matching one, even
+           though it is older — which recency ordering could not express"))))
+
+(deftest recall-falls-back-to-a-scan-rather-than-failing
+  ;; recall is on the path of a tool the model calls to orient itself, so an
+  ;; exception there costs the turn. A query the tokenizer rejects must cost a
+  ;; worse ranking, never an error.
+  (knowledge/remember! @conn {:content "fred likes fish"})
+  (with-redefs [db/fts5-available? (fn [_] false)]
+    (is (= ["fred likes fish"]
+           (mapv :content (knowledge/recall @conn "fred")))))
+  ;; And a thrown MATCH, not only an absent extension.
+  (let [real db/fetch]
+    (with-redefs [db/fetch (fn [c q & opts]
+                             (if (clojure.string/includes? (str (first q)) "knowledge_fts")
+                               (throw (ex-info "fts5: syntax error" {}))
+                               (apply real c q opts)))]
+      (is (= ["fred likes fish"]
+             (mapv :content (knowledge/recall @conn "fred")))))))
 
 (deftest recent-limits
   (dotimes [_ 3] (knowledge/remember! @conn {:content "row"}))
@@ -96,3 +141,135 @@
     (let [r (base/run-tool {:branch {:id "B1"} :conn @conn
                             :tool-name "forget" :args {}})]
       (is (str/includes? (:result r) "Missing")))))
+
+;; --- salience: memory that learns from being used ---------------------------
+
+(deftest a-memory-kind-sets-its-starting-standing
+  ;; The ordering is the claim: who we are outranks what is true, which
+  ;; outranks how to do things, which outranks what happened once, which
+  ;; outranks what we are doing right now.
+  (is (< (memory/base-salience :working)
+         (memory/base-salience :episodic)
+         (memory/base-salience :procedural)
+         (memory/base-salience :semantic)
+         (memory/base-salience :identity)
+         (memory/base-salience :overview)))
+  (is (= (memory/base-salience :note) (memory/base-salience :wat))
+      "an unclassified kind gets the note default, not zero — burying a memory
+       nobody thought to categorise is worse than mis-tiering it"))
+
+(deftest effectiveness-is-log-damped-signed-and-bounded
+  ;; The axis that makes memory a loop rather than a list, and the damping is
+  ;; what stops a memory being voted to the top by repetition.
+  (is (zero? (memory/effectiveness 0 0)) "no record is not a bad record")
+  (is (zero? (memory/effectiveness 7 7)) "an even record says nothing")
+  (is (< 0.04 (memory/effectiveness 1 0) 0.05) "the first confirmation buys most of it")
+  (is (< 0.14 (memory/effectiveness 9 0) 0.16))
+  (is (= (- (memory/effectiveness 3 0)) (memory/effectiveness 0 3)) "symmetric")
+  (is (<= (memory/effectiveness 100000 0) (:effectiveness-cap (memory/policy)))
+      "a hot playbook cannot outrank a durable identity fact on its record alone"))
+
+(deftest confidence-is-a-tiebreak-not-a-tier-jump
+  (is (zero? (memory/confidence-bonus 0.6)) "the default is neutral")
+  (let [swing (- (memory/confidence-bonus 1.0) (memory/confidence-bonus 0.0))
+        tier-gap (- (memory/base-salience :semantic) (memory/base-salience :procedural))]
+    (is (< swing (* 3 tier-gap))
+        "salience is importance and confidence is truth-likelihood; a contested
+         claim must not jump above a durable one on confidence alone")))
+
+(deftest recall-reinforces-what-it-returns
+  ;; Being looked up IS the relevance signal — the cheapest honest one, since
+  ;; it needs nobody to judge anything.
+  (let [id (knowledge/remember! @conn {:content "the deploy needs sudo" :kind "procedural"})
+        before (:salience (knowledge/get-by-id @conn id))]
+    (knowledge/recall @conn "deploy sudo")
+    (let [after (knowledge/get-by-id @conn id)]
+      (is (> (:salience after) before))
+      (is (= 1 (:use_count after)))
+      (is (some? (:last_used_at after))))))
+
+(deftest an-outcome-moves-how-a-memory-ranks
+  (let [good (knowledge/remember! @conn {:content "alpha rule about widgets" :kind "procedural"})
+        bad (knowledge/remember! @conn {:content "beta rule about widgets" :kind "procedural"})]
+    (dotimes [_ 3] (knowledge/record-outcome! @conn good true))
+    (dotimes [_ 3] (knowledge/record-outcome! @conn bad false))
+    (let [rows (knowledge/recall @conn "rule widgets")]
+      (is (= good (:id (first rows)))
+          "the one that worked outranks the one that did not, at equal kind"))))
+
+(deftest standing-shows-what-the-project-learned-without-reinforcing-it
+  ;; The supervisor's block. Being shown by default is not evidence a memory
+  ;; was useful, and counting it would inflate exactly the entries already at
+  ;; the top.
+  (knowledge/remember! @conn {:content "this is a todo library" :kind "overview"})
+  (knowledge/remember! @conn {:content "a passing thought" :kind "working"})
+  (let [rows (knowledge/standing @conn)
+        overview-id (:id (first rows))]
+    (is (= "overview" (:kind (first rows)))
+        "a reader who does not know what the project IS cannot judge the rest")
+    (is (zero? (:use_count (knowledge/get-by-id @conn overview-id)))
+        "standing does not reinforce")))
+
+(deftest corroboration-counts-distinct-runs-only
+  ;; backpass VISION.md: "a new instruction needs corroboration from at least
+  ;; two distinct sessions, and one session never counts twice however often it
+  ;; is re-analyzed". DISTINCT is the load-bearing word — without it a long run
+  ;; corroborates its own findings by repetition, which is the overfitting the
+  ;; count exists to prevent.
+  (let [id (knowledge/remember! @conn {:content "a measured pattern" :kind "episodic"
+                                       :run-id "r1"})]
+    (is (= 1 (:corroborations (knowledge/get-by-id @conn id))))
+    (is (= 1 (knowledge/corroborate! @conn id "r1"))
+        "the same run again is the same evidence, not more of it")
+    (is (= 2 (knowledge/corroborate! @conn id "r2")))
+    (is (= 2 (knowledge/corroborate! @conn id "r2")))
+    (is (= 3 (knowledge/corroborate! @conn id "r3")))))
+
+(deftest one-run-is-an-observation-and-two-is-a-pattern
+  ;; Not a claim that two runs prove anything — it is the difference between a
+  ;; pattern and an afternoon, and the lowest bar that is still a bar.
+  (let [id (knowledge/remember! @conn {:content "x" :kind "episodic" :run-id "r1"})]
+    (is (not (knowledge/corroborated? (knowledge/get-by-id @conn id))))
+    (knowledge/corroborate! @conn id "r2")
+    (is (knowledge/corroborated? (knowledge/get-by-id @conn id)))))
+
+(deftest a-pattern-is-identified-by-a-column-not-by-its-text
+  ;; backpass has to match memory text by bigram similarity at a tuned
+  ;; threshold, with a side-car ledger keyed by hashed phrasings, because its
+  ;; memory is a markdown file and an instruction has no id. We have rows.
+  ;;
+  ;; Reproducing text identity on top of a table with a primary key inherits a
+  ;; constraint we do not have, and it is fragile in the way text matching
+  ;; always is — which is the case this pins.
+  (let [id (knowledge/remember! @conn {:content "[lever] beam width 5 -> 2 — worse"
+                                       :kind "procedural" :run-id "r1"
+                                       :pattern-key "lever:beam-width-5-2"})]
+    (is (= id (:id (knowledge/by-pattern @conn "lever:beam-width-5-2"))))
+    (is (nil? (knowledge/by-pattern @conn "lever:something-else")))
+
+    (testing "and the content may be rewritten without changing identity —
+              the evidence differs every run, the pattern is what recurs"
+      (knowledge/remember! @conn {:content "an unrelated note" :kind "procedural"})
+      (is (= id (:id (knowledge/by-pattern @conn "lever:beam-width-5-2")))))))
+
+(deftest one-lever-worded-two-ways-is-one-record
+  (let [c @conn
+        write (fn [change run]
+                (knowledge/distill-verdicts!
+                 c [{:name "e" :change change :hypothesis "h" :verdict :worse
+                     :before 1.0 :after -1.0}]
+                 {:run-id run}))]
+    (write "beam width 5 -> 2" "r1")
+    (write "beam-width  5→2" "r2")
+    (let [rows (filter #(= "procedural" (:kind %)) (knowledge/recent c 20))]
+      (is (= 1 (count rows))
+          "a model writes the change description fresh each time; two
+           spellings of one lever must not each look like a first attempt")
+      (is (= 2 (:failure_count (first rows)))
+          "and the record accumulates, so a lever that keeps failing sinks"))))
+
+(deftest an-ordinary-memory-has-no-pattern-key
+  ;; Sparse by design: a fact somebody typed has no pattern, and the index
+  ;; costs nothing on the common row.
+  (let [id (knowledge/remember! @conn {:content "the deploy needs sudo" :kind "semantic"})]
+    (is (nil? (:pattern_key (knowledge/get-by-id @conn id))))))

@@ -69,7 +69,10 @@ branch_theses({theses})
     become sibling branches that explore independently and share your failure
     log, so none of you repeats another's dead end.
 done({answer})
-    Ship. Refused if the answer states figures nothing in the evidence
+    Ship. `answer` is REQUIRED and is the run's actual output — the text a
+    person reads to learn what you did and why they should believe it. A
+    `done` with no answer is refused and costs you the turn.
+    Also refused if the answer states figures nothing in the evidence
     supports, or engages nothing the problem asked.
 give_up({reason})
     Stop working this line and say why.
@@ -195,6 +198,34 @@ manifest({action, ...})
                            Saving a new version of the active manifest tunes
                            the loop for your next run; saving a new name adds
                            a loop that config (:run :loop) can select.
+experiment({name, change, hypothesis})
+    Bind a change you are making to what you expect it to do, so the next
+    round can tell you whether it worked. Start one whenever you edit a cell,
+    manifest, prompt or threshold. A change with no stated expectation cannot
+    be wrong, and a change that cannot be wrong teaches nothing.
+verdict({name})
+    Read an experiment back: better / worse / unchanged / too early, with the
+    fitness per turn before and after. `worse` and `unchanged` both mean
+    revert — a change nobody can justify is debt, and "it did not hurt" is not
+    a reason to carry one.
+prompt({action, ...})
+    Every word the harness says is a prompt, and every prompt is yours to
+    change — the system prompt you are reading, each gate's message, each
+    role's instructions. A gate that fires at the right moment and says the
+    wrong thing is a real failure; this is the instrument for that, and
+    rewiring the loop is not. Actions:
+      list                 Every prompt, and whether this project has edited
+                           it or is still on the shipped template.
+      show {name, version?} The prompt's text.
+      versions {name}      Its edit history here.
+      save {name, body}    Store an edited prompt. It must RENDER — prompts
+                           are selmer templates, and an unbalanced conditional
+                           would fail mid-run where it is used, rather than
+                           here. Placeholders in a prompt are its inputs; keep
+                           the ones already there unless you mean to drop what
+                           they carry.
+      revert {name, version} Go back to an earlier body. The revert is itself
+                           a new version, so nothing is lost.
 ```
 
 The loop is not fixed infrastructure. Inspect how it is wired and running with
@@ -254,13 +285,26 @@ the one failure the board exists to prevent.
 ### Long-term knowledge
 
 ```
-remember({content, kind?})
-    Store a fact for later recall. kind defaults to note. Returns the id.
+remember({content, kind?, confidence?})
+    Store a fact for later runs. Returns the id. `kind` sets how durable it
+    is, most durable first: identity (who and what this project is), semantic
+    (a durable fact), procedural (a how-to or rule — the default), episodic
+    (a specific thing that happened), working (current task context),
+    overview (the ONE orientation note; a second replaces it).
 recall({query}) or recall({id})
-    Search stored knowledge by substring; matches come back newest
-    first, one per line. No matches means nothing is stored for it yet.
+    Search what has been stored. Matches come back BEST FIRST, not newest
+    first: the text picks the candidates, and their standing orders them —
+    how important the kind is, whether they have been used lately, and
+    whether acting on them has worked. Each line shows that standing, so you
+    can judge a memory the way the ranking did. Recalling one reinforces it.
     With an {id} instead, return that one memory's full content — this is
     how you expand a breadcrumb index entry.
+outcome({id, worked})
+    Report whether acting on a memory helped. Everything else measures
+    whether a memory gets READ; this is the only signal that measures whether
+    it HELPED, and it is what stops the ranking becoming a popularity
+    contest. Report a memory that turned out WRONG too — that is the one you
+    most want the next run not to follow.
 forget({id})
     Delete one memory by id — for when recall surfaces a fact you now
     know is wrong. Removal is total; re-record the correction with

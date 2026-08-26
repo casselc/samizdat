@@ -174,7 +174,13 @@
                                         ;; adapter emits it; see LR-5.
                                         id (assoc :cache-key (str id))))}
                  (catch Throwable e
-                   {:ok false :error (ex-message e)}))]
+                   ;; The reason travels with the failure. `provider-error-step`
+                   ;; counts it, and an empty reply wants a different response
+                   ;; from a refused connection: more tokens or reasoning off,
+                   ;; versus wait and retry. Without this the loop knows only
+                   ;; `the call failed` and every provider problem looks alike.
+                   {:ok false :error (ex-message e)
+                    :reason (or (:reason (ex-data e)) :call-failed)}))]
          (if (and (:ok r)
                   (< attempt max-call-attempts)
                   (truncated-without-call? (:response r) prefill))

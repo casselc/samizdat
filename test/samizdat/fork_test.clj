@@ -9,7 +9,9 @@
   prose claimed the child carried its parent's history. These pin the split:
   the CONVERSATION is inherited, every gate counter is not."
   (:require [clojure.test :refer [deftest is testing]]
+            [samizdat.agent.beam :as beam]
             [samizdat.agent.state :as state]
+            [samizdat.repl :as repl]
             [samizdat.tape :as tape]))
 
 (defn- parent-branch
@@ -104,3 +106,69 @@
     (is (= 9 (tape/depth (:messages c))))
     (is (not-any? #(= "child only" (:content %)) (:messages p))
         "fork isolation is what makes branching cost nothing")))
+
+;; --- per-branch eval sessions ----------------------------------------------
+;;
+;; RFC-006 listed `dispose-branch-engines!` as a no-op seam and named what
+;; would fill it: "the coding tools open sessions (nREPL, subprocesses) that
+;; will want per-branch disposal here."
+;;
+;; What filled it was the eval session, and moving it from per-run to
+;; per-branch is an ISOLATION fix as much as a disposal one. One namespace per
+;; run meant five competing branches shared one set of defs.
+
+(deftest a-branch-eval-session-is-its-own
+  (let [b1 (repl/new-session)
+        b2 (repl/new-session)]
+    (try
+      (repl/eval-code "(def only-mine 1)" b1 nil)
+      (is (:ok (repl/eval-code "only-mine" b1 nil)))
+      (is (not (:ok (repl/eval-code "only-mine" b2 nil)))
+          "a sibling could call a helper it never defined and whose definition
+           is not in its own transcript — so it worked for reasons invisible
+           to it, and stopped working on a replay that did not include B1")
+      (finally (repl/close-session b1) (repl/close-session b2)))))
+
+(deftest a-fork-inherits-its-parents-defs-and-then-diverges
+  ;; A child inherits its parent's CONVERSATION, so it inherits a transcript
+  ;; in which those defs were made. A child that can read `(def helper …)` in
+  ;; its own history but cannot call it is being shown a lie about its state.
+  (let [parent (repl/new-session)]
+    (try
+      (repl/eval-code "(def helper 41)" parent nil)
+      (let [child (repl/fork-session parent)]
+        (try
+          (is (= "42" (:value (repl/eval-code "(inc helper)" child nil)))
+              "the inherited transcript is true")
+
+          (repl/eval-code "(def after-fork :child)" child nil)
+          (is (not (:ok (repl/eval-code "after-fork" parent nil)))
+              "copied, not shared — they are competing approaches")
+
+          (repl/eval-code "(def helper 99)" child nil)
+          (is (= "41" (:value (repl/eval-code "helper" parent nil)))
+              "and rebinding an inherited name does not reach back")
+          (finally (repl/close-session child))))
+      (finally (repl/close-session parent)))))
+
+(deftest forking-a-dead-parent-session-still-yields-a-session
+  ;; A fork must never fail on the state of the thing it is forking from.
+  (let [parent (repl/new-session)]
+    (repl/close-session parent)
+    (let [child (repl/fork-session parent)]
+      (try (is (:ok (repl/eval-code "(+ 1 1)" child nil)))
+           (finally (repl/close-session child)))))
+  (let [child (repl/fork-session nil)]
+    (try (is (:ok (repl/eval-code "(+ 1 1)" child nil)))
+         (finally (repl/close-session child)))))
+
+(deftest disposing-a-branch-closes-its-session
+  (let [session (repl/new-session)]
+    (repl/eval-code "(def x 1)" session nil)
+    (is (some? (find-ns session)))
+    (beam/dispose-branch-engines! {:id "B1" :repl-session session})
+    (is (nil? (find-ns session)) "the branch's namespace does not outlive it")
+    (is (nil? (beam/dispose-branch-engines! {:id "B1" :repl-session session}))
+        "safe to call twice — the run-end teardown sweeps every branch again")
+    (is (nil? (beam/dispose-branch-engines! {:id "B2"}))
+        "and a branch that never opened one is not an error")))

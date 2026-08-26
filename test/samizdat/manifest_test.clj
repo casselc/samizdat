@@ -25,7 +25,7 @@
             [samizdat.agent.tools.base :as base]
             [samizdat.agent.tools.manifest]
             [samizdat.store.db :as db]
-            [samizdat.store.workflows :as workflows]
+            [samizdat.store.userspace :as us]
             [samizdat.workflow :as wf]))
 
 (defn- with-db [f]
@@ -124,14 +124,14 @@
           (let [r (base/run-tool {:branch {:id "B1"} :conn conn :tool-name "manifest"
                                   :args {:action "save" :name "loop2" :edn good}})]
             (is (= :neutral (:category r)))
-            (is (= 1 (:version (workflows/load-latest conn "loop2"))))
+            (is (= 1 (:version (us/load-latest conn :manifest "loop2"))))
             (is (= "loop2" (:name (wf/load-loop! conn "loop2"))))))
         (testing "a manifest that cannot compile is refused, not stored"
           (let [r (base/run-tool {:branch {:id "B1"} :conn conn :tool-name "manifest"
                                   :args {:action "save" :name "bad"
                                          :edn "{:cells {:x :no-such-cell}}"}})]
             (is (= :failure (:category r)))
-            (is (nil? (workflows/load-latest conn "bad")) "nothing broken was stored")))))))
+            (is (nil? (us/load-latest conn :manifest "bad")) "nothing broken was stored")))))))
 
 (deftest a-composed-manifest-registers-and-compiles-its-sub-loops
   (with-db

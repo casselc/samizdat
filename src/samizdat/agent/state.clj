@@ -30,7 +30,8 @@
   (:require [clojure.set]
             [clojure.string :as str]
             [samizdat.agent.phases :as phases]
-            [samizdat.agent.wordlists :as wordlists]
+            [samizdat.lexicon :as lexicon]
+            [samizdat.prompt :as prompt]
             [samizdat.tape :as tape]
             [samizdat.util :as util]))
 
@@ -300,7 +301,15 @@
 ;; Tier 1c: the list is wordlists.edn :claim-relevance — data, retunable at
 ;; runtime. A separate loader from gates.clj because this namespace sits
 ;; below gates in the require graph.
-(def ^:private claim-stopwords (wordlists/wordlist :claim-relevance))
+(def ^:private claim-stopwords
+  "The relevance filter's stopwords, re-read when the lexicon reloads.
+
+  This was a top-level `def`, evaluated once at namespace load — so a
+  supervisor editing the list saw nothing change until the process
+  restarted, in the namespace whose whole premise is that the list is data.
+  ship.clj had already hit this and fixed it with `generation-cache`; state
+  had the same bug and not the same fix."
+  (util/generation-cache lexicon/gen #(lexicon/wordlist :claim-relevance)))
 
 (defn- singularize
   "Strip one trailing `s`. `flow` and `flows` are the same noun, and a
@@ -310,10 +319,10 @@
 
   Applied AFTER the stopword filter, so a stopword's stem is never resurrected
   (`supports` is on the list; `support` is not). Never to a word ending in
-  `ss`, and never below five characters, so nothing is stemmed into a
-  collision."
+  `ss`, and never below the lexicon's `:min-stem-length`, so nothing is
+  stemmed into a collision."
   [w]
-  (if (and (>= (count w) 5)
+  (if (and (>= (count w) (lexicon/tuning :claim-matching :min-stem-length))
            (str/ends-with? w "s")
            (not (str/ends-with? w "ss")))
     (subs w 0 (dec (count w)))
@@ -322,8 +331,8 @@
 (defn- claim-tokens [s]
   (->> (str/split (str/lower-case (or s "")) #"[^a-z0-9]+")
        (remove str/blank?)
-       (remove claim-stopwords)
-       (filter #(>= (count %) 4))
+       (remove (claim-stopwords))
+       (filter #(>= (count %) (lexicon/tuning :claim-matching :min-token-length)))
        (map singularize)
        set))
 
@@ -700,55 +709,61 @@
    :failures (vec failures)
    :gate-tally (vec gate-tally)})
 
+(defn- claim-lines
+  "`- [kind/tier] claim` per artifact, or nil for an empty section — the
+  mechanical half of the residual report. What each section MEANS is prose,
+  and prose lives in prompts/residual-report.md."
+  [artifacts]
+  (when (seq artifacts)
+    (str/join "\n" (for [a artifacts]
+                     (str "- [" (:kind a) "/" (:tier a) "] " (:claim a))))))
+
 (defn render-residual-report
   "Markdown-ish text for the API content slot. The established section is the
   load-bearing one; existential, ambiguous, drift and run-level sections are
-  labeled for exactly what they are."
+  labeled for exactly what they are.
+
+  The labels are the point of this function and every one of them was a
+  string literal here. They are what tells a reader that `measured` is not
+  `established` and that an existential witness is not an instance — the
+  distinctions the whole residual report exists to make — and a project that
+  works on something other than proofs will want all of them said
+  differently. They are in prompts/residual-report.md now; this assembles the
+  lists and hands them over."
   [r]
   (when r
-    (str (:label r) "\n\n"
-         (str/join "\n\n"
-                   (for [b (:branches r)]
-                     (str (str "## " (:branch b)
-                               (when (:goal b) (str " — was proving: " (:goal b))))
-                          (when (seq (:outstanding b))
-                            (str "\n\nOutstanding sub-claims (undischarged):\n"
-                                 (str/join "\n" (map #(str "- " %) (:outstanding b)))))
-                          (when (seq (:established b))
-                            (str "\n\nEstablished (engine-confirmed):\n"
-                                 (str/join "\n" (for [a (:established b)]
-                                                  (str "- [" (:kind a) "/" (:tier a) "] " (:claim a))))))
-                          (when (seq (:existential b))
-                            (str "\n\nExistential only — the engine confirmed existence, not an instance:\n"
-                                 (str/join "\n" (for [a (:existential b)]
-                                                  (str "- [" (:kind a) "/" (:tier a) "] " (:claim a))))))
-                          (when (seq (:measured b))
-                            (str "\n\nMeasured — what a computation produced at the"
-                                 " parameters it was run at, not a proof:\n"
-                                 (str/join "\n" (for [a (:measured b)]
-                                                  (str "- [" (:kind a) "/" (:tier a) "] " (:claim a))))))
-                          (when (seq (:ambiguous b))
-                            (str "\n\nAmbiguous — the engine returned no decisive verdict; substantiates nothing:\n"
-                                 (str/join "\n" (for [a (:ambiguous b)]
-                                                  (str "- [" (:kind a) "/" (:tier a) "] " (:claim a))))))
-                          (when (:drift b)
-                            (str "\n\nThesis drift — the last audit found the evidence establishes \""
-                                 (:established (:drift b)) "\", "
-                                 (if (:relaxation? (:drift b))
-                                   "strictly weaker than the goal"
-                                   "matching the goal")
-                                 " \"" (:goal b) "\".")))))
-         (when (seq (:failures r))
-           (str "\n\n## Shared failure log (most recent first)\n"
-                (str/join "\n" (for [f (:failures r)]
-                                 (str "- [" (:branch_id f) " t" (:turn f) " " (:tool_name f) "] "
-                                      (:claim f) "\n  → " (:reason f))))))
-         (when (seq (:gate-tally r))
-           (str "\n\n## Gate firings\n"
-                (str/join "\n" (for [g (:gate-tally r)]
-                                 (str "- " (:gate g) ": " (:fired g) " fired, "
-                                      (or (:met g) 0) " met, " (or (:unmet g) 0) " unmet, "
-                                      (or (:open g) 0) " open"))))))))
+    (prompt/render
+     "residual-report"
+     {:label (:label r)
+      :branches
+      (for [b (:branches r)]
+        {:branch (:branch b)
+         :goal (:goal b)
+         :outstanding (when (seq (:outstanding b))
+                        (str/join "\n" (map #(str "- " %) (:outstanding b))))
+         :established (claim-lines (:established b))
+         :existential (claim-lines (:existential b))
+         :measured (claim-lines (:measured b))
+         :ambiguous (claim-lines (:ambiguous b))
+         :drift (boolean (:drift b))
+         :drift-established (:established (:drift b))
+         :drift-goal (:goal (:drift b))
+         ;; Whether the audit found a WEAKENING is the one judgement in this
+         ;; report. It reaches the template as a flag and the template says
+         ;; both readings, so a project can reword either without touching a
+         ;; conditional in compiled code.
+         :drift-relaxation (boolean (:relaxation? (:drift b)))})
+      :failures (when (seq (:failures r))
+                  (str/join "\n" (for [f (:failures r)]
+                                   (str "- [" (:branch_id f) " t" (:turn f) " "
+                                        (:tool_name f) "] " (:claim f)
+                                        "\n  → " (:reason f)))))
+      :gate-tally (when (seq (:gate-tally r))
+                    (str/join "\n" (for [g (:gate-tally r)]
+                                     (str "- " (:gate g) ": " (:fired g) " fired, "
+                                          (or (:met g) 0) " met, "
+                                          (or (:unmet g) 0) " unmet, "
+                                          (or (:open g) 0) " open"))))})))
 
 ;; --- safe state -------------------------------------------------------------
 ;;

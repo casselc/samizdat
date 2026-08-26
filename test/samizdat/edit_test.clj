@@ -89,8 +89,13 @@
     (write root "a.clj" "(defn f [] (+ 1 2))\n")
     (let [r (files/edit-file (ctx root {:path "a.clj"
                                         :old_text "(+ 1 2))" :new_text "(+ 1 2)"}))]
-      ;; removed a closing paren → the file no longer reads
-      (is (str/includes? (:result r) "does not balance")))))
+      ;; removed a closing paren → the file no longer reads.
+      ;; Asserts the CONSEQUENCE the model has to act on, not the wording:
+      ;; the sentence lives in prompts/file-tool.md now and a project may
+      ;; reword it. The original read "no longer balances / does not
+      ;; balance", which was two phrasings of one clause left in by an edit.
+      (is (str/includes? (:result r) "[harness]"))
+      (is (str/includes? (:result r) "will not load")))))
 
 (deftest edit-a-missing-or-escaping-file
   (with-root [root]

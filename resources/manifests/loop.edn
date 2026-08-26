@@ -47,8 +47,38 @@
                       [:abandoned (fn [d] (= :abandoned (:verdict d)))]
                       [:exhausted (fn [d] (= :exhausted (:verdict d)))]]}
 
- ;; The invariants an edit may not remove: a dispatched tool call is always
- ;; journalled, and a journalled turn always faces the arbiter. Violations
- ;; fail at compile time, before a soak ever runs.
- :constraints [{:type :must-follow :if :dispatch :then :journal}
-               {:type :must-follow :if :journal :then :arbiter}]}
+ ;; EVERY ordering rule this turn claims, and which of them the compiler
+ ;; catches. `:constraints` is DERIVED from the `:enforced true` entries, so
+ ;; an editor can read this list and know what is actually defended rather
+ ;; than having to go and read the cells.
+ :invariants
+ [{:type :must-follow :if :dispatch :then :journal :enforced true
+   :protects "A dispatched tool call is always recorded."}
+
+  {:type :must-follow :if :journal :then :arbiter :enforced true
+   :protects "A recorded turn always faces a gate."}
+
+  {:type :must-precede :cell :dispatch :before :arbiter :enforced true
+   :protects "The arbiter reads what the turn DID. A gate deciding before the
+              tool ran would steer on the previous turn's state. The
+              provider-error and no-call routes reach neither node, which is
+              why this is expressible as a precedence rather than as a
+              must-follow: it binds only the paths where a gate actually
+              fires."}
+
+  {:type :must-precede :cell :parse :before :dispatch :enforced true
+   :protects "Nothing is dispatched that was not parsed out of a reply."}
+
+  {:enforced false
+   :rule "settle before fire, inside :gate/arbiter"
+   :protects "A gate cannot be credited with an outcome that preceded it.
+              steer-step settles open predictions BEFORE the arbiter chooses,
+              so this turn's resolution closes against the gate that asked
+              for it and not the one about to."
+   :unenforced-because "It orders two steps INSIDE one cell, not two nodes of
+                        the manifest, so there is no path for a constraint to
+                        check. Splitting :gate/arbiter into a settle node and
+                        a fire node would make it expressible and is the way
+                        to enforce it if it ever comes loose; it is documented
+                        in the cell for now, which is a convention and is
+                        named as one."}]}

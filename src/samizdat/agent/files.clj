@@ -30,9 +30,22 @@
   (:require [samizdat.agent.gates :as gates]
             [clojure.string :as str]
             [jolt.fs :as fs]
-            [samizdat.lisp :as lisp]))
+            [samizdat.lisp :as lisp]
+            [samizdat.prompt :as prompt]))
 
 (def ^:private clojure-exts #{"clj" "cljc" "cljs" "cljd" "edn" "bb"})
+
+(defn- msg
+  "One of the file tools' branch-facing messages, from prompts/file-tool.md.
+
+  Every one of these was a `str` here. They are the whole of what the model
+  learns when an edit does not apply — which text did not match, that
+  whitespace was tolerated, that the result no longer balances — and a
+  project working in a language the paren-balance note means nothing for
+  should be able to reword or drop them without a rebuild. One template keyed
+  by reason rather than a file per sentence, because they are one surface."
+  [ctx]
+  (prompt/render "file-tool" ctx))
 
 (defn- clojure-file? [path]
   (contains? clojure-exts (last (str/split (str path) #"\."))))
@@ -80,8 +93,8 @@
                           (when (> (count content) (max-read-chars))
                             "\n… [truncated]"))
              :category :neutral :progress? false :branch branch})
-          (miss branch (str "No file " path " under the project root.")))
-        (miss branch (str "Path " path " is outside the project root and cannot be read."))))))
+          (miss branch (msg {:no-file true :path path})))
+        (miss branch (msg {:outside-root true :path path :verb "read"}))))))
 
 (defn grep-project
   "Search the project's source files for `pattern` (a regex string); return a
@@ -155,12 +168,12 @@
         new-text (str (:new_text args))
         replace-all? (boolean (:replace_all args))]
     (cond
-      (str/blank? path) (miss branch "edit_file needs a `path`.")
-      (str/blank? old-text) (miss branch "edit_file needs `old_text` to find.")
+      (str/blank? path) (miss branch (msg {:needs-path true :tool "edit_file"}))
+      (str/blank? old-text) (miss branch (msg {:needs-old-text true}))
       :else
       (if-let [abs (resolve-under-root (or root ".") path)]
         (if-not (fs/exists? abs)
-          (miss branch (str "No file " path " under the project root."))
+          (miss branch (msg {:no-file true :path path}))
           (let [content (str/replace (slurp abs) "\r\n" "\n")
                 old-text (str/replace old-text "\r\n" "\n")
                 new-text (str/replace new-text "\r\n" "\n")
@@ -171,20 +184,16 @@
                 starts (line-starts content)]
             (cond
               (empty? ranges)
-              (miss branch
-                    (str "old_text not found in " path ". The exact text must match,"
-                         " including whitespace — tried an exact and a line-trimmed match."))
+              (miss branch (msg {:not-found true :path path}))
 
               (and (> (count ranges) 1) (not replace-all?))
               (miss branch
-                    (str "old_text matched " (count ranges) " times in " path ":\n"
-                         (str/join "\n"
-                                   (for [[s _] (take (grep-ranges) ranges)]
-                                     (str "  Line " (line-of starts s))))
-                         (when (> (count ranges) (grep-ranges))
-                           (str "\n  … and " (- (count ranges) (grep-ranges)) " more"))
-                         "\n\nAdd surrounding context to old_text to narrow it, or pass"
-                         " replace_all: true to change every occurrence."))
+                    (msg {:ambiguous true :path path :count (count ranges)
+                          :lines (str/join "\n"
+                                           (for [[s _] (take (grep-ranges) ranges)]
+                                             (str "  Line " (line-of starts s))))
+                          :more (when (> (count ranges) (grep-ranges))
+                                  (- (count ranges) (grep-ranges)))}))
 
               :else
               ;; Splice in reverse so earlier offsets stay valid.
@@ -198,21 +207,15 @@
                     unbalanced (when (clojure-file? path)
                                  (let [{:keys [status note]} (lisp/balance edited)]
                                    (when (not= :balanced status)
-                                     (or note "the delimiters no longer balance"))))]
+                                     (or note (msg {:unbalanced-generic true})))))]
                 (spit abs edited)
-                {:result (str "Edited " path
-                              " (" (if replace-all? (count ranges) 1) " replacement"
-                              (when (and replace-all? (> (count ranges) 1)) "s") ")."
-                              (when fallback (str "\n[harness] matched via " fallback
-                                                  " fallback — exact text not found;"
-                                                  " whitespace tolerated."))
-                              (when unbalanced
-                                (str "\n[harness] the edit means the Clojure no longer"
-                                     " balances / does not balance: " unbalanced
-                                     " It will not load until you fix it.")))
+                {:result (let [n (if replace-all? (count ranges) 1)]
+                           (msg {:edited true :path path :replacements n
+                                 :plural (when (> n 1) "s")
+                                 :fallback fallback :unbalanced unbalanced}))
                  :category :success :progress? true :branch branch
                  :fallback fallback}))))
-        (miss branch (str "Path " path " is outside the project root and cannot be edited."))))))
+        (miss branch (msg {:outside-root true :path path :verb "edited"}))))))
 
 (defn write-file
   "Write `content` to a file under the root, creating parent directories.
@@ -223,10 +226,10 @@
         content (:content args)]
     (cond
       (str/blank? path)
-      (miss branch "write_file needs a `path`.")
+      (miss branch (msg {:needs-path true :tool "write_file"}))
 
       (nil? content)
-      (miss branch "write_file needs `content` (an empty string is allowed).")
+      (miss branch (msg {:needs-content true}))
 
       :else
       (if-let [abs (resolve-under-root (or root ".") path)]
@@ -244,11 +247,10 @@
           (when-let [parent (fs/parent abs)]
             (fs/create-dirs parent))
           (spit abs content*)
-          {:result (str "Wrote " (count content*) " chars to " path "."
-                        (when (= :repaired status) (str "\n[harness] " note))
-                        (when (= :unbalanced status)
-                          (str "\n[harness] Written as given, but the Clojure does not"
-                               " balance: " note " It will not load until you fix it.")))
+          {:result (msg {:wrote true :path path :chars (count content*)
+                         :repaired (= :repaired status)
+                         :note note
+                         :unbalanced (when (= :unbalanced status) note)})
            :category :success :progress? true :branch branch
            :repaired? (= :repaired status)})
-        (miss branch (str "Path " path " is outside the project root and cannot be written."))))))
+        (miss branch (msg {:outside-root true :path path :verb "written"}))))))

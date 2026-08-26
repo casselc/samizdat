@@ -1,12 +1,19 @@
-;; Curated wordlists, as data rather than sets baked into src (tier 1c).
+;; The claim-text lexicon: curated wordlists AND the parameters that decide
+;; how claim text is tokenized and compared, as data rather than as literals
+;; baked into src (tier 1c). Read through samizdat.lexicon.
 ;;
-;; Two gates read these: the relevance filter (state.clj advances-thesis?)
-;; and the answer-evidence gate (ship.clj answer-tokens / uncovered-tokens).
-;; Both gates treat a word on a list as carrying no specific claim, so
-;; widening a list weakens its gate — entries earn their place by being
-;; framing rather than content. The comments recording WHY each section
-;; exists move with the words: retuning a list without its history is how
-;; gates get quietly weakened.
+;; Four readers: the relevance filter (state.clj advances-thesis?), the
+;; answer-evidence gate (ship.clj answer-tokens / uncovered-tokens), the
+;; ledger's near-duplicate collapse (store/artifacts.clj) and the failure
+;; log's search (store/failures.clj). Every one of them decides, from words
+;; the model produced, whether two pieces of text say the same thing.
+;;
+;; A word on a list carries no specific claim, so widening a list weakens its
+;; gate; a minimum length or a similarity threshold decides what counts as a
+;; match at all, so lowering one weakens the gate the same way from the other
+;; side. Both kinds of value earn their place the same way, and the comments
+;; recording WHY move with them: retuning without the history is how gates get
+;; quietly weakened.
 
 {:claim-relevance
  ;; The relevance guard's stopwords: grammar and framing a thesis and a
@@ -77,6 +84,76 @@
    ;; substance cannot be an assertion about the substance.
    "here" "above" "below" "within" "throughout"
    "reach" "reaches" "reached" "give" "gives" "yield" "yields" "open"}
+
+ :claim-matching
+ ;; How claim text is turned into something comparable, before any wordlist
+ ;; is consulted. Every one of these was a bare number in src/ — under a
+ ;; paragraph of justification in two cases, which reads as diligence and is
+ ;; exactly as unreachable to a supervisor as an anonymous literal.
+ ;;
+ ;; They are the same KIND of knob as the stopword lists above: a gate that
+ ;; asks "do these two claims say the same thing" answers differently when
+ ;; the minimum token is three characters instead of four, and nothing about
+ ;; the right answer is universal — a Lean campaign and a Rust refactor
+ ;; disagree about what a meaningful token looks like.
+ {:min-token-length 4
+  ;; Tokens shorter than this carry no content of their own. state.clj's
+  ;; relevance filter and ship.clj's answer gate both drop them.
+
+  :min-search-token-length 3
+  ;; The floor for a SEARCH term rather than a claim token, used by the
+  ;; shared-artifact FTS query and the failure log. Lower than the claim
+  ;; minimum on purpose: a search is ranked and recall matters more than
+  ;; precision, while a gate's verdict is binary.
+
+  :min-stem-length 5
+  ;; Never singularize below this. `is` must not become `i`, and nothing may
+  ;; be stemmed into a collision with a different word.
+
+  :shingle-width 4
+  ;; Words per shingle for the ledger's near-duplicate Jaccard. Wide enough
+  ;; that two claims sharing ordinary phrasing do not match; narrow enough
+  ;; that one rewording does not hide a duplicate.
+
+  :near-duplicate-threshold 0.6
+  ;; Jaccard at or above this and two claims are the same claim. Read live
+  ;; off gen-22, where three branches proved one inequality and the ledger
+  ;; listed it three times; the live duplicates differed only in variable
+  ;; names and an `i.e.` for a `so`.
+
+  :answer-token-min-length 4
+  ;; ship.clj: the shortest token the answer-evidence gate will hold against
+  ;; an answer. Separate from :min-token-length because this one decides
+  ;; whether a SHIP is refused, and a gate that blocks delivery earns a
+  ;; knob of its own.
+
+  :answer-suffix-min-stem 5
+  ;; ship.clj: never strip a suffix that would leave a stem shorter than
+  ;; this.
+
+  :answer-prefix-token-length 8
+  :answer-prefix-match-length 6
+  ;; ship.clj: a token this long (8) is considered covered when its first
+  ;; six characters appear in the answer text. Long words survive
+  ;; inflection that the suffix table does not enumerate.
+  }
+
+ :usage-cap-signals
+ ;; How a provider says "you are out of budget" rather than "slow down", in
+ ;; the error TEXT of a 429 — the status alone cannot tell the two apart, and
+ ;; the difference decides whether the retry ladder waits or gives up. A cap
+ ;; wearing a rate limit's headers cannot be waited out inside a run.
+ ;;
+ ;; Deliberately NARROW: misreading a rate limit as a cap costs the run. The
+ ;; English signals cover OpenAI and DeepSeek; GLM/Zhipu report a daily usage
+ ;; cap as error code 1308 with a Chinese 使用上限 message, and some gateways
+ ;; phrase it "per-day".
+ ;;
+ ;; Here rather than in the adapter because it is a fact about PROVIDERS, and
+ ;; providers change their error text without asking. A user hitting a new
+ ;; gateway's wording should be able to add it and keep working, not wait for
+ ;; a release. Kept as a string because EDN has no regex literal.
+ "(?i)insufficient|quota|billing|exceeded your current|payment|per-day|daily limit|1308|使用上限|每日"
 
  :tool-version
  ;; A tool name followed by its version. Stripped BEFORE tokenizing,

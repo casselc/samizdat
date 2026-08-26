@@ -11,7 +11,6 @@
   (:require [clojure.test :refer [deftest is testing use-fixtures]]
             [samizdat.store.db :as db]
             [samizdat.store.userspace :as store]
-            [samizdat.store.workflows :as workflows]
             [samizdat.userspace :as us]
             [samizdat.agent.state :as state]
             [samizdat.agent.tools :as tools]
@@ -154,14 +153,15 @@
 
 ;; --- manifests came across ---------------------------------------------------
 
-(deftest the-manifest-shim-reads-and-writes-the-one-store
-  (workflows/save! *conn* "loop" "{:description \"mine\"}")
-  (is (= "{:description \"mine\"}" (:edn (workflows/load-latest *conn* "loop")))
-      "the shim keeps the :edn key its callers destructure")
+(deftest manifests-live-in-the-one-userspace-store
+  ;; store/workflows.clj was a shim that renamed :body to :edn for callers
+  ;; written before the userspace table existed. It is gone: manifests are a
+  ;; userspace kind like cells, policy and prompts, read the same way, with
+  ;; the column called what the table calls it.
+  (store/save! *conn* :manifest "loop" "{:description \"mine\"}")
   (is (= "{:description \"mine\"}"
-         (:body (store/load-latest *conn* :manifest "loop")))
-      "and the row is in the one userspace table")
-  (is (= ["loop"] (mapv :name (workflows/names *conn*)))))
+         (:body (store/load-latest *conn* :manifest "loop"))))
+  (is (= ["loop"] (mapv :name (store/names *conn* :manifest)))))
 
 (deftest manifest-rows-from-before-the-migration-are-carried-across
   ;; v11 copies the workflows table in. A project that had already evolved its
@@ -173,8 +173,8 @@
                      VALUES (?, ?, ?, ?)" "legacy" 7 "{:description \"old\"}" (db/now)])
     (db/execute! c ["INSERT OR IGNORE INTO userspace (kind, name, version, body, created_at)
                      SELECT 'manifest', name, version, edn, created_at FROM workflows"])
-    (is (= "{:description \"old\"}" (:edn (workflows/load-latest c "legacy"))))
-    (is (= 7 (:version (workflows/load-latest c "legacy"))))))
+    (is (= "{:description \"old\"}" (:body (store/load-latest c :manifest "legacy"))))
+    (is (= 7 (:version (store/load-latest c :manifest "legacy"))))))
 
 ;; --- the `cell` tool: the supervisor's edge into userspace --------------------
 

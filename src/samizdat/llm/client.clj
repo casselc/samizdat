@@ -42,7 +42,8 @@
             [clojure.tools.logging :as log]
             [jolt.http-client :as http]
             [samizdat.llm.adapter :as adapter]
-            [samizdat.llm.message :as message]))
+            [samizdat.llm.message :as message]
+            [samizdat.session :as session]))
 
 (def default-max-retries 2)
 (def default-timeout-ms 300000)
@@ -145,7 +146,12 @@
         (if-let [parsed (adapter/parse-chat adapter decoded)]
           (let [merged (message/merge-reasoning (:content parsed) (:reasoning parsed))]
             (if (str/blank? merged)
+              ;; The REASON travels from where it is detected. Re-deriving it
+              ;; downstream by matching this sentence would make the counter a
+              ;; measurement of the wording — reword the message and the
+              ;; provider-trouble finding silently stops firing.
               {:outcome :fatal
+               :reason :empty-reply
                :error (str (adapter/display-name adapter)
                            " returned neither content nor reasoning. This usually means"
                            " the model spent its entire output budget thinking; raise"
@@ -218,6 +224,13 @@
                                 (last errors))
                            {:provider (adapter/id adapter)
                             :attempts (inc attempt)
+                            ;; A KEYWORD reason beside the prose, carried from
+                            ;; where the trouble was DETECTED. An empty reply
+                            ;; and a refused connection want different
+                            ;; responses — more tokens versus wait and retry —
+                            ;; and deriving that from a sentence downstream is
+                            ;; how a counter ends up measuring the wording.
+                            :reason (or (:reason result) :call-failed)
                             :errors errors}))
 
            ;; A retryable error whose own reset is beyond the in-run window is
@@ -232,14 +245,60 @@
                                 (last errors))
                            {:provider (adapter/id adapter)
                             :attempts (inc attempt)
+                            :reason :usage-cap
                             :errors errors}))
 
            :else
            (let [wait (backoff-ms attempt (:headers result))]
+             ;; Retries are counted even when the call eventually succeeds. A
+             ;; run that got there on the third attempt every time is a run in
+             ;; trouble, and the outcome alone cannot say so.
+             (session/observe! [:provider :retried])
              (log/warn (adapter/display-name adapter) "attempt" (inc attempt)
                        "failed, retrying in" wait "ms:" (:error result))
              (Thread/sleep wait)
              (recur (inc attempt) errors))))))))
+
+(defn probe-llama-cpp
+  "Ask an endpoint whether it is a llama.cpp server, and how many KV slots it
+  was launched with. Returns `{:llama-cpp? true :total-slots n}` or nil.
+
+  IDENTIFY, DO NOT GUESS — and do not send hopefully either. RFC-005 recorded
+  that `:local` was decided by which config key the endpoint sat under, so a
+  llama-server configured as `:openai` silently got no prefix pinning. The
+  obvious repair is to send `cache_prompt` everywhere and let servers ignore
+  what they do not know, and that repair is wrong: an OpenAI-compatible server
+  that validates its body strictly rejects the WHOLE REQUEST over an unknown
+  field. dirge measured it (dirge-07ew) — Cerebras answered 422
+  `property 'body.prompt_cache_key' is unsupported`, Groq and Volcano Engine's
+  DeepSeek answer the same way — so a field sent hopefully is a session that
+  cannot make a single request. A probe asks; it does not hope.
+
+  `/props` is llama.cpp's own endpoint and `total_slots` is the field only it
+  serves. Anything else — a 404, a hosted provider's error page, a connection
+  refused — is `nil`, meaning `not llama.cpp`, which is the safe answer in
+  every direction.
+
+  `total_slots` is worth having on its own: RFC-005 said an explicit `:slots`
+  table was the only option because `a slot count is a property of how the
+  server was launched`. It is, and this is the server saying so."
+  [config]
+  (try
+    (let [base (str/replace (str (:base-url config)) #"/v1/?$" "")
+          resp (http/get (str base "/props")
+                         {:socket-timeout 5000
+                          :conn-timeout (:conn-timeout-ms config
+                                                          default-conn-timeout-ms)
+                          :throw-exceptions false})]
+      (when (<= 200 (:status resp) 299)
+        (let [body (decode (:body resp))]
+          (when-let [slots (:total_slots body)]
+            {:llama-cpp? true :total-slots slots}))))
+    (catch Throwable _
+      ;; Unreachable, not-llama.cpp and malformed are the same answer here, and
+      ;; none of them is a reason not to start: the harness must come up
+      ;; against an endpoint that is merely slow to boot.
+      nil)))
 
 (defn list-models
   "Model ids the endpoint advertises, or [] when it has no such endpoint."

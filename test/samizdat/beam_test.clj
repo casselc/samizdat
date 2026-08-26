@@ -15,6 +15,7 @@
             [samizdat.agent.beam :as beam]
             [samizdat.agent.state :as state]
             [samizdat.cells :as cells]
+            [samizdat.llm.client :as llm]
             [samizdat.store.db :as db]
             [samizdat.store.runs :as runs]
             [samizdat.workflow :as workflow]))
@@ -208,6 +209,131 @@
     (is (empty? (remove registered (remove (set (mapcat #(keys (:subworkflows %)) defs))
                                            (set (mapcat #(vals (:cells %)) defs)))))
         "and no manifest references a cell that is not registered")))
+
+(defn- shipped-manifest-names []
+  (->> (file-seq (java.io.File. "resources/manifests"))
+       (filter #(.isFile %))
+       (map #(clojure.string/replace (.getName %) #"\.edn$" ""))))
+
+(defn- definition-of [n]
+  (workflow/read-definition (slurp (clojure.java.io/resource (str "manifests/" n ".edn")))))
+
+(deftest a-manifest-says-which-of-its-invariants-are-enforced
+  ;; RFC-002 recorded, in bold, that there was no way to tell from a manifest
+  ;; which of its invariants the compiler would catch — an editor could not
+  ;; know what was defended. Four ordering rules lived in cell docstrings only,
+  ;; on the stated grounds that mycelium's constraint vocabulary could not
+  ;; express them.
+  ;;
+  ;; Three of the four turned out to be expressible: `:must-precede` says "if
+  ;; `before` is on this path, `cell` appears earlier on it", which is exactly
+  ;; the shape of directives-before-advance, cull-before-spawn and
+  ;; dispatch-before-arbiter. Only the manifests were using `:must-follow`
+  ;; alone. The fourth (settle before fire) orders two steps INSIDE one cell,
+  ;; where a path-based checker has nothing to look at, and it is declared
+  ;; unenforced with that reason.
+  (doseq [n (shipped-manifest-names)
+          :let [d (definition-of n)
+                declared (workflow/invariants d)]
+          :when (seq declared)]
+    (testing n
+      (is (every? #(contains? % :protects) declared)
+          "every declared invariant says what it protects")
+      (doseq [i (workflow/unenforced-invariants d)]
+        (is (seq (:unenforced-because i))
+            (str "unenforced invariant " (pr-str (:rule i))
+                 " does not say why nothing checks it — `no constraint` and"
+                 " `no constraint yet` are different facts"))))))
+
+(deftest an-enforced-invariant-reaches-the-compiler
+  ;; The derivation is the point: one list, so a rule cannot be documented as
+  ;; enforced while nothing checks it. That is the failure direction that
+  ;; matters — it reads as a defence and is not one.
+  (doseq [n (shipped-manifest-names)
+          :let [d (definition-of n)]]
+    (testing n
+      (is (= (count (filter :enforced (workflow/invariants d)))
+             (count (workflow/enforced-constraints d)))
+          "every enforced invariant became a constraint, and nothing else did")
+      (doseq [c (workflow/enforced-constraints d)]
+        (is (contains? c :type) "a derived constraint carries its type")
+        (is (not-any? #{:enforced :protects :unenforced-because} (keys c))
+            (str "reader-facing keys reached the compiler: " (pr-str c)))))))
+
+(deftest a-must-precede-invariant-is-really-enforced
+  ;; The check the whole change rests on: assert the COMPILER refuses a
+  ;; manifest that breaks one of the newly-enforced rules, rather than
+  ;; trusting that adding the entry did something. A constraint that compiles
+  ;; either way would be worse than the docstring it replaced.
+  (let [d (definition-of "beam")
+        ;; Route around :directives, so :advance runs without it.
+        broken (assoc-in d [:edges :start :continue] :advance)]
+    (is (thrown? Throwable (workflow/compile-loop broken))
+        "advancing without draining directives compiles")))
+
+(deftest the-driver-provides-every-ctx-key-it-declares
+  ;; The other end of workflow/ctx-keys. A contract cells are held to and no
+  ;; driver satisfies would be worse than none: every cell would compile and
+  ;; every read would still be nil.
+  ;;
+  ;; Checked against the ctx the production driver actually builds, captured
+  ;; by intercepting run-rounds rather than by re-listing the keys here — a
+  ;; second list would drift from the first, which is the failure this whole
+  ;; pair exists to prevent.
+  (let [captured (atom nil)]
+    (with-redefs [beam/run-rounds (fn [ctx _branches _turn]
+                                    (reset! captured ctx)
+                                    {:status :completed :branches []})
+                  llm/chat (fn [& _] {:content "" :finish-reason "stop"})]
+      (let [c (db/open! ":memory:")]
+        (try
+          (beam/run! {:conn c :config {:run {:width 1}} :llm-adapter :a
+                      :llm-config {:max-tokens 100} :problem "p" :max-turns 3})
+          (finally (db/close c)))))
+    (is (some? @captured) "the driver ran")
+    (let [;; :live-branches is set by run-rounds itself, which this test
+          ;; replaced — it is the one key the interception cannot observe.
+          expected (disj workflow/ctx-keys :live-branches)
+          missing (remove #(contains? @captured %) expected)]
+      (is (empty? missing)
+          (str "workflow/ctx-keys promises cells these, and the beam driver "
+               "does not set them: " (pr-str (vec missing)))))))
+
+(deftest a-cell-declares-every-ctx-key-it-reads
+  ;; :requires is only worth having if it cannot drift from the source. A
+  ;; declaration that quietly stopped matching the handler would put the
+  ;; conventional-ctx-keys gap straight back, with a table on top of it
+  ;; asserting otherwise.
+  ;;
+  ;; Reads the shipped cell SOURCE, since that is what load-string registers.
+  (doseq [f (->> (file-seq (java.io.File. "resources/cells"))
+                 (filter #(.isFile %))
+                 (filter #(clojure.string/ends-with? (.getName %) ".clj")))
+          :let [src (slurp f)]
+          form (read-string {:read-cond :allow} (str "[" src "]"))
+          :when (and (seq? form) (= 'cell/defcell (first form)))
+          :let [cell-id (second form)
+                meta-map (nth form 2)
+                declared (set (:requires meta-map))
+                handler (last form)
+                ;; What the handler reads out of ctx: the keys it destructures
+                ;; from its first argument, plus any (:key ctx) in its body.
+                binding (first (second handler))
+                destructured (when (map? binding) (map keyword (:keys binding)))
+                direct (->> (tree-seq coll? seq handler)
+                            (filter #(and (seq? %) (= 2 (count %))
+                                          (keyword? (first %))
+                                          (= 'ctx (second %))))
+                            (map first))
+                read-keys (set (concat destructured direct))]]
+    (testing (str cell-id)
+      (is (contains? meta-map :requires)
+          "every cell declares :requires, even when it is empty — an absent
+           declaration and a declared-nothing look identical otherwise")
+      (let [undeclared (remove declared read-keys)]
+        (is (empty? undeclared)
+            (str cell-id " reads ctx keys it does not declare: "
+                 (pr-str (vec undeclared))))))))
 
 (deftest every-shipped-manifest-compiles-and-is-selectable
   ;; A manifest in the catalogue that cannot compile is a trap: the supervisor

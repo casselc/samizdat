@@ -206,3 +206,127 @@
                      {:db {:path ":memory:"} :http {:port 0}})
       (system/stop!))
     (is (= 1 @called) "start! refreshed the cached gate thresholds")))
+
+;; --- the four directives that used to be advertised and rejected ------------
+;;
+;; RFC-006 recorded that `drain-directives!` recognised pause, resume, extend
+;; and fork and rejected them explicitly as unwired, and that rejecting beat
+;; accepting silently — but that they were advertised by the control API. Half
+;; of `interventions/kinds` was a promise the scheduler would not keep.
+
+(defn- drain [c rid branches]
+  (beam/drain-directives! {:conn c :run-id rid} branches
+                          (interventions/pending c rid) 1))
+
+(defn- branch [id]
+  {:id id :status :active :messages [] :turn 1})
+
+(deftest extend-raises-the-turn-cap
+  (with-db [c]
+    (let [rid (runs/start-run! c {:problem "p"})]
+      (interventions/submit! c rid {:kind "extend" :payload {:turns 20}})
+      (let [r (drain c rid [(branch "B1")])]
+        (is (= 20 (:max-turns r)))
+        (is (= "applied" (:status (first (interventions/history c rid))))))
+      (testing "the round's cap is the run's plus the extension"
+        (is (= 60 (beam/round-max-turns {:max-turns 40} {:max-turns 60})))
+        (is (= 40 (beam/round-max-turns {:max-turns 40} {}))
+            "no extension leaves the run's own cap alone")))))
+
+(deftest extend-without-a-turn-count-is-refused-and-says-so
+  ;; A directive is never silently dropped — the same discipline `cull` on the
+  ;; last branch already followed.
+  (with-db [c]
+    (let [rid (runs/start-run! c {:problem "p"})]
+      (interventions/submit! c rid {:kind "extend" :payload {}})
+      (let [r (drain c rid [(branch "B1")])
+            [d] (interventions/history c rid)]
+        (is (nil? (:max-turns r)))
+        (is (= "rejected" (:status d)))
+        (is (str/includes? (str (:disposition d)) "turns"))))))
+
+(deftest fork-becomes-a-pending-thesis-the-spawn-cell-already-honours
+  ;; No scheduler machinery of its own: :beam/spawn turns a branch's
+  ;; :pending-branch-theses into siblings under the total cap, and runs after
+  ;; the cull in the same round. A human's fork is the same object a branch's
+  ;; own branch_theses call produces.
+  (with-db [c]
+    (let [rid (runs/start-run! c {:problem "p"})]
+      (interventions/submit! c rid {:kind "fork"
+                                    :payload {:thesis "try the greedy bound"}})
+      (let [{:keys [branches]} (drain c rid [(branch "B1") (branch "B2")])
+            theses (mapcat :pending-branch-theses branches)]
+        (is (= 1 (count theses)) "exactly one parent takes the fork")
+        (is (= "try the greedy bound" (:goal (first theses))))
+        (is (true? (:from-human? (first theses))))))))
+
+(deftest fork-without-a-thesis-is-refused
+  (with-db [c]
+    (let [rid (runs/start-run! c {:problem "p"})]
+      (interventions/submit! c rid {:kind "fork" :payload {}})
+      (let [{:keys [branches]} (drain c rid [(branch "B1")])
+            [d] (interventions/history c rid)]
+        (is (empty? (mapcat :pending-branch-theses branches)))
+        (is (= "rejected" (:status d)))
+        (is (str/includes? (str (:disposition d)) "thesis"))))))
+
+(deftest pause-and-resume-are-derived-from-the-record
+  ;; Derived rather than stored, so there is one answer and it survives a
+  ;; process restart: a runs column would be a second copy that a crash
+  ;; between the directive and the column write could leave disagreeing with
+  ;; the record the run is judged by.
+  (with-db [c]
+    (let [rid (runs/start-run! c {:problem "p"})]
+      (is (false? (interventions/paused? c rid)) "a fresh run is not paused")
+
+      (interventions/submit! c rid {:kind "pause"})
+      (is (false? (interventions/paused? c rid))
+          "a PENDING pause has not reached a boundary yet")
+
+      (is (true? (:paused? (drain c rid [(branch "B1")]))))
+      (is (true? (interventions/paused? c rid)))
+
+      (interventions/submit! c rid {:kind "resume"})
+      (drain c rid [(branch "B1")])
+      (is (false? (interventions/paused? c rid))
+          "the most recently applied of the two wins"))))
+
+(deftest a-paused-run-stays-stoppable
+  ;; A pause that could not be aborted out of would be a wedge with a friendly
+  ;; name. await-resume! reads the abort flag on the same pass as the pause.
+  (with-db [c]
+    (let [rid (runs/start-run! c {:problem "p"})]
+      (interventions/submit! c rid {:kind "pause"})
+      (drain c rid [(branch "B1")])
+      (is (true? (interventions/paused? c rid)))
+      (let [aborted (atom true)
+            waited (beam/await-resume! {:conn c :run-id rid :abort aborted})]
+        (is (= 0 waited) "an aborted run does not wait for a resume")))))
+
+(deftest await-resume-returns-immediately-when-nothing-is-paused
+  (with-db [c]
+    (let [rid (runs/start-run! c {:problem "p"})]
+      (is (= 0 (beam/await-resume! {:conn c :run-id rid :abort (atom false)}))))))
+
+(deftest every-advertised-directive-kind-does-something
+  ;; The gap, asserted directly: interventions/kinds is what a human is shown,
+  ;; and half of it was a promise the scheduler would not keep. A kind that is
+  ;; advertised and rejected as unwired must not exist.
+  (with-db [c]
+    (let [rid (runs/start-run! c {:problem "p"})
+          payloads {"message" {:text "t"}
+                    "review" {}
+                    "cull" {}
+                    "fork" {:thesis "t"}
+                    "retract" {:artifact_id 1}
+                    "extend" {:turns 5}
+                    "pause" {}
+                    "resume" {}}]
+      (doseq [k (keys interventions/kinds)]
+        (interventions/submit! c rid {:kind k :payload (payloads k)})
+        (drain c rid [(branch "B1") (branch "B2")])
+        (let [d (first (filter #(= k (:kind %)) (interventions/history c rid)))]
+          (is (not= "pending" (:status d))
+              (str k " reached a boundary and was left pending"))
+          (is (not (str/includes? (str (:disposition d)) "not wired"))
+              (str k " is advertised to a human and rejected as unwired")))))))

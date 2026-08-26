@@ -21,7 +21,7 @@
   mycelium's checks, drive a run.
 
   This ns is the seam the mutation protocol (karamazov-ioo.11) grows on: an
-  agent edit is a workflows/save! followed by the same compile-loop call the
+  agent edit is a us/save! :manifest followed by the same compile-loop call the
   driver makes, and a failed compile means the previous version keeps
   driving. Activation is serialized by construction — each run loads and
   compiles once, at start.
@@ -52,11 +52,12 @@
             [samizdat.agent.gitdiff :as gitdiff]
             [samizdat.agent.loop :as branch-loop]
             [samizdat.repl :as repl]
+            [samizdat.watch :as watch]
             [samizdat.userspace :as userspace]
             [samizdat.agent.state :as state]
             [samizdat.store.journal :as journal]
             [samizdat.store.runs :as runs]
-            [samizdat.store.workflows :as workflows])
+            [samizdat.store.userspace :as us])
   (:refer-clojure :exclude [run!]))
 
 (def loop-name "loop")
@@ -97,6 +98,98 @@
       (compose/register-workflow-cell!
        cell-id (read-definition (slurp (io/resource res))) {}))))
 
+(def ctx-keys
+  "The run-scoped resources every driver hands a cell, as a set.
+
+  A cell receives `ctx` and `data`. `data` is the workflow's value and
+  mycelium checks its shape; `ctx` is mycelium's `resources` slot, and its
+  keys were conventional — RFC-002 recorded that a cell reading a key the
+  driver does not set gets `nil` at run time, with nothing to say so until
+  something downstream fell over.
+
+  This is the contract, and it is checked from both ends: `compile-loop`
+  refuses a cell whose `:requires` names a key that is not here, and
+  `beam-test` asserts the production ctx actually carries every key that is.
+  One without the other is worth little — a contract nobody satisfies, or a
+  driver nobody holds to it.
+
+  Mechanism, not policy: it describes what the base provides, not what any
+  project should do with it."
+  #{;; RFC-002's documented set
+    :conn :run-id :config :llm-adapter :llm-config :root :max-turns :abort
+    ;; What the beam driver adds
+    :problem :beam? :beam-width :turn-workflow :iterating-loop? :git-baseline
+    :repl-session :sessions :engine-sessions :live-branches})
+
+(defn cell-requires
+  "The ctx keys `cell-id` declares it reads. `:requires` is mycelium's own
+  vocabulary — the guide documents it beside `:doc` and `:effects` — and it
+  was simply unused here, the same shape of miss as the manifests using only
+  `:must-follow` when `:must-precede` was sitting there."
+  [cell-id]
+  (set (:requires (cell/get-cell cell-id))))
+
+(defn- check-requires!
+  "Refuse a manifest whose cells want ctx keys no driver provides.
+
+  At COMPILE time, so a bad edit fails in the mutation protocol's validate
+  step — before the soak, and long before a nil surfaces as a
+  NullPointerException six cells downstream with nothing pointing back here."
+  [definition]
+  (let [wanted (for [[node cell-id] (:cells definition)
+                     k (cell-requires cell-id)
+                     :when (not (ctx-keys k))]
+                 {:node node :cell cell-id :key k})]
+    (when (seq wanted)
+      (throw (ex-info
+              (str "cells require ctx keys no driver provides: "
+                   (str/join ", " (for [{:keys [node cell key]} wanted]
+                                    (str node " (" cell ") wants " key)))
+                   ". Either the key belongs in workflow/ctx-keys and the"
+                   " drivers must set it, or the cell should not be asking.")
+              {:wanted wanted :provided (sort ctx-keys)})))))
+
+(defn invariants
+  "Every ordering rule a manifest CLAIMS, enforced or not.
+
+  The list exists because `:constraints` alone could not answer the question
+  an editor actually has. A manifest carrying two constraints looks like a
+  manifest with two invariants; the beam had four and the turn had five, and
+  the rest lived in cell docstrings — so there was no way to tell, from the
+  file being edited, which of its rules the compiler would catch. RFC-002
+  recorded that as a gap: an editor cannot know what is defended."
+  [definition]
+  (vec (:invariants definition)))
+
+(def ^:private constraint-keys
+  "The keys mycelium's checker reads, by constraint type. Anything else in an
+  invariant entry — `:protects`, `:enforced`, `:unenforced-because` — is for
+  the reader and must not reach the compiler."
+  [:type :if :then :cell :before :cells])
+
+(defn enforced-constraints
+  "mycelium `:constraints`, DERIVED from the enforced invariants.
+
+  One list, not two. A manifest that declared its invariants separately from
+  its constraints would let the two disagree, and the disagreement would say
+  the opposite of the truth in the more dangerous direction — a rule
+  documented as enforced that nothing checks.
+
+  An explicit `:constraints` is still honoured and appended, so a project
+  manifest stored before this key existed keeps compiling unchanged."
+  [definition]
+  (into (vec (:constraints definition))
+        (comp (filter :enforced)
+              (map #(into {} (filter (fn [[k _]] (some #{k} constraint-keys))) %)))
+        (:invariants definition)))
+
+(defn unenforced-invariants
+  "The rules a manifest claims that nothing checks. Each must say why: `no
+  constraint` and `no constraint yet` are different facts, and only one of
+  them is a decision."
+  [definition]
+  (vec (remove :enforced (:invariants definition))))
+
 (defn compile-loop
   "Compile a loop definition through mycelium's full static checking:
   structure, dispatch coverage, reachability, and the :constraints that make
@@ -110,10 +203,23 @@
   ;; different ones) — so this always loads rather than guarding on emptiness.
   ;; Idempotent, cheap (one file), and it picks up any edited cell, which is
   ;; the hot-reload the mutation protocol will build on.
+  ;; A definition with no cells is not a loop, and mycelium will happily
+  ;; compile one: `pre-compile` on nil returns an FSM whose start state is
+  ;; missing, and the failure surfaces later as a ClassCastException with
+  ;; nothing pointing back here. That is how a manifest read from the wrong
+  ;; column produced a run that died four frames deep in the driver — the
+  ;; store returns `:body` and the caller was still reading `:edn`, so
+  ;; `read-definition` was handed nil and returned it.
+  (when-not (seq (:cells definition))
+    (throw (ex-info (str "not a workflow definition: no :cells"
+                         (when (nil? definition) " (the definition is nil)"))
+                    {:definition definition})))
   (cells/load-cells!)
   ;; Register any composed sub-loops as cells before the parent references them.
   (register-subworkflows! definition)
-  (let [compiled (myc/pre-compile definition)]
+  (check-requires! definition)
+  (let [compiled (myc/pre-compile
+                  (assoc definition :constraints (enforced-constraints definition)))]
     (when-let [warnings (:mycelium/compile-warnings (:compiled-fsm compiled))]
       (log/warn "loop definition compiled with warnings:" (pr-str warnings)))
     compiled))
@@ -127,17 +233,23 @@
   ([conn] (load-loop! conn loop-name))
   ([conn name]
    (let [res (manifest-resource name)
-         row (if (io/resource res)
-               (workflows/seed! conn name res)
-               (workflows/load-latest conn name))]
+         row (if-let [r (io/resource res)]
+               (us/seed! conn :manifest name (slurp r))
+               (us/load-latest conn :manifest name))]
      (when-not row
        (throw (ex-info (str "no loop manifest named '" name
                             "' — no resource at " res " and nothing stored")
                        {:name name})))
-     {:name name
-      :version (:version row)
-      :definition (read-definition (:edn row))
-      :compiled (compile-loop (read-definition (:edn row)))})))
+     ;; `:body`, not `:edn`. store/workflows.clj used to rename the column on
+     ;; the way out; reading the raw userspace row means the key is what the
+     ;; table calls it. Read once and compiled from the same value, so a
+     ;; caller cannot get a definition and a compiled FSM built from different
+     ;; text.
+     (let [definition (read-definition (:body row))]
+       {:name name
+        :version (:version row)
+        :definition definition
+        :compiled (compile-loop definition)}))))
 
 ;; --- the per-turn slice, for the beam ---------------------------------------
 ;;
@@ -278,8 +390,8 @@
   (let [factory (->> factory-manifest-names
                      (filter #(io/resource (manifest-resource %)))
                      set)
-        stored (->> (try (workflows/names conn) (catch Throwable _ nil))
-                    ;; workflows/names yields rows ({:name :version :versions}),
+        stored (->> (try (us/names conn :manifest) (catch Throwable _ nil))
+                    ;; us/names yields rows ({:name :version :versions}),
                     ;; factory yields name strings — normalise to names.
                     (map (fn [x] (if (map? x) (:name x) x)))
                     (remove nil?)
@@ -289,7 +401,7 @@
                  (let [res (manifest-resource nm)
                        edn (if (io/resource res)
                              (slurp (io/resource res))
-                             (some-> (workflows/load-latest conn nm) :edn))]
+                             (some-> (us/load-latest conn :manifest nm) :body))]
                    (when edn
                      (let [d (try (read-definition edn) (catch Throwable _ nil))]
                        {:name nm :description (str (:description d))})))))
@@ -348,10 +460,11 @@
   manifest's per-turn slice fresh, so a cell or manifest edit is picked up."
   ([ctx branch turn] (run-turn ctx branch turn loop-name))
   ([ctx branch turn manifest-name]
-   (let [wf (compile-loop (turn-manifest
-                           (read-definition
-                            (:edn (workflows/seed! (:conn ctx) manifest-name
-                                                   (manifest-resource manifest-name))))))
+   (let [wf (compile-loop
+             (turn-manifest
+              (read-definition
+               (:body (us/seed! (:conn ctx) :manifest manifest-name
+                                (slurp (io/resource (manifest-resource manifest-name))))))))
          data (myc/run-compiled wf ctx {:branch branch :turn turn})]
      (when (myc/error? data)
        (throw (ex-info "the turn manifest failed structurally"
@@ -377,25 +490,49 @@
         ;; The project root the file tools are confined to, and the shell tool
         ;; runs in. Configurable so a run can target another checkout.
         root (or (get-in config [:run :root]) (System/getProperty "user.dir"))
+        ;; Make the project's own namespaces requirable from `eval` before any
+        ;; branch takes a turn. The system prompt's whole first section is
+        ;; REPL-first against the project under work, and without this that
+        ;; instruction is unreachable the moment :run :root is not the harness.
+        _ (repl/ensure-project-roots! root)
         ctx {:conn conn :run-id run-id :config config
              :llm-adapter llm-adapter :llm-config llm-config
              :root root
-             ;; A run-start git baseline so a finalization critic can review
-             ;; exactly what this run changed. Only captured for a non-default
-             ;; manifest — the factory loop has no critic to read it, and
-             ;; skipping it keeps the common path off git entirely.
-             :git-baseline (when (not= loop-nm loop-name) (gitdiff/baseline root))
+             ;; A run-start git baseline: what this run changed, for a
+             ;; finalization critic AND — the part this used to miss — for the
+             ;; ship gate's test rung.
+             ;;
+             ;; This was `(when (not= loop-nm loop-name) …)`, on the reasoning
+             ;; that the factory loop has no critic to read it and skipping it
+             ;; keeps the common path off git entirely. That was true when the
+             ;; critic was the only reader. The ship gate reads it too now, via
+             ;; changed-files, and with no baseline `changed` is nil, no focused
+             ;; command is built, no tests run, and verify-block falls through
+             ;; its last clause — which trusts rather than deadlocks. So the
+             ;; default loop verified NOTHING while reporting a successful ship:
+             ;; observed live, a run that shipped `{:test 19 :pass 49 :error 5}`
+             ;; with the gate silently inert.
+             ;;
+             ;; Captured whenever anything downstream could use it.
+             :git-baseline (when (or (not= loop-nm loop-name)
+                                     (get-in config [:run :verify-focused?])
+                                     (not (str/blank? (str (get-in config [:run :verify-cmd])))))
+                             (gitdiff/baseline root))
              ;; A per-run eval session, so defs the agent makes with `eval`
              ;; persist across its turns (define, then use) — REPL-first
              ;; development against the live image.
              :repl-session (repl/new-session)
              :max-turns max-turns}]
     (runs/open-branch! conn run-id {:branch-id "B1"})
+    ;; The single-branch driver drains the same interventions queue the beam
+    ;; does (loop/drain-directives!), so the watcher works here unchanged.
+
     ;; Which loop drove this run, durably: an agent reading a surprising run
     ;; back needs to know which version of itself produced it.
     (journal/note! conn run-id :loop-workflow
                    {:data {:name loop-nm :version version}})
-    (try
+    (let [stop-watch (watch/start! ctx)]
+     (try
       (let [data (myc/run-compiled compiled ctx
                                    (cond-> {:branch branch :turn 1}
                                      ;; A team workflow fans out over these — one
@@ -411,7 +548,8 @@
         (-> (select-keys data [:status :answer :branch :residual])
             (assoc :run-id run-id)))
       (finally
+        (stop-watch)
         ;; The run's eval namespace does not outlive the run
         ;; (provenance CR1-6): one namespace per run, never removed, was
         ;; unbounded growth on a serve process.
-        (repl/close-session (:repl-session ctx))))))
+        (repl/close-session (:repl-session ctx)))))))

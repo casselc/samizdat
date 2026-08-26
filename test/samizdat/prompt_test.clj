@@ -156,3 +156,30 @@
   ;; behaves exactly as a plain prompt read.
   (is (= (str/trim (prompt/prompt "crossover"))
          (str/trim (prompt/layer :crossover)))))
+
+(deftest shipped-prompts-match-what-ships
+  ;; Enumerated rather than globbed, for the reason cells/shipped-cells is:
+  ;; `jolt build` bakes resources/ into the binary and an embedded resource
+  ;; has no filesystem path for a glob to walk, so a built binary run outside
+  ;; the project root would report that the harness has no prompts. An
+  ;; enumerated list cannot drift on its own — this is what pins it.
+  (let [on-disk (->> (file-seq (java.io.File. "resources/prompts"))
+                     (filter #(.isFile %))
+                     (map #(-> (.getPath %)
+                               (str/replace #"^resources/prompts/" "")
+                               (str/replace #"\.md$" "")))
+                     set)]
+    (is (seq on-disk) "resources/prompts is readable from the test's cwd")
+    (is (= on-disk (set prompt/shipped-prompts))
+        (str "prompt/shipped-prompts and resources/prompts disagree; missing: "
+             (sort (remove (set prompt/shipped-prompts) on-disk))
+             ", listed but absent: "
+             (sort (remove on-disk prompt/shipped-prompts))))))
+
+(deftest every-shipped-prompt-renders
+  ;; A template that cannot be parsed fails where it is USED — for a gate
+  ;; message that is mid-run, and for the system prompt it is the top of every
+  ;; branch. Cheap to check them all here instead.
+  (doseq [n prompt/shipped-prompts]
+    (is (string? (prompt/render-str (prompt/prompt n) {}))
+        (str "prompts/" n ".md does not render"))))

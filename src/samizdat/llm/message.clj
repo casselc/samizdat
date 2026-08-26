@@ -22,6 +22,7 @@
   Two jobs, both of which have to happen the same way for every provider or
   the harness's context management differs by which model it is talking to."
   (:require [clojure.string :as str]
+            [samizdat.lexicon :as lexicon]
             [samizdat.tape :as tape]))
 
 (defn strip-think-blocks
@@ -51,22 +52,41 @@
       (seq r) (str "<think>" r "</think>")
       :else c)))
 
-(def default-keep-pairs
+(defn default-keep-pairs
   "How many recent turns stay verbatim when a branch's history is compacted.
 
   This is the branch's working memory: what it just tried, what the engine
-  said, and the goal state it is mid-way through. Ten is enough to hold a
-  proof attempt and the two or three failures that shaped it."
-  10)
+  said, and the goal state it is mid-way through.
 
-(def default-compaction-threshold
+  `:context-budget :keep-pairs`, not a constant. `infer/render` already passes
+  the budget's value in, so a constant here was a SECOND answer to the same
+  question that applied on exactly the path nobody was watching — a direct
+  caller passing no opts — and disagreed with the first as soon as anyone
+  retuned the table."
+  []
+  (lexicon/budget :keep-pairs))
+
+(defn default-compaction-threshold
   "Total content characters before compaction engages.
 
   Deliberately high. A 19-turn branch carries about 26,000 characters and does
   not need this; the longest branch on record is 86 turns and about 211,000.
   Compaction is for the tail, and a branch that never reaches it is sent
-  byte-identical messages to what it would have been sent before."
-  50000)
+  byte-identical messages to what it would have been sent before.
+
+  `:context-budget :compaction-chars`, for the reason above."
+  []
+  (lexicon/budget :compaction-chars))
+
+(def ^:private frame-size
+  "Messages at the head of a tape that are never compaction candidates: the
+  system prompt and the problem statement.
+
+  Not a tunable — it is the SHAPE of a tape, fixed by `loop/seed-messages`,
+  and the two things whose byte-stability the whole prefix cache rests on
+  (RFC-004's caching rule). Named so the guard below reads as what it is
+  rather than as a magic 3."
+  2)
 
 (defn- digest-line
   "One line for a turn that has been unloaded: what was tried, how it came out.
@@ -159,10 +179,12 @@
   ([messages turns] (compact messages turns nil))
   ([messages turns {:keys [keep-pairs threshold-chars floor]}]
    (let [messages (vec messages)
-         keep-pairs (or keep-pairs default-keep-pairs)
-         threshold (or threshold-chars default-compaction-threshold)
+         keep-pairs (or keep-pairs (default-keep-pairs))
+         threshold (or threshold-chars (default-compaction-threshold))
          total (reduce + 0 (map (comp count str :content) messages))]
-     (if (or (< total threshold) (< (count messages) 3))
+     ;; Nothing to do below the threshold, and nothing to do when the tape is
+     ;; the frame plus at most nothing: there is no message past it.
+     (if (or (< total threshold) (<= (count messages) frame-size))
        messages
        ;; The frame is never a candidate: the system prompt and the problem
        ;; statement are the two things whose stability the whole prefix cache

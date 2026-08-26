@@ -18,12 +18,63 @@
  ;; capped and what comes next, not how long it lasts.
  ;;
  ;; :withholds is the per-phase tool policy base/phase-refusal consults.
- ;; Empty today: the proof harness's withheld tools left with its engines,
- ;; and the coding loop has no phase-locked tools yet. When it does, this is
- ;; where they go — a refusal from here carries :policy-refusal? true so the
- ;; cull record can tell a declined call from a malformed fence.
+ ;; Empty: the proof harness's withheld tools left with its engines, and the
+ ;; coding loop has no PHASE-locked tools. The refusals table below is the
+ ;; one that is populated, because the rule that was missing turned on the
+ ;; branch rather than on its phase. Both paths carry :policy-refusal? true
+ ;; so a cull record can tell a declined call from a malformed fence.
  :phases {:explore {:cap-key :explore-cap :next :build :withholds #{}}
           :build {:withholds #{}}}
+
+ ;; CONDITIONAL withholds: a refusal that depends on the BRANCH rather than
+ ;; on its phase. :withholds above can only ask "which tools does this phase
+ ;; forbid"; this table can ask anything about the branch, because a :when
+ ;; form sees `branch` and `tool-name` as locals. Ordered, first match wins,
+ ;; compiled once at load (a broken form fails there, not mid-run) while
+ ;; everything the form reads is read at fire time.
+ ;;
+ ;; WHY THE FIRST ENTRY EXISTS. RFC-008 recorded that the task board was
+ ;; "encouraged, not enforced": the per-turn context block says "No task
+ ;; claimed" and the system prompt says work starts with a task, but nothing
+ ;; refused a tool call from a branch holding none. Encouragement is not a
+ ;; property — a model under pressure skips it exactly when the board would
+ ;; have mattered most, and the board's whole purpose is arbitrating between
+ ;; branches that are about to collide.
+ ;;
+ ;; WHICH TOOLS, and the three things this set is deliberately NOT.
+ ;;
+ ;; What the board arbitrates is who is CHANGING WHAT. On a team workflow the
+ ;; competing implementors are branches of one run sharing one working tree,
+ ;; and two of them editing the same file is the collision the board exists to
+ ;; prevent. So the rule gates the two tools that mutate that tree, and
+ ;; nothing else.
+ ;;
+ ;; NOT the investigating tools. `read_file`, `grep`, `lsp`, `shell` and
+ ;; `eval` are how a branch finds out what needs doing — and a branch has to
+ ;; be able to do that BEFORE it can know what to claim. A refusal on
+ ;; `read_file` is a deadlock wearing a policy's clothes. `task` itself is
+ ;; never withheld, for the same reason.
+ ;;
+ ;; NOT `done` or `give_up`. Refusing to let a branch FINISH because it never
+ ;; claimed a task discards completed work to enforce bookkeeping, which is
+ ;; the worst available trade: the work exists, the answer is in hand, and the
+ ;; harness would be throwing it away over a missing row. Ending a run is also
+ ;; where a bad refusal is least recoverable — there is no next turn to fix it
+ ;; in. Every scripted end-to-end run drives `thesis` then `done`, and when
+ ;; `done` was briefly in this set all of them failed; that was the mechanism
+ ;; reporting a real design error, not a test fixture problem.
+ ;;
+ ;; NOT `eval`, specifically, on top of the above: the mutation protocol is
+ ;; built on in-process eval (RFC-002), so withholding it would make the
+ ;; harness's ability to modify itself depend on the task board.
+ ;;
+ ;; TO TURN IT OFF, set :tools to #{}. It is data, and a project that does not
+ ;; want a board should not have to carry one.
+ :refusals
+ [{:rule :work-needs-a-task
+   :when (nil? (:task branch))
+   :tools #{"write_file" "edit_file"}
+   :message-file "task-required"}]
 
  ;; #3: tool-result signals → branch-state effects. The claim-first state
  ;; machine as a declarative table instead of cond-> clauses in the
@@ -36,13 +87,24 @@
  ;; point the safe-state rung rewinds to (it also ends a reframe — the
  ;; withheld approach could not have produced it, vf-9wx).
  ;;
- ;; An artifact-status trigger ([:artifact :claim-status] and friends) IS
- ;; available: tools/ship.clj emits {:claim-status :confirmed} on a green
- ;; ship-verify, so a project that wants an effect keyed on the artifact
- ;; rather than on the signal can add one. This comment used to say those
- ;; triggers "left with the tools that produced those statuses", which stopped
- ;; being true and made a usable extension point look closed. RFC-001 F1.
- :transitions {[:result :verified-green?] [:mark-green :clear-reframe]}
+ ;; A value can be matched, not just tested for truth: an entry whose value is
+ ;; a MAP dispatches on what the path holds, `{:confirmed [...]}`. That is
+ ;; what an artifact trigger needs — :claim-status is truthy for :confirmed,
+ ;; :empirical and :sketch alike, so a truthy test would fire the confirmed
+ ;; effects on an unverified plan. A status is a vocabulary, not a flag.
+ ;;
+ ;; The two entries ask DIFFERENT questions, which is why neither subsumes the
+ ;; other. :mark-green keys on the verify signal, because the green point the
+ ;; safe-state rung rewinds to is a fact about the WORKING TREE — the suite was
+ ;; observed passing — and not about any claim. :clear-reframe keys on a
+ ;; confirmed artifact, because that is what clear-reframe has always meant in
+ ;; its own words: the branch banked something the withheld approach could not
+ ;; have produced. Keying it on the artifact rather than on the verify signal
+ ;; makes it general — ANY tool that confirms a claim ends a reframe, not only
+ ;; a green ship-verify, which is the behaviour the docstring already
+ ;; described and the table did not deliver.
+ :transitions {[:result :verified-green?] [:mark-green]
+               [:artifact :claim-status]  {:confirmed [:clear-reframe]}}
 
  ;; #30: the winner rubric — the ported UCLA FirstProof selector. EDN forms
  ;; compiled at load by state.clj into the ranking tuple, best-first

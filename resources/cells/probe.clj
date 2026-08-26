@@ -96,7 +96,8 @@
         :on-mechanics-failures — because a branch producing well-formed calls
         needs no help and probing it is pure spend. Adds :probe to the data
         map; a manifest routes on it or ignores it."
-   :effects [:net :db]}
+   :effects [:net :db]
+   :requires []}
   (fn [ctx {:keys [branch turn] :as data}]
     (let [{:keys [width on-mechanics-failures]} (gates/threshold :probe)]
       (if (or (not (pos? (or width 0)))
@@ -137,7 +138,8 @@
         code. Adds :ab to the data map; nothing routes on it yet, which is
         deliberate: the comparison is worth recording before it is worth
         acting on."
-   :effects [:net :db]}
+   :effects [:net :db]
+   :requires []}
   (fn [ctx {:keys [branch] :as data}]
     (let [{:keys [variants]} (gates/threshold :probe)]
       (if-not (seq variants)

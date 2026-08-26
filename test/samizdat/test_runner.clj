@@ -65,6 +65,10 @@
             [mycelium.validation-test]
             [mycelium.workflow-test]
             [samizdat.agent-test]
+            [samizdat.base-test]
+            [samizdat.boundary-test]
+            [samizdat.session-test]
+            [samizdat.watch-test]
             [samizdat.tasks-test]
             [samizdat.knowledge-test]
             [samizdat.messages-test]
@@ -163,6 +167,10 @@
     samizdat.store-test
     samizdat.llm-test
     samizdat.agent-test
+    samizdat.base-test
+    samizdat.boundary-test
+    samizdat.session-test
+    samizdat.watch-test
     samizdat.tasks-test
     samizdat.knowledge-test
     samizdat.messages-test

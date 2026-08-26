@@ -159,10 +159,20 @@
   consulted, because a judge asked to grade the harness's own steering is a
   judge with an opinion about the harness.
 
-  Returns :met, :unmet, or nil for still-open."
+  Returns :met, :met-late, :unmet, or nil for still-open.
+
+  THREE outcomes, not two, because two could not tell apart the gate nobody
+  obeys and the gate whose advice is sound but slow — and those want opposite
+  responses. A prediction's :window is in turns; anything a gate asks for
+  costs at least a turn to attempt and another to verify, so advice followed
+  on the third turn of a two-turn window used to settle :unmet and read
+  exactly like advice ignored. The window is now the promptness bar and the
+  grace (gates.edn :prediction-grace-turns) is the did-it-happen-at-all bar."
   [{:keys [gate turn window]} {:keys [current-turn tools-called branch-before branch-after]}]
   (let [settle-called (gates/tool-vocab :settle-called)
-        expired? (>= (- current-turn turn) window)
+        elapsed (- current-turn turn)
+        late? (> elapsed window)
+        expired? (>= elapsed (+ window (gates/threshold :prediction-grace-turns)))
         ;; `#{}` rather than nil for a gate the vocabulary does not name:
         ;; `(some nil tools-called)` calls nil as a predicate and throws, so a
         ;; gate added to gates.edn :gates without a :settle-called entry took
@@ -215,7 +225,7 @@
         (:prologue-cap :progress-stalled) (progressed? branch-before branch-after)
         :human-directive true
         (tools-met? gate))
-      :met
+      (if late? :met-late :met)
 
       expired? :unmet
       :else nil)))

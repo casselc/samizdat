@@ -22,6 +22,77 @@
 
 (selmer-util/turn-off-escaping!)
 
+(def shipped-prompts
+  "Every prompt name the harness ships, ENUMERATED not globbed.
+
+  Same reason as `cells/shipped-cells`: `jolt build` bakes resources/ into the
+  binary, and an embedded resource has no filesystem path for a glob to walk —
+  a built binary run outside the project root would find nothing and report
+  that the harness has no prompts. `prompt-test` pins this against the
+  directory, so it cannot drift on its own.
+
+  Used by the `prompt` tool to list what a project can edit. Reading one still
+  goes through the userspace seam, which is what decides whether the project's
+  version or the template answers."
+  [
+   "architect"
+   "branch-cap"
+   "branch-out"
+   "critic"
+   "critic-system"
+   "crossover"
+   "cull-reprieve"
+   "directive-refused"
+   "directive-rejected"
+   "emergency-review"
+   "experiment-tool"
+   "explore-cap"
+   "failure-log"
+   "file-tool"
+   "fork-thesis"
+   "judge"
+   "judge-exemptions"
+   "judge-user"
+   "juvenile-grace"
+   "last-call"
+   "ledger"
+   "manual-group"
+   "memory-tool"
+   "milestone"
+   "planner"
+   "probe-candidates"
+   "probe-steer"
+   "problem"
+   "progress-stalled"
+   "prologue-cap"
+   "prompt-tool"
+   "reflection"
+   "repopulate"
+   "residual-report"
+   "review"
+   "roles/implementor"
+   "roles/reviewer"
+   "roles/supervisor"
+   "run-health"
+   "safe-state"
+   "session-block"
+   "shared-artifacts"
+   "shell-refused"
+   "stuck"
+   "system"
+   "task-busy"
+   "task-claimed"
+   "task-current"
+   "task-none"
+   "task-required"
+   "team-worker"
+   "turn-deadline"
+   "verify-red"
+   "verify-timeout"
+   "verify-unknown"
+   "watch-intervention"
+   "wind-down"   ])
+
 (defn prompt
   "The text of prompt `name` for the current project.
 

@@ -43,6 +43,7 @@
             [samizdat.agent.gates :as gates]
             [samizdat.prompt :as prompt]
             [samizdat.agent.state :as state]
+            [samizdat.session :as session]
             [samizdat.store.failures :as failures]
             [samizdat.store.interventions :as interventions]
             [samizdat.store.journal :as journal]
@@ -274,7 +275,7 @@
         target (or beam-width 1)
         strength (fn [b]
                    (let [sc (get-in b [:critic :scores])]
-                     [(reduce + 0 (vals (select-keys sc critic/survival-objectives)))
+                     [(reduce + 0 (vals (select-keys sc (critic/survival-objectives))))
                       (count (state/confirmed-artifacts b))]))
         candidate (when (and (< (count alive) target) (< total-count cap))
                     (->> alive
@@ -310,9 +311,17 @@
         :continue — do the round.
 
         Reads the abort flag, so not pure."
-   :effects [:db]}
-  (fn [{:keys [abort max-turns] :as ctx} {:keys [branches turn] :as data}]
-    (let [active (filterv state/active? branches)
+   :effects [:db]
+   :requires [:abort]}
+  (fn [{:keys [abort] :as ctx} {:keys [branches turn] :as data}]
+    ;; A paused run waits HERE, at the top of the round, before anything is
+    ;; scheduled — which is what `pause` promises: no new turns, and whatever
+    ;; is in flight finishes (it already has, a round ago). The wait polls the
+    ;; abort flag too, so a paused run is still stoppable; a pause that could
+    ;; not be aborted out of would be a wedge with a friendly name.
+    (beam/await-resume! ctx)
+    (let [cap (beam/round-max-turns ctx data)
+          active (filterv state/active? branches)
           candidates (filterv :final-answer branches)
           done (beam/finish-now? ctx (beam/select-done-branch ctx candidates) branches)]
       (assoc data
@@ -322,7 +331,7 @@
              :verdict (cond
                         (and abort @abort) :aborted
                         done :completed
-                        (or (empty? active) (> turn max-turns)) :exhausted
+                        (or (empty? active) (> turn cap)) :exhausted
                         :else :continue)))))
 
 ;; --- the round --------------------------------------------------------------
@@ -331,18 +340,35 @@
   {:doc "Apply pending human directives at the boundary and resolve each in the
         interventions table. First in the round on purpose: a directive that
         landed mid-turn would rewrite state under a branch that had already
-        read it."
-   :effects [:db]}
+        read it.
+
+        Three of the eight kinds are about the RUN rather than a branch, and
+        this is where they land in the data map: `:paused?` (the next round
+        waits at :beam/round-open, so turns in flight finish), and
+        `:max-turns` (an `extend` raises the cap the round-open exhaustion
+        check reads). Both persist across the back edge because :beam/tick
+        drops only the per-round products."
+   :effects [:db]
+   :requires []}
   (fn [ctx {:keys [active turn] :as data}]
     (let [{:keys [conn run-id]} ctx
-          pending (interventions/pending conn run-id)]
-      (assoc data :active (beam/drain-directives! ctx active pending turn)))))
+          pending (interventions/pending conn run-id)
+          {:keys [branches max-turns paused?]}
+          (beam/drain-directives! ctx active pending turn)]
+      ;; :paused? is NOT carried in the data map — beam/await-resume! reads the
+      ;; interventions table, because the resume that ends the wait is written
+      ;; by another process while this round is inside it. It is recorded here
+      ;; only so the round's trace says what happened.
+      (cond-> (assoc data :active branches)
+        (some? paused?) (assoc :paused-by-directive? paused?)
+        max-turns (update :max-turns (fnil + (beam/round-max-turns ctx data)) max-turns)))))
 
 (cell/defcell :beam/advance
   {:doc "One turn for every active branch, concurrently, each under a hard
         deadline. A branch that throws is abandoned rather than taking the beam
         down with it; a branch that hangs loses only its own turn."
-   :effects [:net :db :fs :proc]}
+   :effects [:net :db :fs :proc]
+   :requires [:live-branches]}
   (fn [ctx {:keys [active branches turn] :as data}]
     (let [advanced (beam/advance-all (assoc ctx :branch-count (count branches))
                                      (filterv state/active? active)
@@ -358,7 +384,8 @@
         call per branch per :critic-every window. Before the retention pass,
         because that pass reads them and stale scores would decide a live
         branch's fate on last round's evidence."
-   :effects [:net :db]}
+   :effects [:net :db]
+   :requires []}
   (fn [ctx {:keys [advanced turn] :as data}]
     (assoc data :advanced (beam/ensure-scored ctx advanced turn))))
 
@@ -370,7 +397,8 @@
         Evaluated in order rather than in parallel for that reason — the last
         branch standing is never culled, so whether THIS branch survives
         depends on what happened to the ones before it."
-   :effects [:db]}
+   :effects [:db]
+   :requires []}
   (fn [ctx {:keys [advanced turn] :as data}]
     (let [culled (first
                   (reduce (fn [[acc alive] b]
@@ -383,6 +411,20 @@
                               [(conj acc b') (if (state/active? b') alive (dec alive))]))
                           [[] (count advanced)]
                           advanced))]
+      ;; SHARPENING vs EXPANSION (papers/2608.17981v1 §4.5.4, after Yue et al.
+      ;; on pass@k). A beam can fail two ways and they want opposite fixes:
+      ;; no branch ever held the answer (expansion — widen, diversify), or one
+      ;; did and the harness threw it away (sharpening — fix the rubric and the
+      ;; cull thresholds). End-to-end success confuses them.
+      ;;
+      ;; A branch culled while holding CONFIRMED artifacts is the cheap
+      ;; in-run signal for the second: it had banked machine-checked evidence
+      ;; and was killed anyway. Counted here, where the decision is actually
+      ;; made, so the diagnosis is available without a bench run.
+      (doseq [b culled
+              :when (and (not (state/active? b))
+                         (seq (state/confirmed-artifacts b)))]
+        (session/observe! [:beam :culled-with-evidence]))
       (assoc data :culled culled))))
 
 (cell/defcell :beam/settle
@@ -392,7 +434,8 @@
 
         Before repopulation, so a slot freed this round is visible to the
         refill that happens in the same round."
-   :effects [:db]}
+   :effects [:db]
+   :requires []}
   (fn [ctx {:keys [branches culled] :as data}]
     (beam/record-inactive! ctx culled)
     (let [inactive (filterv (complement state/active?) branches)]
@@ -405,7 +448,8 @@
         the strongest earning survivor. The ask itself is the :repopulate gate,
         which reads the mark — so the invitation has a prediction and shows up
         in the gate tally rather than being an untracked second harness voice."
-   :effects [:db]}
+   :effects [:db]
+   :requires []}
   (fn [ctx {:keys [culled all-now turn] :as data}]
     (assoc data :culled (repopulate ctx culled (count all-now) turn))))
 
@@ -413,7 +457,8 @@
   {:doc "Turn each branch's pending theses into sibling branches, under the
         total cap. After the cull, so a branch that died this round does not
         spend the budget on children."
-   :effects [:db]}
+   :effects [:db]
+   :requires []}
   (fn [ctx {:keys [culled all-now turn] :as data}]
     (let [[children updated]
           (reduce (fn [[acc bs] b]
@@ -426,22 +471,40 @@
                   culled)]
       (assoc data :children children :updated updated))))
 
+(def ^:private round-products
+  "The keys a round produces and the next one must not inherit.
+
+  CLEARED TO NIL, NOT DISSOC'D. mycelium propagates keys as
+  `(merge input (handler input))`, so a handler cannot remove anything — the
+  input map is merged back over the top and the dissoc is undone. This cell's
+  own docstring claimed it dropped these for six months; it never did, and the
+  data map it was written to bound held every branch's whole message history
+  five times over, once per round, for the life of the run.
+
+  Nil is what a handler CAN say, because handler output wins on a key it
+  names. The key survives and the value it was holding is released, which is
+  the half that mattered — and a stale round product now reads as absent to
+  the cell that would have inherited it."
+  [:active :advanced :culled :inactive :all-now :updated :children
+   :done-branch :multi-candidate? :verdict])
+
 (cell/defcell :beam/tick
-  {:doc "Close the round: reassemble the branch set, advance the turn, and drop
-        the per-round products so the data map does not grow without bound.
+  {:doc "Close the round: reassemble the branch set, advance the turn, and
+        release the per-round products so the data map does not grow without
+        bound.
 
         The trace is capped hard here. Every mycelium trace entry snapshots the
         whole data map, and this map holds every branch's entire message
         history — an uncapped trace would be quadratic in the run."
-   :pure true}
+   :pure true
+   :requires [:live-branches]}
   (fn [ctx {:keys [inactive updated children] :as data}]
     (let [next-branches (into (into (vec inactive) updated) children)]
       (when-let [live (:live-branches ctx)] (reset! live next-branches))
       (-> data
           (assoc :branches next-branches)
           (update :turn inc)
-          (dissoc :active :advanced :culled :inactive :all-now :updated :children
-                  :done-branch :multi-candidate? :verdict)
+          (merge (zipmap round-products (repeat nil)))
           (update :mycelium/trace #(vec (take-last 5 %)))))))
 
 ;; --- the three endings -------------------------------------------------------
@@ -449,7 +512,8 @@
 (cell/defcell :beam/abort
   {:doc "The run was stopped from outside. Every still-active branch is closed
         as abandoned; no answer is claimed."
-   :effects [:db]}
+   :effects [:db]
+   :requires [:conn :run-id]}
   (fn [{:keys [conn run-id]} {:keys [branches active] :as data}]
     (doseq [b active]
       (runs/close-branch! conn run-id (:id b) :abandoned "aborted"))
@@ -461,7 +525,8 @@
         others are closed naming what superseded them — 'outranked by' when
         more than one branch had shipped and the rubric chose, 'superseded by'
         when only one had."
-   :effects [:db]}
+   :effects [:db]
+   :requires [:conn :run-id]}
   (fn [{:keys [conn run-id]} {:keys [branches done-branch multi-candidate?] :as data}]
     (doseq [b branches
             :when (and (state/active? b) (not= (:id b) (:id done-branch)))]
@@ -479,7 +544,8 @@
         branch is closed as exhausted and each branch's RESIDUAL is journalled:
         what it believed it was close to when the budget ran out, so a resume
         does not re-derive scope from the transcript."
-   :effects [:db]}
+   :effects [:db]
+   :requires [:conn :max-turns :run-id]}
   (fn [{:keys [conn run-id max-turns]} {:keys [branches active] :as data}]
     (let [residuals (keep state/residual branches)
           report (state/build-residual-report

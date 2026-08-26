@@ -18,6 +18,7 @@ These are design documents, not a change log. Past defects live in
 | [007](RFC-007-steer-system.md) | Steer | What the harness says to a branch, and whether it worked |
 | [008](RFC-008-tools-and-tasks.md) | Tools | The agent's capability surface and the work board |
 | [009](RFC-009-storage.md) | Storage | The durable record a resume rebuilds from |
+| [010](RFC-010-adaptation.md) | Adaptation | How the harness gets better: two memories, two roles, one selection pressure |
 
 ## How to read a layer boundary
 

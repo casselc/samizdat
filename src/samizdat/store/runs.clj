@@ -27,16 +27,33 @@
   (:require [clojure.data.json :as json]
             [jdbc.core :as jdbc]
             [samizdat.store.db :as db]
-            [samizdat.store.journal :as journal]))
+            [samizdat.store.journal :as journal]
+            [samizdat.lexicon :as lexicon]))
 
 (defn start-run!
   "Open a run and return its id."
   [conn {:keys [problem provider model max-turns beam-width prompt-digest]}]
   (let [id (str (random-uuid))]
-    ;; The retention sweep (provenance R2-11): events outlive their run's tail
-    ;; window, then go — every durable table keeps the content.
-    (journal/prune-finished!
-     conn (str (.minusSeconds (java.time.Instant/now) (* 24 3600))))
+    ;; The retention sweep (provenance R2-11), on run START rather than at
+    ;; finish: a client tailing a just-finished run still reads its
+    ;; :run-finished entry to learn the run ended.
+    ;;
+    ;; Two windows, and they are different KINDS of decision. Events are a
+    ;; tail buffer and go on their own; the run RECORD is what a resume
+    ;; replays from and what makes a crashed run inspectable, so it is kept
+    ;; forever unless an operator says otherwise. Both are gates.edn
+    ;; :retention — the events window was (* 24 3600) here, a number nobody
+    ;; could change without a rebuild.
+    (let [{:keys [events-hours run-record-days]} (lexicon/policy :retention)
+          ago (fn [seconds]
+                (str (.minusSeconds (java.time.Instant/now) (long seconds))))]
+      (when events-hours
+        (journal/prune-finished! conn (ago (* events-hours 3600))))
+      (when run-record-days
+        (let [n (journal/prune-run-record! conn (ago (* run-record-days 86400)))]
+          (when (pos? n)
+            (log/info "retention: dropped the record of" n "run(s) older than"
+                      run-record-days "days")))))
     (db/with-writer
       (db/execute! conn
                      ["INSERT INTO runs (id, problem, status, provider, model, max_turns,

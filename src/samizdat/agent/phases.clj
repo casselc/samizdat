@@ -11,9 +11,8 @@
   gates in the require graph (gates requires state) and cannot read its
   accessor, while the phase table and the winner rubric are consumed down
   there. system.clj calls reload! on every start."
-  (:require [clojure.edn :as edn]
-            [samizdat.userspace :as userspace]
-            [clojure.java.io :as io]))
+  (:require [samizdat.userspace :as userspace]
+            [samizdat.util :as util]))
 
 (defn- load-phases
   "The phase table for the current project, through the userspace seam. Like
@@ -66,6 +65,40 @@
   "The tool names phase `p` withholds (base/phase-refusal consults this)."
   [p]
   (:withholds (phase p)))
+
+;; --- conditional withholding ------------------------------------------------
+;;
+;; `:withholds` answers "which tools does THIS PHASE forbid", and that is the
+;; only question it can answer, because a phase is all it is handed. RFC-008's
+;; gap needed a different one: the board is encouraged and not enforced, and
+;; nothing refuses a tool call from a branch holding no task — which is a fact
+;; about the BRANCH, not about its phase. `phases.edn :refusals` is the table
+;; that can say it.
+;;
+;; Same compilation discipline as gates.edn's `:when` forms, and for the same
+;; reason: the STRUCTURE compiles once so a broken form fails at load rather
+;; than mid-run, while everything the form reads is read at fire time so the
+;; policy stays runtime-editable. The form sees `branch` and `tool-name` as
+;; plain locals and nothing else — a form reaching for anything more fails to
+;; compile, which is the fail-fast.
+
+(defn- compile-refusal
+  [entry]
+  (assoc entry
+         :when (binding [*ns* (the-ns 'samizdat.agent.phases)]
+                 (eval `(fn [~'ctx]
+                          (let [~'branch    (get ~'ctx :branch)
+                                ~'tool-name (get ~'ctx :tool-name)]
+                            ~(:when entry)))))))
+
+(def refusals
+  "The compiled conditional withholds, in table order — first match wins.
+
+  A function memoized against the generation, not a top-level value: as a
+  `def` the table would be compiled once at namespace load and `reload!`
+  would move the thresholds the forms read without moving the forms, which is
+  the bug gates.clj's own table had and fixed."
+  (util/generation-cache gen #(mapv compile-refusal (:refusals @cache))))
 
 (defn transitions
   "The result-signal transitions: get-in paths into the turn envelope,

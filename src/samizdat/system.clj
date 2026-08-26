@@ -37,9 +37,11 @@
             [ring-chez.adapter :as adapter]
             [samizdat.agent.gates :as gates]
             [samizdat.agent.phases :as phases]
-            [samizdat.agent.wordlists :as wordlists]
+            [samizdat.lexicon :as lexicon]
             [samizdat.config :as config]
+            [samizdat.llm.client :as llm-client]
             [samizdat.llm.registry :as registry]
+            [samizdat.session :as session]
             [samizdat.lsp.client :as lsp-client]
             [samizdat.store.db :as db]
             [samizdat.store.runs :as runs]
@@ -86,12 +88,34 @@
            ;; edits without a process restart. Same for the wordlists (tier 1c)
            ;; and the phase machine (drg-4026 #34).
            _ (gates/reload-config!)
-           _ (wordlists/reload!)
+           _ (lexicon/reload!)
            _ (phases/reload!)
+         ;; A fresh session tally per process start. Short-term memory is
+         ;; scoped to the process on purpose: a pattern that shows up across
+         ;; three runs is exactly the pattern a single-run digest cannot see,
+         ;; and a tally that survived a restart would be measuring a harness
+         ;; that no longer exists.
+         _ (session/reset!)
          ;; Process-wide, and set here rather than in core so that every entry
          ;; point gets it: the tests, the benchmark runner and a REPL session
          ;; all bring the system up through start! without going through -main.
          _ (platform/set-max-response-ms! (get-in cfg [:llm :max-response-ms]))
+         ;; Ask the endpoint what it is, once, at startup. A llama.cpp server
+         ;; answers /props with a total_slots; anything else answers something
+         ;; else, and the probe returns nil. RFC-005 recorded that :local was
+         ;; decided by which config key an endpoint sat under, so a
+         ;; llama-server configured as :openai silently lost prefix pinning —
+         ;; asking is what fixes that, and asking is specifically NOT the same
+         ;; as sending the knob hopefully, which a strict OpenAI-compatible
+         ;; server answers with a 422 on the whole request.
+         ;;
+         ;; Merged into the LLM config so it reaches chat-body the way every
+         ;; other endpoint fact does, and so a test can set it directly.
+         probed (llm-client/probe-llama-cpp (:llm cfg))
+         cfg (cond-> cfg probed (update :llm merge probed))
+         _ (when probed
+             (log/info "endpoint identified as llama.cpp:"
+                       (:total-slots probed) "KV slots — prefix caching on"))
          c (db/open! (get-in cfg [:db :path]))
          ;; Point the userspace reads at THIS project's store. From here on a
          ;; cell, manifest, policy table or prompt resolves to the project's

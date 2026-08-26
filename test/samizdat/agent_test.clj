@@ -40,7 +40,7 @@
             [samizdat.agent.tools.base :as tools-base]
             [samizdat.agent.tools.ship :as ship]
             [samizdat.agent.verify :as verify]
-            [samizdat.agent.wordlists :as wordlists]
+            [samizdat.lexicon :as lexicon]
             [samizdat.cells :as cells]
             [samizdat.agent.gitdiff :as gitdiff]
             [samizdat.llm.client :as llm]
@@ -339,13 +339,13 @@
   ;; into resources/wordlists.edn, so a list is retuned at runtime without a
   ;; rebuild. A separate loader from gates.clj because state.clj sits below
   ;; gates in the require graph and cannot read its accessor.
-  (is (set? (wordlists/wordlist :claim-relevance)))
-  (is (contains? (wordlists/wordlist :claim-relevance) "the"))
-  (is (set? (wordlists/wordlist :answer-framing)))
-  (is (contains? (wordlists/wordlist :answer-framing) "mathlib"))
-  (is (string? (wordlists/wordlist :tool-version)))
-  (is (re-find (re-pattern (wordlists/wordlist :tool-version)) "Python 3.11"))
-  (is (nil? (re-find (re-pattern (wordlists/wordlist :tool-version))
+  (is (set? (lexicon/wordlist :claim-relevance)))
+  (is (contains? (lexicon/wordlist :claim-relevance) "the"))
+  (is (set? (lexicon/wordlist :answer-framing)))
+  (is (contains? (lexicon/wordlist :answer-framing) "mathlib"))
+  (is (string? (lexicon/wordlist :tool-version)))
+  (is (re-find (re-pattern (lexicon/wordlist :tool-version)) "Python 3.11"))
+  (is (nil? (re-find (re-pattern (lexicon/wordlist :tool-version))
                      "witness 3"))))
 
 (deftest a-reframed-branch-settles-stuck-with-a-live-verification
@@ -938,11 +938,10 @@
                                     (gates/threshold :safe-state-multiple))))))
 
 (deftest green-verify-marks-the-green-point
-  ;; No tool on the current surface emits :claim-status artifacts (the proof
-  ;; engines that did are gone), so keying the green point on :confirmed was
-  ;; keying it on a status that never occurs. A green ship-verify — the suite
-  ;; actually passed — is the real known-good state; ship reports it and the
-  ;; loop stamps the cursor.
+  ;; The green point is a fact about the WORKING TREE — the suite was observed
+  ;; passing — so it keys on the verify signal and not on any claim. That is
+  ;; why it did not move to the artifact trigger when :clear-reframe did: the
+  ;; two entries ask different questions and neither subsumes the other.
     (with-redefs [tools/run-tool (fn [{:keys [branch]}]
                                  {:branch branch
                                   :result "Answer accepted."
@@ -1743,9 +1742,18 @@
       (is (= :met (arbiter/settle {:gate :reflection :turn 1 :window 1}
                                   {:current-turn 2 :tools-called ["introspect"]
                                    :branch-before (branch-with) :branch-after (branch-with)})))
+      ;; A turn past the window with the wrong tool is no longer :unmet on the
+      ;; spot — it is still OPEN through the grace, because a gate's advice
+      ;; commonly costs a turn to attempt and another to verify, and settling
+      ;; the moment the window passes made slow-but-followed advice read
+      ;; exactly like ignored advice.
+      (is (nil? (arbiter/settle {:gate :reflection :turn 1 :window 1}
+                                {:current-turn 3 :tools-called ["eval"]
+                                 :branch-before (branch-with) :branch-after (branch-with)})))
       (is (= :unmet (arbiter/settle {:gate :reflection :turn 1 :window 1}
-                                    {:current-turn 3 :tools-called ["eval"]
-                                     :branch-before (branch-with) :branch-after (branch-with)}))))))
+                                    {:current-turn 20 :tools-called ["eval"]
+                                     :branch-before (branch-with) :branch-after (branch-with)}))
+          "past the grace it is genuinely unmet"))))
 
 (deftest the-studying-gate-catches-inspect-without-shipping
   (let [studying (branch-with :turns (vec (concat [{:tool "write_file"}]
@@ -1923,8 +1931,16 @@
     (is (= 3 (count rungs)))
     (is (= [:answer-exists :figure-coverage :engages-problem]
            (mapv :name rungs))))
-  (is (= "Supply an `answer` to ship."
-         (ship/ship-gate-block {:answer nil})))
+  ;; Asserts the SKELETON, not the sentence: two live runs did the work,
+  ;; passed their tests, closed their task, then spent every remaining turn
+  ;; calling `done` empty and ended :exhausted with nothing shipped. The rung
+  ;; was saying only the argument's name — the exact failure base/missing
+  ;; exists to prevent — so what matters is that it now shows the call.
+  (let [msg (ship/ship-gate-block {:answer nil})]
+    (is (str/includes? msg "answer"))
+    (is (str/includes? msg "```tool-call")
+        "a missing-argument complaint has to show the call it wanted")
+    (is (str/includes? msg "\"name\": \"done\"")))
   (let [figures-msg (ship/ship-gate-block {:answer "the count is 42 and 7"
                                            :problem "count things"
                                            :evidence [{:claim "count is 40"}]
@@ -1959,29 +1975,136 @@
 
 (deftest phase-refusal-reads-the-phase-table
   ;; drg-4026 #34: phase-refusal consults the table's :withholds — the seam
-  ;; the audit called inert. Empty today (the withheld proof tools left),
-  ;; and a refusal from it must carry :policy-refusal? true so the cull
-  ;; record can tell a declined call from a malformed fence.
-  (is (nil? (tools-base/phase-refusal {:branch {:phase :explore}
-                                       :tool-name "eval"})))
-  (with-redefs [phases/withholds (fn [_] #{"eval"})]
-    (let [r (tools-base/phase-refusal {:branch {:phase :explore}
-                                       :tool-name "eval"})]
-      (is (map? r))
-      (is (true? (:policy-refusal? r)))
-      (is (str/includes? (str (:result r)) "explore")))))
+  ;; the audit called inert. Still empty (the withheld proof tools left), and
+  ;; a refusal from it must carry :policy-refusal? true so the cull record can
+  ;; tell a declined call from a malformed fence.
+  (with-redefs [phases/refusals (fn [] [])]
+    (is (nil? (tools-base/phase-refusal {:branch {:phase :explore}
+                                         :tool-name "eval"})))
+    (with-redefs [phases/withholds (fn [_] #{"eval"})]
+      (let [r (tools-base/phase-refusal {:branch {:phase :explore}
+                                         :tool-name "eval"})]
+        (is (map? r))
+        (is (true? (:policy-refusal? r)))
+        (is (str/includes? (str (:result r)) "explore"))))))
+
+(deftest the-board-is-enforced-not-merely-encouraged
+  ;; RFC-008 recorded that the board was "encouraged, not enforced": the
+  ;; context block said "No task claimed" and the prompt said work starts with
+  ;; a task, but nothing refused a call from a branch holding none. RFC-007
+  ;; named `phases.edn :withholds` as the mechanism and noted it was empty —
+  ;; and it could not have expressed this rule anyway, because it is handed a
+  ;; PHASE and holding a task is a fact about the BRANCH.
+  (let [unclaimed {:id "b1" :phase :explore}
+        holding   {:id "b1" :phase :explore :task {:id "sz-abc" :title "t"}}]
+    (testing "a branch with no task cannot change the working tree"
+      (doseq [t ["write_file" "edit_file"]]
+        (let [r (tools-base/phase-refusal {:branch unclaimed :tool-name t})]
+          (is (map? r) (str t " was allowed from an unclaimed branch"))
+          (is (true? (:policy-refusal? r))
+              "a declined call is not evidence about the branch's line of inquiry")
+          (is (= :work-needs-a-task (:refusal-rule r)))
+          (is (str/includes? (str (:result r)) "task")
+              "the refusal says what to do about it"))))
+
+    (testing "holding one, it can"
+      (doseq [t ["write_file" "edit_file"]]
+        (is (nil? (tools-base/phase-refusal {:branch holding :tool-name t})))))
+
+    (testing "investigating never needs a task — a branch must be able to find
+              out what to claim before it can claim it"
+      (doseq [t ["read_file" "grep" "lsp" "shell" "eval" "task" "message"]]
+        (is (nil? (tools-base/phase-refusal {:branch unclaimed :tool-name t}))
+            (str t " was refused, which is a deadlock rather than a policy"))))
+
+    (testing "finishing never needs a task — discarding completed work over a
+              missing row is the worst available trade, and ending a run is
+              where a bad refusal is least recoverable"
+      (doseq [t ["done" "give_up"]]
+        (is (nil? (tools-base/phase-refusal {:branch unclaimed :tool-name t})))))))
+
+(deftest a-refusal-rule-is-data-and-can-be-turned-off
+  ;; The whole point of the table: a project that does not want a board should
+  ;; not have to carry one, and should not need a rebuild to say so.
+  (with-redefs [phases/refusals (fn [] [])]
+    (is (nil? (tools-base/phase-refusal {:branch {:id "b" :phase :explore}
+                                         :tool-name "write_file"}))))
+  ;; And a rule with a different condition fires on that condition instead.
+  (with-redefs [phases/refusals
+                (fn [] [{:rule :never-on-tuesdays
+                         :when (fn [ctx] (= "b-doomed" (:id (:branch ctx))))
+                         :tools #{"write_file"}
+                         :message-file "task-required"}])]
+    (is (some? (tools-base/phase-refusal {:branch {:id "b-doomed"} :tool-name "write_file"})))
+    (is (nil? (tools-base/phase-refusal {:branch {:id "b-fine"} :tool-name "write_file"})))))
+
+(deftest a-confirmed-artifact-ends-a-reframe
+  ;; RFC-007 recorded that :transitions carried one entry and that an
+  ;; artifact-status trigger was available and unused. Wiring it needed the
+  ;; table to be able to match a VALUE: :claim-status is truthy for :confirmed,
+  ;; :empirical and :sketch alike, so the truthy test the table had would have
+  ;; fired the confirmed effects on an unverified plan. A status is a
+  ;; vocabulary, not a flag.
+  ;;
+  ;; What it is keyed to is clear-reframe's own long-standing definition —
+  ;; "the branch banked something the withheld approach could not have
+  ;; produced" — which is a statement about confirming a claim, not about a
+  ;; green test run. Keying it here makes it general: ANY tool that confirms a
+  ;; claim ends a reframe, not only a green ship-verify.
+  (let [reframed (state/begin-reframe (branch-with) 3 "the withheld claim")]
+    (is (some? (:reframe-claim reframed)) "the branch is inside a reframe")
+
+    (testing "a confirmed artifact lifts it"
+      (is (nil? (:reframe-claim
+                 (aloop/apply-transitions {} {:claim-status :confirmed} reframed)))))
+
+    (testing "an unverified plan does not — this is the whole reason the table
+              had to learn to match a value rather than test for truth"
+      (doseq [status [:sketch :empirical :refuted]]
+        (is (some? (:reframe-claim
+                    (aloop/apply-transitions {} {:claim-status status} reframed)))
+            (str status " lifted a reframe"))))
+
+    (testing "and no artifact at all does not"
+      (is (some? (:reframe-claim (aloop/apply-transitions {} nil reframed)))))
+
+    (testing "confirming a claim is not the same as a green working tree"
+      (is (nil? (:green-snapshot
+                 (aloop/apply-transitions {} {:claim-status :confirmed}
+                                          (assoc reframed :turns [{} {}]))))))))
+
+(deftest a-transition-entry-can-test-for-truth-or-match-a-value
+  ;; Both forms, at the seam rather than through a whole turn, so the table's
+  ;; contract is pinned independently of which effects happen to be wired.
+  (with-redefs [phases/transitions (fn [] {[:result :flagged?] [:mark-green]})]
+    (is (= [:mark-green] (aloop/transition-effects {:result {:flagged? true}})))
+    (is (= [] (vec (aloop/transition-effects {:result {:flagged? false}})))))
+  (with-redefs [phases/transitions (fn [] {[:artifact :kind] {:test [:clear-reframe]}})]
+    (is (= [:clear-reframe] (aloop/transition-effects {:artifact {:kind :test}})))
+    (is (= [] (vec (aloop/transition-effects {:artifact {:kind :lemma}})))
+        "a value-keyed entry fires on its value and no other")))
 
 (deftest result-transitions-are-resource-data
   ;; drg-4026 #3: the claim-first state machine as a declarative table —
   ;; tool-result signals map to branch effects, applied generically, not
-  ;; cond-> clauses in the executor. The one live row: a green ship-verify
-  ;; stamps the green point and ends any reframe.
-  (is (= [:mark-green :clear-reframe]
-         (get (phases/transitions) [:result :verified-green?])))
-  (let [b (assoc (branch-with) :reframe-entered-turn 3 :reframe-claim "c")
-        out (aloop/apply-transitions {:verified-green? true} nil b)]
-    (is (= (count (:turns out)) (:green-snapshot out)))
-    (is (nil? (:reframe-entered-turn out)))
+  ;; cond-> clauses in the executor.
+  ;;
+  ;; Two live rows now, asking different questions. The green point is about
+  ;; the WORKING TREE and keys on the verify signal; ending a reframe is about
+  ;; BANKING A CLAIM and keys on a confirmed artifact. :clear-reframe used to
+  ;; ride the verify signal, which made a green test run the only thing that
+  ;; could end a reframe — narrower than what clear-reframe means.
+  (is (= [:mark-green] (get (phases/transitions) [:result :verified-green?])))
+  (is (= {:confirmed [:clear-reframe]}
+         (get (phases/transitions) [:artifact :claim-status])))
+  (let [b (assoc (branch-with) :reframe-entered-turn 3 :reframe-claim "c")]
+    (let [out (aloop/apply-transitions {:verified-green? true} nil b)]
+      (is (= (count (:turns out)) (:green-snapshot out)))
+      (is (= 3 (:reframe-entered-turn out))
+          "a green tree is not by itself a banked claim"))
+    (let [out (aloop/apply-transitions {} {:claim-status :confirmed} b)]
+      (is (nil? (:reframe-entered-turn out)))
+      (is (nil? (:green-snapshot out))))
     (is (= b (aloop/apply-transitions {:verified-green? false} nil b))
         "no signal, no transition")))
 
@@ -2026,3 +2149,37 @@
                        src))
           (str k " is declared in gates.edn :context-budget but nothing in src"
                " reads it — either wire it or drop it")))))
+
+(deftest a-prediction-tells-late-compliance-from-none
+  ;; RFC-007: "a prediction's :window is in turns, so a gate whose advice takes
+  ;; longer than its window to follow settles :unmet regardless of whether it
+  ;; worked." Two outcomes could not tell apart the gate nobody obeys and the
+  ;; gate whose advice is sound but slow — and those want opposite repairs:
+  ;; reword the first, widen the second's window.
+  (let [p {:gate :milestone :turn 5 :window 2}
+        at (fn [turn called] {:current-turn turn :tools-called called
+                              :branch-before {} :branch-after {}})]
+    (testing "inside the window is prompt compliance"
+      (is (= :met (arbiter/settle p (at 6 ["done"])))))
+
+    (testing "after the window but inside the grace is LATE compliance,
+              which used to be indistinguishable from never"
+      (is (= :met-late (arbiter/settle p (at 9 ["done"])))))
+
+    (testing "silence past the window is still open — the grace is what makes
+              late compliance observable at all"
+      (is (nil? (arbiter/settle p (at 8 [])))))
+
+    (testing "silence past the grace is :unmet, which now means what it says"
+      (is (= :unmet (arbiter/settle p (at 12 [])))))))
+
+(deftest the-grace-is-a-threshold-not-a-constant
+  (is (pos? (gates/threshold :prediction-grace-turns))
+      "a project whose turns are slower wants a wider grace, and that is a
+       retune rather than a rebuild")
+  (let [p {:gate :milestone :turn 0 :window 1}]
+    (with-redefs [gates/threshold (fn [k] (if (= k :prediction-grace-turns) 0
+                                              (#'gates/threshold k)))]
+      (is (= :unmet (arbiter/settle p {:current-turn 1 :tools-called []
+                                       :branch-before {} :branch-after {}}))
+          "a zero grace restores the old two-outcome behaviour exactly"))))
