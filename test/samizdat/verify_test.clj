@@ -132,6 +132,95 @@
         (is (str/includes? (:output r) "[REDACTED]") "the token is redacted")
         (is (not (str/includes? (:output r) token)) "the token itself is gone")))))
 
+;; --- the bounded lane's structured-argv twin (M2) -----------------------------
+;;
+;; focused-argv/run-bounded-verify are the shell-free twin of
+;; focused-cmd/run-verify: the controller derives an argv vector, pins the
+;; child's cwd with proc/run's :dir, and no shell ever composes anything.
+
+(deftest focused-argv-derives-a-structured-shell-free-command
+  (let [argv (verify/focused-argv ["src/samizdat/agent/tools/knowledge.clj"
+                                   "test/samizdat/knowledge_test.clj"])]
+    (is (vector? argv))
+    (is (= ["jolt" "-A:test" "-e"] (vec (take 3 argv)))
+        "the fixed prefix is the gates.edn :argv-prefix, verbatim")
+    (is (= 4 (count argv)) "prefix plus exactly one derived -e expression")
+    (is (str/includes? (last argv) "samizdat.knowledge-test")
+        "targets the touched test ns")
+    (is (not (str/includes? (last argv) "knowledge.clj"))
+        "the src change contributes nothing")
+    (is (str/includes? (last argv) "System/exit")
+        "the expression sets an exit code so red is detectable")
+    (is (not-any? #{"sh" "-c"} argv) "no shell anywhere in the vector"))
+  (testing "nothing focusable => nil, never a command"
+    (is (nil? (verify/focused-argv ["src/samizdat/only_src.clj"])))
+    (is (nil? (verify/focused-argv [])))))
+
+(deftest focused-argv-embeds-no-shell-breakout
+  (let [argv (verify/focused-argv ["test/foo'; echo MARKER-INJECTED; echo '.clj"
+                                   "test/samizdat/knowledge_test.clj"])]
+    (is (some? argv))
+    (is (str/includes? (last argv) "samizdat.knowledge-test")
+        "the focusable ns is still targeted")
+    (is (not (str/includes? (last argv) "MARKER-INJECTED"))
+        "the crafted file name contributes nothing")
+    (is (not (str/includes? (last argv) "echo")) "no injected segment"))
+  (testing "only crafted names => nil (the gate then refuses, never trusts)"
+    (is (nil? (verify/focused-argv ["test/foo'; echo pwned; echo '.clj"])))))
+
+(deftest focused-argv-prefix-is-gates-edn-data
+  ;; Same fire-time read as :cmd-prefix: a project retunes the executable and
+  ;; fixed args without a rebuild.
+  (let [cfg (gates/threshold :focused-verify)]
+    (is (= ["jolt" "-A:test" "-e"] (:argv-prefix cfg)))
+    (with-redefs [gates/threshold (fn [_] (assoc cfg :argv-prefix ["bb" "-e"]))]
+      (is (= ["bb" "-e"] (vec (take 2 (verify/focused-argv ["test/x_test.clj"]))))))))
+
+(deftest run-bounded-verify-execs-argv-directly-with-scrubbed-env-and-root-cwd
+  (let [captured (atom nil)]
+    (with-redefs [proc/run (fn [opts & args]
+                             (reset! captured (assoc opts :args args))
+                             {:exit 0 :out "" :err ""})]
+      (let [r (verify/run-bounded-verify "/tmp/some-root"
+                                         ["jolt" "-A:test" "-e" "(expr)"] 1000)]
+        (is (:green? r))))
+    (is (= ["jolt" "-A:test" "-e" "(expr)"] (vec (:args @captured)))
+        "the argv passes through as positional args, element for element")
+    (is (not-any? #{"sh" "-c"} (:args @captured)) "no sh -c anywhere")
+    (is (= "/tmp/some-root" (:dir @captured))
+        "the child's cwd is the root via :dir — no `cd … &&` shell prefix")
+    (is (= (secrets/scrubbed-process-env) (:env @captured))
+        "the child environment is the scrubbed process environment")
+    (is (= 1000 (:timeout-ms @captured)) "the run is bounded")))
+
+(deftest run-bounded-verify-redacts-known-secrets-in-the-output
+  (let [token "sk-Abcdefghijklmnopqrstuvwxyz123456"]
+    (with-redefs [proc/run (fn [_ & _] {:exit 0
+                                        :out (str "dump: " token "\n")
+                                        :err ""})]
+      (let [r (verify/run-bounded-verify "/tmp/r" ["printenv"] 1000)]
+        (is (:green? r))
+        (is (str/includes? (:output r) "[REDACTED]") "the token is redacted")
+        (is (not (str/includes? (:output r) token)) "the token itself is gone")))))
+
+(deftest run-bounded-verify-red-timeout-and-spawn-failure-are-never-green
+  (testing "a non-zero exit is red"
+    (with-redefs [proc/run (fn [_ & _] {:exit 1 :out "FAIL" :err ""})]
+      (let [r (verify/run-bounded-verify "/tmp/r" ["jolt"] 1000)]
+        (is (not (:green? r)))
+        (is (not (:timeout? r)))
+        (is (= 1 (:exit r))))))
+  (testing "a timeout is not green and says so (proc/run reaps the tree)"
+    (with-redefs [proc/run (fn [_ & _] {:timeout true :out "" :err ""})]
+      (let [r (verify/run-bounded-verify "/tmp/r" ["jolt"] 1000)]
+        (is (not (:green? r)))
+        (is (:timeout? r)))))
+  (testing "a spawn failure reads as not-green and never throws"
+    (with-redefs [proc/run (fn [_ & _] (throw (ex-info "spawn failed" {})))]
+      (let [r (verify/run-bounded-verify "/tmp/r" ["jolt"] 1000)]
+        (is (not (:green? r)))
+        (is (str/includes? (:output r) "spawn failed"))))))
+
 (deftest focused-verify-conventions-are-gates-edn-data
   ;; drg-4026 #47/48: what counts as a test file, how a test path becomes a
   ;; namespace, and the command shape that runs a focused suite are PROJECT

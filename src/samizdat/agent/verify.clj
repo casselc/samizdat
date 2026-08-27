@@ -61,25 +61,47 @@
         (when (and ns (re-matches (re-pattern (:ns-whitelist-regex c)) ns))
           ns)))))
 
+(defn- focused-expr
+  "The -e expression that runs ONLY `nses` and exits non-zero on any failure
+  or error (jolt's bare -e does not exit non-zero on a failed assertion, so
+  the expression sets the code itself). Every namespace in it came through
+  ns-from-test-path's whitelist, so the expression genuinely has no single
+  quotes of its own (provenance R3-1)."
+  [nses]
+  (let [quoted (str/join " " (map #(str "(quote " % ")") nses))]
+    (str "(require (quote clojure.test) " quoted ")"
+         "(let [s (clojure.test/run-tests " quoted ")]"
+         "(clojure.core/println s)"
+         "(clojure.core/flush)"
+         "(java.lang.System/exit (if (clojure.core/pos? (+ (:fail s) (:error s))) 1 0)))")))
+
 (defn focused-cmd
   "A test command that runs ONLY the test namespaces among `changed`, with an
-  exit code that reflects pass/fail (jolt's bare -e does not exit non-zero on a
-  failed assertion, so the expression sets the code itself). nil when no test
-  namespace changed — the caller then falls back to the configured :verify-cmd.
-  The command shape is project data (:cmd-prefix)."
+  exit code that reflects pass/fail. nil when no test namespace changed — the
+  caller then falls back to the configured :verify-cmd. The command shape is
+  project data (:cmd-prefix)."
   [changed]
   (let [nses (->> changed (filter test-file?) (keep ns-from-test-path) distinct vec)]
     (when (seq nses)
-      (let [quoted (str/join " " (map #(str "(quote " % ")") nses))
-            expr (str "(require (quote clojure.test) " quoted ")"
-                      "(let [s (clojure.test/run-tests " quoted ")]"
-                      "(clojure.core/println s)"
-                      "(clojure.core/flush)"
-                      "(java.lang.System/exit (if (clojure.core/pos? (+ (:fail s) (:error s))) 1 0)))")]
-        ;; single-quote the whole -e expression for sh -c; every namespace in
-        ;; it came through ns-from-test-path's whitelist, so the expression
-        ;; genuinely has no single quotes of its own (provenance R3-1).
-        (str (:cmd-prefix (conventions)) expr "'")))))
+      ;; single-quote the whole -e expression for sh -c; every namespace in
+      ;; it came through ns-from-test-path's whitelist, so the expression
+      ;; genuinely has no single quotes of its own (provenance R3-1).
+      (str (:cmd-prefix (conventions)) (focused-expr nses) "'"))))
+
+(defn focused-argv
+  "The structured argv that runs ONLY the test namespaces among `changed` —
+  the same focused selection as focused-cmd, but as a direct argv vector
+  (executable + args) with NO shell. nil when no test namespace changed.
+
+  This is the bounded lane's derivation: the executable and fixed args come
+  from project data (:argv-prefix), the one variable element is the -e
+  expression whose namespaces passed ns-from-test-path's whitelist, and the
+  whole thing is handed to proc/run as argv — nothing is ever composed by a
+  shell, so a model-chosen file name cannot inject a command."
+  [changed]
+  (let [nses (->> changed (filter test-file?) (keep ns-from-test-path) distinct vec)]
+    (when (seq nses)
+      (into (vec (:argv-prefix (conventions))) [(focused-expr nses)]))))
 
 (defn- tail
   "The last n non-blank lines of s — enough of a failure to act on without
@@ -156,6 +178,34 @@
     (let [r (proc/run {:timeout-ms (or timeout-ms (gates/threshold :verify-timeout-ms))
                        :env (secrets/scrubbed-process-env)}
                       "sh" "-c" (str "cd " (util/sh-quote root) " && " cmd))
+          known (secrets/known-values (into {} (System/getenv)))]
+      {:green? (and (not (:timeout r)) (zero? (or (:exit r) 1)))
+       :timeout? (boolean (:timeout r))
+       :exit (:exit r)
+       :output (secrets/redact (str (:out r) "\n" (:err r)) known)})
+    (catch Throwable e
+      {:green? false :timeout? false
+       :output (str "verify command failed to run: " (ex-message e))})))
+
+(defn run-bounded-verify
+  "Run a STRUCTURED argv (executable + args, from focused-argv) in `root` and
+  report whether it is green. The argv is exec'd DIRECTLY by proc/run — no
+  shell composes anything — the child's cwd is `root` (proc/run :dir, not a
+  `cd … &&` prefix), it runs with the SCRUBBED process environment, and its
+  output is model-bound (redacted) before it is returned. Bounded by
+  `timeout-ms` (default 10 min); proc/run reaps the whole process tree on
+  timeout. Never throws — a spawn failure reads as not-green.
+
+  This is the bounded lane's runner: the same trust boundary as run-verify
+  (scrubbed env, redacted output, bounded tree) but with a structured argv
+  instead of `sh -c`, so the model's only input — the changed paths — can
+  never select an executable, an argv element, or a shell."
+  [root argv timeout-ms]
+  (try
+    (let [r (apply proc/run {:timeout-ms (or timeout-ms (gates/threshold :verify-timeout-ms))
+                             :env (secrets/scrubbed-process-env)
+                             :dir (str root)}
+                   argv)
           known (secrets/known-values (into {} (System/getenv)))]
       {:green? (and (not (:timeout r)) (zero? (or (:exit r) 1)))
        :timeout? (boolean (:timeout r))

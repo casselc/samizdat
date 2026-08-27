@@ -215,27 +215,41 @@
       (assoc ctx :llm-adapter (registry/adapter-for provider) :llm-config llm))
     ctx))
 
+(def ^:private bounded-profile-capabilities
+  "The controller-fixed requested and authorized capability set per bounded
+  profile. This table, not userspace, decides what a profile requests and is
+  authorized for: the controller's authority statement, which the evaluator
+  then intersects with the request, the runtime's catalog maximum, and the
+  compiled vocabulary."
+  {:agent/project-read #{:project/read :project/list :project/search
+                         :project/stat}
+   :agent/project-develop #{:project/read :project/list :project/search
+                            :project/stat :project/edit}})
+
 (defn bounded-binding
-  "Mint M1's controller-owned read profile only when userspace requested the
+  "Mint a controller-owned bounded binding only when userspace requested the
   bounded lane through [:run :bounded :profile]. The controller — this
   function, not userspace — fixes the requested and authorized capability
-  sets, so a model cannot widen its own read authority through config; a
-  wider or unknown profile request fails closed here, before any binding or
+  sets per profile, so a model cannot widen its own authority through config;
+  a wider or unknown profile request fails closed here, before any binding or
   run exists. Dynamic resolution keeps SCI absent from ordinary startup."
   [root run-id config]
   (when-let [requested (get-in config [:run :bounded :profile])]
-    (when-not (contains? #{:agent/project-read "agent/project-read"} requested)
-      (throw (ex-info "M1 supports only the bounded :agent/project-read profile"
-                      {:samizdat.evaluator/error :unsupported-profile
-                       :requested requested})))
-    (let [bind! (or (try (requiring-resolve 'samizdat.evaluator/bind!)
-                         (catch Throwable _ nil))
-                    (throw (ex-info "Pinned bounded evaluator runtime is unavailable"
-                                    {:samizdat.evaluator/error :runtime-unavailable})))]
-      (bind! root run-id
-             {:requested #{:project/read :project/list :project/search :project/stat}
-              :controller-authorized
-              #{:project/read :project/list :project/search :project/stat}}))))
+    (let [profile (cond (keyword? requested) requested
+                        (string? requested) (keyword requested))
+          capabilities (get bounded-profile-capabilities profile)]
+      (when-not capabilities
+        (throw (ex-info "Unsupported bounded profile; expected :agent/project-read or :agent/project-develop"
+                        {:samizdat.evaluator/error :unsupported-profile
+                         :requested requested})))
+      (let [bind! (or (try (requiring-resolve 'samizdat.evaluator/bind!)
+                           (catch Throwable _ nil))
+                      (throw (ex-info "Pinned bounded evaluator runtime is unavailable"
+                                      {:samizdat.evaluator/error :runtime-unavailable})))]
+        (bind! root run-id
+               {:profile profile
+                :requested capabilities
+                :controller-authorized capabilities})))))
 
 (defn run-turn
   "Advance one branch by one turn, through the manifest.
@@ -325,9 +339,14 @@
              ;; A per-run eval session, so defs the agent makes with `eval`
              ;; persist across its turns (define, then use) — REPL-first
              ;; development against the live image.
-             :repl-session (when-not bounded (repl/new-session))
-             :evaluator/profile (when bounded :agent/project-read)
-             :evaluator/binding bounded
+              :repl-session (when-not bounded (repl/new-session))
+              ;; The profile marker is the binding's own minted profile, not a
+              ;; constant: the bounded lane's signal stays honest about which
+              ;; profile the controller actually granted.
+              :evaluator/profile (when bounded
+                                   (get-in bounded [:spec :context-spec
+                                                    :context/profile]))
+              :evaluator/binding bounded
              :max-turns max-turns}]
     (runs/open-branch! conn run-id {:branch-id "B1"})
     ;; The window findings are evaluated over.

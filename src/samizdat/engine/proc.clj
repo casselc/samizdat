@@ -94,7 +94,7 @@
   found on one dev machine, the oldest at seventeen hours, slowing everything
   else enough to make an unrelated Mathlib import look sixteen times more
   expensive than it is. Fixed upstream too, but this does not depend on that."
-  [{:keys [input timeout-ms env]} & args]
+  [{:keys [input timeout-ms env dir]} & args]
   ;; babashka.process/process takes the command vector FIRST and the options
   ;; map second. Passing them the other way round (which is what `sh` accepts)
   ;; stringifies the vector into an argv[0] of "[z3".
@@ -103,9 +103,14 @@
   ;; process shim runs it as `env -i K=V …`, so nothing from the parent leaks
   ;; in. The shell tool relies on this: it hands a scrubbed environment here so
   ;; a subprocess cannot read a secret the parent holds (samizdat.security).
+  ;;
+  ;; :dir, when given, is the child's working directory — the structured-argv
+  ;; alternative to a `cd … &&` shell prefix, so a caller that must not compose
+  ;; a shell (the bounded verify path) can still pin the cwd.
   (let [proc (p/process (vec args)
                         (cond-> {:in (or input "") :out :string :err :string}
-                          env (assoc :env env)))
+                          env (assoc :env env)
+                          dir (assoc :dir dir)))
         ^java.lang.Process p (:proc proc)
         ms (or timeout-ms 30000)
         finished? (try

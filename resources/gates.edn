@@ -1287,7 +1287,12 @@
     :root-strip-regex "^(test|gui|src)/"
     :ext-strip-regex "\\.cljc?$"
     :ns-whitelist-regex "[a-zA-Z0-9.*-]+"
-    :cmd-prefix "jolt -A:test -e '"}
+    :cmd-prefix "jolt -A:test -e '"
+    ;; The structured-argv twin of :cmd-prefix, for the bounded lane's
+    ;; shell-free runner: the executable and fixed args as a vector, with the
+    ;; derived -e expression appended as the one variable element. No shell
+    ;; composes anything, so there is no quote to get wrong.
+    :argv-prefix ["jolt" "-A:test" "-e"]}
    :kind :threshold :capability-tunable? false
    :doc "The focused-verify conventions as data (see the comment above)."}
 

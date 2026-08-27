@@ -3,7 +3,9 @@
 ;; SPDX-License-Identifier: GPL-3.0-or-later
 
 (ns samizdat.evaluator
-  "Trusted read-only bounded evaluator mechanism for JS1 M1.
+  "Trusted bounded evaluator mechanism for JS1. M1 shipped the read-only
+  :agent/project-read profile; M2 adds the :agent/project-develop profile and
+  its one semantic mutation.
 
   This namespace intentionally requires jolt.sandbox and therefore loads only
   in the pinned bounded lane. Ordinary Samizdat reaches it through dynamic
@@ -17,11 +19,28 @@
   caps), decoding is strict UTF-8, and project/stat carries a fail-closed
   deterministic sha256 digest. Every evaluation runs under the spec's
   per-evaluation timeout ceiling (default 30s) on a private Jolt interrupt
-  token; a caller token (a later TurnLease) may only narrow it."
+  token; a caller token (a later TurnLease) may only narrow it.
+
+  The M2 write side, (project/edit path base new-content), reuses the read
+  side's lexical validation and component walk unchanged — a symbolic link in
+  any component, including the final one, is refused, never followed. The
+  parent directory must already exist (edit never creates directories) and
+  the target must be a regular file or absent. base is the optimistic-
+  concurrency anchor: either the exact digest project/stat returned for the
+  current content, or :absent to create. Stale, missing and existing
+  conflicts are refused with zero writes, as is the operator's run config —
+  through the same files/run-config? seam the ordinary file tools and the
+  shell policy use, invoked after confinement and before any existence check,
+  their authority ordering. Content is bounded; the write is a temp file in
+  the target's own directory atomically renamed into place, and the return is
+  the new content's canonical digest. Intent is recorded before actuation and
+  outcome after; a replay consumes the recorded receipt and never re-executes
+  the write."
   (:require [clojure.set :as set]
             [clojure.string :as str]
             [jolt.fs :as fs]
             [jolt.sandbox :as sandbox]
+            [samizdat.agent.files :as files]
             [samizdat.prompt :as prompt]
             [samizdat.store.evaluator :as store]))
 
@@ -29,11 +48,22 @@
 (def sci-coordinate "32d62a5136ad3dc148588752f5bcc4cc30b14752")
 (def sci-version "0.13.53")
 (def profile-id :agent/project-read)
+(def develop-profile-id :agent/project-develop)
 (def top-level-tools ["eval" "doc" "complete" "done"])
 (def profile-capabilities
-  #{:project/read :project/list :project/search :project/stat})
+  "The :agent/project-read catalog maximum, derived from the sandbox's closed
+  profile table — the one source of truth for what a profile may ever hold."
+  (:profile/max-capabilities (get sandbox/profiles profile-id)))
+(def develop-capabilities
+  "The :agent/project-develop catalog maximum: the read profile plus the one
+  semantic mutation, from the same table."
+  (:profile/max-capabilities (get sandbox/profiles develop-profile-id)))
 (def semantic-operation-order
-  [:project/read :project/list :project/search :project/stat])
+  [:project/read :project/list :project/search :project/stat :project/edit])
+(def compiled-capabilities
+  "The operation vocabulary this build actually compiles — the code-level
+  layer of the authority intersection in context-spec."
+  (set semantic-operation-order))
 (def default-bounds
   {:max-read-chars 60000
    :max-list-entries 1000
@@ -41,7 +71,11 @@
    :max-search-files 20000
    :max-search-file-chars 500000
    :max-search-pattern-chars 200
-   :max-search-line-chars 300})
+   :max-search-line-chars 300
+   ;; project/edit content, at the same ceiling as the read side: the edit
+   ;; anchor is a digest computed through the bounded reader, so a target a
+   ;; binding cannot read in full is one it cannot safely replace either.
+   :max-edit-chars 60000})
 
 ;; Mechanism bounds — the numbers the evaluator's SAFETY model rests on,
 ;; gathered as one table so they read as the mechanism they are. They are
@@ -91,7 +125,10 @@
     :doc "Search bounded project text and return {:path :line :text} data. The file bound is enforced during the walk, a file larger than the per-file bound is skipped without reading, files that are not valid UTF-8 are skipped, symbolic links are never followed, and collection stops at the result bound."}
    :project/stat
    {:name "project/stat" :arglists [["path"]]
-    :doc "Return a deterministic path, kind, byte-size, and sha256 content digest. The digest is computed through the bounded reader and the operation fails rather than returning a fake coordinate."}})
+    :doc "Return a deterministic path, kind, byte-size, and sha256 content digest. The digest is computed through the bounded reader and the operation fails rather than returning a fake coordinate."}
+   :project/edit
+   {:name "project/edit" :arglists [["path" "base" "new-content"]]
+    :doc "Replace or create one regular file under the authorized project root and return its new {:path :kind :bytes :digest} — exactly what project/stat would report, so the digest is the next edit's anchor. base is the exact digest project/stat returned for the current content, or :absent to create a path that must not exist yet. A stale base, a missing anchor target, an existing create target, the operator's run config, a symbolic link in any component, a non-regular-file target, a missing parent, or content over the bound is refused and writes nothing. The write is a temp file in the target's directory, atomically renamed into place."}})
 
 (def tool-docs
   {"eval" {:name "eval" :arglists [["code"]]
@@ -147,17 +184,31 @@
              {:timeout-ms timeout-ms}))
     (min (long requested) (long default-timeout-ms))))
 
+(defn- profile-maximum
+  "The catalog maximum for a profile, from the sandbox's closed profile
+  table. An unknown profile fails closed here, before any spec exists."
+  [profile]
+  (or (get-in sandbox/profiles [profile :profile/max-capabilities])
+      (fail! :unsupported-profile
+             "Unsupported bounded evaluator profile"
+             {:profile profile})))
+
 (defn context-spec
   "Mint the inert effective ContextSpec. Requested authority is intersected
   with controller authorization, the trusted profile maximum, and the compiled
-  operation vocabulary. The timeout ceiling is part of the coordinate."
-  [root {:keys [requested controller-authorized bounds timeout-ms]
-         :or {requested profile-capabilities
-              controller-authorized profile-capabilities}}]
-  (let [effective (set/intersection (set requested)
-                                    (set controller-authorized)
-                                    profile-capabilities)
-        base {:context/profile profile-id
+  operation vocabulary — userspace request ∩ controller authorization ∩
+  catalog maximum ∩ compiled capability, in that authority order. The timeout
+  ceiling is part of the coordinate."
+  [root {:keys [profile requested controller-authorized bounds timeout-ms]
+         :or {profile profile-id}}]
+  (let [maximum (profile-maximum profile)
+        requested (or requested maximum)
+        authorized (or controller-authorized maximum)
+        effective (set/intersection (set requested)
+                                    (set authorized)
+                                    maximum
+                                    compiled-capabilities)
+        base {:context/profile profile
               :context/root (canonical-root root)
               :context/capabilities (vec (sort-by str effective))
               :context/bounds (merge default-bounds bounds)
@@ -479,6 +530,128 @@
     (walk! dir root-prefix)
     @results))
 
+;; ═══════════════════════════════════════════════════════════════════════════
+;; Bounded write substrate (M2) — the one semantic mutation, behind the exact
+;; stat anchor. Confined, lexical-first and symlink-refusing exactly like the
+;; read side; the parent directory must already exist; the target is a regular
+;; file or absent. The write is a bounded temp file in the target's own
+;; directory, moved into place atomically — a reader never observes a
+;; half-written file, and a refused or failed edit leaves the tree
+;; byte-identical.
+;; ═══════════════════════════════════════════════════════════════════════════
+
+(def ^:private edit-base-pattern
+  "The exact anchor shape: the digest project/stat returns."
+  #"sha256:[0-9a-f]{64}")
+
+(defn- validate-edit-arguments!
+  "Lexical argument validation, before any filesystem access: new-content is
+  a bounded string and base is either :absent (the create rule) or an exact
+  stat digest."
+  [base new-content bounds]
+  (when-not (string? new-content)
+    (fail! :invalid-arguments (message {:edit-args true})
+           {:content-type (str (type new-content))}))
+  (when (> (count new-content) (:max-edit-chars bounds))
+    (fail! :too-large (message {:edit-large true})
+           {:limit (:max-edit-chars bounds)}))
+  (when-not (or (= :absent base)
+                (and (string? base) (re-matches edit-base-pattern base)))
+    (fail! :invalid-arguments (message {:edit-args true})
+           {:base (pr-str base)})))
+
+(defn- replace-atomically!
+  "Write content-bytes to a temp file in the target's own directory and move
+  it onto abs.
+
+  A create moves WITHOUT replace-existing: a target that appeared since the
+  :absent check fails the move and surfaces as the :existing conflict — the
+  no-clobber create is atomic, not check-then-act. A replace is a single
+  File.renameTo, which on the pinned runtime is one rename(2) — the atomic
+  replace. Files/move with replace-existing is deliberately NOT used for it:
+  on this host that code path deletes the destination before renaming, which
+  is exactly the gap an atomic replace exists to close.
+
+  perms are applied to the temp before the move, best effort: the file mode
+  is not the safety invariant (content and atomicity are), and a host without
+  posix permission support must not fail the write that succeeded — the same
+  reasoning as files/stale-note."
+  [parent abs create? perms ^bytes content-bytes rel]
+  (let [tmp (java.nio.file.Files/createTempFile
+             (fs/path parent) ".samizdat-edit-" ".tmp"
+             (into-array java.nio.file.attribute.FileAttribute []))]
+    (try
+      (java.nio.file.Files/write tmp content-bytes
+                                 (into-array java.nio.file.OpenOption []))
+      (when perms
+        (try (fs/set-posix-file-permissions tmp perms)
+             (catch Throwable _ nil)))
+      (if create?
+        (try
+          (java.nio.file.Files/move
+           tmp (fs/path abs)
+           (into-array java.nio.file.CopyOption
+                       [java.nio.file.StandardCopyOption/ATOMIC_MOVE]))
+          (catch Throwable e
+            ;; The destination appeared between the :absent check and the
+            ;; move — the atomic no-clobber doing its job. Anything else is a
+            ;; genuine move failure and propagates.
+            (when (= :absent (classify abs))
+              (throw e))
+            (fail! :existing (message {:edit-existing true}) {:path rel})))
+        (when-not (try (.renameTo (java.io.File. (str tmp)) (java.io.File. abs))
+                       (catch Throwable _ false))
+          (fail! :edit-replace (message {:edit-replace true}) {:path rel})))
+      (finally
+        ;; A spent temp is already moved away; a failed one is litter. Removal
+        ;; is best effort and never masks the operation's own outcome.
+        (try (fs/delete-if-exists tmp) (catch Throwable _ nil))))))
+
+(defn- edit-project-file
+  "The (project/edit path base new-content) semantics, run inside the
+  operation's intent/outcome recording: every refusal here throws BEFORE any
+  write, so a refused edit leaves the tree byte-identical."
+  [root bounds rel base new-content]
+  (let [components (lexical-components root rel false)
+        rel (relative-name components)]
+    ;; The operator's run config is refused through the SAME seam the ordinary
+    ;; file tools use (files/run-config?), after confinement and before any
+    ;; existence check or write — the authority ordering edit_file applies.
+    (when (files/run-config? root (str root "/" rel))
+      (fail! :protected-path (message {:edit-protected true}) {:path rel}))
+    (validate-edit-arguments! base new-content bounds)
+    (let [parent (descend root (butlast components))
+          abs (str parent "/" (last components))
+          kind (classify abs)]
+      (when (= :symlink kind)
+        (fail! :symlink (message {:symlink-path true}) {:path rel}))
+      (when-not (contains? #{:file :absent} kind)
+        (fail! :not-file (message {:edit-not-file true}) {:path rel :kind kind}))
+      (if (= :absent base)
+        (when-not (= :absent kind)
+          (fail! :existing (message {:edit-existing true}) {:path rel}))
+        (do (when-not (= :file kind)
+              (fail! :missing (message {:edit-missing true}) {:path rel}))
+            ;; The anchor is the digest of the FULL current content through
+            ;; the bounded reader — over the bound it fails closed, exactly
+            ;; like project/stat, never an anchor over truncated bytes.
+            (let [current (file-digest abs (read-byte-ceiling
+                                          (:max-read-chars bounds)))]
+              (when-not (= base current)
+                (fail! :stale (message {:edit-stale true})
+                       {:path rel :current-digest current})))))
+      (let [content-bytes (.getBytes ^String new-content "UTF-8")
+            perms (if (= :file kind)
+                    (try (fs/posix-file-permissions abs)
+                         (catch Throwable _ nil))
+                    "rw-r--r--")]
+        (replace-atomically! parent abs (= :absent kind) perms content-bytes rel)
+        ;; The canonical return is exactly what project/stat reports for the
+        ;; file now — the next edit's anchor — computed over the bytes
+        ;; written, so it can never be a fake coordinate.
+        {:path rel :kind :file :bytes (alength content-bytes)
+         :digest (str "sha256:" (bytes-digest content-bytes))}))))
+
 (defn- operation-builders [context world-observer hook]
   (let [root (:context/root context)
         bounds (:context/bounds context)
@@ -564,22 +737,29 @@
                      (fail! :not-file (message {:root-not-file true}) {:path rel}))
                    (let [[abs kind] (target-of root components)
                          rel (relative-name components)]
-                     (case kind
-                       :absent {:path rel :kind :absent}
-                       :file {:path rel :kind :file
-                              :bytes (nofollow-size abs)
-                              :digest (file-digest abs
-                                                   (read-byte-ceiling
-                                                    (:max-read-chars bounds)))}
-                        {:path rel :kind kind})))))}]
-    [read-op list-op search-op stat-op]))
+                      (case kind
+                        :absent {:path rel :kind :absent}
+                        :file {:path rel :kind :file
+                               :bytes (nofollow-size abs)
+                               :digest (file-digest abs
+                                                    (read-byte-ceiling
+                                                     (:max-read-chars bounds)))}
+                        {:path rel :kind kind})))))}
+        edit-op
+        {:id :project/edit :name 'edit :effect :actuation
+         :fn (fn [rel base new-content]
+               (observe
+                :project/edit [rel base new-content]
+                #(edit-project-file root bounds rel base new-content)))}]
+    [read-op list-op search-op stat-op edit-op]))
 
 (defn- make-instance [spec observer]
   (let [hook (atom nil)
         ops (operation-builders (:context-spec spec) (:world-observer observer) hook)
         capabilities (set (get-in spec [:context-spec :context/capabilities]))
         state (sandbox/create-context
-               {:operations ops :profile profile-id
+               {:operations ops
+                :profile (get-in spec [:context-spec :context/profile])
                 :requested-capabilities capabilities
                 :authorized-capabilities capabilities})]
     {:samizdat.evaluator/kind :instance
@@ -594,16 +774,25 @@
     (vec (concat top-level-tools ops))))
 
 (defn trusted-orientation [binding]
-  (str "SYSTEM / TRUSTED SURFACE\n"
-       "Callable top-level tools:\n"
-       (str/join "\n" (map #(str "- " %) top-level-tools))
-       "\nSemantic operations available only inside eval:\n"
-       (str/join "\n" (map #(str "- " %)
-                            (drop (count top-level-tools) (catalog binding))))
-       "\n\n" (message {:orientation-guidance true})))
+  ;; The edit guidance is keyed on the CAPABILITY, not the profile name: a
+  ;; develop binding the controller narrowed down to read-only gets the read
+  ;; guidance, which is the authority it actually holds.
+  (let [develop? (contains? (set (get-in binding [:spec :context-spec
+                                                  :context/capabilities]))
+                            :project/edit)]
+    (str "SYSTEM / TRUSTED SURFACE\n"
+         "Callable top-level tools:\n"
+         (str/join "\n" (map #(str "- " %) top-level-tools))
+         "\nSemantic operations available only inside eval:\n"
+         (str/join "\n" (map #(str "- " %)
+                             (drop (count top-level-tools) (catalog binding))))
+         "\n\n" (message {:orientation-guidance true
+                          :orientation-develop develop?}))))
 
 (defn bind!
-  "Create one controller-minted read-only EvaluatorBinding."
+  "Create one controller-minted EvaluatorBinding. The profile comes from the
+  controller via opts (:agent/project-read by default); requested and
+  authorized authority are intersected against it in context-spec."
   [root work-id opts]
   (let [context (context-spec root opts)
         spec (evaluator-spec context)

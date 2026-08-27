@@ -145,11 +145,16 @@
   (let [known (known-values-for ctx)
         outcome (try
                   {:ok (if (and (base/bounded? ctx) (= "done" tool-name))
-                         (base/refusal branch
-                                       (base/bounded-message {:completion-refused true})
-                                       :control-event :done
-                                       :completion-refused true
-                                       :verification-unavailable true)
+                         ;; The bounded lane's done is a ControlEvent the
+                         ;; CONTROLLER settles (M2), never the model's own
+                         ;; say-so: ship/bounded-done derives the focused argv
+                         ;; from the run's own edit receipts and runs it
+                         ;; shell-free with the root pinned as cwd and the
+                         ;; scrubbed environment. RED hands back bounded
+                         ;; evidence and the branch continues; only GREEN is
+                         ;; terminal. The ordinary `done` method — and its
+                         ;; `sh -c` verify — is unreachable in this lane.
+                         (ship/bounded-done ctx)
                          (base/run-tool ctx))}
                   (catch Throwable e {:threw e}))]
     (if-let [e (:threw outcome)]

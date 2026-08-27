@@ -11,8 +11,9 @@
             [samizdat.agent.tools.base :as base]
             [samizdat.agent.state :as state]
             [samizdat.agent.verify :as verify]
-            [samizdat.lexicon :as lexicon]
-            [samizdat.store.journal :as journal]
+          [samizdat.lexicon :as lexicon]
+          [samizdat.store.evaluator :as estore]
+          [samizdat.store.journal :as journal]
             [samizdat.util :as util]
             [samizdat.session :as session]))
 
@@ -410,6 +411,122 @@
                           :verdict :pass
                           :claim-status :confirmed
                           :tier :slow})))))
+
+;; --- the bounded lane's done: a ControlEvent the controller verifies (M2) -----
+;;
+;; In the bounded lane the model cannot run anything — its whole vocabulary is
+;; eval/doc/complete/done over the trusted evaluator surface — so the ordinary
+;; ship gate's `sh -c` verify is unreachable BY DESIGN, and done arrives as a
+;; completion REQUEST (tools.clj routes it here before the ordinary method).
+;; What settles it is the controller's own verification: the changed paths come
+;; from the binding's tamper-evident edit receipts (never from a model-supplied
+;; command), verify/focused-argv derives a STRUCTURED argv from them, and
+;; verify/run-bounded-verify execs it with no shell, the bounded root pinned as
+;; the child's cwd, the scrubbed environment, a bounded timeout, redacted
+;; output, and the process tree reaped. Only a green run is terminal; every
+;; other outcome is bounded evidence handed back so the branch keeps iterating.
+
+(defn- edited-paths
+  "Every path THIS binding changed through project/edit, in first-write order
+  — the controller's own record of what the run changed, read from the
+  evaluator's append-only receipts rather than from anything the model claims
+  or from git (a bounded root need not be a repo). Only :done-phase edit
+  receipts count: a refused or errored edit wrote nothing. A missing conn or
+  binding id reads as 'nothing changed' — the gate fails closed."
+  [conn binding]
+  (if-let [binding-id (and conn (:binding/id binding))]
+    (into [] (comp (mapcat :receipts)
+                   (filter #(and (= :project/edit (:op %))
+                                 (= :done (:phase %))))
+                   (map #(first (:args %)))
+                   (distinct))
+          (estore/history conn binding-id))
+    []))
+
+(defn bounded-done
+  "The bounded lane's `done`: verify, then terminate — and only GREEN
+  terminates.
+
+  The controller — not the model — decides WHAT runs: the run's edited paths
+  from its own receipts, the focused argv derived from them (project data:
+  gates.edn :focused-verify :argv-prefix), the cwd (the bounded root), the
+  scrubbed environment, the timeout, the redaction, the reaping. The model's
+  only influence on any of it is which files it chose to write through the
+  anchored edit path; a file NAME crafted to inject a command yields no
+  namespace (ns-from-test-path's whitelist), so it can shrink the argv toward
+  empty — where the gate refuses — and can never widen it into a command.
+
+  RED is not terminal: the branch gets the bounded tail of the failure and
+  keeps iterating. Neither is 'nothing to run': a hollow done (no edits) and a
+  change with no verifiable test both refuse with evidence. There is no
+  trust-on-unknown clause here — the ordinary lane's :verify-unknown policy
+  exists for a loop whose git might genuinely be unable to tell, which a
+  bounded receipt log never is."
+  [{:keys [branch] :as ctx}]
+  (let [answer (some-> (base/arg ctx :answer) str str/trim not-empty)
+        changed (edited-paths (:conn ctx) (base/bounded-binding ctx))
+        argv (verify/focused-argv changed)
+        vresult (when argv
+                  (verify/run-bounded-verify
+                   (:root ctx) argv
+                   (get-in ctx [:config :run :verify-timeout-ms])))
+        block (cond
+                (empty? changed)
+                (base/bounded-message {:done-nothing-changed true})
+
+                (nil? argv)
+                (base/bounded-message {:done-no-verifiable-test true})
+
+                ;; vresult is always present from here on, so verify-block's
+                ;; red / timeout / green clauses decide and its
+                ;; trust-on-unknown fallthrough is unreachable.
+                :else
+                (verify/verify-block {:verify-on? true :result vresult
+                                      :changed changed :require-test? true}))]
+    ;; The same record the ordinary ship gate keeps: a gate that was configured
+    ;; on and did nothing must not read identically to one that ran green.
+    (session/observe! (if vresult
+                        [:verify (if (:green? vresult) :green :red)]
+                        [:verify :skipped]))
+    (when vresult (session/observe! [:verify :ran]))
+    (when (and (:conn ctx) (:run-id ctx))
+      (journal/note! (:conn ctx) (:run-id ctx) :ship-verify
+                     {:branch-id (:id branch) :turn (:turn ctx)
+                      :data (if vresult
+                              {:ran true
+                               :green (:green? vresult) :timeout (:timeout? vresult)
+                               :blocked (some? block)}
+                              {:ran false
+                               :blocked (some? block)
+                               ;; A keyword, not a sentence, like the ordinary
+                               ;; lane's: this row is queried.
+                               :why (if (empty? changed)
+                                      :nothing-changed
+                                      :no-test-among-changed)})}))
+    (if block
+      (base/fail branch (str "`done` refused.\n\n" block)
+                 :control-event :done :done-block block)
+      (let [final (or answer (base/bounded-message {:done-green true}))]
+        {:branch (assoc branch :final-answer final :status :done)
+         :category :success
+         :progress? true
+         :done? true
+         :control-event :done
+         ;; The green point the safe-state rung rewinds to, exactly as in the
+         ;; ordinary lane.
+         :verified-green? true
+         :answer final
+         :result (str "Answer accepted.\n\n" final)
+         ;; A green controller verification IS the bounded lane's confirmed
+         ;; artifact — machine-checked, not self-reported, the same reasoning
+         ;; as the ordinary lane's green ship-verify artifact. :code is the
+         ;; derived argv itself: the exact thing that ran.
+         :artifact {:kind :test
+                    :claim final
+                    :code (pr-str argv)
+                    :verdict :pass
+                    :claim-status :confirmed
+                    :tier :slow}}))))
 
 (defmethod base/run-tool "give_up" [{:keys [branch] :as ctx}]
   (let [reason (or (base/arg ctx :reason) "no reason given")]
