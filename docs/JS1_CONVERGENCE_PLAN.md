@@ -35,9 +35,11 @@ Those are integration inputs, not regressions to undo.
 RFC-001's rule is binding: `src/` supplies mechanisms; versioned project
 userspace supplies decisions.  `samizdat.userspace` and
 `samizdat.store.userspace` own project-local cells, manifests, policies, and
-prompts.  An evaluator is a base capability.  A project's choice to use a
-bounded evaluator profile, its prompt wording, deadline policy, and provider
-selection are userspace/config decisions.
+prompts.  An evaluator is a base capability.  Userspace decides only that a
+workflow requests a profile (for example, `:project/develop`); the controller
+decides what is granted (possibly `:project/read`); the trusted catalog decides
+what either name can ever mean.  Prompt wording, deadline policy, and provider
+selection remain project/config decisions.
 
 ### Current execution path
 
@@ -203,15 +205,12 @@ in their respective current-upstream order.
 Provider/model choice remains an inference coordinate owned by current
 `llm.adapter`/`client`/`registry`; it is not evaluator authority.  A controller
 may switch providers at a turn boundary without changing ContextSpec,
-RuntimeCoordinate, or replay semantics.  Journal an explicit
+RuntimeCoordinate, or replay semantics.  M3 journals an explicit
 `inference-epoch` record containing provider/model/adapter settings and the
-turn range.  Eval records may reference the active epoch (or a stable epoch
-ID) as provenance metadata outside the receipt replay-coordinate set, so
-evidence can state which provider produced source without treating that
-provider as an authority grant.  M1 reserves this nullable provenance link;
-M3 starts producing epochs at turn boundaries.
-
-The causal chain is `InferenceEpoch → turn → eval → semantic receipts`.
+turn range.  Causality is `InferenceEpoch → turn → eval → semantic receipts`:
+evaluations associate with an epoch through turn/run provenance, so the M1
+evaluator schema contains no epoch field and never anticipates provider
+provenance — the evaluator does not care who generated its Clojure.
 Provider/model identity must not be placed in ContextSpec, evaluator
 RuntimeCoordinate, semantic receipt authority identity, or replay authority:
 replay has zero provider dependency.  The underway local-to-hosted Qwen
@@ -272,13 +271,20 @@ renderer emits only capability descriptions actually present in the binding;
 `doc` and `complete` read the same catalog.  If authority changes materially,
 mint a new binding and ContextSpec coordinate.
 
-Compose the pinned trusted orientation separately from free-form project
-userspace guidance.  Userspace may provide coding conventions, task guidance,
-and workflow advice, but it is neither a capability catalog nor a source of
-truth for host tools.  The composition must prevent userspace prose from
-presenting `shell`, legacy file tools, `project/run`, or any other unavailable
-operation as part of the bounded surface.  This preserves project-local
-guidance while preventing canary attempt 1's generic-prompt failure.
+Compose the initial tape from two structurally distinct sections:
+
+- **SYSTEM / TRUSTED SURFACE:** generated, pinned, and byte-stable; lists
+  exactly the gated top-level tools and exactly the effective ContextSpec
+  semantic operations; explicitly marked authoritative.
+- **PROJECT GUIDANCE:** project userspace conventions, task, and domain advice;
+  explicitly non-authoritative.
+
+Mechanically test generated tool definitions against the gated vocabulary and
+generated semantic-operation definitions against the effective ContextSpec —
+nothing else.  Free-form guidance may say “unlike ordinary Samizdat, shell is
+unavailable here”; that is prose, not a tool definition.  Only the trusted
+section defines callable authority.  This preserves project-local guidance
+while preventing canary attempt 1's generic-prompt failure.
 
 The orientation should teach, briefly, why composition matters: discover with
 `doc`/`complete`; gather multiple read-only observations inside one `eval`;
@@ -302,19 +308,27 @@ composition to defined-and-reused helpers.  Neither an arbitrary L2 count nor
 helper reuse is an authority invariant or PASS criterion; both are useful
 product evidence.
 
-Record or derive, without a parallel tracing system where receipts/turns
-already suffice: semantic operations per turn/eval; multi-operation evals;
-data-dependent later operations; local collection processing; helper
-definitions/reuse; repeated equivalent observations; observation-to-edit and
-observation-to-verification model round trips; successful evals without new
-world evidence; and provider latency/retry degradation.
+Telemetry splits into exact and heuristic classes.  **Exact** facts derive
+directly from receipts/turns with no new tracing: semantic operations per eval
+and model turn; multi-operation eval count/rate; operation kinds/order;
+distinct versus repeated observation arguments; mutations per eval;
+observations between mutations; verification attempts; provider latency/retries;
+and eval success/failure.  **Heuristic** facts remain explicitly heuristic
+unless later instrumentation warrants them: whether operation A's result caused
+operation B, local collection-processing intensity, helper identity/reuse, and
+objective-progress reduction.  M1's deterministic fixture proves
+data-dependent composition exactly because its program is known; arbitrary
+model traces cannot establish it from receipts alone.  Do not add complex
+evaluator instrumentation merely to compute leverage metrics in M1.
 
 Expose these facts read-only to current `session`, `watch`, steering, and
 adaptation.  Distinguish **computational activity** (an eval completed),
-**world progress** (new observation, mutation, test/verification, or durable
-evidence), and **objective progress** (evidence that the residual task became
-smaller).  The evaluator reports facts; current upstream policy judges them.
-No such signal may widen authority or budget automatically.
+**world evidence** (a previously unseen observation coordinate/result, mutation,
+test/verification result, or other new durable evidence), and **objective
+progress** (the residual objective demonstrably narrowed).  Re-reading the
+same file 300 times is activity without new world evidence; current adaptation
+policy, not the evaluator, judges whether new evidence is progress.  No signal
+may widen authority or budget automatically.
 
 Observation and actuation remain asymmetric.  Encourage rich composition of
 read/list/search/stat and pure computation.  Prefer observe + compute +
@@ -353,9 +367,11 @@ the next one.
    orientation → persistent helpers → multi-observation computational eval →
    commit-only failure behavior → fresh-process reconstruction with zero real
    world operations.  Keep ordinary non-SCI Samizdat unchanged.  **Stop and
-   review only after this runs.**  In M1, `done` is a terminal ControlEvent
-   whose verification is explicitly unavailable/refused; M2 supplies the
-   controller-owned verification effect.  It is never a shell grant.
+   review only after this runs.**  In M1, `done` is recognized as a ControlEvent
+   and the controller returns `:verification-unavailable` / `:completion-refused`;
+   the run does **not** become successfully terminal.  From M2, controller-owned
+   verification runs and only GREEN permits successful termination.  `done` is
+   in the four-tool vocabulary from day one and is never a shell grant.
 2. **M2 — develop, complete receipts, and verification.**  Add
    `project/edit`, anchored optimistic mutation, full intent/outcome/exhaustion
    refusal, root/path/symlink/bound checks, and controller-owned `done`
