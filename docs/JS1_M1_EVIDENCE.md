@@ -188,3 +188,46 @@ token narrowing, append-only receipt/replay behavior, and current workflow
 bounded-profile activation/refusal.  It remains advisory because the Jolt
 runtime is dirty and Samizdat has not yet been committed.  The exact-gate
 nonclaim above still applies until clean coordinates are tested.
+
+## Final M1 PASS (2026-08-27)
+
+The initial FAIL remains a truthful record of the first exact-gate attempt.  It
+is superseded for the frozen M1 implementation by this clean-coordinate run:
+
+```text
+Samizdat implementation: bd6075f6e225e43e619ab991d2942f43217de8d4
+Jolt clean worktree:     4af2362176160f2ed0e366689d7232b1a38adfec
+SCI clean submodule:     32d62a5136ad3dc148588752f5bcc4cc30b14752 / 0.13.53
+Chez:                    /usr/local/bin/scheme (10.4.1)
+```
+
+The Jolt worktree was separately created at the pinned detached SHA; the dirty
+`../jolt` checkout was neither modified nor used for this exact bounded lane.
+
+```text
+$ JOLT_CHEZ=/usr/local/bin/scheme \
+  JOLT_HOME=/home/chuck/opencode/src/jolt-js1-m1-clean bin/js1-m1 test
+Samizdat bd6075f6e225e43e619ab991d2942f43217de8d4
+Jolt 4af2362176160f2ed0e366689d7232b1a38adfec
+SCI 32d62a5136ad3dc148588752f5bcc4cc30b14752 / 0.13.53
+Ran 13 tests. 160 assertions passed, 0 failures, 0 errors.
+
+$ JOLT_CHEZ=/usr/local/bin/scheme \
+  /home/chuck/opencode/src/jolt-js1-m1-clean/bin/jolt -M:test
+Ran 1354 tests. 4988 assertions passed, 0 failures, 0 errors.
+```
+
+The bounded lane printed exact EvaluatorSpec, logical EvaluatorInstance,
+EvaluatorBinding, ContextSpec, and RuntimeCoordinate identities; the runtime
+coordinate is `js1-runtime-final` (not the prior dirty value).  It recorded a
+fresh-context replay witness with zero real semantic operations and leverage
+facts `{:evaluations 5, :operations-per-eval [2 0 0 0 0],
+:multi-operation-evals 1, :operation-order [[:project/list :project/search]
+[] [] [] []]}`.
+
+**M1: PASS — gate evidence recorded; STOP.**
+
+Nonclaims remain: this does not start M2, authorize mutation/shell/network,
+TurnLease or scheduler work, provider epochs, trusted verification, multi-agent
+bindings, JS2, or an upstream forward-port.  Upstream motion after frozen base
+`5aa9476` remains a deliberate M1→M2 boundary decision.
