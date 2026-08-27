@@ -533,6 +533,47 @@
   ;; "the run's problem", which is what every branch before this column meant.
   ["ALTER TABLE branches ADD COLUMN problem TEXT"])
 
+(def ^:private v19
+  ;; Bounded evaluator history is separate from the model-visible tape. The
+  ;; absence of a completion row is the durable pending state; intents and
+  ;; outcomes are separate append-only rows so interrupted world operations
+  ;; cannot be mistaken for settled receipts.
+  ["CREATE TABLE IF NOT EXISTS evaluator_evals (
+      id           INTEGER PRIMARY KEY AUTOINCREMENT,
+      spec_id      TEXT NOT NULL,
+      instance_id  TEXT NOT NULL,
+      binding_id   TEXT NOT NULL,
+      binding_seq  INTEGER NOT NULL,
+      context_spec TEXT NOT NULL,
+      runtime      TEXT NOT NULL,
+      source       TEXT NOT NULL,
+      created_at   TEXT NOT NULL
+    )"
+   "CREATE UNIQUE INDEX IF NOT EXISTS idx_evaluator_evals_binding_seq
+      ON evaluator_evals(binding_id, binding_seq)"
+   "CREATE TABLE IF NOT EXISTS evaluator_receipts (
+      id         INTEGER PRIMARY KEY AUTOINCREMENT,
+      eval_id    INTEGER NOT NULL REFERENCES evaluator_evals(id),
+      seq        INTEGER NOT NULL,
+      phase      TEXT NOT NULL,
+      op         TEXT NOT NULL,
+      args       TEXT,
+      result     TEXT,
+      error      TEXT,
+      created_at TEXT NOT NULL
+    )"
+   "CREATE UNIQUE INDEX IF NOT EXISTS idx_evaluator_receipts_phase
+      ON evaluator_receipts(eval_id, seq, phase)"
+   "CREATE TABLE IF NOT EXISTS evaluator_completions (
+      id         INTEGER PRIMARY KEY AUTOINCREMENT,
+      eval_id    INTEGER NOT NULL REFERENCES evaluator_evals(id),
+      status     TEXT NOT NULL,
+      result     TEXT,
+      created_at TEXT NOT NULL
+    )"
+   "CREATE UNIQUE INDEX IF NOT EXISTS idx_evaluator_completions_once
+      ON evaluator_completions(eval_id)"])
+
 (def migrations
   "Ordered. Index 0 is migration 1; PRAGMA user_version holds the count applied."
-  [v1 v2 v3 v4 v5 v6 v7 v8 v9 v10 v11 v12 v13 v14 v15 v16 v17 v18])
+  [v1 v2 v3 v4 v5 v6 v7 v8 v9 v10 v11 v12 v13 v14 v15 v16 v17 v18 v19])

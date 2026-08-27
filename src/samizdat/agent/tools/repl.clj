@@ -42,6 +42,35 @@
             [samizdat.repl :as repl]
             [samizdat.security.secrets :as secrets]))
 
+(defn- evaluator-var [name]
+  (try
+    (requiring-resolve (symbol "samizdat.evaluator" name))
+    (catch Throwable _ nil)))
+
+(defn- bounded-route [ctx]
+  (cond
+    (base/bounded-binding ctx) (base/bounded-binding ctx)
+    (base/bounded? ctx) ::missing-binding
+    :else nil))
+
+(defn- bounded-refusal [branch]
+  (base/refusal branch
+                (base/bounded-message {:missing-binding true})))
+
+(defn- format-eval [branch r]
+  (if (:ok r)
+    (base/ok branch (str "=> " (:value r)))
+    (base/fail branch (str "Eval error: " (:error r)))))
+
+(defn- bounded-eval [ctx binding code]
+  (if-let [evaluate! (evaluator-var "evaluate-recorded!")]
+    (try
+      (let [r (evaluate! (:conn ctx) binding code)]
+        {:ok true :value (pr-str (:value r))})
+      (catch Throwable e
+        {:ok false :error (or (ex-message e) (str e))}))
+    {:ok false :error (base/bounded-message {:runtime-unavailable true})}))
+
 (defn- scrubbed
   "A model-bound eval payload with known secret values and credential-shaped
   strings replaced. Same function the shell path uses, so the two boundaries
@@ -61,28 +90,53 @@
   ;; to. Defs persist across evals within a run (the session is per-run).
   (if-let [m (base/missing ctx :code)]
     (base/malformed branch m)
-    (let [timeout (some-> (base/arg ctx :timeout-ms) str str/trim not-empty parse-long)
-          session (or (:repl-session branch) repl-session)
-          r (repl/eval-code (str (base/arg ctx :code)) session timeout)]
-      (if (:ok r)
-        (base/ok branch (scrubbed (str "=> " (:value r)
-                                       (when (seq (:out r)) (str "\n" (:out r))))))
-        (base/fail branch (scrubbed (str "Eval error: " (:error r)
-                                         (when (seq (:out r))
-                                           (str "\n" (:out r))))))))))
+    (let [route (bounded-route ctx)]
+      (cond
+        (= ::missing-binding route) (bounded-refusal branch)
+        route (format-eval branch
+                           (bounded-eval ctx route (str (base/arg ctx :code))))
+        :else
+        (let [timeout (some-> (base/arg ctx :timeout-ms) str str/trim not-empty parse-long)
+              session (or (:repl-session branch) repl-session)
+              r (repl/eval-code (str (base/arg ctx :code)) session timeout)]
+          (if (:ok r)
+            (base/ok branch (scrubbed (str "=> " (:value r)
+                                           (when (seq (:out r)) (str "\n" (:out r))))))
+            (base/fail branch (scrubbed (str "Eval error: " (:error r)
+                                             (when (seq (:out r))
+                                               (str "\n" (:out r))))))))))))
 
 (defmethod base/run-tool "doc" [{:keys [branch] :as ctx}]
   (if-let [m (base/missing ctx :symbol)]
     (base/malformed branch m)
-    (let [d (repl/doc-sym (str (base/arg ctx :symbol)))]
-      (if (:not-found d)
-        (base/malformed branch (str "No var " (base/arg ctx :symbol) " is loaded."))
-        (base/ok branch (str (:name d) "\n" (pr-str (:arglists d)) "\n\n" (:doc d)))))))
+    (let [route (bounded-route ctx)
+          symbol (str (base/arg ctx :symbol))]
+      (cond
+        (= ::missing-binding route) (bounded-refusal branch)
+        route (let [d (when-let [f (evaluator-var "doc")] (f route symbol))]
+                (if d
+                  (base/ok branch (str (:name d) "\n" (pr-str (:arglists d))
+                                       "\n\n" (:doc d)))
+                  (base/malformed branch
+                                  (base/bounded-message
+                                   {:no-callable true :symbol symbol}))))
+        :else (let [d (repl/doc-sym symbol)]
+                (if (:not-found d)
+                  (base/malformed branch (str "No var " symbol " is loaded."))
+                  (base/ok branch (str (:name d) "\n" (pr-str (:arglists d))
+                                       "\n\n" (:doc d)))))))))
 
 (defmethod base/run-tool "complete" [{:keys [branch] :as ctx}]
   (if-let [m (base/missing ctx :prefix)]
     (base/malformed branch m)
-    (let [ms (repl/complete (str (base/arg ctx :prefix)))]
-      (base/ok branch (if (seq ms)
-                   (str/join "\n" (take 50 ms))
-                   (str "No symbols match " (base/arg ctx :prefix) "."))))))
+    (let [prefix (str (base/arg ctx :prefix))
+          route (bounded-route ctx)]
+      (cond
+        (= ::missing-binding route) (bounded-refusal branch)
+        route (let [ms (if-let [f (evaluator-var "complete")] (f route prefix) [])]
+                (base/ok branch (if (seq ms) (str/join "\n" ms)
+                                    (str "No callable names match " prefix "."))))
+        :else (let [ms (repl/complete prefix)]
+                (base/ok branch (if (seq ms)
+                                  (str/join "\n" (take 50 ms))
+                                  (str "No symbols match " prefix "."))))))))

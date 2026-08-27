@@ -1,0 +1,53 @@
+#!/bin/sh
+# Exact JS1 M1 bounded conformance lane. Ordinary Samizdat never invokes this.
+set -eu
+
+JOLT_SHA=4af2362176160f2ed0e366689d7232b1a38adfec
+SCI_SHA=32d62a5136ad3dc148588752f5bcc4cc30b14752
+SCI_VERSION=0.13.53
+ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd -P)
+JOLT=${JOLT_HOME:-"$ROOT/../jolt"}
+
+fail() {
+  printf 'js1-m1: %s\n' "$*" >&2
+  exit 1
+}
+
+check() {
+  [ -x "$JOLT/bin/jolt" ] || fail "no Jolt checkout at $JOLT"
+  actual=$(git -C "$JOLT" rev-parse HEAD)
+  [ "$actual" = "$JOLT_SHA" ] || fail "Jolt SHA $actual, expected $JOLT_SHA"
+  dirty=$(git -C "$JOLT" status --porcelain --untracked-files=no --ignore-submodules=all)
+  if [ -n "$dirty" ]; then
+    printf 'js1-m1: pinned Jolt checkout has tracked modifications; exact evidence refused:\n%s\n' "$dirty" >&2
+    exit 1
+  fi
+  sci_actual=$(git -C "$JOLT/vendor/sci" rev-parse HEAD)
+  [ "$sci_actual" = "$SCI_SHA" ] || fail "SCI SHA $sci_actual, expected $SCI_SHA"
+  sci_dirty=$(git -C "$JOLT/vendor/sci" status --porcelain --untracked-files=no)
+  [ -z "$sci_dirty" ] || fail "pinned SCI checkout has tracked modifications"
+  version=$(tr -d '\r\n' < "$JOLT/vendor/sci/resources/SCI_VERSION")
+  [ "$version" = "$SCI_VERSION" ] || fail "SCI version $version, expected $SCI_VERSION"
+  printf 'Jolt %s\nSCI %s / %s\n' "$actual" "$sci_actual" "$version"
+}
+
+case ${1:-} in
+  check)
+    check
+    ;;
+  test)
+    check
+    cd "$ROOT"
+    SAMIZDAT_BOUNDED_TEST=1 exec "$JOLT/bin/jolt" \
+      -Sdeps "{:deps {borkdude/sci {:local/root \"$JOLT/vendor/sci\"}}}" \
+      -A:test -e '(require (quote clojure.test) (quote samizdat.evaluator-test))
+                   (let [{:keys [fail error] :as r}
+                         (clojure.test/run-tests (quote samizdat.evaluator-test))]
+                     (println r)
+                     (System/exit (if (pos? (+ fail error)) 1 0)))'
+    ;;
+  *)
+    printf 'usage: bin/js1-m1 check|test\n' >&2
+    exit 2
+    ;;
+esac

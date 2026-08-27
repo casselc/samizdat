@@ -215,6 +215,24 @@
       (assoc ctx :llm-adapter (registry/adapter-for provider) :llm-config llm))
     ctx))
 
+(defn- bounded-binding
+  "Mint M1's controller-owned read profile only when userspace requested the
+  bounded lane. Dynamic resolution keeps SCI absent from ordinary startup."
+  [root run-id config]
+  (when-let [requested (get-in config [:run :bounded :profile])]
+    (when-not (contains? #{:agent/project-read "agent/project-read"} requested)
+      (throw (ex-info "M1 supports only the bounded :agent/project-read profile"
+                      {:samizdat.evaluator/error :unsupported-profile
+                       :requested requested})))
+    (let [bind! (or (try (requiring-resolve 'samizdat.evaluator/bind!)
+                         (catch Throwable _ nil))
+                    (throw (ex-info "Pinned bounded evaluator runtime is unavailable"
+                                    {:samizdat.evaluator/error :runtime-unavailable})))]
+      (bind! root run-id
+             {:requested #{:project/read :project/list :project/search :project/stat}
+              :controller-authorized
+              #{:project/read :project/list :project/search :project/stat}}))))
+
 (defn run-turn
   "Advance one branch by one turn, through the manifest.
 
@@ -263,17 +281,20 @@
                                       :max-turns max-turns
                                       :beam-width 1
                                       :prompt-digest (branch-loop/prompt-digest)})
-        branch (state/new-branch {:id "B1" :problem problem
-                                  :messages (branch-loop/initial-messages
-                                             problem (workflow-prompt definition))})
         ;; The project root the file tools are confined to, and the shell tool
         ;; runs in. Configurable so a run can target another checkout.
         root (or (get-in config [:run :root]) (System/getProperty "user.dir"))
+        bounded (bounded-binding root run-id config)
+        branch (state/new-branch
+                {:id "B1" :problem problem
+                 :messages (branch-loop/initial-messages
+                            problem (workflow-prompt definition)
+                            (:trusted-orientation bounded))})
         ;; Make the project's own namespaces requirable from `eval` before any
         ;; branch takes a turn. The system prompt's whole first section is
         ;; REPL-first against the project under work, and without this that
         ;; instruction is unreachable the moment :run :root is not the harness.
-        _ (repl/ensure-project-roots! root)
+        _ (when-not bounded (repl/ensure-project-roots! root))
         ctx {:conn conn :run-id run-id :config config
              :llm-adapter llm-adapter :llm-config llm-config
              :root root
@@ -300,7 +321,9 @@
              ;; A per-run eval session, so defs the agent makes with `eval`
              ;; persist across its turns (define, then use) — REPL-first
              ;; development against the live image.
-             :repl-session (repl/new-session)
+              :repl-session (when-not bounded (repl/new-session))
+              :evaluator/profile (when bounded :agent/project-read)
+              :evaluator/binding bounded
              :max-turns max-turns}]
     (runs/open-branch! conn run-id {:branch-id "B1"})
     ;; The window findings are evaluated over.
@@ -352,4 +375,5 @@
         ;; The run's eval namespace does not outlive the run
         ;; (provenance CR1-6): one namespace per run, never removed, was
         ;; unbounded growth on a serve process.
-        (repl/close-session (:repl-session ctx)))))))
+        (when-let [session (:repl-session ctx)]
+          (repl/close-session session)))))))

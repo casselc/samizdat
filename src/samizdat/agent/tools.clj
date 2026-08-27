@@ -143,8 +143,15 @@
   3. The model-bound strings are redacted. See the note above the delay."
   [{:keys [branch tool-name] :as ctx}]
   (let [known (known-values-for ctx)
-        outcome (try {:ok (base/run-tool ctx)}
-                     (catch Throwable e {:threw e}))]
+        outcome (try
+                  {:ok (if (and (base/bounded? ctx) (= "done" tool-name))
+                         (base/refusal branch
+                                       (base/bounded-message {:completion-refused true})
+                                       :control-event :done
+                                       :completion-refused true
+                                       :verification-unavailable true)
+                         (base/run-tool ctx))}
+                      (catch Throwable e {:threw e}))]
     (if-let [e (:threw outcome)]
       (do (log/warn "tool" tool-name "threw:" (ex-message e))
           (redact-result

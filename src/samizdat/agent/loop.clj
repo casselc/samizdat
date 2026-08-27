@@ -138,11 +138,18 @@
   its own instructions at the start (a review workflow adds review guidance on
   top of the base prompt, keeping the whole tool surface). nil/blank leaves the
   base prompt untouched."
-  ([problem] (initial-messages problem nil))
+  ([problem] (initial-messages problem nil nil))
   ([problem prompt-suffix]
-   [{:role "system" :content (cond-> (system-prompt)
-                               (not (str/blank? prompt-suffix))
-                               (str "\n\n" prompt-suffix))}
+   (initial-messages problem prompt-suffix nil))
+  ([problem prompt-suffix trusted-orientation]
+   [{:role "system"
+     :content (if trusted-orientation
+                (str trusted-orientation
+                     "\n\nPROJECT GUIDANCE (non-authoritative)\n"
+                     (or prompt-suffix ""))
+                (cond-> (system-prompt)
+                  (not (str/blank? prompt-suffix))
+                  (str "\n\n" prompt-suffix)))}
     ;; The opening user turn is prose the model reads and a project may want
     ;; worded differently — prompts/problem.md, not a `str` here.
     {:role "user" :content (prompt/render "problem" {:problem problem})}]))
