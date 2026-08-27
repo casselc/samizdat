@@ -109,5 +109,7 @@
     :summary "Append a note to the run's journal. The durable record a later run reads back."}
    {:name samizdat.store.journal/artifacts
     :summary "Every artifact this run banked, across all branches."}
+   {:name samizdat.store.evaluator/history
+    :summary "The append-only bounded-evaluator computations and semantic receipts for one binding, in replay order."}
    {:name samizdat.events/subscribe
     :summary "A channel of every event published from now on, for watching a run without polling."}]}]

@@ -38,6 +38,25 @@
 (defmulti run-tool
   (fn [ctx] (:tool-name ctx)))
 
+(def bounded-tool-vocabulary #{"eval" "doc" "complete" "done"})
+
+(defn bounded-binding [ctx]
+  (let [binding (:evaluator/binding ctx)]
+    (cond
+      (nil? binding) nil
+      (map? binding) binding
+      :else @binding)))
+
+(defn bounded?
+  "The trusted binding is the canonical bounded-mode signal. A profile marker
+  without a binding still fails closed instead of falling through to ordinary
+  in-process eval."
+  [ctx]
+  (boolean (or (bounded-binding ctx) (:evaluator/profile ctx))))
+
+(defn bounded-message [data]
+  (prompt/render "bounded-evaluator" data))
+
 (defn ok [branch result & {:as extra}]
   (merge {:result result :category :neutral :progress? false :branch branch} extra))
 
@@ -195,6 +214,10 @@
   its line of inquiry."
   [{:keys [branch tool-name] :as ctx}]
   (or
+   (when (and (bounded? ctx) (not (contains? bounded-tool-vocabulary tool-name)))
+     (refusal branch
+              (bounded-message {:outside-tool true :tool tool-name})))
+
    (when (contains? (phases/withholds (:phase branch)) tool-name)
      (refusal branch
            (str "`" tool-name "` is not available in the "

@@ -38,6 +38,7 @@
    "architect"
    "branch-cap"
    "branch-out"
+   "bounded-evaluator"
    "cell-tool"
    "critic"
    "critic-system"
