@@ -134,3 +134,45 @@
       (let [r (:result (read {:path "small.txt"}))]
         (is (str/includes? r "c"))
         (is (not (str/includes? r "Continue with")))))))
+
+(deftest the-run-config-is-not-writable-by-the-run-it-gates
+  ;; karamazov-kvw: run 671e8a99 rewrote .samizdat/config.edn mid-run,
+  ;; replacing :verify-cmd "jolt -M:test" (3 real tests) with an alias whose
+  ;; runner executes 0 tests and exits 0 — a Gate 2 that always passes. The
+  ;; gate definition belongs to the operator; the party a gate judges does
+  ;; not get to edit it. Reads stay open — a run may always inspect its gates.
+  (let [root (str "/tmp/samizdat-files-" (random-uuid))
+        config "{:run {:verify-cmd \"jolt -M:test\"}}"]
+    (fs/create-dirs (str root "/.samizdat"))
+    (spit (str root "/.samizdat/config.edn") config)
+    (try
+      (testing "write_file refuses and writes nothing"
+        (let [r (files/write-file (ctx root "write_file"
+                                       {:path ".samizdat/config.edn"
+                                        :content "{:run {:verify-cmd \"true\"}}"}))]
+          (is (= :mechanics (:category r)))
+          (is (re-find #"operator" (str (:result r)))
+              "the refusal says whose file it is")
+          (is (= config (slurp (str root "/.samizdat/config.edn"))))))
+      (testing "edit_file refuses too"
+        (let [r (files/edit-file (ctx root "edit_file"
+                                      {:path ".samizdat/config.edn"
+                                       :old_text "jolt -M:test" :new_text "true"}))]
+          (is (= :mechanics (:category r)))
+          (is (= config (slurp (str root "/.samizdat/config.edn"))))))
+      (testing "a dressed-up path does not slip past the resolve"
+        (let [r (files/write-file (ctx root "write_file"
+                                       {:path "src/../.samizdat/config.edn"
+                                        :content "x"}))]
+          (is (= :mechanics (:category r)))
+          (is (= config (slurp (str root "/.samizdat/config.edn"))))))
+      (testing "reading it stays allowed"
+        (is (= :neutral (:category (files/read-file
+                                    (ctx root "read_file"
+                                         {:path ".samizdat/config.edn"}))))))
+      (testing "the rest of .samizdat/ is untouched by the rule"
+        (is (= :success (:category (files/write-file
+                                    (ctx root "write_file"
+                                         {:path ".samizdat/skills/mine.md"
+                                          :content "# a project skill"}))))))
+      (finally (fs/delete-tree root)))))

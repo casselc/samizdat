@@ -287,3 +287,26 @@
   ;; list, next to an unrestricted `write_file`.
   (is (= :allow (:effect (policy/decide {} "sed -n '1,50p' README.md"))))
   (is (= :allow (:effect (policy/decide {} "awk '{print $1}' deps.edn")))))
+
+(deftest the-shell-cannot-mutate-the-run-config-either
+  ;; karamazov-kvw, the side doors: mv/cp/sed/ln/touch are allowed heads, so
+  ;; protecting .samizdat/config.edn in write_file alone would leave
+  ;; `mv mine.edn .samizdat/config.edn` a one-liner. Any statement that names
+  ;; the run config under a head that can write is denied outright.
+  (doseq [cmd ["mv mine.edn .samizdat/config.edn"
+               "cp mine.edn .samizdat/config.edn"
+               "mv .samizdat/config.edn /tmp/gone.edn"
+               "sed -i s/test/true/ .samizdat/config.edn"
+               "tee .samizdat/config.edn"
+               "git checkout -- .samizdat/config.edn"
+               "ls; mv mine.edn .samizdat/config.edn"]]
+    (is (= :deny (:effect (policy/decide {} cmd))) cmd))
+  (testing "the refusal carries which path tripped it"
+    (is (= ".samizdat/config.edn"
+           (:protected-path (policy/decide {} "mv x .samizdat/config.edn")))))
+  (testing "a session grant does not unlock it — this deny is a hard deny"
+    (is (= :deny (:effect (policy/decide {:grants ["mv **"]}
+                                         "mv mine.edn .samizdat/config.edn")))))
+  (testing "reading the config stays allowed — a run may inspect its gates"
+    (is (= :allow (:effect (policy/decide {} "cat .samizdat/config.edn"))))
+    (is (= :allow (:effect (policy/decide {} "grep verify .samizdat/config.edn"))))))

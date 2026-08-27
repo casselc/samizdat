@@ -279,6 +279,42 @@
 
 (def ^:private default-effect :ask)
 
+;; --- protected paths ---------------------------------------------------------
+
+(def ^:private protected-paths
+  "Paths no shell statement may reach under a head that can write.
+  .samizdat/config.edn defines the ship gates (:run :verify-cmd,
+  :require-test?): run 671e8a99 replaced its verify command mid-run with one
+  that ran 0 tests and exited 0 — a Gate 2 that always passes
+  (karamazov-kvw). The file tools refuse it too (files/run-config?); this
+  closes the mv/cp/sed side doors those allows would otherwise leave open.
+
+  Hardcoded rather than policy data on purpose: gates.edn is agent-editable
+  userspace, so a protected list living there could be unprotected by the
+  party it protects against. Not airtight — a segment can name the file
+  without its full path — but the failure it exists to stop is a run drifting
+  into rewriting its own gate, not a jailbreak; `eval` containment is its own
+  open problem (karamazov-zrq)."
+  [".samizdat/config.edn"])
+
+(def ^:private read-only-heads
+  "Heads that cannot write their file arguments, so a protected path in their
+  arguments is a READ — which stays open: a run may always inspect its own
+  gates. Anything else touching a protected path is denied, and over-denying
+  (an unlisted read like `sed -n`) is the correct direction; `cat` is the
+  road."
+  #{"cat" "head" "tail" "wc" "grep" "rg" "less" "more" "diff" "ls" "stat"
+    "file" "find" "sort" "uniq" "cut" "md5" "shasum" "echo"})
+
+(defn- protected-path-hit
+  "The first protected path some candidate statement mentions under a head
+  that can write, or nil."
+  [candidates]
+  (some (fn [seg]
+          (when-not (contains? read-only-heads (command-head seg))
+            (some #(when (str/includes? seg %) %) protected-paths)))
+        candidates))
+
 (defn- last-match
   "The effect of the last rule whose pattern matches any of `candidates`, or
   nil when none match."
@@ -314,6 +350,11 @@
                              distinct
                              vec)
         deny-hit (last-match (filter #(= :deny (second %)) base-rules) deny-candidates)
+        ;; A statement that can write a protected path is a hard deny like the
+        ;; base deny rules — it wins over grants, and compound decomposition
+        ;; cannot resurrect it.
+        protected-hit (protected-path-hit deny-candidates)
+        deny-hit (or deny-hit (when protected-hit :deny))
         grant-hit (when (some #(matches? % raw) (:grants session)) :allow)
         base-hit (last-match base-rules allow-candidates)
         effect (cond
@@ -356,7 +397,9 @@
     ;; able to say so: without it the message reads "`ls` is not on the allow
     ;; list", which is false and sent a live run round the same wall twice.
     {:effect effect :head head :raw raw :complex? complex? :promoted? promoted?
-     :blocked-segment blocked-segment}))
+     :blocked-segment blocked-segment
+     ;; Which protected path forced the deny, so the refusal can name it.
+     :protected-path protected-hit}))
 
 ;; --- the shell tool ---------------------------------------------------------
 
@@ -403,7 +446,8 @@
   (let [command (str (:command args))
         env (or (:env ctx) (into {} (System/getenv)))
         session (if (and conn run-id) (grants/for-run conn run-id) {:grants []})
-        {:keys [effect head complex? promoted? blocked-segment]} (decide session command)
+        {:keys [effect head complex? promoted? blocked-segment protected-path]}
+        (decide session command)
         known (secrets/known-values env command)]
     (case effect
       :deny
@@ -413,8 +457,11 @@
       ;; stamps :policy-refusal? on top, which is what routes it to the
       ;; refusal counter.
       {:category :mechanics :progress? false
-       :result (str "Command denied by policy: `" head "` is on the deny list."
-                    " This cannot be overridden.")
+       :result (if protected-path
+                 (prompt/render "shell-refused"
+                                {:protected true :path protected-path})
+                 (str "Command denied by policy: `" head "` is on the deny list."
+                      " This cannot be overridden."))
        :policy {:effect :deny}}
 
       :ask

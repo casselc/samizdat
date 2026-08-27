@@ -89,6 +89,25 @@
     (when (or (= target root*) (str/starts-with? target (str root* "/")))
       target)))
 
+(def run-config-path
+  "The project-local run config, relative to the root — the file that defines
+  :run :verify-cmd and :require-test?, i.e. the ship gates this run is judged
+  against."
+  ".samizdat/config.edn")
+
+(defn run-config?
+  "Whether the resolved absolute path `abs` IS the root's run config. The
+  write tools refuse it: run 671e8a99 rewrote its own :verify-cmd mid-run to
+  a command that ran 0 tests and exited 0 — a Gate 2 that always passes
+  (karamazov-kvw). The gate definition belongs to the operator; the party a
+  gate judges does not get to edit it. Reads stay open, and the REST of
+  .samizdat/ (cells, skills) stays writable — those are workflow, which the
+  agent owns. A mechanism-level invariant, not policy data, because a
+  protected list in agent-editable gates.edn could be unprotected by the
+  party it protects against."
+  [root abs]
+  (= abs (resolve-under-root (or root ".") run-config-path)))
+
 (defn- miss [branch msg]
   {:result msg :category :mechanics :progress? false :branch branch})
 
@@ -241,8 +260,14 @@
       (str/blank? old-text) (miss branch (msg {:needs-old-text true}))
       :else
       (if-let [abs (resolve-under-root (or root ".") path)]
-        (if-not (fs/exists? abs)
+        (cond
+          (run-config? root abs)
+          (miss branch (msg {:protected true :path path}))
+
+          (not (fs/exists? abs))
           (miss branch (msg {:no-file true :path path}))
+
+          :else
           (let [content (str/replace (slurp abs) "\r\n" "\n")
                 old-text (str/replace old-text "\r\n" "\n")
                 new-text (str/replace new-text "\r\n" "\n")
@@ -339,6 +364,8 @@
 
       :else
       (if-let [abs (resolve-under-root (or root ".") path)]
+        (if (run-config? root abs)
+          (miss branch (msg {:protected true :path path}))
         ;; Paren repair for Clojure sources: models drop trailing closers, and
         ;; a file that does not read is a file that does not load. A trailing
         ;; truncation or over-close is fixed mechanically and noted; a mid-file
@@ -358,5 +385,5 @@
                          :note note
                          :unbalanced (when (= :unbalanced status) note)})
            :category :success :progress? true :branch branch
-           :repaired? (= :repaired status)})
+           :repaired? (= :repaired status)}))
         (miss branch (msg {:outside-root true :path path :verb "written"}))))))
