@@ -79,9 +79,10 @@ Every loader in the base comes through here instead of `io/resource`.
 | `(edn-body kind name)` / `(edn-body! …)` | `body` parsed as EDN. |
 | `(template kind name)` | The shipped body, ignoring the project. `nil` when nothing ships under that name. |
 | `(template-path kind name)` | The classpath resource a template lives at. |
-| `(save! kind name body)` | Append a version. Returns the new version number, or `nil` when unbound. |
-| `(revert! kind name version)` | Re-append an older body as the newest. |
-| `(versions kind name)` / `(names kind)` | History of one; catalogue of a kind. |
+| `(save! kind name body rationale?)` | Append a version, with why. Returns the new version number, or `nil` when unbound. |
+| `(revert! kind name version rationale?)` | Re-append an older body as the newest, recorded as `revert to vN: reason`. |
+| `(versions kind name)` / `(names kind)` | History of one (version, when, why, standing); catalogue of a kind. |
+| `(record-run-outcome! shipped?)` | Stamp a run's ending onto the project-authored versions current for it. |
 | `(seed-all! kind template-names)` | Seed each named template, return `{name body}` for the kind. |
 | `(invalidate!)` | Drop the read cache. |
 
@@ -97,6 +98,16 @@ was stored.
 
 **Contract — seeding never overwrites.** A project that has evolved past version
 1 is untouched by a later read.
+
+**Contract — the history explains itself.** Every version row can carry a
+`rationale` (the commit message of self-modification) and accrues *standing* —
+how many runs ended shipped or not while it was the current version of its
+name; only `project`-sourced rows accrue it. The store keeps the rationale
+optional so seeding and mechanical writes stay honest (`nil`, never invented
+text); the mutation tools are what demand one from the agent, and a revert
+always records that it was a revert and to what. This exists because a live
+supervisor reverted its predecessor's tuning thirteen minutes after it landed —
+the history showed bodies and timestamps but never why (karamazov-c58).
 
 ### `samizdat.store.userspace` — the store
 

@@ -70,8 +70,10 @@ runtime — look before you act:
   (e.g. switch to `decompose` when the implementors can't do a task in one shot).
 - **Cells** — `cells` lists what is LOADED right now. `cell list` shows which of
   them this project has its own versions of, and `cell versions {name}` shows
-  what has already been tried and when. Read that history before you edit: a
-  change that was already made and reverted is one you should not remake.
+  what has already been tried, when, WHY (each version's rationale), and how
+  many runs ended green under it. Read that history before you edit: a change
+  that was already made and reverted is one you should not remake, and one
+  that has survived green runs is one you should not casually undo.
 - **Manifests** — `manifest list` / `manifest show` — the loops as data.
 - **Prompts** — `prompt list` shows every prompt and whether this project has
   edited it; `prompt show {name}` reads one. Every word any role reads is here,
@@ -149,6 +151,18 @@ supervisor that improves the loop from one that churns it:
 - **Reverting is a real move.** If a change did not help, `cell revert` it and
   say so. The version you leave behind stays readable, so the next supervisor
   sees the attempt and its outcome instead of rediscovering it.
+- **Every save and revert records its `rationale` — write it for the reader.**
+  It is the commit message of self-modification: one sentence on what the
+  change is for, shown in `versions` next to the version it explains. "Tuning"
+  says nothing; "workers were re-reading files every turn — tells them to trust
+  the first read" lets the next supervisor judge the change instead of guessing.
+- **Never revert a version you did not author without reading it first.** A
+  delta you do not recognize is not evidence of a mistake — it is usually your
+  predecessor's fix. Read its body and its rationale, and check its standing:
+  a version marked with green runs has survived under fire, and your
+  unfamiliarity does not outweigh that. Revert it only when you can state, in
+  the revert's own rationale, what it broke — a supervisor that restores what
+  it recognizes is oscillation, not selection.
 - **Read the failure the validator gives you.** "It will not compile" and "it
   threw on valid input" are different diagnoses and want different fixes.
   Re-submitting a near-identical cell after a rejection is the same mistake as

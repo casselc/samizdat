@@ -83,9 +83,9 @@
    {:name samizdat.agent.gates/reload-config!
     :summary "Re-read gates.edn from userspace and recompile the steer table. The policy tool's save does this for you."}
    {:name samizdat.userspace/save!
-    :summary "Append a new version of any userspace piece (:cell :manifest :policy :prompt). Prefer the matching tool, which validates first."}
+    :summary "Append a new version of any userspace piece (:cell :manifest :policy :prompt), with a rationale the history shows. Prefer the matching tool, which validates first and requires the rationale."}
    {:name samizdat.userspace/revert!
-    :summary "Re-append an older version of a userspace piece as the newest — the universal rollback."}
+    :summary "Re-append an older version of a userspace piece as the newest — the universal rollback, recorded with your stated reason."}
    {:name samizdat.agent.phases/withholds
     :summary "Which tools a phase refuses, from phases.edn."}
    {:name samizdat.prompt/render

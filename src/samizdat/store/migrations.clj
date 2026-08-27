@@ -533,6 +533,29 @@
   ;; "the run's problem", which is what every branch before this column meant.
   ["ALTER TABLE branches ADD COLUMN problem TEXT"])
 
+(def ^:private v19
+  ;; WHY an edit was made, and what it has survived.
+  ;;
+  ;; Run c2260271: one supervisor landed prompt tuning as v3, and thirteen
+  ;; minutes later the next supervisor of the same run reverted it to v2 —
+  ;; the history showed bodies and timestamps but never a reason, so a
+  ;; successor confronted with an unfamiliar delta had no way to judge it and
+  ;; restored what it recognized. Self-tuning without a rationale column is
+  ;; self-oscillation (karamazov-c58).
+  ;;
+  ;; `rationale` is the commit message of self-modification: nullable, because
+  ;; seeding and mechanical writes have nothing to say, and inventing text
+  ;; would make the history lie. The mutation tools are what demand it.
+  ;;
+  ;; success/failure counts are the version's STANDING: how many runs ended
+  ;; shipped or not while this row was the current version of its name. A
+  ;; tuning that has survived green runs has earned something a fresh
+  ;; supervisor should weigh before reverting it — the same argument that gave
+  ;; knowledge rows outcome columns in v14.
+  ["ALTER TABLE userspace ADD COLUMN rationale TEXT"
+   "ALTER TABLE userspace ADD COLUMN success_count INTEGER NOT NULL DEFAULT 0"
+   "ALTER TABLE userspace ADD COLUMN failure_count INTEGER NOT NULL DEFAULT 0"])
+
 (def migrations
   "Ordered. Index 0 is migration 1; PRAGMA user_version holds the count applied."
-  [v1 v2 v3 v4 v5 v6 v7 v8 v9 v10 v11 v12 v13 v14 v15 v16 v17 v18])
+  [v1 v2 v3 v4 v5 v6 v7 v8 v9 v10 v11 v12 v13 v14 v15 v16 v17 v18 v19])

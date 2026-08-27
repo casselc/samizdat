@@ -76,9 +76,12 @@
 
 (defn versions
   "Every version of `name`, oldest first — the edit history of one piece of
-  userspace."
+  userspace, with each version's rationale and its standing (how many runs
+  ended shipped / not while it was current)."
   [conn kind name]
-  (db/fetch conn ["SELECT version, created_at FROM userspace
+  (db/fetch conn ["SELECT version, created_at, source, rationale,
+                          success_count, failure_count
+                   FROM userspace
                    WHERE kind = ? AND name = ? ORDER BY version"
                   (kind-str kind) (str name)]))
 
@@ -95,15 +98,23 @@
   is everyone but `seed!`. It is what lets a harness upgrade refresh a
   factory copy without ever touching the supervisor's work; the version
   number cannot say, because a save of a name that was never seeded also
-  writes version 1."
+  writes version 1.
+
+  `rationale` is WHY — the commit message of self-modification, read by the
+  next supervisor deciding whether to keep or revert the version
+  (karamazov-c58). Nullable: seeding and mechanical writes have nothing to
+  say, and inventing text would make the history lie. The mutation tools are
+  where a reason is demanded."
   ([conn kind name body] (save! conn kind name body "project"))
-  ([conn kind name body source]
+  ([conn kind name body source] (save! conn kind name body source nil))
+  ([conn kind name body source rationale]
    (let [k (kind-str kind)]
      (db/with-writer
        (let [v (inc (or (:version (load-latest conn k name)) 0))]
-         (db/execute! conn ["INSERT INTO userspace (kind, name, version, body, created_at, source)
-                             VALUES (?, ?, ?, ?, ?, ?)"
-                            k (str name) v (str body) (db/now) (str source)])
+         (db/execute! conn ["INSERT INTO userspace (kind, name, version, body, created_at, source, rationale)
+                             VALUES (?, ?, ?, ?, ?, ?, ?)"
+                            k (str name) v (str body) (db/now) (str source)
+                            (some-> rationale str str/trim not-empty)])
          v)))))
 
 (defn seed!
@@ -151,10 +162,45 @@
 
   Not a delete and not a pointer move: the failed edit stays in the history
   where it can be read, and the revert is itself an edit. Returns the new
-  version number, or nil when the named version does not exist."
-  [conn kind name version]
-  (when-let [row (load-version conn kind name version)]
-    (save! conn kind name (:body row))))
+  version number, or nil when the named version does not exist.
+
+  The new row's rationale always says it was a revert and to what, with the
+  caller's stated reason appended — a revert with no account of itself is
+  exactly the oscillation karamazov-c58 records."
+  ([conn kind name version] (revert! conn kind name version nil))
+  ([conn kind name version rationale]
+   (when-let [row (load-version conn kind name version)]
+     (save! conn kind name (:body row) "project"
+            (str "revert to v" (long version)
+                 (when-let [r (some-> rationale str str/trim not-empty)]
+                   (str ": " r)))))))
+
+(defn record-run-outcome!
+  "Stamp how a run ended onto every project-authored version that is current
+  as it ends: shipped bumps success_count, anything else failure_count.
+
+  Standing, for the next supervisor: a version that has survived N green runs
+  has evidence behind it that a fresh reader's unfamiliarity does not
+  outweigh (karamazov-c58). Only `source = 'project'` rows accrue it —
+  factory copies are the baseline, not a tuning, and crediting them would
+  drown the signal in the default.
+
+  The latest version at run END is an approximation of \"was current while
+  it ran\": an edit landed mid-run was live for the tail of the run, and the
+  run's outcome is the first evidence it has."
+  [conn shipped?]
+  (db/with-writer
+    (db/execute! conn [(if shipped?
+                         "UPDATE userspace SET success_count = success_count + 1
+                          WHERE source = 'project'
+                            AND version = (SELECT MAX(v.version) FROM userspace v
+                                           WHERE v.kind = userspace.kind
+                                             AND v.name = userspace.name)"
+                         "UPDATE userspace SET failure_count = failure_count + 1
+                          WHERE source = 'project'
+                            AND version = (SELECT MAX(v.version) FROM userspace v
+                                           WHERE v.kind = userspace.kind
+                                             AND v.name = userspace.name)")])))
 
 (defn names
   "Every name at `kind`, with its latest version and how many versions it

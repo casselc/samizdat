@@ -80,6 +80,7 @@
             [samizdat.store.journal :as journal]
             [samizdat.store.knowledge :as knowledge]
             [samizdat.store.runs :as runs]
+            [samizdat.userspace :as userspace]
             [samizdat.workflow :as workflow])
   (:refer-clojure :exclude [run!]))
 
@@ -953,6 +954,7 @@
                         (try (knowledge/record-workflow-outcome!
                               conn {:workflow loop-nm :run-id run-id
                                     :shipped? false})
+                             (userspace/record-run-outcome! false)
                              (catch Throwable _ nil))
                         (throw e)))]
       ;; HOW THIS WORKFLOW WENT, for the next run's choice. A run only ever
@@ -965,6 +967,10 @@
       (knowledge/record-workflow-outcome!
        conn {:workflow loop-nm :run-id run-id
              :shipped? (boolean (:answer result))})
+      ;; The same ending, stamped onto the project-authored userspace versions
+      ;; that were current for it — the standing the versions listing shows a
+      ;; later supervisor weighing an unfamiliar edit (karamazov-c58).
+      (userspace/record-run-outcome! (boolean (:answer result)))
       result)))
 
 (defn summary

@@ -210,7 +210,8 @@
   (us/bind! *conn*)
   (us/save! :cell "critic" ";; v1")
   (us/save! :cell "critic" ";; v2 was a bad idea")
-  (let [r (run-cell *conn* {:action "revert" :name "critic" :version "1"})]
+  (let [r (run-cell *conn* {:action "revert" :name "critic" :version "1"
+                            :rationale "v2 was a bad idea"})]
     (is (= :neutral (:category r)))
     (is (re-find #"stored as v3" (:result r)))
     (is (= ";; v1" (us/body :cell "critic")))
@@ -220,7 +221,8 @@
 (deftest the-cell-tool-refuses-a-revert-to-a-version-that-never-existed
   (us/bind! *conn*)
   (us/save! :cell "critic" ";; v1")
-  (let [r (run-cell *conn* {:action "revert" :name "critic" :version "9"})]
+  (let [r (run-cell *conn* {:action "revert" :name "critic" :version "9"
+                            :rationale "testing the miss"})]
     (is (= :mechanics (:category r)))
     (is (re-find #"No v9" (:result r)))
     (is (re-find #"v1" (:result r)) "and says what versions there are")))
@@ -241,7 +243,8 @@
                                :conn *conn* :root root
                                :tool-name "manifest"
                                :args {:action "save" :name "from-file-check"
-                                      :file "m.edn"}})]
+                                      :file "m.edn"
+                                      :rationale "a from-file save"}})]
         (is (= :neutral (:category r)) (str (:result r)))
         (is (re-find #"Saved manifest" (:result r)))
         (is (= (slurp (str root "/m.edn")) (us/body :manifest "from-file-check"))
@@ -259,6 +262,94 @@
                                       :file "nope.clj"}})]
         (is (= :mechanics (:category r)))
         (is (re-find #"No file nope.clj" (:result r)))))))
+
+;; --- rationale: the commit message of self-modification (karamazov-c58) ------
+
+(deftest a-save-records-why-and-a-revert-names-what-it-undid
+  ;; Run c2260271: S0 landed campaign-derived prompt tuning as v3; thirteen
+  ;; minutes later S1 — the next supervisor of the same run — reverted to v2,
+  ;; because the history showed bodies and timestamps but never WHY, so a
+  ;; successor confronted with an unfamiliar delta restored what it
+  ;; recognized. Self-tuning without a rationale column is self-oscillation.
+  (store/save! *conn* :prompt "p" "v1" "project" "first draft")
+  (store/save! *conn* :prompt "p" "v2")
+  (let [rows (store/versions *conn* :prompt "p")]
+    (is (= "first draft" (:rationale (first rows))))
+    (is (nil? (:rationale (second rows)))
+        "an absent reason is recorded as absent, never invented"))
+  (store/revert! *conn* :prompt "p" 1 "v2 dropped the turn-discipline section")
+  (is (= "revert to v1: v2 dropped the turn-discipline section"
+         (:rationale (last (store/versions *conn* :prompt "p"))))
+      "a revert names what it restored and why — that is what the NEXT reader gets")
+  (store/save! *conn* :cell "c" "x")
+  (store/revert! *conn* :cell "c" 1)
+  (is (= "revert to v1" (:rationale (last (store/versions *conn* :cell "c"))))
+      "even a bare revert says it was one"))
+
+(deftest the-tools-refuse-a-save-or-revert-with-no-rationale
+  ;; The mutation tools are where the agent's hands touch the history, so
+  ;; they are where the reason is demanded — the store stays flexible for
+  ;; seeding and tests.
+  (us/bind! *conn*)
+  (doseq [[tool args]
+          [["prompt" {:action "save" :name "p" :body "words"}]
+           ["manifest" {:action "save" :name "m" :edn "{:cells {} :edges []}"}]
+           ["policy" {:action "save" :name "gates" :edn "{}"}]
+           ["cell" {:action "save" :name "c" :clj ";; x"}]
+           ["prompt" {:action "revert" :name "p" :version "1"}]
+           ["policy" {:action "revert" :name "gates" :version "1"}]
+           ["cell" {:action "revert" :name "c" :version "1"}]]]
+    (let [r (tools/run-tool {:tool-name tool :branch (state/new-branch {:id "B1" :problem "p"})
+                             :conn *conn* :args args})]
+      (is (= :mechanics (:category r)) (str tool " " (:action args)))
+      (is (re-find #"rationale" (str (:result r))) (str tool " " (:action args))))))
+
+(deftest a-rationale-rides-the-version-and-shows-in-the-history
+  (us/bind! *conn*)
+  (let [run-prompt (fn [args]
+                     (tools/run-tool {:tool-name "prompt"
+                                      :branch (state/new-branch {:id "B1" :problem "p"})
+                                      :conn *conn* :args args}))]
+    (let [r (run-prompt {:action "save" :name "my-note" :body "words"
+                         :rationale "teach workers to stop re-reading files"})]
+      (is (= :neutral (:category r)) (str (:result r))))
+    (is (re-find #"teach workers to stop re-reading files"
+                 (:result (run-prompt {:action "versions" :name "my-note"})))
+        "the history shows the reason next to the version")
+    (run-prompt {:action "save" :name "my-note" :body "v2 words"
+                 :rationale "second thoughts"})
+    (let [r (run-prompt {:action "revert" :name "my-note" :version "1"
+                         :rationale "v2 lost the point"})]
+      (is (= :neutral (:category r)) (str (:result r))))
+    (is (re-find #"revert to v1: v2 lost the point"
+                 (:result (run-prompt {:action "versions" :name "my-note"}))))))
+
+(deftest green-runs-earn-standing-on-the-versions-that-ran-them
+  ;; c58's third leg: a tuning that has survived green runs has EARNED
+  ;; something a fresh supervisor should weigh before reverting it, and the
+  ;; history is where that standing has to show.
+  (us/bind! *conn*)
+  (us/body :prompt "system")
+  (us/save! :prompt "mine" "project tuning" "because")
+  (us/save! :prompt "mine" "newer tuning" "more")
+  (us/record-run-outcome! true)
+  (us/record-run-outcome! true)
+  (us/record-run-outcome! false)
+  (let [rows (store/versions *conn* :prompt "mine")]
+    (is (= [0 2] (mapv :success_count rows))
+        "only the version that was CURRENT is credited, not its ancestors")
+    (is (= [0 1] (mapv :failure_count rows))))
+  (is (= 0 (:success_count (store/load-latest *conn* :prompt "system")))
+      "factory rows carry no standing — they are the baseline, not a tuning")
+  (testing "the versions listing shows it"
+    (let [r (tools/run-tool {:tool-name "prompt"
+                             :branch (state/new-branch {:id "B1" :problem "p"})
+                             :conn *conn*
+                             :args {:action "versions" :name "mine"}})]
+      (is (re-find #"2 green" (:result r)) (str (:result r)))))
+  (testing "unbound it is a quiet no-op, like every other unbound write"
+    (us/unbind!)
+    (is (nil? (us/record-run-outcome! true)))))
 
 (deftest the-cell-tool-complains-usefully-about-a-missing-argument
   (us/bind! *conn*)
@@ -432,7 +523,8 @@
             g (us/edn-body! :policy "gates")
             r (tools/run-tool {:tool-name "policy" :branch {:id "B1"}
                                :args {:action "save" :name "gates"
-                                      :edn (pr-str (assoc-in g [:cull-threshold :value] 42))}})]
+                                      :edn (pr-str (assoc-in g [:cull-threshold :value] 42))
+                                      :rationale "branches deserve more rope"}})]
         (is (= :neutral (:category r)) (str (:result r)))
         (is (= 42 (gates/threshold :cull-threshold))
             "the saved threshold is live immediately — no restart, no new run")
@@ -448,7 +540,8 @@
                            :prediction {:kind :tool-called :window 1}})
               r2 (tools/run-tool {:tool-name "policy" :branch {:id "B1"}
                                   :args {:action "save" :name "gates"
-                                         :edn (pr-str bad)}})]
+                                         :edn (pr-str bad)
+                                         :rationale "a broken gate on purpose"}})]
           (is (= :failure (:category r2)))
           (is (= 42 (gates/threshold :cull-threshold))
               "the broken save rolled back; the previous policy is live again"))

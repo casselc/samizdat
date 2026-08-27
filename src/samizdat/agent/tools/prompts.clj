@@ -47,7 +47,7 @@
             [samizdat.userspace :as userspace]))
 
 (def ^:private usage
-  "Actions: list, show {name, version?}, save {name, body | file}, versions {name}, revert {name, version}. A prompt is prose the model reads — the system prompt, a gate's message, a role's instructions. Editing one changes what the harness says, not what it does.")
+  "Actions: list, show {name, version?}, save {name, body | file, rationale}, versions {name}, revert {name, version, rationale}. A prompt is prose the model reads — the system prompt, a gate's message, a role's instructions. Editing one changes what the harness says, not what it does. rationale: one sentence on why — the history shows it to the next supervisor deciding whether your change stays.")
 
 (defn- render-check
   "Whether selmer can parse `body`, as `nil` or a complaint.
@@ -115,32 +115,35 @@
           (let [rows (userspace/versions :prompt name)]
             (base/ok branch
                      (if (seq rows)
-                       (str/join "\n" (for [{:keys [version created_at]} rows]
-                                        (str "v" version "  " created_at)))
+                       (str/join "\n" (map base/version-line rows))
                        (msg {:no-versions true :name name
                              :shipped (shipped? name)})))))
 
         "save"
-        (let [{body :body err :error} (base/save-body ctx :body)]
+        (let [{body :body err :error} (base/save-body ctx :body)
+              why (base/rationale ctx)]
           (cond
             (not name) (base/malformed branch (base/missing ctx :name))
             err (base/malformed branch err)
             (nil? body) (base/malformed branch (base/missing ctx :body))
+            (nil? why) (base/malformed branch (base/missing ctx :rationale))
             :else
             (if-let [complaint (render-check (str body))]
               (base/fail branch (msg {:bad-render true :name name :complaint complaint}))
-              (if-let [v (userspace/save! :prompt name (str body))]
+              (if-let [v (userspace/save! :prompt name (str body) why)]
                 (base/ok branch (msg {:saved true :name name :version v})
                          :progress? true)
                 (base/fail branch (msg {:unbound true :name name}))))))
 
         "revert"
-        (let [v (some-> (base/arg ctx :version) str str/trim not-empty parse-long)]
+        (let [v (some-> (base/arg ctx :version) str str/trim not-empty parse-long)
+              why (base/rationale ctx)]
           (cond
             (not name) (base/malformed branch (base/missing ctx :name))
             (nil? v) (base/malformed branch (base/missing ctx :version))
+            (nil? why) (base/malformed branch (base/missing ctx :rationale))
             :else
-            (if-let [nv (userspace/revert! :prompt name v)]
+            (if-let [nv (userspace/revert! :prompt name v why)]
               (base/ok branch (msg {:reverted true :name name :from v :version nv})
                        :progress? true)
               (base/malformed branch (msg {:no-revert true :name name :version v})))))

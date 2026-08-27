@@ -98,9 +98,10 @@
   re-save the shipped template when this save created the first version.
   Reloads afterwards — the pre-save state compiled once, so it compiles now."
   [name v]
-  (if (> v 1)
-    (userspace/revert! :policy name (dec v))
-    (userspace/save! :policy name (userspace/template :policy name)))
+  (let [why (msg {:rollback-rationale true})]
+    (if (> v 1)
+      (userspace/revert! :policy name (dec v) why)
+      (userspace/save! :policy name (userspace/template :policy name) why)))
   (reload-and-verify! name))
 
 (defmethod base/run-tool "policy" [{:keys [branch] :as ctx}]
@@ -138,16 +139,17 @@
           (let [rows (userspace/versions :policy name)]
             (base/ok branch
                      (if (seq rows)
-                       (str/join "\n" (for [{:keys [version created_at]} rows]
-                                        (str "v" version "  " created_at)))
+                       (str/join "\n" (map base/version-line rows))
                        (msg {:no-versions true :name name})))))
 
         "save"
-        (let [{body :body err :error} (base/save-body ctx :edn)]
+        (let [{body :body err :error} (base/save-body ctx :edn)
+              why (base/rationale ctx)]
           (cond
             (not name) (base/malformed branch (base/missing ctx :name))
             err (base/malformed branch err)
             (str/blank? (str body)) (base/malformed branch (base/missing ctx :edn))
+            (nil? why) (base/malformed branch (base/missing ctx :rationale))
             (not (known? name))
             (base/malformed branch (msg {:no-policy true :name name
                                          :names (str/join ", " shipped-policies)}))
@@ -160,7 +162,7 @@
                 ;; Warm the cache so the seed exists and the version we might
                 ;; roll back to is real, then store and recompile.
                 (do (userspace/body :policy name)
-                    (let [v (userspace/save! :policy name (str body))]
+                    (let [v (userspace/save! :policy name (str body) why)]
                       (if (nil? v)
                         (base/fail branch (msg {:unbound true :name name}))
                         (try
@@ -174,12 +176,14 @@
                                              :complaint (ex-message e)})))))))))))
 
         "revert"
-        (let [v (some-> (base/arg ctx :version) str str/trim not-empty parse-long)]
+        (let [v (some-> (base/arg ctx :version) str str/trim not-empty parse-long)
+              why (base/rationale ctx)]
           (cond
             (not name) (base/malformed branch (base/missing ctx :name))
             (nil? v) (base/malformed branch (base/missing ctx :version))
+            (nil? why) (base/malformed branch (base/missing ctx :rationale))
             :else
-            (if-let [v' (userspace/revert! :policy name v)]
+            (if-let [v' (userspace/revert! :policy name v why)]
               (do (reload-and-verify! name)
                   (base/ok branch (msg {:reverted true :name name
                                         :from v :version v'})

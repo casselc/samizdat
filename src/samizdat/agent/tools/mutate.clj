@@ -117,13 +117,12 @@
 ;; --- the project's own cells (userspace) -------------------------------------
 
 (def ^:private cell-usage
-  "Actions: list, show {name, version?}, save {name, clj | file}, versions {name}, revert {name, version}. A cell is one step of the loop, as Clojure. Save validates by compiling the loop and dry-running it before it stores, and stores a new VERSION in this project — the shipped template is never written. For a large body, write it to a file first (write_file), then save {name, file}: a fix left as a file and never saved does not exist.")
+  "Actions: list, show {name, version?}, save {name, clj | file, rationale}, versions {name}, revert {name, version, rationale}. A cell is one step of the loop, as Clojure. Save validates by compiling the loop and dry-running it before it stores, and stores a new VERSION in this project — the shipped template is never written. For a large body, write it to a file first (write_file), then save {name, file}: a fix left as a file and never saved does not exist. rationale: one sentence on why — the history shows it to the next supervisor deciding whether your change stays.")
 
 (defn- render-versions [name]
   (let [rows (userspace/versions :cell name)]
     (if (seq rows)
-      (str/join "\n" (for [{:keys [version created_at]} rows]
-                       (str "v" version "  " created_at)))
+      (str/join "\n" (map base/version-line rows))
       (str "No stored versions of '" name "' in this project."
            " It is still the shipped template."))))
 
@@ -172,15 +171,17 @@
           (base/ok branch (render-versions name)))
 
         "save"
-        (let [{body :body err :error} (base/save-body ctx :clj)]
+        (let [{body :body err :error} (base/save-body ctx :clj)
+              why (base/rationale ctx)]
           (cond
             (not name) (base/malformed branch (base/missing ctx :name))
             err (base/malformed branch err)
             (str/blank? (str body)) (base/malformed branch (base/missing ctx :clj))
+            (nil? why) (base/malformed branch (base/missing ctx :rationale))
             :else
             (let [active (active-name ctx)
                   r (mutation/propose-cell!
-                     {:name name :body (str body)
+                     {:name name :body (str body) :rationale why
                       :loop-def (current-loop-def ctx)
                       :extra-defs (extra-defs active)
                       ;; The loader's own static pipeline (sub-workflows,
@@ -215,12 +216,14 @@
                                 "\n\nFix it and save again."))))))
 
         "revert"
-        (let [v (some-> (base/arg ctx :version) str str/trim not-empty parse-long)]
+        (let [v (some-> (base/arg ctx :version) str str/trim not-empty parse-long)
+              why (base/rationale ctx)]
           (cond
             (not name) (base/malformed branch (base/missing ctx :name))
             (nil? v) (base/malformed branch (base/missing ctx :version))
+            (nil? why) (base/malformed branch (base/missing ctx :rationale))
             :else
-            (if-let [nv (userspace/revert! :cell name v)]
+            (if-let [nv (userspace/revert! :cell name v why)]
               (base/ok branch
                        (str "Reverted cell '" name "' to the body of v" v
                             ", stored as v" nv ". Reverting is itself an edit, so"

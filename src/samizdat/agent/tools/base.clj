@@ -109,6 +109,30 @@
 
       :else nil)))
 
+(defn rationale
+  "The stated reason for a userspace save or revert, trimmed, or nil.
+
+  The mutation tools REQUIRE one (karamazov-c58): a live supervisor reverted
+  its predecessor's tuning thirteen minutes after it landed, because the
+  version history showed bodies and timestamps but never why — so a successor
+  confronted with an unfamiliar delta restored what it recognized. The
+  rationale is the commit message of self-modification; demanding it at the
+  tool seam keeps the store free for seeding and tests."
+  [ctx]
+  (some-> (arg ctx :rationale) str str/trim not-empty))
+
+(defn version-line
+  "One line of a userspace edit history: when, why, and what the version has
+  survived. The reader is the NEXT supervisor deciding whether to keep it."
+  [{:keys [version created_at rationale success_count failure_count]}]
+  (let [green (long (or success_count 0))
+        red (long (or failure_count 0))]
+    (str "v" version "  " created_at
+         (when-let [r (some-> rationale str not-empty)] (str "  — " r))
+         (when (or (pos? green) (pos? red))
+           (str "  [" green " green run" (when (not= 1 green) "s")
+                (when (pos? red) (str ", " red " failed")) "]")))))
+
 (defn missing
   "The complaint for absent required arguments, WITH the call it wanted.
 

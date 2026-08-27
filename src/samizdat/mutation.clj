@@ -212,12 +212,13 @@
                   other workflow commit untouched (karamazov-blt.2)
     :soak-input — the initial data map the soak dry-run starts from
     :compile-fn — how to compile+validate (default mycelium pre-compile)
+    :rationale  — why, stored with the committed version (karamazov-c58)
     :conn :run-id — to journal the outcome (optional)
 
   Returns {:status :committed :version n} or
   {:status :rolled-back :reason ...} with the registry restored and nothing
   written to the store."
-  [{:keys [name body loop-def extra-defs soak-input compile-fn conn run-id]}]
+  [{:keys [name body loop-def extra-defs soak-input compile-fn rationale conn run-id]}]
   (let [compile-fn (or compile-fn myc/pre-compile)
         snapshot (cell/registry-snapshot)
         fail (fn [reason]
@@ -249,7 +250,7 @@
           ;; about an edit that vanishes on restart (karamazov-blt.8). It is
           ;; not a rollback either — validate and soak passed, the candidate
           ;; stays live in this image — so the caller hears exactly that.
-          (let [v (userspace/save! :cell name body)]
+          (let [v (userspace/save! :cell name body rationale)]
             (if (nil? v)
               ;; :reason is a KEYWORD, not prose: the sentence the model reads
               ;; is the tool's to render (prompts/cell-tool.md), same as every

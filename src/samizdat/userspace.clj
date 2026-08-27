@@ -215,25 +215,39 @@
 
   nil rather than a throw on an unbound write: a tool that edits userspace
   outside a run is a real situation (a REPL session, a test), and it should
-  hear that nothing was stored rather than crash."
-  [kind name new-body]
-  (if-let [c (conn)]
-    (let [v (store/save! c kind name new-body)]
-      (invalidate!)
-      (log/info "userspace" (clojure.core/name kind) name "saved as version" v)
-      v)
-    (do (log/warn "userspace save ignored — no project store is bound:"
-                  (clojure.core/name kind) name)
-        nil)))
+  hear that nothing was stored rather than crash.
+
+  `rationale` — why the edit was made — is stored with the version and shown
+  in the history; see store/save!."
+  ([kind name new-body] (save! kind name new-body nil))
+  ([kind name new-body rationale]
+   (if-let [c (conn)]
+     (let [v (store/save! c kind name new-body "project" rationale)]
+       (invalidate!)
+       (log/info "userspace" (clojure.core/name kind) name "saved as version" v)
+       v)
+     (do (log/warn "userspace save ignored — no project store is bound:"
+                   (clojure.core/name kind) name)
+         nil))))
 
 (defn revert!
-  "Re-append an older version as the newest — the rollback. Returns the new
-  version number, or nil."
-  [kind name version]
+  "Re-append an older version as the newest — the rollback, recorded with the
+  caller's stated reason. Returns the new version number, or nil."
+  ([kind name version] (revert! kind name version nil))
+  ([kind name version rationale]
+   (when-let [c (conn)]
+     (let [v (store/revert! c kind name version rationale)]
+       (invalidate!)
+       v))))
+
+(defn record-run-outcome!
+  "Stamp a run's ending onto the project-authored versions that were current
+  for it — their standing, read back through `versions`. A quiet nil when no
+  project is bound, like every other unbound write."
+  [shipped?]
   (when-let [c (conn)]
-    (let [v (store/revert! c kind name version)]
-      (invalidate!)
-      v)))
+    (store/record-run-outcome! c (boolean shipped?))
+    true))
 
 (defn versions
   "The edit history of one piece of userspace, oldest first. Empty when

@@ -158,14 +158,16 @@
       (let [good (slurp (io/resource "manifests/loop.edn"))]
         (testing "a manifest that compiles is stored and then loads by name"
           (let [r (base/run-tool {:branch {:id "B1"} :conn conn :tool-name "manifest"
-                                  :args {:action "save" :name "loop2" :edn good}})]
+                                  :args {:action "save" :name "loop2" :edn good
+                                         :rationale "a second loop"}})]
             (is (= :neutral (:category r)))
             (is (= 1 (:version (us/load-latest conn :manifest "loop2"))))
             (is (= "loop2" (:name (wf/load-loop! conn "loop2"))))))
         (testing "a manifest that cannot compile is refused, not stored"
           (let [r (base/run-tool {:branch {:id "B1"} :conn conn :tool-name "manifest"
                                   :args {:action "save" :name "bad"
-                                         :edn "{:cells {:x :no-such-cell}}"}})]
+                                         :edn "{:cells {:x :no-such-cell}}"
+                                         :rationale "a bad save on purpose"}})]
             (is (= :failure (:category r)))
             (is (nil? (us/load-latest conn :manifest "bad")) "nothing broken was stored")))))))
 
@@ -249,7 +251,8 @@
         (let [bad (pr-str '{:cells {:start :test/bad-requires}
                             :edges {:start :end}})
               r (base/run-tool {:branch {:id "B1"} :conn conn :tool-name "manifest"
-                                :args {:action "save" :name "badreq" :edn bad}})]
+                                :args {:action "save" :name "badreq" :edn bad
+                                       :rationale "a bad require on purpose"}})]
           (is (= :failure (:category r)))
           (is (str/includes? (str (:result r)) "ctx key")
               "the refusal names the loader check that would have thrown")
@@ -273,7 +276,8 @@
                                :edges {:start :end}
                                :subworkflows {:child-cell "authored-child"}})
               r (base/run-tool {:branch {:id "B1"} :conn conn :tool-name "manifest"
-                                :args {:action "save" :name "composed" :edn parent}})]
+                                :args {:action "save" :name "composed" :edn parent
+                                       :rationale "compose a stored child"}})]
           (is (= :neutral (:category r)) (str "save refused: " (:result r)))
           (is (some? (us/load-latest conn :manifest "composed"))))
         (finally (userspace/unbind!))))))
