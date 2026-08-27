@@ -11,15 +11,17 @@ evaluator contract at current seams.  Preserve current userspace, manifests,
 tape, scheduler, task, provider, resume, and adaptation architecture unless a
 specific JS1 invariant demonstrably requires a change.
 
-This is a plan only.  It does not authorize implementation or JS2.
+This planning contract is frozen for M1.  `JS1_M1_IMPLEMENTATION_PROMPT.md`
+separately authorizes implementation of M1 only; neither document authorizes
+JS2.
 
 ## Coordinates inspected
 
 | Role | Coordinate |
 |---|---|
 | Current Samizdat upstream | `yogthos/samizdat` `main` `5aa94769160a92ffb5131adf776fdc06f6157405` |
-| JS1 reference | `casselc/samizdat` `js1-bounded-samizdat` `3d718ba` |
-| Frozen pre-canary JS1 PASS runtime | Samizdat `897cf534ffd12939c17048477c83fb4be4560672` |
+| JS1 executable/conformance reference | `casselc/samizdat` `897cf534ffd12939c17048477c83fb4be4560672` |
+| Later JS1 branch documentation/findings | `casselc/samizdat` `js1-bounded-samizdat` (non-oracle; may not move the executable reference) |
 | Bounded Jolt reference | `casselc/jolt` `js1-runtime-current-upstream` `4af2362176160f2ed0e366689d7232b1a38adfec` |
 | SCI reference | `32d62a5136ad3dc148588752f5bcc4cc30b14752` / `0.13.53` |
 
@@ -90,10 +92,11 @@ layout.
 6. **Commit-only state.**  Failed/interrupted evaluations rebuild to committed
    history; rollback failure poisons the instance rather than continuing.
 7. **Durable replay.**  Each evaluation has append-only intent/outcome receipts
-   and a terminal completion.  Fresh-process reconstruction replays all
-   committed history in one fresh SCI context, makes zero real world calls,
-   consumes exactly the recorded receipt trace, and fails closed on mismatch,
-   gap, pending intent, or unconsumed receipt.
+   and a terminal completion.  Fresh-process reconstruction retains the logical
+   EvaluatorInstance identity/coordinates but creates a new live SCI context;
+   it replays all committed history, makes zero real world calls, consumes
+   exactly the recorded receipt trace, and fails closed on mismatch, gap,
+   pending intent, or unconsumed receipt.
 8. **Mutation.**  Project edits are root-confined, anchored optimistic edits;
    paths, symlinks, UTF-8/bounds, and write size fail closed.
 9. **Trusted completion.**  `done` reaches controller-owned verification with
@@ -417,9 +420,21 @@ same receipt sequence, reproduce result/state and helper availability, and
 perform **zero** real world operations.
 
 The same M1 test set explicitly executes a failed recorded evaluation followed
-by rollback to committed state, and independent pending, receipt-mismatch,
-receipt-exhaustion, and unconsumed-receipt cases.  Each must refuse before an
-unrecorded world operation or replay interpretation occurs.
+by rollback to committed state, then proves replay refusal ordering:
+
+- spec/runtime/binding mismatch or pending history refuses **before replay
+  begins**;
+- receipt mismatch or exhaustion refuses at the corresponding semantic-operation
+  request, before any real world operation;
+- an unconsumed receipt is detected only after replay evaluation completes, then
+  refuses the reconstructed state before it is accepted or committed.
+
+Replay interpretation is permitted; real-world re-actuation is never permitted.
+The M1 gate also drives the actual current manifest/turn/infer/parse/tool path
+with a deterministic no-network fake model: a parsed `eval` reaches the bounded
+binding, SCI, one or more `project/*` receipts, and the ordinary current
+tool-result/tape path.  A fake `shell` request is refused by the bounded
+top-level vocabulary with zero shell execution.
 
 Expected evidence:
 
@@ -430,8 +445,11 @@ Expected evidence:
 - `begin → intent → outcome → complete` receipt rows in causal order;
 - multi-observation / data-dependent branch / local aggregation leverage facts;
 - failed evaluation rollback to committed state;
-- fresh-process reconstruction, stable binding identity, zero replay-world
-  operations, and exact mismatch/pending/exhaustion refusal cases;
+- fresh-process reconstruction with stable logical instance/binding identities,
+  a new live SCI context, zero replay-world operations, and exact ordered
+  mismatch/pending/exhaustion/unconsumed refusal cases;
+- deterministic no-network current-turn smoke evidence for bounded `eval` and
+  zero-execution refusal of a top-level `shell` request;
 - ordinary current upstream no-SCI suite remains green, and the pinned Jolt/SCI
   conformance lane is green.
 
