@@ -66,16 +66,23 @@ layout.
 1. **Evaluator lifecycle.**  Distinguish immutable `EvaluatorSpec`, live
    `EvaluatorInstance`, and work-scoped `EvaluatorBinding`.  A branch, task,
    cell, workflow, or provider is none of these.
-2. **Authority.**  Capability selection is controller-owned:
-   `requested ⊆ authorized ⊆ profile maximum`; explicit capability IDs are
-   checked at every dispatch; a compiled context is not itself permission.
+2. **Authority.**  Userspace may request a profile but is never an authority
+   source.  Effective authority is `userspace request ∩ controller
+   authorization ∩ trusted profile/catalog maximum ∩ compiled runtime
+   capability`.  Trusted capability IDs, profile maxima, ceilings, and
+   controller policy live below self-editable userspace.  Explicit capability
+   IDs are checked at every dispatch; a compiled context is not itself
+   permission.
 3. **Model surface.**  JS1 exposes only `eval`, `doc`, `complete`, and `done`.
    Project operations are Clojure vocabulary inside `eval`:
    `project/read`, `project/list`, `project/search`, `project/stat`, and
    `project/edit`.
-4. **Authority-derived discovery.**  Prompt, `doc`, and `complete` are
-   projections of the binding's effective ContextSpec/catalog.  They may not
-   advertise an unavailable capability.
+4. **Authority-derived discovery.**  Trusted orientation, `doc`, and
+   `complete` are projections of the binding's effective ContextSpec/catalog.
+   They may not advertise an unavailable capability.  The orientation is
+   rendered once when the binding is created, placed in the initial tape, and
+   byte-stable/pinned for that binding lifetime; a material authority change
+   creates a new binding/context coordinate rather than rewriting history.
 5. **Persistent bounded SCI.**  Successful definitions persist for the
    binding; model code cannot select authority, root, profile, or instance.
 6. **Commit-only state.**  Failed/interrupted evaluations rebuild to committed
@@ -100,16 +107,28 @@ layout.
     receipt protocol coordinates are exact replay inputs.  JS1 is initially
     single-player: multi-branch and whole-run fan-out are refused.
 
+13. **Two evaluator modes.**  Ordinary current Samizdat retains RFC-003's
+    trusted in-process eval threat model.  Bounded JS1 is an explicit stronger
+    mode: persistent SCI, no ambient host files/environment/secrets/network,
+    and only projected semantic operations across the world boundary.  The
+    convergence must not silently change ordinary-eval semantics globally.
+
+14. **REPL leverage.**  The evaluator is a bounded programmable layer below
+    the expensive model boundary.  It must support local observation,
+    branching, filtering, aggregation, temporary abstractions, and persistent
+    helpers while retaining per-operation authorization and receipts.  This is
+    a product/evaluation behavior, not an authority widening rule.
+
 ## Mapping to current upstream
 
 | Contract | Reference implementation | Current seam | Treatment | Evidence / principal risk |
 |---|---|---|---|---|
 | Spec / instance / binding | `agent/sandbox.clj` | new base evaluator namespace; `workflow`, `beam` ctx | rederive | lifecycle identity tests; do not tie binding to branch/provider |
 | JS0 SCI authority / receipts | Jolt `jolt.sandbox` | pinned Jolt adapter/library boundary | use reference runtime | JS0 authority/replay conformance; ordinary JVM must not load SCI |
-| Capability profile selection | hardcoded `:project/develop` in old workflow | project userspace policy + controller config | rederive | cells/manifests cannot widen profile |
+| Capability profile selection | hardcoded `:project/develop` in old workflow | userspace request + controller config + trusted catalog | rederive | userspace requests only; cells/manifests cannot widen or define maxima |
 | `eval/doc/complete/done` dispatch | old `tools/base`, `tools/repl`, `loop` | current tool registry plus `agent.infer` / turn manifest | rederive | prompt/tool vocabulary equality |
-| Authority-derived prompt | old `loop/orient-messages` | `samizdat.prompt`, userspace prompt templates, infer render | port concept | generic prompt must remain unchanged outside JS1 |
-| Persistent SCI state | old sandbox provider registry | new evaluator provider/registry | port concept | stable instance/binding IDs across rebuild |
+| Authority-derived prompt | old `loop/orient-messages` | `samizdat.prompt`, initial `tape`, userspace prompt templates, infer render | rederive | trusted binding orientation is pinned once; generic prompt remains unchanged outside JS1 |
+| Persistent SCI state | old sandbox provider registry | new evaluator provider owned by current run/context lifecycle | port concept | stable instance/binding IDs across rebuild; no global registry presumption |
 | Evals / receipts | `store/evals.clj` | new append-only store beside journal/tape | port / adapt | tape is LLM state, eval receipts are SCI-world state; never conflate |
 | Resume reconstruction | old `agent.resume` | current `agent.resume` / `workflow/compile-turn-loop` | rederive | preserve current task claims, tape, per-branch problem, provenance |
 | Project operation substrate | old sandbox ops + `agent.files` | current confined file mechanism, or new evaluator adapter | port invariants | root/symlink/anchor tests |
@@ -119,6 +138,7 @@ layout.
 | Provider provenance | old run-row only | current `llm.adapter`, `client`, `registry`, tape/inference | use upstream + extend provenance | provider switch must not alter evaluator coordinate |
 | Single-player restriction | old branch/whole-run guards | current workflow selection/beam width/manifests | port invariant | reject before provider spend |
 | Steering/adaptation observation | old gate counters only | current gates, `session`, `watch`, `memory`, `knowledge` | use upstream + add read-only signals | no automatic authority widening |
+| REPL leverage / progress | canary receipts and persistent defs | current `session`, `watch`, adaptation, tape/turn records | rederive telemetry | activity is not world or objective progress |
 
 ## Overlap: use current upstream rather than port old code
 
@@ -185,9 +205,42 @@ Provider/model choice remains an inference coordinate owned by current
 may switch providers at a turn boundary without changing ContextSpec,
 RuntimeCoordinate, or replay semantics.  Journal an explicit
 `inference-epoch` record containing provider/model/adapter settings and the
-turn range.  Eval records reference the active epoch (or a stable epoch ID),
-so evidence can state which provider produced source without treating that
-provider as an authority grant.
+turn range.  Eval records may reference the active epoch (or a stable epoch
+ID) as provenance metadata outside the receipt replay-coordinate set, so
+evidence can state which provider produced source without treating that
+provider as an authority grant.  M1 reserves this nullable provenance link;
+M3 starts producing epochs at turn boundaries.
+
+The causal chain is `InferenceEpoch → turn → eval → semantic receipts`.
+Provider/model identity must not be placed in ContextSpec, evaluator
+RuntimeCoordinate, semantic receipt authority identity, or replay authority:
+replay has zero provider dependency.  The underway local-to-hosted Qwen
+transition is precisely the kind of controller-recorded epoch transition this
+must describe, including transition reason and relevant adapter/config
+identity.
+
+### Two security modes and trusted verification
+
+Convergence supports two explicit modes rather than silently changing
+RFC-003's existing threat model:
+
+| Mode | Evaluation | World authority |
+|---|---|---|
+| Ordinary Samizdat | current trusted live in-process eval | current RFC-003 model |
+| Bounded JS1 | persistent SCI under a ContextSpec | no ambient files, environment/secrets, network, or host execution; only semantic operations |
+
+`done` is a model ControlEvent, not a special shell grant.  Verification is a
+controller-owned effect: the controller chooses executable, argv, cwd,
+scrubbed environment, timeout, process scope, and output bounds.  Reuse current
+security/redaction/process policy and the bounded Jolt scope primitive where
+they preserve this rule.  The bounded model still has no generic shell.
+
+Do not introduce a process-global evaluator registry merely because the
+contract names spec/instance/binding.  First use current run/context lifecycle
+ownership.  Persist specs, binding/instance identities, coordinates, and
+committed history; add a registry only if reacquisition/concurrency evidence
+requires it, since current upstream intentionally removed obsolete global
+session registries.
 
 ### Scheduler / TurnLease
 
@@ -206,18 +259,70 @@ multi-branch JS1 shapes refuse before provider work.
 
 ### Authority → discovery → prompt
 
-At send time, compose a JS1 system projection from:
+At binding creation, render one trusted bounded orientation from:
 
 1. the binding's effective ContextSpec capability catalog;
 2. base descriptions for exactly `eval/doc/complete/done`; and
-3. a project-userspace bounded prompt fragment teaching persistent SCI
-   programming and project operations inside `eval`.
+3. trusted concise guidance for persistent SCI composition, `doc`/`complete`,
+   and project operations inside `eval`.
 
-The base renderer emits only capability descriptions actually present in the
-binding.  Userspace supplies wording and task guidance but cannot name a
-capability absent from the projection.  `doc` and `complete` read the same
-catalog.  This preserves current per-project prompts while preventing the
-attempt-1 generic-tool mismatch.
+Place that orientation in the initial tape and pin it byte-for-byte for the
+binding lifetime so current prefix-cache/tape behavior is stable.  The base
+renderer emits only capability descriptions actually present in the binding;
+`doc` and `complete` read the same catalog.  If authority changes materially,
+mint a new binding and ContextSpec coordinate.
+
+Compose the pinned trusted orientation separately from free-form project
+userspace guidance.  Userspace may provide coding conventions, task guidance,
+and workflow advice, but it is neither a capability catalog nor a source of
+truth for host tools.  The composition must prevent userspace prose from
+presenting `shell`, legacy file tools, `project/run`, or any other unavailable
+operation as part of the bounded surface.  This preserves project-local
+guidance while preventing canary attempt 1's generic-prompt failure.
+
+The orientation should teach, briefly, why composition matters: discover with
+`doc`/`complete`; gather multiple read-only observations inside one `eval`;
+branch/filter/reduce locally; define and reuse small helpers; return a compact
+conclusion rather than paying a model round trip after every observation.  It
+must not become a long tutorial.
+
+### REPL leverage and progress telemetry
+
+REPL leverage is the ability to move cheap control flow below the model
+boundary without moving it above the authority boundary:
+
+`MODEL → persistent SCI → authorized semantic operations → WORLD`.
+
+It has two axes.  The composition axis ranges from **L0 tool-shaped REPL**
+(one operation then return) through **L1 computational REPL** (local parsing,
+filtering, or transformation) to **L2 agentic REPL** (multiple observations,
+data-dependent branching, aggregation/micro-workflow, then at most deliberate
+actuation).  The persistence axis ranges independently from ephemeral
+composition to defined-and-reused helpers.  Neither an arbitrary L2 count nor
+helper reuse is an authority invariant or PASS criterion; both are useful
+product evidence.
+
+Record or derive, without a parallel tracing system where receipts/turns
+already suffice: semantic operations per turn/eval; multi-operation evals;
+data-dependent later operations; local collection processing; helper
+definitions/reuse; repeated equivalent observations; observation-to-edit and
+observation-to-verification model round trips; successful evals without new
+world evidence; and provider latency/retry degradation.
+
+Expose these facts read-only to current `session`, `watch`, steering, and
+adaptation.  Distinguish **computational activity** (an eval completed),
+**world progress** (new observation, mutation, test/verification, or durable
+evidence), and **objective progress** (evidence that the residual task became
+smaller).  The evaluator reports facts; current upstream policy judges them.
+No such signal may widen authority or budget automatically.
+
+Observation and actuation remain asymmetric.  Encourage rich composition of
+read/list/search/stat and pure computation.  Prefer observe + compute +
+decide followed by one/few anchored edits.  Each edit remains individually
+authorized, intent-recorded, outcome-recorded, and replayable; rollback of SCI
+state cannot undo an already completed external mutation.  Semantic operations
+therefore return canonical structured data (coordinates, paths, fields, facts),
+not model-oriented prose; SCI performs interpretation and aggregation.
 
 ## Adaptation and steering signals
 
@@ -230,7 +335,7 @@ userspace directive, task, workflow, or provider epoch at a boundary.  It may
 not mint capabilities, increase a profile, bypass a lease, or widen budget.
 
 The ongoing canary confirms the importance of these signals: authority-derived
-prompting changed behavior from zero operations to real read/search/edit/test
+prompting changed behavior from zero operations to real read/list/stat/edit
 work, but a long sequence of successful `eval` calls can still make no forward
 progress.  That is a current steering/adaptation input, not a reason to weaken
 the evaluator boundary.
@@ -240,44 +345,82 @@ the evaluator boundary.
 Each milestone is a stop-and-review point, not a promise to immediately start
 the next one.
 
-1. **Evaluator/store seam.**  On a fresh `5aa9476` branch, add inert
-   Spec/Instance/Binding types and append-only evaluator tables, retaining
-   tape/userspace unchanged.  Gate: plain-JVM receipt/store properties and
-   migration/version tests.
-2. **Read-only bounded SCI slice.**  Add Jolt-backed `:project/read` binding
-   behind an explicit optional runtime adapter, plus four-tool dispatch and
-   authority-derived prompt/catalog.  Gates: no-SCI normal suite; pinned-Jolt
-   authority/prompt/attenuation tests; no generic prompt leakage.
-3. **Develop/replay slice.**  Add `project/list/search/stat/edit`,
-   intent/outcome receipts, commit-only state, and fresh-process whole-history
-   replay.  Gates: root/anchor properties, zero-real-operation replay witness,
-   runtime/spec/receipt mismatch refusal.
-4. **Current scheduler/resume integration.**  Re-derive TurnLease in current
-   `beam/advance-all`; journal binding and inference epochs; rebuild evaluator
-   beside current tape/task/branch resume.  Gates: deterministic
-   permit/revoke interleavings, deadline non-quiescence, task/tape resume
-   fidelity, and provider-switch provenance without evaluator change.
-5. **Current-upstream canary and conformance freeze.**  Run a disposable
-   single-player task through current manifests/userspace with bounded prompt,
-   focused verification, restart/rebuild witness, and no authority widening.
-   Freeze a contract test matrix against the Jolt reference runtime before any
-   multi-agent evaluator or JS2 work.
+1. **M1 — read-only bounded evaluator vertical slice.**  On one frozen current
+   upstream base, deliver a complete executable path: Spec → Instance → Binding
+   → minimal durable receipt store → pinned Jolt/SCI adapter → trusted
+   `:agent/project-read` ContextSpec
+   (`read/list/search/stat`) → `eval/doc/complete/done` → stable initial-tape
+   orientation → persistent helpers → multi-observation computational eval →
+   commit-only failure behavior → fresh-process reconstruction with zero real
+   world operations.  Keep ordinary non-SCI Samizdat unchanged.  **Stop and
+   review only after this runs.**  In M1, `done` is a terminal ControlEvent
+   whose verification is explicitly unavailable/refused; M2 supplies the
+   controller-owned verification effect.  It is never a shell grant.
+2. **M2 — develop, complete receipts, and verification.**  Add
+   `project/edit`, anchored optimistic mutation, full intent/outcome/exhaustion
+   refusal, root/path/symlink/bound checks, and controller-owned `done`
+   verification with scoped process cleanup.  **Stop and review.**
+3. **M3 — current scheduler/resume/controller integration.**  Re-derive
+   TurnLease in current `beam/advance-all`; preserve current tape/task/branch
+   problem/userspace resume while reconstructing the evaluator; add inference
+   epochs, non-quiescence failure, retained audited budget extension, and
+   read-only leverage/progress telemetry into session/watch/adaptation.
+   **Stop and review.**
+4. **M4 — current-upstream self-hosting canary and freeze.**  Run a disposable
+   single-player task through current userspace/manifests/tasks/memory/
+   adaptation with bounded orientation, interruption/reconstruction, trusted
+   GREEN verification, leverage metrics, and reference-oracle comparison.
+   Freeze the converged baseline.  Stop before JS2.
 
-## First convergence gate
+## Exact first executable convergence gate
 
-The first executable gate after milestone 1 is deliberately small:
+M1's gate is a deterministic evaluator-level conformance test, not a
+model-behavior test.  With the final read profile already present, mint a
+read-only binding for a temporary root and execute **one** recorded evaluation
+conceptually equivalent to:
 
-1. mint an attenuated read-only binding for a temporary project root;
-2. use the four-tool surface to define a persistent helper and perform one
-   `project/stat` operation;
-3. assert durable `begin → intent → outcome → complete` rows;
-4. construct a fresh evaluator, replay history, and prove helper availability
-   with zero real semantic operations; and
-5. run the ordinary current upstream suite without SCI plus the pinned SCI
-   conformance lane.
+```clojure
+(let [entries (project/list "src")
+      relevant? (some #(= "samizdat" (:name %)) entries)]
+  (if relevant?
+    (->> (project/search "defn" {:path "src/samizdat"})
+         (map :path)
+         distinct
+         (take 5)
+         vec)
+    []))
+```
 
-Do not add edit, scheduler leases, self-hosting, or provider switching until
-this two-lane gate is green and reviewed.
+The exact expression follows final structured operation APIs.  It must prove,
+in one evaluator evaluation: multiple semantic observations; later branching
+dependent on an earlier observation; local transform/aggregation; a compact
+canonical result; and ordered durable receipts.  In the same slice, define a
+small persistent helper, use it in a later recorded eval, then construct a
+fresh evaluator and replay all committed evaluations.  Replay must consume the
+same receipt sequence, reproduce result/state and helper availability, and
+perform **zero** real world operations.
+
+The same M1 test set explicitly executes a failed recorded evaluation followed
+by rollback to committed state, and independent pending, receipt-mismatch,
+receipt-exhaustion, and unconsumed-receipt cases.  Each must refuse before an
+unrecorded world operation or replay interpretation occurs.
+
+Expected evidence:
+
+- `EvaluatorSpec`, `EvaluatorInstance`, `EvaluatorBinding`, ContextSpec, and
+  RuntimeCoordinate identities recorded and exact;
+- only `project/read|list|search|stat` advertised by prompt, `doc`, and
+  `complete`, with no generic host tools;
+- `begin → intent → outcome → complete` receipt rows in causal order;
+- multi-observation / data-dependent branch / local aggregation leverage facts;
+- failed evaluation rollback to committed state;
+- fresh-process reconstruction, stable binding identity, zero replay-world
+  operations, and exact mismatch/pending/exhaustion refusal cases;
+- ordinary current upstream no-SCI suite remains green, and the pinned Jolt/SCI
+  conformance lane is green.
+
+Do not add edit, scheduler leases, canary work, provider switching, or any M2+
+feature until this exact two-lane vertical gate is green and reviewed.
 
 ## Deliberately deferred
 
@@ -285,18 +428,29 @@ this two-lane gate is green and reviewed.
   shell;
 - multi-agent / shared evaluator bindings;
 - automatic authority/budget widening;
+- process-global evaluator registry unless lifecycle evidence requires it;
 - replacing upstream prompt/userspace, tape, manifest, task, or scheduler
   architecture;
 - rebasing the old JS1 branch or moving the Jolt reference coordinate;
 - treating the incomplete historical/current canary as convergence evidence.
 
+## Base-motion discipline
+
+`5aa9476` is the planning coordinate, not a command to implement on stale
+upstream.  At implementation start: fetch `yogthos/samizdat` main, record its
+actual SHA, create one convergence branch from that SHA, and freeze that
+milestone base.  Do not continuously rebase merely because upstream moves;
+decide deliberately whether to refresh only at a milestone boundary.
+
 ## Recommendation
 
-**Start a fresh branch from `5aa94769160a92ffb5131adf776fdc06f6157405`.
-First implement the inert evaluator-spec/binding plus append-only evaluator
-receipt-store seam.  Preserve the twelve contract invariants above.  Use
-current upstream userspace, manifests, tape/inference/provider, scheduler,
+**At implementation start, create a fresh branch from the then-current recorded
+`yogthos/samizdat` main SHA (planning inspected `5aa94769160a92ffb5131adf776fdc06f6157405`).
+First implement M1's complete read-only bounded evaluator vertical slice using
+the trusted `:agent/project-read` profile, not inert substrate or a temporary
+one-operation authority.  Preserve the fourteen contract invariants above and
+use current upstream userspace, manifests, tape/inference/provider, scheduler,
 tasks, resume, security policy, and adaptation machinery unchanged.  Re-derive
-only evaluator lifecycle, semantic receipt/replay, and lease integration at
-their current seams.  Run the first convergence gate above.  Stop and review
-before the bounded SCI read-only slice.**
+only evaluator lifecycle, receipt/replay, stable authority projection, and
+their current seams.  Run the exact M1 gate above, record leverage facts, and
+STOP for review before M2.**
