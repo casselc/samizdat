@@ -78,6 +78,34 @@
   regex cannot tell a quoted `;` from an operator.)"
   [#"\$\(" #"`" #"<\(" #">\(" #"\$\[" #"\(\("])
 
+(def ^:private benign-redirect-re
+  "Redirections that neither create a file nor run anything: stderr folded into
+  another stream (`2>&1`, `>&2`) and either stream discarded to /dev/null.
+  Anchored at the `>` itself, so the stream digit in front of it is already
+  consumed."
+  #"(?s)^(>&\d+|>>?[ \t]*/dev/null)")
+
+(defn- benign-redirect-len
+  "The length of the benign redirection starting at index `i` of `raw`, or nil
+  when the redirection there is anything else — a write, an append, an input
+  read — which stays opaque.
+
+  A length rather than a flag because the scanner has to CONSUME the whole
+  token: the `&` in `2>&1` is a redirection operator, and letting the
+  statement splitter see it cut `ls -la 2>&1; cat x` into an `ls -la 2>`, a
+  bare `1`, and a `cat x`, so the command no longer decomposed into statements
+  any rule could match."
+  [raw i]
+  (let [m (re-find benign-redirect-re (subs raw i))
+        tok (if (vector? m) (first m) m)
+        end (when tok (+ i (count tok)))]
+    (when (and tok
+               ;; `> /dev/nullx` is an ordinary file write wearing a familiar
+               ;; prefix; the token must end at the end of a word.
+               (or (>= end (count raw))
+                   (not (re-matches #"[A-Za-z0-9_./-]" (str (nth raw end))))))
+      (count tok))))
+
 (defn- shell-split
   "One quote-aware pass over a command string, yielding its shell STRUCTURE:
   the statement segments (split at unquoted `;`, `|`, `&`, and newline), WHICH
@@ -88,6 +116,10 @@
   feeds one allowed command into the next and runs nothing an allow rule
   cannot see; a `;` or `&` starts a statement that has nothing to do with the
   first. `decide` uses the distinction to stop refusing `grep x | head`.
+
+  A redirection that only discards or folds stderr does not count as one: it
+  writes nothing and runs nothing, and treating `find … 2>/dev/null` as
+  opaque cost a live run a turn every time it looked around (karamazov-7es).
 
   Quote semantics follow bash: single quotes are literal (nothing inside is
   an operator, not even backslash), double quotes honor backslash escapes, and
@@ -119,7 +151,13 @@
                     (= c \') (recur (inc i) :single (conj cur c) segs redirect? seps)
                     (= c \") (recur (inc i) :double (conj cur c) segs redirect? seps)
                     (sep? c) (recur (inc i) :code [] (conj segs (apply str cur)) redirect? (conj seps c))
-                    (or (= c \<) (= c \>)) (recur (inc i) :code (conj cur c) segs true seps)
+                    (or (= c \<) (= c \>))
+                    (if-let [len (and (= c \>) (benign-redirect-len raw i))]
+                      ;; consumed whole, so its own `&` never reaches the
+                      ;; statement splitter
+                      (recur (+ i len) :code (into cur (subs raw i (+ i len)))
+                             segs redirect? seps)
+                      (recur (inc i) :code (conj cur c) segs true seps))
                     :else (recur (inc i) :code (conj cur c) segs redirect? seps))
             :single (if (= c \')
                       (recur (inc i) :code (conj cur c) segs redirect? seps)
@@ -169,14 +207,16 @@
     {:raw raw
      :head (command-head raw)
      :segments segments
-     ;; A PIPELINE and nothing else: no substitution, no redirection, and the
-     ;; only separator was `|`. Every segment is then a command an allow rule
-     ;; can see in full, which is what lets `decide` stop refusing a pipe
-     ;; between two allowed reads.
-     :pipeline-only? (boolean (and (> (count segments) 1)
-                                   (= #{\|} separators)
-                                   (not redirection?)
-                                   (not (some #(re-find % raw) complex-markers))))
+     ;; DECOMPOSABLE: the command is exactly a list of statements, with
+     ;; nothing the shell would expand into a command a rule cannot see — no
+     ;; substitution, no subshell, no redirection that writes. Every segment
+     ;; is then a command an allow rule can read in full, which is what lets
+     ;; `decide` allow a compound whose every part is independently allowed.
+     ;; The separator does not enter into it: `|`, `;`, `&&` and a newline
+     ;; all run exactly the statements shell-split just handed back.
+     :decomposable? (boolean (and (> (count segments) 1)
+                                  (not redirection?)
+                                  (not (some #(re-find % raw) complex-markers))))
      :complex? (boolean (or (some #(re-find % raw) complex-markers)
                             redirection?
                             (> (count segments) 1)))}))
@@ -260,7 +300,7 @@
 
   `session` is {:grants [pattern ...]} from the grants table (empty is fine)."
   [session command]
-  (let [{:keys [raw head complex? pipeline-only? segments]} (classify command)
+  (let [{:keys [raw head complex? decomposable? segments]} (classify command)
         ;; Allow matching sees the command RAW — a wrapper prefix changes what
         ;; runs and must not ride an allow. Deny matching sees EVERY statement
         ;; segment (each is a command the shell would run on its own) plus its
@@ -280,32 +320,43 @@
                  deny-hit :deny
                  grant-hit :allow
                  :else (or base-hit default-effect))
-        ;; A PIPELINE of independently-allowed commands is allowed. The blanket
-        ;; downgrade refused `find . -type f | sort` and `grep x | head` —
-        ;; both segments on the list, nothing hidden from a rule — and a run
-        ;; spends a turn on each refusal it meets. The reasoning that makes a
-        ;; compound command opaque does not apply here: `|` starts no
-        ;; statement of its own, so every command the shell will run is one
-        ;; the allow rules just matched. `;`, `&`, substitution and
-        ;; redirection are all still opaque and still downgrade.
-        piped-allow? (and pipeline-only?
-                          (not deny-hit)
-                          (seq segments)
-                          (every? #(= :allow (last-match base-rules [%])) segments))
+        ;; The statements of a decomposable command, each judged on its own.
+        ;; A compound was refused wholesale — `find . -type f | sort`,
+        ;; `ls -la; cat deps.edn`, `git status && ls -la` — every part on the
+        ;; allow list, nothing hidden from a rule, and a run spends a turn on
+        ;; each refusal it walks into. What makes a compound opaque is a
+        ;; command a rule never saw, not the punctuation between commands: if
+        ;; shell-split enumerated every statement and each one matched an
+        ;; allow, then every command the shell will run has been allowed.
+        ;; Substitution, subshells and writing redirections still hide a
+        ;; command and still downgrade.
+        segment-effects (when decomposable?
+                          (map #(last-match base-rules [%]) segments))
+        compound-allow? (and decomposable?
+                             (not deny-hit)
+                             (seq segments)
+                             (every? #(= :allow %) segment-effects))
+        ;; The first statement that is not independently allowed — what the
+        ;; refusal names, so the model fixes THAT rather than re-splitting a
+        ;; command whose other parts were never the problem.
+        blocked-segment (when (and decomposable? (not compound-allow?))
+                          (->> (map vector segments segment-effects)
+                               (some (fn [[s e]] (when-not (= :allow e) s)))))
         ;; A complex command cannot otherwise ride an allow: downgrade
         ;; allow → ask, but a deny still stands.
-        promoted? (and complex? (not piped-allow?)
+        promoted? (and complex? (not compound-allow?)
                        (= :allow (or base-hit default-effect))
                        (not deny-hit) (not grant-hit))
         effect (cond
-                 (and piped-allow? (not= :deny effect)) :allow
+                 (and compound-allow? (not= :deny effect)) :allow
                  (and complex? (= :allow effect)) :ask
                  :else effect)]
     ;; `:promoted?` — this command WOULD have been allowed on its head and was
     ;; downgraded for being compound. Returned because the refusal has to be
     ;; able to say so: without it the message reads "`ls` is not on the allow
     ;; list", which is false and sent a live run round the same wall twice.
-    {:effect effect :head head :raw raw :complex? complex? :promoted? promoted?}))
+    {:effect effect :head head :raw raw :complex? complex? :promoted? promoted?
+     :blocked-segment blocked-segment}))
 
 ;; --- the shell tool ---------------------------------------------------------
 
@@ -352,7 +403,7 @@
   (let [command (str (:command args))
         env (or (:env ctx) (into {} (System/getenv)))
         session (if (and conn run-id) (grants/for-run conn run-id) {:grants []})
-        {:keys [effect head complex? promoted?]} (decide session command)
+        {:keys [effect head complex? promoted? blocked-segment]} (decide session command)
         known (secrets/known-values env command)]
     (case effect
       :deny
@@ -377,6 +428,12 @@
        :result (prompt/render "shell-refused"
                               {:command command :head head :complex? complex?
                                :promoted promoted?
+                               ;; Named when the command DID decompose and one
+                               ;; statement is the whole reason: pointing at
+                               ;; that part beats telling a model to re-split a
+                               ;; command whose other parts were never refused.
+                               :blocked blocked-segment
+                               :blockedhead (some-> blocked-segment command-head)
                                :markers (when complex?
                                           (str/join " or "
                                                     (map #(str "`" % "`")

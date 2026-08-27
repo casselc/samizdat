@@ -254,7 +254,13 @@
    "src/samizdat/security/policy.clj"
    {:threshold {120000 "Shell command timeout. A security bound, and see the
                         note on secrets.clj below: a control the agent could
-                        retune is not a control."}}
+                        retune is not a control."}
+    :vocabulary {"(?s)^(>&\\d+|>>?[ \\t]*/dev/null)"
+                 "What a benign redirection IS — `2>&1`, `2>/dev/null` — is
+                  POSIX shell structure the lexer must recognize, like the
+                  statement separators beside it. Not a vocabulary a project
+                  tunes: widening it weakens the redirection downgrade, which
+                  is a security control (see the secrets.clj note)."}}
 
    "src/samizdat/lsp/client.clj"
    {:threshold {5000 "LSP request timeout."
