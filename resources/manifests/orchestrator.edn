@@ -8,6 +8,13 @@
 ;; back to the worker to keep going; :abandoned/:exhausted finish directly.
 ;; Select with config :run :loop "orchestrator".
 ;;
+;; The critic's revise goes to :retry — the SAME worker sub-loop on a node of
+;; its own — never back to :start: the beam driver's turn slice redirects any
+;; edge returning to the entry node into :end, so a whole-run manifest that
+;; routes revise to :start has each cycle run as a separate turn with a fresh
+;; data map, and the critic's attempt counter resets every bounce (the same
+;; data loss the feature loop hit live, run 3b8d2af5).
+;;
 ;; This is the structural basis for multi-agent work: once a worker is a
 ;; composable sub-loop, a top level can run several of them — one per agent,
 ;; each its own loop — coordinating through the shared workspace and mailbox.
@@ -15,17 +22,24 @@
  :subworkflows {:loop/worker "worker"}
 
  :cells {:start  :loop/worker
+         :retry  :loop/worker
          :critic :gate/critic
          :finish :loop/finish}
 
  :edges {:start  {:done      :critic
                   :abandoned :finish
                   :exhausted :finish}
+         :retry  {:done      :critic
+                  :abandoned :finish
+                  :exhausted :finish}
          :critic {:ship   :finish
-                  :revise :start}
+                  :revise :retry}
          :finish :end}
 
  :dispatches {:start  [[:done      (fn [d] (= :done (:verdict d)))]
+                       [:abandoned (fn [d] (= :abandoned (:verdict d)))]
+                       [:exhausted (fn [d] (= :exhausted (:verdict d)))]]
+              :retry  [[:done      (fn [d] (= :done (:verdict d)))]
                        [:abandoned (fn [d] (= :abandoned (:verdict d)))]
                        [:exhausted (fn [d] (= :exhausted (:verdict d)))]]
               :critic [[:ship   (fn [d] (= :ship (:critic/decision d)))]

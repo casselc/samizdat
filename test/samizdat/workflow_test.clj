@@ -340,3 +340,17 @@
         "the header names the manifest and version that drive the run")
     (is (str/includes? (str (:result r)) "x/one")
         "and the wiring rendered is that manifest's, not loop.edn's")))
+
+(deftest introspect-falls-back-when-the-turn-workflow-carries-no-definition
+  ;; karamazov-2ld, found (and hot-patched live) by the harness's own
+  ;; supervisor during the todomvc dogfood run: the beam destructures
+  ;; compile-turn-loop's COMPILED slice into ctx :turn-workflow, which has no
+  ;; :definition — so introspect showed the supervisor an EMPTY loop wiring at
+  ;; exactly the moment it was diagnosing the loop. A :turn-workflow without a
+  ;; :definition falls back to the stored manifest body rather than rendering
+  ;; nothing.
+  (let [r (base/run-tool {:tool-name "introspect" :branch {:id "B1"}
+                          :config {:run {:loop "loop"}}
+                          :turn-workflow {:compiled-fsm {} :input-schema-raw {}}})]
+    (is (str/includes? (str (:result r)) "loop/assemble")
+        "the wiring shown is the stored loop manifest's, not an empty dump")))

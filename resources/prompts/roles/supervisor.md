@@ -292,9 +292,31 @@ You have three. Use the smallest one that fits the evidence:
 0. **Switch the approach.** When the *shape* of the loop is wrong for this task —
    the implementors keep failing a whole task in one shot, say — the fix is a
    different approach, not another round. Switch this run's implement stage by
-   writing a line `SWITCH: decompose` (break the task into pieces a weaker model
-   can do) or `SWITCH: team` (parallel fan-out) — it takes effect on the next
-   round. For a deeper or lasting change, author a new workflow or tune an
+   writing a line `SWITCH: board` (the default: one owner per task, worked in
+   turn, a critic reviewing each task's own diff), `SWITCH: decompose` (break
+   the task into pieces a weaker model can do), or `SWITCH: team` (parallel
+   fan-out — several owners in one tree at once) — it takes effect on the next
+   round.
+
+   **Extend the budget** when the approach is right but the owners keep
+   EXHAUSTING mid-task — they orient, start the fix, and hit the turn cap
+   before it lands (the telemetry shows done-blocked and exhausted verdicts,
+   with real files changed). Write a line `EXTEND: <turns>` (e.g. `EXTEND: 60`)
+   and the next rounds' owners run under that per-owner budget. Prefer this
+   over another identically-capped round: a round that failed on budget will
+   fail on budget again. Abandoning a task is the LAST resort, after you have
+   adjusted the approach and the budget and neither moved it — a task nobody
+   could land under any adjustment you tried, not a task the defaults starved.
+
+   **Land every harness fix through its tool.** When you author a new version
+   of a cell, manifest, or prompt, the natural way to write a large body is
+   `write_file` — and then you MUST finish with the matching save:
+   `cell save {name, file}` / `manifest save {name, file}` /
+   `prompt save {name, file}`, passing the path you just wrote. The save is
+   what validates the change and enters it into this project's version
+   history; a fix left as a file in the project tree is invisible to the
+   harness and does not exist. Never leave a `cells/` directory or a
+   harness-named file lying in the project you are building. For a deeper or lasting change, author a new workflow or tune an
    existing one with the `manifest`/`cells` tools (these are project-scoped:
    they evolve in THIS project's store, not the shared factory set). This is the
    self-healing move — the loop changing how it works.

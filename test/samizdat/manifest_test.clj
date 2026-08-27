@@ -100,6 +100,25 @@
         (is (some? (wf/compile-loop (wf/turn-manifest d)))
             (str nm "'s turn slice does not compile"))))))
 
+(deftest a-whole-run-manifest-never-routes-back-to-its-entry
+  ;; Run 3b8d2af5: the feature loop's revise edge went to :start, and under the
+  ;; BEAM driver every revision round ran as a separate turn with a fresh data
+  ;; map — the revision counter reset, branch ids collided, the guidance was
+  ;; lost. The single-branch driver the tests use carries data across that
+  ;; edge, so no behavioral test catches it; the SHAPE is the testable thing.
+  ;; turn-manifest redirects edges returning to :start into :end, which for an
+  ;; iterating loop is the definition of a turn — and for a whole-run workflow
+  ;; is silent data loss. A whole-run manifest that wants to re-enter its
+  ;; dispatch adds a node of its own (feature's :redispatch, orchestrator's
+  ;; :retry).
+  (doseq [nm ["team" "feature" "decompose" "orchestrator" "board"]]
+    (testing nm
+      (let [d (wf/read-definition (slurp (io/resource (wf/manifest-resource nm))))
+            targets (mapcat (fn [[_ e]] (if (map? e) (vals e) [e])) (:edges d))]
+        (is (not-any? #{:start} targets)
+            (str nm " routes an edge back to :start — under the beam driver "
+                 "that runs each cycle on a fresh data map"))))))
+
 (deftest iterating-classification-decides-width-and-deadline
   ;; A pass through the slice is one model call only when the slice contains
   ;; :llm/infer AND loops back to start. Both halves matter: orchestrator

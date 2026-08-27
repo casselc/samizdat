@@ -43,7 +43,7 @@
   the next — so iteration through different approaches happens even when the
   supervisor is passive or can't decide. The supervisor can still switch earlier
   (or to any rung) with a SWITCH: line; this is the floor, not the ceiling."
-  ["team" "decompose"])
+  ["board" "team" "decompose"])
 
 (defn- next-strategy [current]
   (second (drop-while #(not= % current) implement-ladder)))
@@ -63,6 +63,21 @@
   (let [files (gitdiff/changed-files root git-baseline)]
     (boolean (and files (empty? files)))))
 
+(defn- root-error
+  "The exception a cell actually threw, out of mycelium's execution wrapper —
+  the same unwrapping beam/unwrap-round-error does, for the same reason: every
+  nested-workflow failure otherwise records as the same opaque
+  \"execution error\", which told nobody what broke (observed live on the
+  board stage). Returns {:message :node}."
+  [e]
+  (loop [cur e, node nil, depth 0]
+    (let [d (ex-data cur)
+          inner (:error d)
+          node (or (:current-state-id d) (:last-state-id d) node)]
+      (if (and (instance? Throwable inner) (< depth 8))
+        (recur inner node (inc depth))
+        {:message (ex-message cur) :node node}))))
+
 (defn- safely
   "Run a stage body, but never let it take the whole run down. A stage that
   throws records the error and falls through to `fallback` (a safe default for
@@ -73,18 +88,27 @@
   [conn run-id stage data body fallback]
   (try (body)
        (catch Throwable e
-         (let [msg (str (name stage) ": " (ex-message e))]
-           (journal/note! conn run-id :stage-error {:data {:stage stage :error (ex-message e)}})
+         (let [{:keys [message node]} (root-error e)
+               msg (str (name stage) (when node (str "/" node)) ": " message)]
+           (journal/note! conn run-id :stage-error
+                          {:data {:stage stage :node (some-> node str) :error message}})
            (-> (fallback data)
                (update :feature/errors (fnil conj []) msg))))))
 
 (defn- run-role
   "Run a role sub-loop (compiled) on a fresh branch `bid` with problem `prob` and
-  role-prompt `suffix`. Returns {:verdict :answer}."
+  role-prompt `suffix`. Returns {:verdict :answer}.
+
+  The branch is marked ADVISORY: its done delivers a verdict about the run,
+  not shippable work, so the ship gate's evidence rungs (figures need
+  artifacts; the tests must be green) do not apply — they gated the verdict
+  on the very condition it was reporting, and every advisory role exhausted
+  its budget unable to conclude (karamazov-t86)."
   [{:keys [conn run-id] :as ctx} compiled bid prob suffix]
   (runs/open-branch! conn run-id {:branch-id bid})
-  (let [b (state/new-branch {:id bid :problem prob
-                             :messages (turn/initial-messages prob suffix)})
+  (let [b (assoc (state/new-branch {:id bid :problem prob
+                                    :messages (turn/initial-messages prob suffix)})
+                 :advisory? true)
         out (myc/run-compiled compiled ctx {:branch b :turn 1})]
     {:verdict (:verdict out) :answer (get-in out [:branch :final-answer])}))
 
@@ -98,6 +122,69 @@
     (let [first-line (-> (str answer) str/split-lines first str str/upper-case)]
       (if (str/includes? first-line "REVISE") :revise :pass))))
 
+(cell/defcell :feature/redispatch
+  {:doc "The revise round's re-entry point: a pass-through node whose EDGES
+        re-dispatch the implement strategy. A node of its own, never a route
+        back to :start — the beam driver's turn slice redirects any edge that
+        returns to the entry node into :end, so a whole-run manifest that
+        routes revise to :start has each revision run as a separate turn with
+        a FRESH data map: :feature/revisions resets, branch ids collide, and
+        the round bookkeeping is gone. Observed live (run 3b8d2af5); the
+        single-branch driver the tests use carries data across that edge, so
+        only a beam-driven run sees it."
+   :pure true
+   :requires []}
+  (fn [_ data] data))
+
+(cell/defcell :feature/board
+  {:doc "The IMPLEMENT stage, board strategy (the default): run the board loop
+        as this round's implementation — a queue of owned tasks, each claimed by
+        one implementor, worked to a finish, and reviewed by a critic on the
+        diff THAT task produced before it closes.
+
+        Nested, so the board summarizes and returns rather than finishing the
+        run: the feature loop still has its reviewer, its tests and its
+        supervisor to run on the round as a whole. A revise round re-enters with
+        the findings, and the board picks up whatever is still open — the tasks
+        that landed stay closed, so a second round is the work that is left
+        rather than the work again."
+   :effects [:net :db]
+   :requires [:config :conn :run-id :root]}
+  (fn [{:keys [conn run-id] :as ctx} {:keys [branch] :as data}]
+    (safely conn run-id :board data
+      (fn []
+        (let [;; The supervisor's EXTEND lever: owners in this round run under
+              ;; the extended budget. On the ctx, because the worker loop reads
+              ;; its cap from ctx :max-turns.
+              ctx (if-let [budget (:feature/turn-budget data)]
+                    (assoc ctx :max-turns budget)
+                    ctx)
+              out (myc/run-compiled (wf/compiled-manifest "board") ctx
+                                    {:branch branch :turn 1
+                                     :board/nested? true
+                                     ;; round-scoped branch ids, and the
+                                     ;; findings become tasks when the last
+                                     ;; round closed everything it opened
+                                     :board/round (revision data)
+                                     :board/guidance (:revise/guidance data)})]
+          (assoc data
+                 :board/landed (:board/landed out)
+                 :board/left (:board/left out)
+                 ;; The shape the supervisor's telemetry digest reads
+                 ;; (`:nobody-shipped` counts :done statuses in :results) —
+                 ;; the board's outcome in the fan-out's result vocabulary, so
+                 ;; every downstream stage works unchanged whichever strategy
+                 ;; implemented the round.
+                 :results (vec (concat
+                                (map (fn [{:keys [task answer]}]
+                                       {:status :done :subtask task :answer answer})
+                                     (:board/landed out))
+                                (map (fn [{:keys [task answer]}]
+                                       {:status :abandoned :subtask task :answer answer})
+                                     (:board/left out))))
+                 :branch (assoc branch :final-answer (:answer out)))))
+      (fn [d] (assoc d :branch (assoc (:branch d) :final-answer nil))))))
+
 (cell/defcell :feature/review
   {:doc "The reviewer role: run reviewer.edn on the implementors' finished work
         (on its own branch R<rev>) and read back PASS or REVISE. Fail-open to
@@ -107,6 +194,16 @@
   (fn [{:keys [conn run-id] :as ctx} {:keys [branch] :as data}]
     (safely conn run-id :review data
       (fn []
+        (if (or (:board/landed data) (:board/left data))
+          ;; A board round: every task that closed was already reviewed by the
+          ;; critic ON ITS OWN DIFF before it could close (RFC-011), so a
+          ;; second 40-turn reviewer pass over the same work re-reviews what
+          ;; was reviewed — and on a red tree it could not even deliver its
+          ;; verdict (karamazov-t86). The round-level judge (critique) and the
+          ;; tests (verify) still gate the round.
+          (do (journal/note! conn run-id :review
+                             {:data {:decision :pass :verdict :per-task}})
+              (assoc data :review/decision :pass :review/findings ""))
         (let [prob (str "Review this feature's work.\n\nFeature:\n" (:problem branch)
                         "\n\nThe implementors reported:\n" (:final-answer branch))
               {:keys [verdict answer]}
@@ -116,7 +213,7 @@
                    (catch Throwable e {:verdict :error :answer (ex-message e)}))
               decision (review-decision verdict answer)]
           (journal/note! conn run-id :review {:data {:decision decision :verdict verdict}})
-          (assoc data :review/decision decision :review/findings (str answer))))
+          (assoc data :review/decision decision :review/findings (str answer)))))
       ;; fail-open: a broken review does not block shipping
       (fn [d] (assoc d :review/decision :pass :review/findings "")))))
 
@@ -169,14 +266,28 @@
 (defn- parse-switch
   "A supervisor may switch this run's implement approach with a `SWITCH: <name>`
   line — the mid-run self-healing lever. Only the switchable implement strategies
-  are honoured: `decompose` (the decompose-on-stuck loop) or `team`/`fanout` (the
-  default parallel fan-out). Returns the normalized strategy or nil."
+  are honoured: `board` (the default — one owner per task, reviewed per task),
+  `decompose` (the decompose-on-stuck loop) or `team`/`fanout` (the parallel
+  fan-out). Returns the normalized strategy or nil."
   [answer]
   (when-let [m (re-find #"(?im)^\s*SWITCH:\s*([A-Za-z-]+)" (str answer))]
     (let [s (str/lower-case (second m))]
-      (cond (= s "decompose") "decompose"
+      (cond (= s "board") "board"
+            (= s "decompose") "decompose"
             (#{"team" "fanout" "fan-out"} s) "team"
             :else nil))))
+
+(defn- parse-extend
+  "A supervisor may raise the per-owner turn budget for the following rounds
+  with an `EXTEND: <n>` line — the lever for the failure mode where owners keep
+  exhausting mid-task (orient, start the fix, run out). Clamped: an extension
+  below the current default is not an extension, and an unbounded one is a
+  spend policy no single supervisor turn should be able to set. Returns n or
+  nil."
+  [answer]
+  (when-let [m (re-find #"(?im)^\s*EXTEND:\s*(\d{1,4})" (str answer))]
+    (let [n (parse-long (second m))]
+      (when (and n (pos? n)) (min n 200)))))
 
 (defn- supervise-directive
   "The within-run directive from the supervisor's verdict + answer: STOP (ship
@@ -270,10 +381,22 @@
               live (session/render mark)
               _ (session/mark! mark)
               prob (str "Introspect on this run and decide whether the loop needs "
-                        "an adjustment. A STAGE CRASHED signal is a harness bug the "
-                        "loop just survived — diagnose it and, if you can, fix it at "
-                        "the source with your tools. If a problem is systemic, tune "
+                        "an adjustment. If a problem is systemic, tune "
                         "the harness.\n\n"
+                        ;; Claim a crash only when one happened. The
+                        ;; unconditional "a STAGE CRASHED signal is a harness
+                        ;; bug — diagnose it" sentence sent a supervisor with a
+                        ;; healthy run chasing a phantom crash for a whole
+                        ;; branch budget (run e1491f04). Authored BY the
+                        ;; harness's own supervisor via `cell save` — the first
+                        ;; protocol-compliant self-edit — and folded into the
+                        ;; canonical cell here.
+                        (when-let [errs (seq (:feature/errors data))]
+                          (str "A STAGE CRASHED signal appeared this run — a "
+                               "harness bug the loop just survived — diagnose "
+                               "it and, if you can, fix it at the source with "
+                               "your tools.\n\nStage errors:\n- "
+                               (str/join "\n- " (map str errs)) "\n\n"))
                         ;; Measured, not inferred. The digest says what the
                         ;; stages produced; this says where the turns actually
                         ;; went and whether the last change moved anything.
@@ -328,14 +451,17 @@
                              (wf/prompt-text "roles/supervisor"))
                    (catch Throwable e {:verdict :error :answer (ex-message e)}))
               directive (supervise-directive verdict answer)
-              ;; The mid-run self-healing lever: the supervisor can switch this
-              ;; run's implement approach. A switch implies keep-solving with the
-              ;; new strategy, so it forces a revise.
-              switch (parse-switch answer)]
+              ;; The mid-run self-healing levers: switch the implement approach,
+              ;; and/or extend the per-owner turn budget for the rounds that
+              ;; follow. Either implies keep-solving, so both force a revise.
+              switch (parse-switch answer)
+              extend (parse-extend answer)]
           (journal/note! conn run-id :supervise
-                         {:data {:directive directive :verdict verdict :switch switch}})
+                         {:data {:directive directive :verdict verdict
+                                 :switch switch :extend extend}})
           (cond-> (assoc data :supervisor/notes (str answer))
             switch                (assoc :implement-strategy switch :feature/escalate true)
+            extend                (assoc :feature/turn-budget extend :feature/escalate true)
             (= directive :revise) (assoc :feature/escalate true)
             (= directive :stop)   (assoc :feature/stop true))))
       ;; fail-safe: a broken supervisor lets the loop proceed unchanged
@@ -382,7 +508,7 @@
           ;; Deterministic escalation: if the failing strategy has had its
           ;; soft-cap rounds and the supervisor didn't switch, advance the ladder
           ;; so the next round tries a DIFFERENT approach on its own.
-          strategy (or (:implement-strategy data) "team")
+          strategy (or (:implement-strategy data) "board")
           auto-next (when (and (= decision :revise)
                                (>= (rounds-on-strategy data strategy) soft-cap))
                       (next-strategy strategy))]
@@ -398,8 +524,25 @@
         ;; pass + critic ship + a real diff + green tests — not in the
         ;; fan-out join, which used to mark it unconditionally
         ;; (karamazov-blt.19).
+        ;;
+        ;; The ANSWER is written here, because under the beam driver the turn
+        ;; slice cuts the :finish node out of a whole-run manifest and the
+        ;; beam's own ending reads the branch's :final-answer — a ship whose
+        ;; final round happened to land nothing carried nil there, and two
+        ;; live runs (3b8d2af5, e1491f04) had their green, shipped feature
+        ;; recorded as finish-run! :failed, teaching record-workflow-outcome!
+        ;; that the loop never ships.
         (assoc data :feature/decision :ship :verdict :done
-               :branch (assoc (:branch data) :status :done))   ; -> finish, :completed
+               :branch (let [b (:branch data)]
+                         (assoc b :status :done
+                                :final-answer
+                                (or (not-empty (str (:final-answer b)))
+                                    (str "Feature shipped after " rev " revision round(s):"
+                                         " the review passed, the critic shipped it, and"
+                                         " the tests passed"
+                                         (when-let [note (:verify/note data)]
+                                           (str " (" note ")"))
+                                         ".")))))   ; -> finish, :completed
 
         :abandon
         ;; Honest end, not a hollow completed. Any partial work stays on disk for
@@ -426,7 +569,7 @@
                    ;; repeating a losing approach.
                    :feature/tried (conj (or (:feature/tried data) [])
                                         {:round rev
-                                         :strategy (or (:implement-strategy data) "team")
+                                         :strategy (or (:implement-strategy data) "board")
                                          :outcome (cond hollow "changed no files"
                                                         (= :revise (:review/decision data)) "review bounced it"
                                                         (false? (:verify/passed? data)) "tests failed"

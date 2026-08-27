@@ -232,6 +232,17 @@
   ;; — now data-defined (gates.edn :ship-gates, drg-4026 #44). The coding
   ;; loop's ship gate (tests pass, review passed) rebuilds on this seam.
   (let [answer (base/arg ctx :answer)
+        ;; An ADVISORY branch (a reviewer or supervisor role loop) delivers a
+        ;; VERDICT through done, not shippable work: it quotes the run's own
+        ;; figures ("19 tests, 7 failed") and, on a red tree, describes the
+        ;; redness it is reporting. The figure rung demanded artifacts for
+        ;; those numbers and the verify rung demanded the very green the
+        ;; verdict may be saying is absent, so every advisory role ground out
+        ;; its whole budget unable to say what it had concluded, and the
+        ;; caller read an exhaustion fallback instead of the verdict
+        ;; (karamazov-t86 — observed on every supervisor branch of three
+        ;; consecutive live runs). run-role marks the branch.
+        advisory? (boolean (:advisory? branch))
         confirmed (state/confirmed-artifacts branch)
         own (concat confirmed (state/empirical-artifacts branch))
         ;; And what the rest of the run established: a branch is shown the
@@ -247,10 +258,11 @@
         borrowed (when (seq elsewhere)
                    (seq (remove (set uncovered)
                                 (uncovered-tokens answer own [problem]))))
-         block (ship-gate-block
-                {:answer answer :problem problem
-                 :evidence evidence
-                 :uncovered-numbers uncovered-numbers})
+         block (when-not advisory?
+                 (ship-gate-block
+                  {:answer answer :problem problem
+                   :evidence evidence
+                   :uncovered-numbers uncovered-numbers}))
         ;; The test rung — what makes the loop test-driven rather than one-shot.
         ;; `done` is not terminal until the unit's tests actually pass: run the
         ;; unit's tests, and a red / hollow / untested result is fed back so the
@@ -261,7 +273,8 @@
         verify-cmd (get-in ctx [:config :run :verify-cmd])
         verify-focused? (get-in ctx [:config :run :verify-focused?] false)
         require-test? (get-in ctx [:config :run :require-test?] true)
-        verify-on? (and (nil? block)
+        verify-on? (and (not advisory?)
+                        (nil? block)
                         (or verify-focused? (not (str/blank? (str verify-cmd)))))
         changed (when verify-on? (gitdiff/changed-files (:root ctx) (:git-baseline ctx)))
         ;; Prefer the focused command; fall back to the configured one. Run only
