@@ -91,3 +91,100 @@ Verdict rule applied: the sibling pinned Jolt checkout remains dirty; per the
 frozen M1 prompt the exact gate failure is recorded as M1 FAIL rather than
 altering that repository. Samizdat-side M1 work is left complete and green in
 the working tree for a rerun once the Jolt checkout is clean at the pinned SHA.
+
+## Closure (2026-08-27, verification fence)
+
+The initial M1 FAIL above stands unchanged. Nothing in this closure alters the
+verdict: the exact bounded gate still refuses to run because the sibling pinned
+Jolt checkout carries 9 tracked modifications and the Samizdat working tree is
+itself dirty.
+
+### Store-test fence (owned files only)
+
+`test/samizdat/evaluator_store_test.clj` was cleaned and made to compile:
+
+- Removed six stray `%%` comment artifacts (mangled `;;` markers) in the two
+  `begin!`/last-insert-id regression tests.
+- Removed one stray `)` in `begin-last-insert-id-stays-inside-the-writer-section`
+  that left the form unbalanced and the namespace unreadable.
+
+The writer-critical-section regression is grounded in the actual db locking:
+`db/with-conn` serializes ALL connection access through one global `locking`
+monitor (`conn-lock`), Jolt monitors are per-thread reentrant, and
+`last_insert_rowid()` answers for the connection, not the statement — so
+`begin!`'s INSERT and its `last-insert-id` read must hold the monitor
+continuously. The test parks thread A inside the redefined `db/last-insert-id`
+(post-INSERT, pre-return) and proves a second writer cannot enter its section
+until A releases, and that the id A returns names A's own row.
+
+Focused ordinary test (advisory, NOT exact-gate):
+
+```text
+$ ulimit -n 1024; ../jolt/bin/jolt -A:test -e '(require (quote clojure.test) (quote samizdat.evaluator-store-test)) (clojure.test/run-tests (quote samizdat.evaluator-store-test))'
+Ran 3 tests. 213 assertions passed, 0 failures, 0 errors.
+```
+
+Deterministic across three consecutive runs.
+
+### bin/js1-m1 fence (tested; no external repo changed)
+
+- `bin/js1-m1 sha` emits the tested Samizdat SHA:
+  `Samizdat 335e664f91f8e6877641f1bec1aeb5131813f04c`.
+- `bin/js1-m1 check` (and `test`) refuses the dirty Samizdat checkout (7 tracked
+  modifications) before reaching Jolt/SCI.
+- `check_jolt` in isolation refuses the dirty pinned Jolt checkout (the same 9
+  tracked modifications recorded above).
+- SCI is clean at `32d62a5136ad3dc148588752f5bcc4cc30b14752` / `0.13.53`, so the
+  SCI refusal branch is correctly not exercised.
+
+### Full ordinary no-SCI suite (advisory, NOT exact-gate)
+
+```text
+$ ulimit -n 1024; ../jolt/bin/jolt -M:test
+Ran 1354 tests. 4986 assertions passed, 2 failures, 0 errors.
+```
+
+The 2 failures are both in `base_test.clj` and both flag the uncommitted
+`src/samizdat/evaluator.clj` (the M1 evaluator), not the store test:
+
+- `no-new-model-facing-prose-in-src` — model-facing prose in `src/`.
+- `nothing-in-src-decides-what-the-harness-does` — hardcoded thresholds in
+  `src/` (19 literals: 30000, 4096, 200000, 128, 191, 194, 223, 160, 225, 236,
+  238, 239, 159, 144, 241, 243, 143, 8, 5).
+
+These are policy violations in the M1 evaluator source (thresholds and prose
+belong in `resources/`, per AGENTS.md), outside this fence's owned files. They
+supersede the earlier "0 failures" advisory run recorded above, which predated
+the M1 evaluator source landing in `src/`.
+
+### Nonclaim
+
+M1 remains **FAIL**. The advisory green store test and the `bin/js1-m1`
+refusal behaviour are recorded as evidence, not as a PASS. The exact gate still
+requires a clean committed Samizdat checkout plus a clean Jolt worktree at the
+pinned SHA; neither holds, and the full ordinary suite is not green (2 failures
+in the M1 evaluator source).
+
+## Closure correction (2026-08-27, before frozen-base commit)
+
+The two ordinary-suite policy findings above were corrected in the evaluator
+before this M1 closure was committed: bounded messages use the trusted prompt
+resource, and mechanism ceilings are grouped and justified without changing the
+ContextSpec-controlled operation bounds.  The earlier failing ordinary result
+remains historical evidence; it is superseded by these advisory reruns on the
+same dirty Jolt runtime:
+
+```text
+$ ulimit -n 1024; ../jolt/bin/jolt -M:test
+Ran 1354 tests. 4988 assertions passed, 0 failures, 0 errors.
+
+$ SAMIZDAT_BOUNDED_TEST=1 ../jolt/bin/jolt -Sdeps '{:deps {borkdude/sci {:local/root "../jolt/vendor/sci"}}}' -A:test -e '... samizdat.evaluator-test ...'
+Ran 13 tests. 160 assertions passed, 0 failures, 0 errors.
+```
+
+The bounded rerun covers component-wise symlink refusal, bounded/strict UTF-8
+read semantics, deterministic `project/stat` digest, per-evaluation timeout and
+token narrowing, append-only receipt/replay behavior, and current workflow
+bounded-profile activation/refusal.  It remains advisory because the Jolt
+runtime is dirty and Samizdat has not yet been committed.  The exact-gate
+nonclaim above still applies until clean coordinates are tested.

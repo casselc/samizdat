@@ -7,7 +7,17 @@
 
   This namespace intentionally requires jolt.sandbox and therefore loads only
   in the pinned bounded lane. Ordinary Samizdat reaches it through dynamic
-  resolution and does not put SCI on its classpath."
+  resolution and does not put SCI on its classpath.
+
+  Read-side root confinement: every read/list/search/stat path is validated
+  lexically first (bounded, relative, non-escaping), then walked component by
+  component — any symbolic link in ANY intermediate or final component is
+  refused, so no walk can be redirected. Bounds are enforced before
+  unbounded consumption (bounded byte reads, entry-stream and search-walk
+  caps), decoding is strict UTF-8, and project/stat carries a fail-closed
+  deterministic sha256 digest. Every evaluation runs under the spec's
+  per-evaluation timeout ceiling (default 30s) on a private Jolt interrupt
+  token; a caller token (a later TurnLease) may only narrow it."
   (:require [clojure.set :as set]
             [clojure.string :as str]
             [jolt.fs :as fs]
@@ -30,21 +40,58 @@
    :max-search-results 500
    :max-search-files 20000
    :max-search-file-chars 500000
-   :max-search-pattern-chars 200})
+   :max-search-pattern-chars 200
+   :max-search-line-chars 300})
+
+;; Mechanism bounds — the numbers the evaluator's SAFETY model rests on,
+;; gathered as one table so they read as the mechanism they are. They are
+;; deliberately NOT under :context/bounds (the tunable surface a controller
+;; narrows per binding, defaulted in default-bounds below): each of these is
+;; a ceiling the tier under observation must not be able to raise, for the
+;; same reason the soak timeout is not userspace — an agent able to stretch
+;; its own evaluation ceiling, path budget or matcher budget can hang the
+;; process with one call. A project retunes consumption through
+;; :context/bounds, never through here.
+(def ^:private mechanism-bounds
+  {:timeout-ceiling-ms 30000
+   :path-chars 4096
+   :search-match-budget 200000
+   ;; How deep interrupted? walks a cause chain looking for a Jolt
+   ;; interruption — a loop bound, not a policy.
+   :cause-chain-depth 8
+   ;; The watcher's coarsest sleep between deadline checks, in ms.
+   :watcher-poll-ms 5})
+
+;; The per-evaluation interrupt ceiling every EvaluatorSpec carries unless the
+;; controller attenuates it. A later TurnLease may only narrow it, never
+;; stretch it: the guarded evaluation runs on a private per-evaluation Jolt
+;; interrupt token (see evaluate-guarded!) that no caller-held token can
+;; disarm or outlive.
+(def default-timeout-ms (:timeout-ceiling-ms mechanism-bounds))
+
+;; A model-supplied path is one bounded non-empty relative string, and a
+;; search pattern at most max-search-pattern-chars, before any filesystem
+;; access happens.
+(def max-path-chars (:path-chars mechanism-bounds))
+
+;; A line longer than this necessarily costs the regex matcher at least its
+;; length in reads on a full scan, so refusing it up front bounds the
+;; superlinear-backtracking exposure of any accepted pattern.
+(def search-match-budget (:search-match-budget mechanism-bounds))
 
 (def operation-docs
   {:project/read
    {:name "project/read" :arglists [["path"]]
-    :doc "Read one UTF-8 file relative to the authorized project root."}
+    :doc "Read one UTF-8 file relative to the authorized project root. Consumption stops at the byte/character bound instead of reading whole first; invalid UTF-8 fails rather than being replaced; a symbolic link is refused, not followed, in every path component."}
    :project/list
    {:name "project/list" :arglists [["path"]]
-    :doc "List one directory level as sorted {:name :kind :bytes?} data."}
+    :doc "List one directory level as sorted {:name :kind :bytes?} data. Entry consumption stops at the bound; symbolic links are refused in every path component and reported as :symlink entries, never followed."}
    :project/search
    {:name "project/search" :arglists [["pattern"] ["pattern" "options"]]
-    :doc "Search bounded project text and return {:path :line :text} data."}
+    :doc "Search bounded project text and return {:path :line :text} data. The file bound is enforced during the walk, a file larger than the per-file bound is skipped without reading, files that are not valid UTF-8 are skipped, symbolic links are never followed, and collection stops at the result bound."}
    :project/stat
    {:name "project/stat" :arglists [["path"]]
-    :doc "Return a deterministic path, kind, and byte-size observation."}})
+    :doc "Return a deterministic path, kind, byte-size, and sha256 content digest. The digest is computed through the bounded reader and the operation fails rather than returning a fake coordinate."}})
 
 (def tool-docs
   {"eval" {:name "eval" :arglists [["code"]]
@@ -76,11 +123,35 @@
   (str "js1:" (subs (sandbox/canonical-coordinate
                       (dissoc spec :spec/coordinate)) 4)))
 
+(defn- fail!
+  ([kind message data] (fail! kind message data nil))
+  ([kind message data cause]
+   (throw (ex-info message (assoc data :samizdat.evaluator/error kind) cause))))
+
+(defn- message [data]
+  (prompt/render "bounded-evaluator" data))
+
+(defn- resolve-timeout
+  "The per-evaluation computational ceiling, in milliseconds.
+
+  Defaults to 30 seconds. The controller may only NARROW it: a requested
+  value above the default is attenuated down to the default, exactly as a
+  requested capability beyond authorization is intersected away, and zero or
+  a negative value is refused rather than read as \"no ceiling\". Nothing a
+  caller or controller supplies can stretch an evaluation past the default."
+  [timeout-ms]
+  (let [requested (or timeout-ms default-timeout-ms)]
+    (when-not (and (integer? requested) (pos? requested))
+      (fail! :invalid-timeout
+             "timeout-ms: positive integer milliseconds required"
+             {:timeout-ms timeout-ms}))
+    (min (long requested) (long default-timeout-ms))))
+
 (defn context-spec
   "Mint the inert effective ContextSpec. Requested authority is intersected
   with controller authorization, the trusted profile maximum, and the compiled
-  operation vocabulary."
-  [root {:keys [requested controller-authorized bounds]
+  operation vocabulary. The timeout ceiling is part of the coordinate."
+  [root {:keys [requested controller-authorized bounds timeout-ms]
          :or {requested profile-capabilities
               controller-authorized profile-capabilities}}]
   (let [effective (set/intersection (set requested)
@@ -89,7 +160,8 @@
         base {:context/profile profile-id
               :context/root (canonical-root root)
               :context/capabilities (vec (sort-by str effective))
-              :context/bounds (merge default-bounds bounds)}]
+              :context/bounds (merge default-bounds bounds)
+              :context/timeout-ms (resolve-timeout timeout-ms)}]
     (assoc base :context/coordinate (sandbox/canonical-coordinate base))))
 
 (defn evaluator-spec [context]
@@ -98,16 +170,22 @@
               :runtime-coordinate (runtime-coordinate)}]
     (assoc base :spec/coordinate (spec-coordinate base))))
 
-(defn- fail! [kind message data]
-  (throw (ex-info message (assoc data :samizdat.evaluator/error kind))))
+;; ═══════════════════════════════════════════════════════════════════════════
+;; Path policy — read-side root confinement. Every intermediate AND final
+;; path component is checked: a walk may never be redirected through a
+;; symbolic link, so "would this link escape?" never has to be answered.
+;; ═══════════════════════════════════════════════════════════════════════════
 
-(defn- message [data]
-  (prompt/render "bounded-evaluator" data))
-
-(defn- relative-path
+(defn- lexical-components
+  "Validate one model-supplied relative path lexically, before any filesystem
+  access, and return its normalized components under the root ([] is the root
+  itself). The root itself is admitted only when allow-root? (listing and
+  searching it are their primary use; read/stat reject it as not a file)."
   [root rel allow-root?]
-  (when-not (and (string? rel) (not (str/blank? rel)))
-    (fail! :invalid-path "Expected a non-empty relative project path" {:path rel}))
+  (when-not (and (string? rel) (not (str/blank? rel))
+                 (<= (count rel) max-path-chars))
+    (fail! :invalid-path "Expected a bounded non-empty relative project path"
+           {:path (str rel)}))
   (when (fs/absolute? (fs/path rel))
     (fail! :absolute-path (message {:absolute-path true}) {:path rel}))
   (let [root (str root)
@@ -116,12 +194,42 @@
       (fail! :path-escape (message {:path-escape true}) {:path rel}))
     (when (and (= normalized root) (not allow-root?))
       (fail! :not-file (message {:root-not-file true}) {:path rel}))
-    normalized))
+    (if (= normalized root)
+      []
+      (vec (remove str/blank?
+                   (str/split (subs normalized (inc (count root))) #"/"))))))
 
-(defn- relative-name [root path]
-  (str (fs/relativize root path)))
+(defn- require-directory-component!
+  "One intermediate walk component must exist, be a directory, and NOT be a
+  symbolic link — even a link that stays inside the root is refused."
+  [dir component]
+  (let [child (str dir "/" component)]
+    (cond
+      (not (fs/exists? child {:nofollow-links true}))
+      (fail! :not-found (message {:path-missing true}) {:component component})
 
-(defn- classify [path]
+      (fs/sym-link? child)
+      (fail! :symlink (message {:symlink-path true}) {:component component})
+
+      (not (fs/directory? child {:nofollow-links true}))
+      (fail! :not-found (message {:path-missing true}) {:component component}))))
+
+(defn- descend
+  "Walk components under the root, refusing every symbolic link and every
+  missing/non-directory intermediate. Returns the absolute directory path the
+  walk lands in — the root itself when components is empty."
+  [root components]
+  (loop [dir root
+         [component & more] components]
+    (if component
+      (do (require-directory-component! dir component)
+          (recur (str dir "/" component) more))
+      dir)))
+
+(defn- classify
+  "The NOFOLLOW kind of a leaf path: a link is reported as a link and never
+  followed, inside or outside any root."
+  [path]
   (cond
     (not (fs/exists? path {:nofollow-links true})) :absent
     (fs/sym-link? path) :symlink
@@ -129,14 +237,247 @@
     (fs/regular-file? path {:nofollow-links true}) :file
     :else :other))
 
-(defn- read-text [path max-chars]
-  (when-not (= :file (classify path))
-    (fail! :not-file (message {:read-not-file true}) {:path path}))
-  (let [text (slurp (str path))]
-    (when (> (count text) max-chars)
-      (fail! :too-large (message {:read-large true})
-             {:limit max-chars}))
-    text))
+(defn- target-of
+  "Resolve a leaf path to [parent-abs kind]: the walk descends to the parent
+  with the frozen rules and classifies the leaf NOFOLLOW."
+  [root components]
+  (let [parent (descend root (butlast components))
+        abs (str parent "/" (last components))]
+    [abs (classify abs)]))
+
+(defn- relative-name [components]
+  (str/join "/" components))
+
+;; ═══════════════════════════════════════════════════════════════════════════
+;; Bounded read substrate — bounds are enforced BEFORE unbounded consumption,
+;; decoding is strict UTF-8 (never replacement), and digests fail closed.
+;; ═══════════════════════════════════════════════════════════════════════════
+
+(defn- read-byte-ceiling
+  "The byte bound a bounded read stops at, derived from a character bound: a
+  character occupies at most four UTF-8 bytes, so this is the largest byte
+  consumption the read can ever need. No read consumes past it regardless of
+  what the file contains."
+  [max-chars]
+  (* 4 max-chars))
+
+(defn- read-bounded-bytes
+  "Read at most max-bytes bytes from path, STOPPING AT THE BOUND: content
+  larger than the limit fails :too-large instead of being read whole and
+  checked afterwards."
+  [path max-bytes]
+  (let [input (java.io.FileInputStream. (str path))]
+    (try
+      (let [output (java.io.ByteArrayOutputStream.)
+            buffer (byte-array 8192)]
+        (loop [total 0]
+          (let [remaining (- (inc max-bytes) total)
+                read (.read input buffer 0 (min (alength buffer) remaining))]
+            (cond
+              (neg? read) (.toByteArray output)
+
+              (> (+ total read) max-bytes)
+              (fail! :too-large (message {:read-large true})
+                     {:limit max-bytes})
+
+              :else
+              (do (.write output buffer 0 read)
+                  (recur (+ total read)))))))
+      (finally
+        (try (.close input) (catch Throwable _ nil))))))
+
+(def ^:private utf8-lead-classes
+  "The RFC 3629 lead-byte grammar as data: one row per lead-byte class,
+  [lead-lo lead-hi continuation-ranges], where continuation-ranges holds the
+  inclusive [lo hi] byte range each continuation byte of the class must lie
+  in (an empty range vector is the ASCII single-byte class).
+
+  The constants of the UTF-8 encoding itself — the same bytes on every
+  machine, fixed by the standard — gathered as one grammar table rather than
+  scattered through comparisons. Overlong forms (no 0xc0/0xc1 class),
+  surrogates (0xed's second byte stops at 0x9f) and code points beyond
+  U+10FFFF (0xf4's second byte stops at 0x8f) are excluded by the ranges
+  themselves, exactly as the specification defines them."
+  [[0x00 0x7f []]
+   [0xc2 0xdf [[0x80 0xbf]]]
+   [0xe0 0xe0 [[0xa0 0xbf] [0x80 0xbf]]]
+   [0xe1 0xec [[0x80 0xbf] [0x80 0xbf]]]
+   [0xed 0xed [[0x80 0x9f] [0x80 0xbf]]]
+   [0xee 0xef [[0x80 0xbf] [0x80 0xbf]]]
+   [0xf0 0xf0 [[0x90 0xbf] [0x80 0xbf] [0x80 0xbf]]]
+   [0xf1 0xf3 [[0x80 0xbf] [0x80 0xbf] [0x80 0xbf]]]
+   [0xf4 0xf4 [[0x80 0x8f] [0x80 0xbf] [0x80 0xbf]]]])
+
+(defn- valid-utf8?
+  "Strict structural UTF-8 validation: rejects truncated sequences, bad
+  continuations, overlong forms, surrogates, and code points beyond
+  U+10FFFF — the inputs a Java CharsetDecoder with REPORT would reject.
+  A lead byte with no class in utf8-lead-classes is never valid."
+  [^bytes bs]
+  (let [n (alength bs)]
+    (letfn [(class-ranges
+              [byte]
+              (some (fn [[lead-lo lead-hi ranges]]
+                      (when (<= lead-lo byte lead-hi) ranges))
+                    utf8-lead-classes))
+            (valid-from
+              [i]
+              (if (>= i n)
+                true
+                (if-let [ranges (class-ranges (bit-and (aget bs i) 0xff))]
+                  (let [end (+ i (count ranges))]
+                    (and (< end n)
+                         (every? (fn [[k [lo hi]]]
+                                   (<= lo (bit-and (aget bs (+ i k 1)) 0xff) hi))
+                                 (map-indexed vector ranges))
+                         (valid-from (inc end))))
+                  false)))]
+      (valid-from 0))))
+
+(defn- decode-utf8
+  "Strict UTF-8 decode: malformed input fails :invalid-utf8 — never silently
+  replaced — so a binary file is an error, not mojibake."
+  [^bytes bs]
+  (when-not (valid-utf8? bs)
+    (fail! :invalid-utf8 (message {:read-not-utf8 true}) {}))
+  (String. bs "UTF-8"))
+
+(defn- decode-utf8-or-nil [^bytes bs]
+  (try (decode-utf8 bs) (catch Throwable _ nil)))
+
+(def ^:private libcrypto-candidates
+  "The shared libraries the digest bootstrap tries when the process got no
+  MessageDigest provider through dependency resolution."
+  ["libcrypto.so.3" "libcrypto.so.1.1" "libcrypto.so"
+   "/opt/homebrew/opt/openssl@3/lib/libcrypto.dylib"
+   "/usr/lib/libcrypto.dylib" "libcrypto.dylib"])
+
+(defn- hex-encode [^bytes bs]
+  (apply str (map #(format "%02x" %) bs)))
+
+(defn- compute-digest [^bytes bs]
+  (hex-encode (.digest (java.security.MessageDigest/getInstance "SHA-256") bs)))
+
+(defn- bytes-digest
+  "SHA-256 hex digest of bs. Fail-closed, with a one-time bootstrap for
+  processes whose dependency resolution loaded no digest natives: any
+  remaining failure propagates — a digest is a content coordinate, and an
+  uncomputable coordinate must not become a fake one."
+  [^bytes bs]
+  (try
+    (compute-digest bs)
+    (catch Throwable failure
+      (try
+        (doseq [lib libcrypto-candidates]
+          (try (jolt.ffi/load-native lib) (catch Throwable _ nil)))
+        (require 'jolt.crypto)
+        (compute-digest bs)
+        (catch Throwable _
+          (throw failure))))))
+
+(defn- file-digest
+  "sha256:… digest of a file's bytes read through the bounded reader. Fails
+  closed — over the bound, unreadable, or without digest machinery — never
+  nil, and never a fake coordinate in place of an uncomputable one."
+  [path max-bytes]
+  (try
+    (str "sha256:" (bytes-digest (read-bounded-bytes path max-bytes)))
+    (catch Throwable e
+      (if (:samizdat.evaluator/error (ex-data e))
+        (throw e)
+        (fail! :stat-digest (message {:stat-digest-failed true})
+               {:path (str path)} e)))))
+
+(defn- nofollow-size
+  "The lstat byte size (a symbolic link reports the link, not its target)."
+  [path]
+  (fs/get-attribute path "basic:size" {:nofollow-links true}))
+
+(defn- read-text
+  "One bounded strict-UTF-8 file read. Bytes are consumed only up to the
+  derived byte ceiling, decoding is strict, and the character bound fails
+  rather than truncates."
+  [abs max-chars]
+  (let [content (decode-utf8 (read-bounded-bytes abs (read-byte-ceiling max-chars)))]
+    (when (> (count content) max-chars)
+      (fail! :too-large (message {:read-large true}) {:limit max-chars}))
+    content))
+
+(defn- list-one-level
+  "The immediate entries of a directory, consumed at most max-entries + 1 —
+  the bound is enforced DURING consumption, so an unbounded directory is
+  never materialized whole. Entries are inert {:name :kind :bytes?} maps
+  sorted by name, attributes read NOFOLLOW."
+  [dir max-entries]
+  (with-open [stream (java.nio.file.Files/newDirectoryStream (fs/path dir))]
+    (let [overflow? (atom false)
+          entries (reduce (fn [acc entry]
+                            (let [acc' (conj acc entry)]
+                              (if (> (count acc') max-entries)
+                                (do (reset! overflow? true) (reduced acc'))
+                                acc')))
+                          [] stream)]
+      (when @overflow?
+        (fail! :too-many-entries (message {:list-many true})
+               {:limit max-entries}))
+      (mapv (fn [entry]
+              (let [kind (classify entry)]
+                (cond-> {:name (str (fs/file-name entry)) :kind kind}
+                  (= :file kind) (assoc :bytes (nofollow-size entry)))))
+            (sort-by (fn [entry] (str (fs/file-name entry))) entries)))))
+
+(defn- search-tree
+  "Bounded regex search under dir (already confinement-checked), with match
+  paths relative to the root prefix. Deterministic depth-first walk with
+  entries sorted at every level; symbolic links never followed; the file
+  bound fails DURING the walk; a file over the per-file byte bound is
+  skipped without reading; non-UTF-8 files are skipped; collection stops at
+  max-results."
+  [root-prefix dir re {:keys [max-results max-file-bytes max-files
+                              max-line-chars]}]
+  (let [results (atom [])
+      files (atom 0)
+       match-line! (fn [rel line number]
+                     (when (> (count line) search-match-budget)
+                       (fail! :match-budget
+                              "Search match budget exceeded"
+                              {:budget search-match-budget}))
+                    (when (re-find re line)
+                      (swap! results conj
+                             {:path rel :line number
+                              :text (let [trimmed (str/trim line)]
+                                      (if (> (count trimmed) max-line-chars)
+                                        (str (subs trimmed 0 max-line-chars) "...")
+                                        trimmed))})))
+      search-file! (fn [abs rel]
+                     (let [size (nofollow-size abs)]
+                       (when (<= size max-file-bytes)
+                         (when-let [content (decode-utf8-or-nil
+                                             (read-bounded-bytes abs max-file-bytes))]
+                           (loop [lines (str/split content #"\n" -1) number 1]
+                             (when (and (seq lines)
+                                        (< (count @results) max-results))
+                               (match-line! rel (first lines) number)
+                               (recur (rest lines) (inc number))))))))
+      walk! (fn walk! [d prefix]
+              (doseq [entry (sort-by (fn [p] (str (fs/file-name p)))
+                                     (fs/list-dir d))
+                      :while (< (count @results) max-results)]
+                (let [name (str (fs/file-name entry))
+                      rel (if (str/blank? prefix) name (str prefix "/" name))]
+                  (case (classify entry)
+                    ;; Never followed, exactly as in listing.
+                    :symlink nil
+                    :directory (walk! entry rel)
+                    :file (do
+                            (when (>= @files max-files)
+                              (fail! :too-many-files (message {:search-many true})
+                                     {:limit max-files}))
+                            (swap! files inc)
+                            (search-file! (str entry) rel))
+                    nil))))]
+    (walk! dir root-prefix)
+    @results))
 
 (defn- operation-builders [context world-observer hook]
   (let [root (:context/root context)
@@ -146,75 +487,91 @@
                               (when world-observer (world-observer op args))
                               (f))]
                     (if-let [h @hook] (h op args run) (run))))
-        read-op {:id :project/read :name 'read :effect :observation
-                 :fn (fn [rel]
-                       (observe :project/read [rel]
-                                #(read-text (relative-path root rel false)
-                                            (:max-read-chars bounds))))}
-        list-op {:id :project/list :name 'list :effect :observation
-                 :fn (fn [rel]
-                       (observe
-                        :project/list [rel]
-                        #(let [dir (relative-path root rel true)]
-                           (when-not (= :directory (classify dir))
-                             (fail! :not-directory (message {:list-not-dir true})
-                                    {:path rel}))
-                           (let [entries (sort-by str (fs/list-dir dir))]
-                             (when (> (count entries) (:max-list-entries bounds))
-                               (fail! :too-many-entries (message {:list-many true})
-                                      {:limit (:max-list-entries bounds)}))
-                             (mapv (fn [entry]
-                                     (let [kind (classify entry)]
-                                       (cond-> {:name (str (fs/file-name entry)) :kind kind}
-                                         (= :file kind) (assoc :bytes (fs/size entry)))))
-                                   entries))))) }
+        read-op
+        {:id :project/read :name 'read :effect :observation
+         :fn (fn [rel]
+               (observe
+                :project/read [rel]
+                #(let [components (lexical-components root rel false)]
+                   (when (empty? components)
+                     (fail! :not-file (message {:read-not-file true}) {:path rel}))
+                   (let [[abs kind] (target-of root components)]
+                     (when-not (= :file kind)
+                       (fail! :not-file (message {:read-not-file true})
+                              {:path rel :kind kind}))
+                     (read-text abs (:max-read-chars bounds))))))}
+        list-op
+        {:id :project/list :name 'list :effect :observation
+         :fn (fn [rel]
+               (observe
+                :project/list [rel]
+                #(let [components (lexical-components root rel true)
+                       dir (descend root components)]
+                   (case (classify dir)
+                     :symlink (fail! :symlink (message {:symlink-path true})
+                                     {:path rel})
+                     :absent (fail! :not-found (message {:path-missing true})
+                                    {:path rel})
+                     :directory (list-one-level dir (:max-list-entries bounds))
+                     (fail! :not-directory (message {:list-not-dir true})
+                            {:path rel})))))}
         search-op
         {:id :project/search :name 'search :effect :observation
          :fn (fn [& args]
-               (let [[pattern options] args]
-                 (when-not (and (<= 1 (count args) 2)
-                                (string? pattern) (not (str/blank? pattern))
-                                (<= (count pattern) (:max-search-pattern-chars bounds))
-                                (or (nil? options) (map? options)))
-                   (fail! :invalid-arguments (message {:search-args true})
-                          {:args args}))
-                 (observe
-                  :project/search (vec args)
-                  #(let [dir (relative-path root (or (:path options) ".") true)
+             (let [[pattern options] args]
+               (when-not (and (<= 1 (count args) 2)
+                              (string? pattern) (not (str/blank? pattern))
+                              (<= (count pattern) (:max-search-pattern-chars bounds))
+                              (or (nil? options) (map? options)))
+                 (fail! :invalid-arguments (message {:search-args true})
+                        {:args args}))
+               (observe
+                :project/search (vec args)
+                #(let [rel-path (or (:path options) ".")]
+                    (when-not (and (string? rel-path) (not (str/blank? rel-path))
+                                   (<= (count rel-path) max-path-chars))
+                      (fail! :invalid-path
+                             "Expected a bounded relative search path"
+                             {:path rel-path}))
+                   (let [components (lexical-components root rel-path true)
+                         dir (descend root components)
                          re (try (re-pattern pattern)
                                  (catch Throwable _
                                    (fail! :invalid-regex "Invalid search regex"
-                                          {:pattern pattern})))
-                         paths (->> (fs/glob dir "**")
-                                    (filter (fn [p] (= :file (classify p))))
-                                    (sort-by str)
-                                    vec)]
-                     (when (> (count paths) (:max-search-files bounds))
-                       (fail! :too-many-files (message {:search-many true})
-                              {:limit (:max-search-files bounds)}))
-                     (->> paths
-                          (mapcat (fn [p]
-                                    (let [text (when (<= (fs/size p)
-                                                        (:max-search-file-chars bounds))
-                                                 (slurp (str p)))]
-                                      (when text
-                                        (keep-indexed
-                                         (fn [i line]
-                                           (when (re-find re line)
-                                             {:path (relative-name root p)
-                                              :line (inc i)
-                                              :text (str/trim line)}))
-                                         (str/split text #"\n" -1))))))
-                          (take (:max-search-results bounds))
-                          vec))))) }
-        stat-op {:id :project/stat :name 'stat :effect :observation
-                 :fn (fn [rel]
-                       (observe
-                        :project/stat [rel]
-                        #(let [path (relative-path root rel false)
-                               kind (classify path)]
-                           (cond-> {:path (relative-name root path) :kind kind}
-                             (= :file kind) (assoc :bytes (fs/size path))))))}]
+                                          {:pattern pattern})))]
+                     (case (classify dir)
+                       :symlink (fail! :symlink (message {:symlink-path true})
+                                       {:path rel-path})
+                       :absent (fail! :not-found (message {:path-missing true})
+                                      {:path rel-path})
+                       :directory
+                       (->> (search-tree (relative-name components) dir re
+                                         {:max-results (:max-search-results bounds)
+                                          :max-file-bytes (:max-search-file-chars bounds)
+                                          :max-files (:max-search-files bounds)
+                                          :max-line-chars (:max-search-line-chars bounds)})
+                            (take (:max-search-results bounds))
+                            vec)
+                       (fail! :not-directory (message {:search-not-dir true})
+                              {:path rel-path})))))))}
+        stat-op
+        {:id :project/stat :name 'stat :effect :observation
+         :fn (fn [rel]
+               (observe
+                :project/stat [rel]
+                #(let [components (lexical-components root rel false)]
+                   (when (empty? components)
+                     (fail! :not-file (message {:root-not-file true}) {:path rel}))
+                   (let [[abs kind] (target-of root components)
+                         rel (relative-name components)]
+                     (case kind
+                       :absent {:path rel :kind :absent}
+                       :file {:path rel :kind :file
+                              :bytes (nofollow-size abs)
+                              :digest (file-digest abs
+                                                   (read-byte-ceiling
+                                                    (:max-read-chars bounds)))}
+                        {:path rel :kind kind})))))}]
     [read-op list-op search-op stat-op]))
 
 (defn- make-instance [spec observer]
@@ -271,6 +628,7 @@
      :evaluator/binding-id (:binding/id binding)
      :evaluator/context-spec (get-in binding [:spec :context-spec :context/coordinate])
      :evaluator/runtime (get-in binding [:spec :runtime-coordinate])
+     :evaluator/timeout-ms (get-in binding [:spec :context-spec :context/timeout-ms])
      :evaluator/live-context (:context-id instance)
      :evaluator/capabilities (get-in binding [:spec :context-spec :context/capabilities])}))
 
@@ -327,6 +685,71 @@
         (fail! :history-mismatch "Evaluator history identity mismatch"
                {:eval-id (:id row) :expected expected})))))
 
+(defn- interrupted?
+  "Whether a Jolt interruption (or a chain of causes carrying one) stopped
+  the evaluation."
+  [e]
+  (loop [e e n 0]
+    (and e (< n (:cause-chain-depth mechanism-bounds))
+         (or (:jolt/interrupted (ex-data e))
+             (recur (ex-cause e) (inc n))))))
+
+(defn- evaluate-guarded!
+  "Run one sandbox evaluation under the spec's per-evaluation timeout ceiling.
+
+  The guarded evaluation ALWAYS runs on a PRIVATE per-evaluation Jolt
+  interrupt token when a ceiling is in effect, interrupted by exactly one of:
+
+    - the ceiling timer, at :context/timeout-ms from the evaluation's start —
+      reported as {:samizdat.evaluator/error :timeout}; or
+    - the relay of a caller-supplied token (a later TurnLease's) — a caller
+      revocation, propagated as the raw Jolt interrupt and never relabeled
+      :timeout.
+
+  A caller-held token can therefore only NARROW the ceiling: nothing a caller
+  holds can stretch an evaluation past the spec's timeout, and the spec's
+  timer never fires the caller's shared token (a wake landing after the
+  guarded extent would otherwise poison every later same-turn evaluation)."
+  [state source timeout-ms caller-token]
+  (let [timeout-ms (long (or timeout-ms default-timeout-ms))]
+    (when-not (pos? timeout-ms)
+      (fail! :invalid-timeout "timeout-ms: positive integer milliseconds required"
+             {:timeout-ms timeout-ms}))
+    (let [tok (jolt.host/make-interrupt)
+          ;; nil | :ceiling | :caller — the first interrupter owns the label.
+           cause (atom nil)
+           done (atom false)
+           deadline (+ (System/currentTimeMillis) (long timeout-ms))
+           watcher (fn []
+                     (loop []
+                       (let [ms-left (- deadline (System/currentTimeMillis))]
+                         (cond
+                           @done nil
+                           (and caller-token (jolt.host/interrupted? caller-token))
+                           (do (compare-and-set! cause nil :caller)
+                               (jolt.host/interrupt! tok))
+                           (<= ms-left 0)
+                           (do (compare-and-set! cause nil :ceiling)
+                               (jolt.host/interrupt! tok))
+                            :else
+                            (do (Thread/sleep
+                                 (min (:watcher-poll-ms mechanism-bounds)
+                                      (max 1 ms-left)))
+                                (recur))))))]
+        (doto (Thread. watcher) (.setDaemon true) (.start))
+        (try
+          (sandbox/evaluate! state source tok)
+          (catch Throwable e
+            (if (and (interrupted? e) (= :ceiling @cause))
+              (fail! :timeout (message {:eval-timeout true})
+                     {:timeout-ms timeout-ms})
+              (throw e)))
+          (finally
+            (reset! done true))))))
+
+(defn- binding-timeout [binding]
+  (get-in binding [:spec :context-spec :context/timeout-ms]))
+
 (defn- rebuild-internal! [conn binding]
   (let [rows (store/history conn (:binding/id binding))]
     ;; Validate every durable coordinate before allocating or interpreting SCI.
@@ -340,7 +763,10 @@
           (let [receipts (mapv receipt->jolt (:receipts row))]
             (sandbox/load-receipts! state receipts)
             (sandbox/set-mode! state :replay)
-            (let [value (sandbox/evaluate! state (:source row))]
+            ;; Replay runs under the same spec timeout ceiling as normal
+            ;; evaluation, on its own private interrupt token.
+            (let [value (evaluate-guarded! state (:source row)
+                                           (binding-timeout binding) nil)]
               (when-not (result-matches? row value)
                 (fail! :replay-result-mismatch "Replayed result differs from durable result"
                        {:eval-id (:id row)}))))))
@@ -357,48 +783,57 @@
 (defn evaluate-recorded!
   "Evaluate one source form under the binding and append begin, operation
   intent/outcome, and terminal rows. Failed evaluations rebuild to committed
-  history before propagating."
-  [conn binding source]
-  (verify-binding! binding)
-  (when @(:poisoned binding)
-    (fail! :instance-poisoned "Evaluator instance is poisoned" {}))
-  (let [claim (str (random-uuid))]
-    (when-not (compare-and-set! (:owner binding) nil claim)
-      (fail! :instance-busy (message {:evaluator-busy true}) {}))
-    (try
-      (let [instance @(:instance binding)
-            eval-id (store/begin! conn (assoc (identity-map binding) :source source))
-            hook (:hook instance)]
-        (reset! hook
-                (fn [op args run]
-                  (let [seqn (store/intent! conn eval-id op args)]
-                    (try
-                      (let [value (sandbox/inert (run))]
-                        (store/outcome! conn eval-id seqn {:result value})
-                        value)
-                      (catch Throwable e
-                        (store/outcome! conn eval-id seqn {:error (ex-message e)})
-                        (throw e))))))
-        (try
-          (let [value (sandbox/evaluate! (:state instance) source)
-                result (result-record value)]
-            (store/complete! conn eval-id :completed result)
-            {:eval-id eval-id :value value :result result})
-          (catch Throwable e
-            (try
-              (store/complete! conn eval-id :failed {:error (ex-message e)})
-              (rebuild-internal! conn binding)
-              (catch Throwable rollback
-                (reset! (:poisoned binding) true)
-                (throw (ex-info "Evaluation failed and committed-state rollback failed"
-                                {:samizdat.evaluator/error :rollback-failed
-                                 :eval-id eval-id}
-                                rollback))))
-            (throw e))
-          (finally
-            (reset! hook nil))))
-      (finally
-        (compare-and-set! (:owner binding) claim nil)))))
+  history before propagating.
+
+  opts:
+    :token — a caller-held Jolt interrupt token (a later TurnLease's). It may
+             only NARROW the evaluation: the spec's :context/timeout-ms
+             ceiling still applies on a private per-evaluation token, and the
+             caller's token is never fired by the spec's timer."
+  ([conn binding source] (evaluate-recorded! conn binding source nil))
+  ([conn binding source opts]
+   (verify-binding! binding)
+   (when @(:poisoned binding)
+     (fail! :instance-poisoned "Evaluator instance is poisoned" {}))
+   (let [claim (str (random-uuid))]
+     (when-not (compare-and-set! (:owner binding) nil claim)
+       (fail! :instance-busy (message {:evaluator-busy true}) {}))
+     (try
+       (let [instance @(:instance binding)
+             eval-id (store/begin! conn (assoc (identity-map binding) :source source))
+             hook (:hook instance)]
+         (reset! hook
+                 (fn [op args run]
+                   (let [seqn (store/intent! conn eval-id op args)]
+                     (try
+                       (let [value (sandbox/inert (run))]
+                         (store/outcome! conn eval-id seqn {:result value})
+                         value)
+                       (catch Throwable e
+                         (store/outcome! conn eval-id seqn {:error (ex-message e)})
+                         (throw e))))))
+         (try
+           (let [value (evaluate-guarded! (:state instance) source
+                                          (binding-timeout binding)
+                                          (:token opts))
+                 result (result-record value)]
+             (store/complete! conn eval-id :completed result)
+             {:eval-id eval-id :value value :result result})
+           (catch Throwable e
+             (try
+               (store/complete! conn eval-id :failed {:error (ex-message e)})
+               (rebuild-internal! conn binding)
+               (catch Throwable rollback
+                 (reset! (:poisoned binding) true)
+                 (throw (ex-info "Evaluation failed and committed-state rollback failed"
+                                 {:samizdat.evaluator/error :rollback-failed
+                                  :eval-id eval-id}
+                                 rollback))))
+             (throw e))
+           (finally
+             (reset! hook nil))))
+       (finally
+         (compare-and-set! (:owner binding) claim nil))))))
 
 (defn leverage [conn binding]
   (let [completed (filter #(= :completed (:status %))

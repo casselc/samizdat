@@ -55,6 +55,10 @@
                         context_spec, runtime, source, created_at)
                      VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
                     spec-id instance-id binding-id n context-spec runtime source (db/now)]))
+    ;; last_insert_rowid() is CONNECTION-GLOBAL, so this retrieval MUST stay
+    ;; inside the same db writer critical section as the INSERT above: hoisted
+    ;; out, any interleaved writer on the shared conn would hand back its row.
+    ;; Pinned by begin-last-insert-id-stays-inside-the-writer-section.
     (db/last-insert-id conn)))
 
 (defn intent!

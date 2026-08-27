@@ -215,9 +215,13 @@
       (assoc ctx :llm-adapter (registry/adapter-for provider) :llm-config llm))
     ctx))
 
-(defn- bounded-binding
+(defn bounded-binding
   "Mint M1's controller-owned read profile only when userspace requested the
-  bounded lane. Dynamic resolution keeps SCI absent from ordinary startup."
+  bounded lane through [:run :bounded :profile]. The controller — this
+  function, not userspace — fixes the requested and authorized capability
+  sets, so a model cannot widen its own read authority through config; a
+  wider or unknown profile request fails closed here, before any binding or
+  run exists. Dynamic resolution keeps SCI absent from ordinary startup."
   [root run-id config]
   (when-let [requested (get-in config [:run :bounded :profile])]
     (when-not (contains? #{:agent/project-read "agent/project-read"} requested)
