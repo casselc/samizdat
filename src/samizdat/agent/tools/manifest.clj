@@ -46,7 +46,7 @@
   true)
 
 (def ^:private usage
-  "Actions: list, show {name, version?}, save {name, edn}. A manifest is the loop as data — a :cells map, :edges, and dispatch predicates. Save validates by compiling before it stores; the run that uses it is chosen by config :run :loop.")
+  "Actions: list, show {name, version?}, save {name, edn | file}. A manifest is the loop as data — a :cells map, :edges, and dispatch predicates. Save validates by compiling before it stores; the run that uses it is chosen by config :run :loop.")
 
 (defn- render-list
   "Every manifest this project can run: the stored rows PLUS the shipped
@@ -105,9 +105,10 @@
 
         "save"
         (let [name (base/arg ctx :name)
-              edn-text (base/arg ctx :edn)]
+              {edn-text :body err :error} (base/save-body ctx :edn)]
           (cond
             (str/blank? (str name)) (base/malformed branch (base/missing ctx :name))
+            err (base/malformed branch err)
             (str/blank? (str edn-text)) (base/malformed branch (base/missing ctx :edn))
             :else
             (do (validate! edn-text)

@@ -47,7 +47,7 @@
             [samizdat.userspace :as userspace]))
 
 (def ^:private usage
-  "Actions: list, show {name, version?}, save {name, body}, versions {name}, revert {name, version}. A prompt is prose the model reads — the system prompt, a gate's message, a role's instructions. Editing one changes what the harness says, not what it does.")
+  "Actions: list, show {name, version?}, save {name, body | file}, versions {name}, revert {name, version}. A prompt is prose the model reads — the system prompt, a gate's message, a role's instructions. Editing one changes what the harness says, not what it does.")
 
 (defn- render-check
   "Whether selmer can parse `body`, as `nil` or a complaint.
@@ -121,9 +121,10 @@
                              :shipped (shipped? name)})))))
 
         "save"
-        (let [body (base/arg ctx :body)]
+        (let [{body :body err :error} (base/save-body ctx :body)]
           (cond
             (not name) (base/malformed branch (base/missing ctx :name))
+            err (base/malformed branch err)
             (nil? body) (base/malformed branch (base/missing ctx :body))
             :else
             (if-let [complaint (render-check (str body))]

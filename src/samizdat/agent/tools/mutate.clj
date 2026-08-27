@@ -117,7 +117,7 @@
 ;; --- the project's own cells (userspace) -------------------------------------
 
 (def ^:private cell-usage
-  "Actions: list, show {name, version?}, save {name, clj}, versions {name}, revert {name, version}. A cell is one step of the loop, as Clojure. Save validates by compiling the loop and dry-running it before it stores, and stores a new VERSION in this project — the shipped template is never written.")
+  "Actions: list, show {name, version?}, save {name, clj | file}, versions {name}, revert {name, version}. A cell is one step of the loop, as Clojure. Save validates by compiling the loop and dry-running it before it stores, and stores a new VERSION in this project — the shipped template is never written. For a large body, write it to a file first (write_file), then save {name, file}: a fix left as a file and never saved does not exist.")
 
 (defn- render-versions [name]
   (let [rows (userspace/versions :cell name)]
@@ -172,9 +172,10 @@
           (base/ok branch (render-versions name)))
 
         "save"
-        (let [body (base/arg ctx :clj)]
+        (let [{body :body err :error} (base/save-body ctx :clj)]
           (cond
             (not name) (base/malformed branch (base/missing ctx :name))
+            err (base/malformed branch err)
             (str/blank? (str body)) (base/malformed branch (base/missing ctx :clj))
             :else
             (let [active (active-name ctx)

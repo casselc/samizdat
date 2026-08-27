@@ -23,6 +23,8 @@
   per-phase refusal the branch loop consults before dispatch. Tool groups
   require this namespace; nothing here requires a group back."
   (:require [clojure.string :as str]
+            [jolt.fs :as fs]
+            [samizdat.agent.files :as files]
             [samizdat.agent.phases :as phases]
             [samizdat.prompt :as prompt]))
 
@@ -75,6 +77,37 @@
   (ok branch (str capability " is unavailable: " (ex-message e))))
 
 (defn arg [ctx k] (get-in ctx [:args k]))
+
+(defn save-body
+  "The body for a save action: the inline argument `k` when present, else the
+  contents of the `file` argument read from under the run root.
+
+  The file arm exists because of what a live supervisor actually did with a
+  fix it had authored (karamazov-lf0): it wrote the new cell body to a file —
+  the thing models do reliably — and then never landed it, because save
+  demanded the whole body inline in one JSON string. The natural write-a-file
+  workflow has to END in the validated save, not die beside it.
+
+  Returns {:body s}, {:error msg} (a path outside the root, or no such file),
+  or nil when neither argument was given — the caller then issues its own
+  missing-argument complaint."
+  [ctx k]
+  (let [inline (arg ctx k)
+        file (some-> (arg ctx :file) str str/trim not-empty)]
+    (cond
+      ;; presence, not non-blankness: each tool keeps its own judgement about
+      ;; an explicitly empty inline body (the prompt tool allows one)
+      (some? inline) {:body (str inline)}
+
+      file
+      (if-let [p (and (:root ctx) (files/resolve-under-root (:root ctx) file))]
+        (if (fs/exists? p)
+          {:body (slurp p)}
+          {:error (prompt/render "file-tool" {:no-file true :path file})})
+        {:error (prompt/render "file-tool" {:outside-root true :path file
+                                            :verb "read"})})
+
+      :else nil)))
 
 (defn missing
   "The complaint for absent required arguments, WITH the call it wanted.

@@ -8,8 +8,10 @@
   gets its OWN copy of the shipped template, evolves it, and neither the
   harness's files nor another project's copy is affected. A layer that is
   shared is not userspace no matter which directory it lives in."
-  (:require [clojure.string :as str]
+  (:require [clojure.java.io :as io]
+            [clojure.string :as str]
             [clojure.test :refer [deftest is testing use-fixtures]]
+            [jolt.fs :as jfs]
             [samizdat.store.db :as db]
             [samizdat.store.userspace :as store]
             [samizdat.system :as system]
@@ -222,6 +224,41 @@
     (is (= :mechanics (:category r)))
     (is (re-find #"No v9" (:result r)))
     (is (re-find #"v1" (:result r)) "and says what versions there are")))
+
+(deftest a-save-can-read-its-body-from-a-file-under-the-root
+  ;; karamazov-lf0: a live supervisor authored a cell fix, wrote it to a file
+  ;; — the thing models do reliably — and never landed it, because save only
+  ;; took the whole body inline in one JSON string. The write-a-file workflow
+  ;; must END in the validated save.
+  (us/bind! *conn*)
+  (let [root (str (jfs/create-temp-dir))]
+    (spit (str root "/fix.clj") ";; the authored fix")
+    (testing "the file body reaches the same save the inline body does"
+      ;; through the manifest tool (no soak needed): a valid manifest from file
+      (spit (str root "/m.edn")
+            (slurp (io/resource "manifests/critic.edn")))
+      (let [r (tools/run-tool {:branch (state/new-branch {:id "B1" :problem "p"})
+                               :conn *conn* :root root
+                               :tool-name "manifest"
+                               :args {:action "save" :name "from-file-check"
+                                      :file "m.edn"}})]
+        (is (= :neutral (:category r)) (str (:result r)))
+        (is (re-find #"Saved manifest" (:result r)))
+        (is (= (slurp (str root "/m.edn")) (us/body :manifest "from-file-check"))
+            "what was stored is byte-for-byte the file")))
+    (testing "a path outside the root is refused, not read"
+      (let [r (run-cell *conn* {:action "save" :name "critic"
+                                :file "../../etc/passwd"})]
+        (is (= :mechanics (:category r)))
+        (is (re-find #"outside the project root" (:result r)))))
+    (testing "a missing file is a complaint, not an empty save"
+      (let [r (tools/run-tool {:branch (state/new-branch {:id "B1" :problem "p"})
+                               :conn *conn* :root root
+                               :tool-name "cell"
+                               :args {:action "save" :name "critic"
+                                      :file "nope.clj"}})]
+        (is (= :mechanics (:category r)))
+        (is (re-find #"No file nope.clj" (:result r)))))))
 
 (deftest the-cell-tool-complains-usefully-about-a-missing-argument
   (us/bind! *conn*)

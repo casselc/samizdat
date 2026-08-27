@@ -143,9 +143,10 @@
                        (msg {:no-versions true :name name})))))
 
         "save"
-        (let [body (base/arg ctx :edn)]
+        (let [{body :body err :error} (base/save-body ctx :edn)]
           (cond
             (not name) (base/malformed branch (base/missing ctx :name))
+            err (base/malformed branch err)
             (str/blank? (str body)) (base/malformed branch (base/missing ctx :edn))
             (not (known? name))
             (base/malformed branch (msg {:no-policy true :name name
