@@ -19,6 +19,7 @@ These are design documents, not a change log. Past defects live in
 | [008](RFC-008-tools-and-tasks.md) | Tools | The agent's capability surface and the work board |
 | [009](RFC-009-storage.md) | Storage | The durable record a resume rebuilds from |
 | [010](RFC-010-adaptation.md) | Adaptation | How the harness gets better: two memories, two roles, one selection pressure |
+| [011](RFC-011-board-workflow.md) | Board workflow | Owned tasks worked one at a time, a critic on each task's own diff |
 
 ## How to read a layer boundary
 

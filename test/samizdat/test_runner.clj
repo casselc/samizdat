@@ -80,6 +80,7 @@
             [samizdat.manifest-test]
             [samizdat.judge-test]
             [samizdat.team-test]
+            [samizdat.board-test]
             [samizdat.planner-test]
             [samizdat.decompose-test]
             [samizdat.decompose-run-test]
@@ -185,6 +186,7 @@
     samizdat.manifest-test
     samizdat.judge-test
     samizdat.team-test
+    samizdat.board-test
     samizdat.planner-test
     samizdat.decompose-test
     samizdat.decompose-run-test

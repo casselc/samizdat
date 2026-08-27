@@ -117,6 +117,21 @@
         (is (str/includes? (:content added) "must work"))
         (is (str/includes? (:content added) "the suite is green"))))))
 
+(deftest the-claim-asks-whether-the-task-is-one-thing-or-several
+  ;; Observed in the todomvc dogfood: implementors took a task that was really
+  ;; four ("build TodoMVC") and worked it as one, exhausting a 40-turn budget
+  ;; with a partial tree and nothing shipped. The board can already hold the
+  ;; answer — `task create` takes a parentId — so the claim is the moment to
+  ;; ask the question, before any of the budget is spent.
+  (with-run [c rid]
+    (let [id (tasks/create! c {:title "build the whole feature"})
+          b (:branch (run-task c rid (branch) {:action "claim" :id id}))
+          added (last (:messages b))]
+      (is (str/includes? (:content added) "parentId")
+          "the statement names the mechanism for splitting, not just the idea")
+      (is (re-find #"(?i)subtask|split" (:content added))
+          "and tells the implementor to split a task that is really several"))))
+
 (deftest a-pinned-statement-is-never-compacted-away
   ;; THE POINT of pinning. A task matters MORE the longer it runs, so ageing it
   ;; out of the context as the branch works is exactly backwards.

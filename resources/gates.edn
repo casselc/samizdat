@@ -419,6 +419,24 @@
         tolerates a much wider split than one with a single build. Config
         :run :max-subtasks still overrides for one run."}
 
+ :board-max-tasks
+ {:value 40 :kind :threshold :capability-tunable? false
+  :doc "How many tasks one board run will work before it stops and reports what
+        is left. The board loop is open-ended by design — an owner may split its
+        task into more tasks, and those may split again — so the only structural
+        bound is this one. It is a RUNAWAY GUARD, not a plan: a run that reaches
+        it has produced 40 owned, reviewed changes and should be looked at, not
+        quietly continued. Raise it for a genuinely large migration."}
+
+ :board-review-attempts
+ {:value 2 :kind :threshold :capability-tunable? false
+  :doc "How many times a critic may send one task back to its owner before the
+        loop leaves it open and moves on. A calibrated critic blocks rarely;
+        this caps what a miscalibrated one can spend on a single task. The task
+        is NOT closed when this trips — it goes back to the board, because a
+        task the board still shows is a truer record than one closed because the
+        loop got tired of it."}
+
  :retention
  {:value {:events-hours 24
           :run-record-days nil}
