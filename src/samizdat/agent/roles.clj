@@ -75,8 +75,10 @@
   unrestricted — roles are opt-in, so adding one cannot silently disarm a
   workflow that never had one."
   [role tool]
-  (let [s (surface role)]
-    (or (nil? (spec role)) (= :all s) (contains? s (str tool)))))
+  (let [s (surface role)
+        denied (set (map str (:denied (spec role))))]
+    (and (not (contains? denied (str tool)))
+         (or (nil? (spec role)) (= :all s) (contains? s (str tool))))))
 
 ;; --- the tool catalogue, filtered -------------------------------------------
 ;;

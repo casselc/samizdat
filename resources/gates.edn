@@ -76,6 +76,26 @@
  {:value 2 :kind :re-fire-guard :capability-tunable? true
   :doc "How often the stall nudge may re-fire on one branch."}
 
+ :oversight-unmet-floor
+ {:value 2 :kind :threshold :capability-tunable? true
+  :doc "Gate firings a run may leave UNMET before the supervisor stream spends
+        a model call looking at it.
+
+        An unmet firing is the harness having said something the branch did not
+        act on — the single most direct evidence that the harness's own words
+        are wrong, which is the supervisor's actual subject. One is noise; two
+        is a pattern worth the call."}
+
+ :oversight-idle-floor
+ {:value 25 :kind :threshold :capability-tunable? true
+  :doc "Turns a run may go without writing a file before the supervisor stream
+        looks at it.
+
+        Set well above :orient-turns (60 is the gate that speaks TO the branch;
+        this is the threshold at which the harness starts examining ITSELF).
+        Every stalled run in this project's history shows this signal, and it
+        is the cheapest reliable one there is."}
+
  :orient-turns
  {:value 60 :kind :threshold :capability-tunable? true
   :doc "Turns a branch may READ without declaring a plan or writing anything.
@@ -757,6 +777,31 @@
         verdict is `too early`. :meaningful-delta — how much per-turn fitness
         must move before a change counts as having done anything, rather than
         the supervisor reading its own preferences into the third decimal."}
+
+ :oversight
+ {:value {:enabled? true
+          :poll-ms 5000
+          ;; A pass is a model call, so the cadence is minutes and the budget
+          ;; is small. The stream is meant to be the thing that notices, not
+          ;; the thing that runs.
+          :every-ms 120000
+          :budget 12}
+  :kind :policy :capability-tunable? false
+  :doc "THE SUPERVISOR STREAM: the harness reasoning about itself, in parallel
+        with the run, in its own context.
+
+        Distinct from :watch, which is a REFLEX — rule-based, every few
+        seconds, steering only, and never a model call. This is DELIBERATION:
+        it runs the supervisor role over the run's health and may tune the
+        harness (prompts, thresholds, manifests, cells) as well as steer the
+        run. Different costs, so different cadences and different evidence
+        bars: a steer is wrong for one turn, a userspace edit is wrong for
+        every run until somebody changes it back.
+
+        :budget bounds the model calls one run may spend supervising itself.
+        Twelve is roughly one look every two minutes across a long run, and it
+        binds unconditionally — a bound a distress signal can lift is not a
+        bound."}
 
  :watch
  {:value {:enabled? true

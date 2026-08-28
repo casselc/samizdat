@@ -245,6 +245,14 @@ manifest({action, ...})
                            Saving a new version of the active manifest tunes
                            the loop for your next run; saving a new name adds
                            a loop that config (:run :loop) can select.
+intervene({kind, branch?, text?})
+    Steer a run that is happening right now. `kind` is one of message,
+    review, cull, fork, retract, extend, pause, resume; `message` is the one
+    you want almost always. It lands at the top of that branch's next turn,
+    above every machine gate.
+    Say the specific thing to do next, not that it seems stuck — a branch
+    that could tell it was stuck would have stopped already. Watch what it
+    does with one directive before sending another.
 experiment({name, change, hypothesis})
     Bind a change you are making to what you expect it to do, so the next
     round can tell you whether it worked. Start one whenever you edit a cell,

@@ -69,6 +69,8 @@
    "no-call-imitation"
    "no-edits"
    "outside-role-surface"
+   "intervene-tool"
+   "oversight-pass"
    "orienting"
    "parse-error-causes"
    "parse-error-repaired"

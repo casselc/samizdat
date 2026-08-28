@@ -171,6 +171,10 @@
    "forget"      {:reach :harness-only}
    "recall"      {:reach :harness-only}
    "outcome"     {:reach :harness-only}
+   ;; Writes a row to the run's own interventions table. It reaches no host
+   ;; resource — but it is the only tool that changes what ANOTHER branch will
+   ;; do, which is why the implementor role is denied it (roles.edn :denied).
+   "intervene"   {:reach :harness-only}
    "experiment"  {:reach :harness-only}
    "verdict"     {:reach :harness-only}
    "fetch_turn"  {:reach :harness-only}

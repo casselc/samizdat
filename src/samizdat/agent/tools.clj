@@ -44,6 +44,7 @@
             [samizdat.agent.tools.base :as base]
             [samizdat.agent.tools.repl]
             [samizdat.agent.tools.files]
+            [samizdat.agent.tools.intervene]
             [samizdat.agent.tools.plan]
             [samizdat.agent.tools.websearch]
             [samizdat.agent.tools.shell]

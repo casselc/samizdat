@@ -31,11 +31,19 @@
         declare what it will change, explore, land the files, ship. The only
         role that writes to the project."
   :tools :all
+  ;; :all is a SENTINEL, never expanded — but steering the run is not part of
+  ;; doing the work in it. A branch that could cull its siblings or raise its
+  ;; own turn cap has stopped being an implementor. Denials are how a broad
+  ;; surface keeps a narrow carve-out without giving up the sentinel.
+  :denied #{"intervene"}
   :prompt "roles/implementor"
   :sees #{:task :problem :shared-tree :skills}}
 
  :supervisor
- {:doc "The meta process. Does not care how the feature is implemented; cares
+ {;; `intervene` is the supervisor's HANDS. Everything else on this surface
+  ;; observes the run or tunes the harness for the next one; this is the only
+  ;; tool that reaches the run in front of it.
+  :doc "The meta process. Does not care how the feature is implemented; cares
         whether the implementer is moving through its steps and what to tune
         when it is not. Reads the run's health, investigates the record, and
         changes the harness — manifests, cells, prompts, policy — so the next
@@ -44,7 +52,7 @@
         patch."
   ;; `websearch` is investigation: a supervisor diagnosing an endpoint or a
   ;; library's behaviour has the same need an implementor does.
-  :tools #{"read_file" "grep" "lsp" "skill" "doc" "complete" "manual"
+  :tools #{"intervene" "read_file" "grep" "lsp" "skill" "doc" "complete" "manual"
            "introspect" "cells" "cell" "manifest" "prompt" "policy"
            "fetch_turn" "fetch_artifact" "recall" "remember" "forget" "outcome"
            "experiment" "message" "eval" "shell" "websearch" "done" "give_up"}
