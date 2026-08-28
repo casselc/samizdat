@@ -51,7 +51,7 @@
   Pinned against the directory by workflow-test."
   ["loop" "beam" "critic" "orchestrator" "probe" "review" "reviewer"
    "supervisor" "worker" "team" "board" "board-bt" "feature" "decompose"
-   "repair"])
+   "repair" "repl"])
 
 (defn manifest-resource
   "The factory resource path a manifest name seeds from, e.g. \"loop\" ->

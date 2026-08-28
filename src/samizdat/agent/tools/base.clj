@@ -33,6 +33,9 @@
             [samizdat.agent.gates :as gates]
             [samizdat.agent.phases :as phases]
             [samizdat.agent.storm :as storm]
+            ;; Same reason as gates/storm above: the repl-session refusal
+            ;; :when forms name samizdat.agent.state fully qualified.
+            [samizdat.agent.state :as state]
             [samizdat.prompt :as prompt]))
 
 (defmulti run-tool
@@ -215,7 +218,14 @@
               (refusal branch
                        (prompt/render message-file
                                       {:tool-name tool-name
-                                       :phase (some-> (:phase branch) name)})
+                                       :phase (some-> (:phase branch) name)
+                                       ;; What the repl-session exit refusal
+                                       ;; names back: a refusal that cannot
+                                       ;; say WHICH file is outstanding is one
+                                       ;; more unactionable message.
+                                       :unwritten (str/join "\n"
+                                                            (map #(str "  - " %)
+                                                                 (state/unwritten branch)))})
                        :refusal-rule (:rule rule)))))
          (phases/refusals))))
 

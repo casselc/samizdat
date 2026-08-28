@@ -2048,9 +2048,32 @@
 
     (testing "investigating never needs a task — a branch must be able to find
               out what to claim before it can claim it"
-      (doseq [t ["read_file" "grep" "lsp" "shell" "eval" "task" "message"]]
+      (doseq [t ["read_file" "grep" "lsp" "shell" "task" "message"]]
         (is (nil? (tools-base/phase-refusal {:branch unclaimed :tool-name t}))
             (str t " was refused, which is a deadlock rather than a policy"))))
+
+    (testing "`eval` is the exception, and the deadlock argument still holds"
+      ;; eval used to sit in the list above. It now requires a PLAN — not a
+      ;; task — because a REPL session must begin by naming the files it
+      ;; intends to change (karamazov-70b: a run spent 238 turns exploring
+      ;; without ever having to say where it thought the bug was).
+      ;;
+      ;; This is not the deadlock the case above rules out. Every tool you
+      ;; ORIENT with stays free: read_file, grep, lsp and shell are all
+      ;; unrefused for a branch with neither task nor plan, and reading the
+      ;; failing assertion plus the code it calls is how you decide which file
+      ;; is lying. What is gated is EXPLORING, which is the step that comes
+      ;; after you have a hypothesis.
+      (let [planned (assoc unclaimed :repl-plan {:files ["src/a.clj"]})]
+        (is (some? (tools-base/phase-refusal {:branch unclaimed :tool-name "eval"}))
+            "no plan: the REPL is closed")
+        (is (= :repl-needs-a-plan
+               (:refusal-rule (tools-base/phase-refusal
+                               {:branch unclaimed :tool-name "eval"}))))
+        (is (nil? (tools-base/phase-refusal {:branch planned :tool-name "eval"}))
+            "a branch that said what it is changing may explore freely")
+        (is (nil? (tools-base/phase-refusal {:branch planned :tool-name "plan"}))
+            "and may always re-plan")))
 
     (testing "finishing never needs a task — discarding completed work over a
               missing row is the worst available trade, and ending a run is

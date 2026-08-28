@@ -151,6 +151,10 @@
    ;; the same way — resolve-under-root, and the run config refused — because
    ;; it is the same act by a different address.
    "patch"       {:reach :host-bytes}
+   ;; The repl session's declaration. Records file PATHS on the branch and
+   ;; reads nothing off the machine — the paths are the model's own words,
+   ;; not a directory listing, and nothing resolves or opens them here.
+   "plan"        {:reach :harness-only}
    "doc"         {:reach :in-process     :also "reads the live image, same as eval"}
    "complete"    {:reach :in-process     :also "reads the live image, same as eval"}
 

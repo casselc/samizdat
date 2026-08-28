@@ -255,3 +255,60 @@
       (is (gates/budget-exceeded?
            g (apply hist (concat (map fire (range 1 (inc cap)))
                                  [{:gate :studying :turn 50 :settled :met}])))))))
+
+;; --- the REPL session contract ----------------------------------------------
+;; Run bd56a286 is the case this exists for. T0 spent 238 turns in the REPL
+;; hunting a bug that was in its own tests; T1 read for 316 turns and wrote
+;; nothing. Both were reachable only by nudges, and nudges are 0-for-6
+;; (karamazov-qic). The answer is not a louder nudge, it is a CONTRACT: say
+;; which files you are going to change before you start exploring, and land
+;; them before you finish. Declaring a file is a HYPOTHESIS about where the
+;; problem is, which is exactly what T0 never formed (karamazov-70b).
+
+(deftest a-repl-session-declares-before-it-explores
+  (testing "a branch with no plan has not entered a session"
+    (is (nil? (state/plan {})))
+    (is (not (state/planned? {}))))
+  (testing "declaring records the files and the tests"
+    (let [b (state/declare-plan {} {:files ["src/fps/level.clj"]
+                                    :tests ["test/fps/level_test.clj"]
+                                    :goal "fix wall collision"})]
+      (is (state/planned? b))
+      (is (= "fix wall collision" (:goal (state/plan b))))
+      ;; Tests are part of what must LAND. A declared test nobody writes is
+      ;; exactly the gap this contract closes, so :files is everything owed
+      ;; and :tests is the subset that are tests.
+      (is (= ["src/fps/level.clj" "test/fps/level_test.clj"]
+             (:files (state/plan b))))
+      (is (= ["test/fps/level_test.clj"] (:tests (state/plan b))))
+      (is (= 2 (count (state/unwritten b))))))
+  (testing "a plan with no files is not a plan — the point is committing to a file"
+    (is (not (state/planned? (state/declare-plan {} {:files [] :goal "poke about"}))))
+    (is (not (state/planned? (state/declare-plan {} {:goal "poke about"}))))))
+
+(deftest a-session-is-not-done-until-the-declared-files-are-written
+  (let [b (state/declare-plan {} {:files ["src/a.clj" "test/a_test.clj"]})]
+    (testing "nothing written yet: both outstanding"
+      (is (= #{"src/a.clj" "test/a_test.clj"} (set (state/unwritten b)))))
+    (testing "writing one leaves the other"
+      (let [b (state/note-write b "src/a.clj")]
+        (is (= ["test/a_test.clj"] (state/unwritten b)))))
+    (testing "writing both closes the session"
+      (let [b (-> b (state/note-write "src/a.clj") (state/note-write "test/a_test.clj"))]
+        (is (empty? (state/unwritten b)))))
+    (testing "a write nobody declared does not discharge a declared file"
+      (let [b (state/note-write b "src/unrelated.clj")]
+        (is (= 2 (count (state/unwritten b))))))
+    (testing "paths are compared leniently — ./src/a.clj is src/a.clj"
+      (let [b (state/note-write b "./src/a.clj")]
+        (is (= ["test/a_test.clj"] (state/unwritten b)))))))
+
+(deftest re-declaring-replaces-the-plan-rather-than-accreting
+  ;; A model that learns the bug is elsewhere must be able to say so. The
+  ;; contract is "commit to a hypothesis", not "never change your mind".
+  (let [b (-> (state/declare-plan {} {:files ["src/a.clj"]})
+              (state/note-write "src/a.clj")
+              (state/declare-plan {:files ["test/a_test.clj"]}))]
+    (is (= ["test/a_test.clj"] (:files (state/plan b))))
+    (is (= ["test/a_test.clj"] (state/unwritten b))
+        "the new plan's files are outstanding again")))

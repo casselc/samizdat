@@ -97,6 +97,10 @@ flowchart LR
     scrub --> lsp
     lsp --> redact
 
+    plan[plan tool: records declared paths on the branch]
+    toolcall --> plan
+    plan --> redact
+
     files[file tools: read_file, write_file, edit_file, patch, grep]
     root[Project root confinement]
     toolcall --> files

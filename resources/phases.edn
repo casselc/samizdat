@@ -95,7 +95,37 @@
    :when (samizdat.agent.storm/oscillation-blocked?
           ctx (samizdat.agent.gates/storm-policy))
    :tools :all
-   :message-file "storm-oscillation"}]
+   :message-file "storm-oscillation"}
+
+  ;; THE REPL SESSION CONTRACT — its two conditions, as refusals rather than
+  ;; as advice. Nudges are 0-for-6 across two model tiers (karamazov-qic); a
+  ;; withhold is what actually holds.
+  ;;
+  ;; ENTRY. `eval` is refused until the branch has named the files it intends
+  ;; to change. Run bd56a286: a strong model spent 238 turns in the REPL
+  ;; hunting a defect that was in its own tests, because nothing ever made it
+  ;; say WHERE it thought the defect was. Declaring a file is a hypothesis,
+  ;; and the refusal is what forces one to exist before exploring starts.
+  ;;
+  ;; Note this withholds eval only from a branch that has NOT planned — a
+  ;; branch that has said what it is doing may use the REPL freely, which is
+  ;; the difference between this and the blanket eval withhold considered and
+  ;; rejected in karamazov-qic. The mutation protocol does not use the eval
+  ;; TOOL (mutation.clj references eval nowhere), so a supervisor's ability to
+  ;; change the harness does not depend on this.
+  {:rule :repl-needs-a-plan
+   :when (not (samizdat.agent.state/planned? branch))
+   :tools #{"eval"}
+   :message-file "repl-needs-a-plan"}
+
+  ;; EXIT. `done` is refused while a declared file is still unwritten. The
+  ;; session closes by LANDING what it said it would, so exploration cannot
+  ;; quietly become the deliverable — T1 of that same run read for 316 turns
+  ;; and wrote nothing.
+  {:rule :plan-not-landed
+   :when (seq (samizdat.agent.state/unwritten branch))
+   :tools #{"done"}
+   :message-file "plan-not-landed"}]
 
  ;; #3: tool-result signals → branch-state effects. The claim-first state
  ;; machine as a declarative table instead of cond-> clauses in the

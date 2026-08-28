@@ -564,6 +564,14 @@
       (not refused?)
       (update :file-touch storm/note-file-touch paths)
 
+      ;; A landed WRITE discharges the file from the repl session's plan. Only
+      ;; a write — reading a file you promised to change is not changing it,
+      ;; and the whole contract is that exploration ends in a file.
+      (and (not refused?)
+           (contains? (gates/tool-vocab :file-write) tool)
+           (= :success (:category result)))
+      (as-> b (reduce state/note-write b paths))
+
       storm-refused?
       (update :storm-strikes (fnil inc 0))
 

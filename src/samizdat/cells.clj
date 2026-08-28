@@ -106,6 +106,7 @@
   files, so a shipped cell edited in place is picked up from disk."
   ["cells/beam.clj" "cells/board.clj" "cells/critic.clj" "cells/decompose.clj"
    "cells/feature.clj" "cells/loop.clj" "cells/probe.clj" "cells/repair.clj"
+   "cells/repl.clj"
    "cells/team.clj"])
 
 (defn- shipped-sources

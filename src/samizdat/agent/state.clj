@@ -593,6 +593,56 @@
   (cond-> (update branch :artifacts conj artifact)
     (:tier artifact) (update :tiers-seen (fnil conj #{}) (:tier artifact))))
 
+(defn- norm-path
+  "A declared path and a written path compared leniently: leading ./ dropped,
+  trimmed. The model declares `src/a.clj` and the write arrives as
+  `./src/a.clj` often enough that exact string equality would make the exit
+  condition unsatisfiable for reasons that have nothing to do with the work."
+  [p]
+  (-> (str p) str/trim (str/replace #"^\./" "")))
+
+(defn declare-plan
+  "Record what this branch is about to change: `{:files [...] :tests [...]
+  :goal \"...\"}`. REPLACES any previous plan — a model that learns the bug is
+  somewhere else must be able to say so, since the contract is commit to a
+  hypothesis, not never change your mind.
+
+  THIS IS THE HYPOTHESIS. Run bd56a286 spent 238 turns in the REPL hunting a
+  defect that was in its own tests, and the reason it could not escape is that
+  it never had to say WHERE it thought the defect was. Naming a file before
+  exploring forces the question; re-naming a different file is how the answer
+  gets corrected."
+  [branch {:keys [files tests goal]}]
+  (let [files (vec (distinct (map norm-path (remove nil? (concat files tests)))))]
+    (assoc branch :repl-plan {:files files
+                              :tests (vec (map norm-path (remove nil? tests)))
+                              :goal (some-> goal str not-empty)}
+                  :repl-written #{})))
+
+(defn plan
+  "The branch's current declaration, or nil."
+  [branch]
+  (:repl-plan branch))
+
+(defn planned?
+  "Whether this branch has committed to changing at least one named file. An
+  empty plan is not a plan: naming no file is exactly the state the contract
+  exists to rule out."
+  [branch]
+  (boolean (seq (:files (plan branch)))))
+
+(defn note-write
+  "Record that `path` was actually written, discharging it from the plan."
+  [branch path]
+  (update branch :repl-written (fnil conj #{}) (norm-path path)))
+
+(defn unwritten
+  "Declared files this branch has not written yet, in declaration order — the
+  EXIT condition of a repl session. Empty when the session may close."
+  [branch]
+  (let [written (or (:repl-written branch) #{})]
+    (vec (remove written (:files (plan branch))))))
+
 (defn context-pressure
   "How close the LAST request came to the operating ceiling: nil, `:advisory`,
   `:urgent`, or `:over`. `policy` is gates.edn `:context-pressure`.

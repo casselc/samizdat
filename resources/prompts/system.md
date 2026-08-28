@@ -94,6 +94,13 @@ give_up({reason})
 ### Developing at the REPL
 
 ```
+plan({files, tests?, goal?})
+    Say which files you are about to create or edit, which tests you will
+    write, and why — one line. REQUIRED before eval: the REPL stays closed
+    until you have named a file. Naming one is a hypothesis about where the
+    problem is, and you may call plan again the moment you learn it is
+    somewhere else. You cannot finish with a declared file unwritten, so the
+    list is a promise rather than a wish.
 eval({code, timeout_ms?})
     Evaluate Clojure in the live harness image and see the value and any
     printed output. This is how to work: try a form, inspect what it returns,
