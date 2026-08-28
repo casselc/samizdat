@@ -1,24 +1,21 @@
 {:schema 1
  :library {:id yogthos/samizdat
-           ;; Compatibility id for the instrumentable M2 call-site surface.
+           ;; Compatibility id for the instrumentable M2 semantic surface.
            ;; Resource-only commits may advance without changing this contract.
            :version "35b01fddd20fa9e6d77678eadc2a2bcc6fb9ac2d"}
  :aspects
  [{:id :samizdat.agent.beam/turn
-   :match {:ns samizdat.agent.beam
-           :call samizdat.agent.beam/advance-branch
+   :match {:entry samizdat.agent.beam/advance-branch
            :arity 3}
    :advice-role :samizdat/turn
    :expect {:matches 1}}
   {:id :samizdat.agent.infer/model
-   :match {:ns samizdat.agent.infer
-           :call samizdat.llm.client/chat
+   :match {:entry samizdat.llm.client/chat
            :arity 4}
    :advice-role :samizdat/model
    :expect {:matches 1}}
   {:id :samizdat.agent.loop/tool
-   :match {:ns samizdat.agent.loop
-           :call samizdat.agent.tools/run-tool
+   :match {:entry samizdat.agent.tools/run-tool
            :arity 1}
    :advice-role :samizdat/tool
    :expect {:matches 1}}
