@@ -95,6 +95,7 @@
             [samizdat.files-test]
             [samizdat.edit-test]
             [samizdat.embed-test]
+            [samizdat.aspect-manifest-test]
             [samizdat.evaluator-store-test]
             [samizdat.evaluator-test]
             [samizdat.grep-test]
@@ -214,6 +215,7 @@
     samizdat.files-test
     samizdat.edit-test
     samizdat.embed-test
+    samizdat.aspect-manifest-test
     samizdat.evaluator-store-test
     samizdat.evaluator-test
     samizdat.grep-test
