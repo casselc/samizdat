@@ -242,6 +242,22 @@
         (is (not (contains? env "SSH_AUTH_SOCK")))
         (is (= #{"HOME" "PWD" "TMPDIR" "JOLT_PWD" "LANG" "PATH"}
                (set (keys env))) "only controller-authored names exist"))))
+  (testing "the controller's Chez pin rides along, and only it"
+    (with-redefs [secrets/scrubbed-process-env
+                   (fn [] (secrets/scrub-env {"JOLT_CHEZ" "/usr/local/bin/scheme"
+                                              "PATH" "/usr/bin:/bin"
+                                              "HARNESS_PLANTED_TOKEN" "leak-me"}))]
+      (let [env (ve/child-env)]
+        (is (= "/usr/local/bin/scheme" (get env "JOLT_CHEZ"))
+            "bin/jolt treats JOLT_CHEZ as authoritative; the controller hands
+            its own resolution to the pinned verifier unchanged")
+        (is (= "/workspace" (get env "JOLT_PWD"))
+            "the pin adds a toolchain name; every sandbox-path pin still holds")
+        (is (= #{"HOME" "PWD" "TMPDIR" "JOLT_PWD" "LANG" "PATH" "JOLT_CHEZ"}
+               (set (keys env)))
+            "the pin is the ONLY additional name — a credential-shaped one is
+            dropped by scrubbed-process-env before child-env ever sees it")
+        (is (not (contains? env "HARNESS_PLANTED_TOKEN"))))))
   (testing "HOME/PWD/TMPDIR and the verifier's own PWD locator are pinned to sandbox paths"
     (let [env (ve/child-env)]
       (is (= "/home" (get env "HOME")))

@@ -31,7 +31,8 @@
       read-only under a PRIVATE /home. No /etc, no host $HOME, no host /tmp.
       The environment is CONSTRUCTED, not filtered: child-env below is the
       whole environment (HOME/PWD/TMPDIR/JOLT_PWD/LANG/PATH pinned to
-      sandbox values), so no host variable — credential-shaped or not, in
+      sandbox values, plus the controller's own JOLT_CHEZ toolchain pin when
+      it resolved one), so no host variable — credential-shaped or not, in
       the harness process's own environment — can reach the child by
       inheritance, omission or accident.
     - PINNED IMMUTABLE VERIFIER AUTHORITY — the verifier executable and its
@@ -121,6 +122,10 @@
 ;; handed sh -c by design.
 ;; ═══════════════════════════════════════════════════════════════════════════
 
+;; Forward reference: `coordinate` names the FULL policy, which includes the
+;; constructed child environment child-env defines further down.
+(declare child-env)
+
 (def verifier-exec-name "jolt")
 (def verifier-fixed-args ["-A:test" "-e"])
 
@@ -207,10 +212,13 @@
 
 (defn coordinate
   "A stable name for the pinned environment itself — the flags, limits,
-  verifier authority and cache set, hashed. This names the FULL policy,
-  where the SPI description (below) deliberately names only the shape; the
-  verify envelope's attribution carries the description's canonical
-  coordinate, which is the name a second repository can check."
+  verifier authority, constructed child environment and cache set, hashed.
+  This names the FULL policy, where the SPI description (below) deliberately
+  names only the shape; the verify envelope's attribution carries the
+  description's canonical coordinate, which is the name a second repository
+  can check. The child environment participates through its constructed
+  value, so two controllers pinning different verifier toolchains (a JOLT_CHEZ
+  pin present or absent) name different environments — which they are."
   []
   (str "js1-ve/v1:"
        (sha256 (pr-str {:namespaces [:user :ipc :net :pid :uts]
@@ -218,7 +226,8 @@
                         :limits resource-limits
                         :verifier [verifier-exec-name verifier-fixed-args]
                         :workspace workspace-policy
-                        :home-caches home-cache-names}))))
+                        :home-caches home-cache-names
+                        :child-env (child-env)}))))
 
 ;; ═══════════════════════════════════════════════════════════════════════════
 ;; The ExecutionEnvironment EDN SPI (RFC-012): description, coordinate,
@@ -501,14 +510,29 @@
   (a leaked harness JOLT_PWD would point the verifier at a host path that
   does not exist inside the sandbox), LANG is fixed so output bytes are
   deterministic, and PATH names only the read-only system runtime the
-  sandbox actually has."
+  sandbox actually has.
+
+  One controller-authored TOOLCHAIN pin may ride along: JOLT_CHEZ, the
+  interpreter the controller itself resolved for its own launcher (the
+  value bin/jolt treats as authoritative), handed to the pinned verifier
+  unchanged. Without it the verifier's own discovery must find a threaded
+  Chez inside the bind allowlist — a checkout carrying one under
+  .cache/local, or a PATH-named chez/chezscheme under /usr; a host whose
+  working Chez is named neither leaves the sandboxed verifier dead and
+  bounded done refused, fail-closed. The value stays the controller's own
+  path: when it is not visible under the binds the verifier dies the same
+  fail-closed death — no host path is ever bound for it, and a credential
+  cannot ride the name (scrubbed-process-env drops those)."
   []
-  {"HOME" "/home"
-   "PWD" "/workspace"
-   "TMPDIR" "/tmp"
-   "JOLT_PWD" "/workspace"
-   "LANG" "C.UTF-8"
-   "PATH" "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"})
+  (merge {"HOME" "/home"
+          "PWD" "/workspace"
+          "TMPDIR" "/tmp"
+          "JOLT_PWD" "/workspace"
+          "LANG" "C.UTF-8"
+          "PATH" "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"}
+         (when-let [chez (not-empty (get (secrets/scrubbed-process-env)
+                                         "JOLT_CHEZ"))]
+           {"JOLT_CHEZ" chez})))
 
 ;; ═══════════════════════════════════════════════════════════════════════════
 ;; The private staging root and the workspace copy.
