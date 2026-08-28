@@ -206,7 +206,11 @@
       ;; round's turns to the last round's branch.
       (let [n worked
             round (or (:board/round data) 0)
-            bid (str "T" n (when (pos? round) (str "v" round)))
+            ;; The id NAMES THE TASK. It used to be the owner index alone, so
+            ;; every task that owner ever worked shared one id — run 8710067f
+            ;; ran turns 1-153 under "T0" across two tasks with two separate
+            ;; fresh contexts, and nothing downstream could tell them apart.
+            bid (state/branch-id-for n round (:title t))
             prob (str (or (not-empty (str (:body t))) (:title t)))
             claimed (do (runs/open-branch! conn run-id {:branch-id bid :problem prob})
                         (tasks/claim! conn (:id t) run-id bid))]

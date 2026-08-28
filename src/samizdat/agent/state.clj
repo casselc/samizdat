@@ -624,13 +624,6 @@
   [branch]
   (:repl-plan branch))
 
-(defn planned?
-  "Whether this branch has committed to changing at least one named file. An
-  empty plan is not a plan: naming no file is exactly the state the contract
-  exists to rule out."
-  [branch]
-  (boolean (seq (:files (plan branch)))))
-
 (defn note-write
   "Record that `path` was actually written, discharging it from the plan."
   [branch path]
@@ -682,6 +675,54 @@
        (map #(some-> % str str/trim))
        (remove str/blank?)
        first))
+
+(defn planned?
+  "Whether this branch has an OPEN repl session: it has named at least one file
+  and has not yet written them all.
+
+  OPEN, not ever-declared. A landed plan used to keep this true for the rest of
+  the run, so the entry condition was satisfied forever and the NEXT piece of
+  work proceeded under a stale declaration about the last one. Run 8710067f
+  landed its green-suite plan at turn 35 and then spent 118 turns building the
+  window layer — different work, different files — with nothing asking it to
+  say what it was changing now.
+
+  Landing closes the session, so the next `eval` needs its own plan. That makes
+  the contract cyclic rather than one-shot, which is what any multi-part task
+  needs. An empty declaration is still not a plan: naming no file is the state
+  the contract exists to rule out."
+  [branch]
+  (boolean (and (seq (:files (plan branch)))
+                (seq (unwritten branch)))))
+
+(defn branch-id-for
+  "A branch id that says WHICH TASK it is working: `T<owner><-slug>[v<round>]`.
+
+  Ids used to be the owner index alone, so one id covered every task that owner
+  ever touched — run 8710067f ran turns 1-153 under \"T0\" across two tasks with
+  two separate fresh contexts, and the journal could not tell them apart. Every
+  per-branch metric then aggregated across a boundary that genuinely exists,
+  which is the same mistake as reading per-branch turn counters in aggregate.
+
+  The slug is a label, not a description: lower-cased, punctuation collapsed to
+  single hyphens, bounded. A blank title degrades to the bare owner id rather
+  than to something unreadable."
+  [owner round title]
+  (let [slug (-> (str title)
+                 str/lower-case
+                 (str/replace #"[^a-z0-9]+" "-")
+                 (str/replace #"^-+|-+$" ""))
+        ;; Cut at a WORD boundary. Truncating mid-word produced ids like
+        ;; `…-render-i`, which reads as a typo rather than a label.
+        slug (if (<= (count slug) 34)
+               slug
+               (let [cut (subs slug 0 34)
+                     i (str/last-index-of cut "-")]
+                 (if (and i (> i 8)) (subs cut 0 i) cut)))
+        slug (some-> slug (str/replace #"-+$" ""))]
+    (str "T" owner
+         (when (seq slug) (str "-" slug))
+         (when (pos? (or round 0)) (str "v" round)))))
 
 (defn plan-stale?
   "Whether this branch has DECLARED files it has not written and has not

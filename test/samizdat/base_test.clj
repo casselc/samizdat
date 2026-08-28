@@ -289,6 +289,18 @@
    "src/samizdat/lisp.clj"
    {:threshold {256 "Reader recursion bound."}}
 
+   "src/samizdat/agent/state.clj"
+   {:threshold
+    {34 "Characters of task slug in a branch id. An ID FORMAT, not a policy:
+         the slug exists so a human and the journal can tell two of an owner's
+         branches apart at a glance, and the bound keeps it a label rather
+         than a description. Changing it at runtime would make ids for the
+         same task differ between rounds, which is the confusion the slug was
+         added to remove."
+     8 "Minimum slug length before the word-boundary cut applies. Below it the
+        cut is taken mid-word rather than producing a uselessly short slug.
+        Part of the same format rule."}}
+
    "src/samizdat/hashline.clj"
    {:threshold
     {3 "Hex chars in an anchor's content hash — the WIRE FORMAT, not a

@@ -442,3 +442,58 @@
         (is (str/includes? m "THE-ERROR-TEXT"))
         (is (str/includes? m "fetch_turn")
             "and says how to look at it — information plus the tool to investigate")))))
+
+;; --- a branch id says which task it is working -----------------------------
+;; Branch ids were T0, T1… by OWNER INDEX, so one id covered every task that
+;; owner ever worked. Run 8710067f ran turns 1-153 under "T0" across two
+;; different tasks with two different fresh contexts — the journal could not
+;; tell "T0 on the green-suite task" from "T0 on the render task". Every
+;; per-branch metric aggregated across a boundary that genuinely exists, which
+;; is the same class of mistake as reading per-branch turn counters in
+;; aggregate.
+
+(deftest a-branch-id-names-the-task-it-is-working
+  (testing "the owner index and a slug of the task"
+    (is (= "T0-get-pure-layer-suite-green-9"
+           (state/branch-id-for 0 0 "Get pure-layer suite green (9 failing assertions)"))
+        "readable at a glance, and says which task this branch is working"))
+  (testing "a revise round is distinct again"
+    ;; The slug is cut at a word boundary, so the exact tail depends on the
+    ;; title — assert the PROPERTIES that matter rather than a guessed string.
+    (let [id (state/branch-id-for 0 2 "Build raylib window layer (render/input/main)")]
+      (is (str/starts-with? id "T0-build-raylib-window-layer"))
+      (is (str/ends-with? id "v2"))
+      (is (not (str/includes? id "/")) "no path separators in an id")
+      (is (not= id (state/branch-id-for 0 1 "Build raylib window layer (render/input/main)"))
+          "a different round is a different branch")))
+  (testing "two tasks of one owner are DIFFERENT ids — the whole point"
+    (is (not= (state/branch-id-for 0 0 "Get the suite green")
+              (state/branch-id-for 0 0 "Build the window layer"))))
+  (testing "punctuation and case do not leak into an id"
+    (is (= "T1-fix-the-a-b-bug" (state/branch-id-for 1 0 "Fix the A/B bug!!"))))
+  (testing "a missing or blank title still yields a usable id"
+    (is (= "T3" (state/branch-id-for 3 0 nil)))
+    (is (= "T3" (state/branch-id-for 3 0 "   ")))
+    (is (= "T3v1" (state/branch-id-for 3 1 ""))))
+  (testing "a long title is bounded — an id is a label, not a description"
+    (is (>= 48 (count (state/branch-id-for 0 0 (apply str (repeat 200 "x"))))))))
+
+;; --- a new task starts a new REPL session ----------------------------------
+;; A landed plan kept `planned?` true forever, so the entry condition was
+;; satisfied for the REST OF THE RUN. Run 8710067f landed its green-suite plan
+;; at turn 35 and then spent 118 turns building the window layer — new work —
+;; under that stale declaration, with nothing asking it to say what it was
+;; changing now.
+
+(deftest landing-a-plan-closes-the-session
+  (let [b (-> (state/declare-plan {} {:files ["a.clj"]})
+              (state/note-write "a.clj"))]
+    (is (empty? (state/unwritten b)) "the plan is landed")
+    (is (not (state/planned? b))
+        "and the session is CLOSED — the next piece of work needs its own plan")))
+
+(deftest an-open-plan-still-opens-the-repl
+  (let [b (state/declare-plan {} {:files ["a.clj" "b.clj"]})]
+    (is (state/planned? b))
+    (is (state/planned? (state/note-write b "a.clj"))
+        "partly landed is still an open session — do not close it mid-way")))

@@ -18,6 +18,21 @@
             [samizdat.store.db :as db]
             [samizdat.workflow :as workflow]))
 
+(defn- owner-ran?
+  "Whether owner `n` ran, by prefix. Branch ids carry the task they worked now
+  (`T0-get-the-suite-green`), so pinning the bare `T0` froze an id format that
+  deliberately changed — the owner is the thing these tests mean."
+  [ids n]
+  (boolean (some #(str/starts-with? (str %) (str "T" n)) ids)))
+
+(defn- round-ran?
+  "Whether owner `n` ran a REVISE round `r`. The round suffix is still `v<r>`;
+  what moved is the task slug between the owner and the suffix."
+  [ids n r]
+  (boolean (some #(and (str/starts-with? (str %) (str "T" n))
+                       (str/ends-with? (str %) (str "v" r)))
+                 ids)))
+
 ;; Ground truth (step 3): a done with no diff is not a completed feature. By
 ;; default these tests simulate a run that DID change files, so the wiring tests
 ;; below exercise the ship/revise paths; the hollow-path tests redef this to [].
@@ -98,8 +113,8 @@
         ;; once — and each was critic-reviewed on its own diff before closing,
         ;; so the round-level reviewer role is skipped (RFC-011).
         (let [b (branch-ids conn)]
-          (is (contains? b "T0"))
-          (is (contains? b "T1"))
+          (is (owner-ran? b 0))
+          (is (owner-ran? b 1))
           (is (not (contains? b "R0"))))))))
 
 (deftest feature-critique-revise-loops-back-to-implement-bounded
@@ -119,9 +134,9 @@
         (is (= :abandoned (:status r))))
       (testing "each revise round re-implemented on a versioned branch"
         (let [b (branch-ids conn)]
-          (is (contains? b "T0"))     ; round 0
-          (is (contains? b "T0v1"))   ; revise round 1
-          (is (contains? b "T0v2"))   ; revise round 2, then the runaway guard trips
+          (is (owner-ran? b 0))     ; round 0
+          (is (round-ran? b 0 1))   ; revise round 1
+          (is (round-ran? b 0 2))   ; revise round 2, then the runaway guard trips
           (is (not (contains? b "T0v3"))))))))
 
 (deftest supervisor-reasons-over-telemetry-and-forces-a-round
@@ -138,7 +153,7 @@
                                               :max-revisions 9 :max-revisions-hard 1}}
                                :max-turns 3})]
       (testing "a revise round happened despite the reviewer passing"
-        (is (contains? (branch-ids conn) "T0v1")))
+        (is (round-ran? (branch-ids conn) 0 1)))
       (testing "and since the implementors never shipped, it ends unsolved, not falsely completed"
         (is (= :abandoned (:status r)))))))
 
@@ -209,8 +224,11 @@
         (let [turns (into {} (map (juxt :branch_id :t)
                                   (db/fetch conn ["SELECT branch_id, MAX(turn) t FROM turns
                                                    WHERE branch_id LIKE 'T0%' GROUP BY branch_id"])))]
-          (is (= 3 (get turns "T0")) "round 0 ran under the run's own budget")
-          (is (= 9 (get turns "T0v1"))
+          (is (= 3 (val (first (filter #(str/starts-with? (key %) "T0") turns))))
+              "round 0 ran under the run's own budget")
+          (is (= 9 (some (fn [[k v]] (when (and (str/starts-with? k "T0")
+                                                   (str/ends-with? k "v1")) v))
+                             turns))
               "after EXTEND: 9, the revise round's owner ran under the extended budget"))))))
 
 (deftest an-advisory-branch-ships-its-verdict-without-the-evidence-rungs
@@ -280,7 +298,7 @@
                                               :max-revisions 9 :max-revisions-hard 2}}})]
       (is (not= :completed (:status r)) "an empty diff is never reported completed")
       (testing "it kept solving before giving up (revised, did not abandon on the first empty round)"
-        (is (contains? (branch-ids conn) "T0v1")))
+        (is (round-ran? (branch-ids conn) 0 1)))
       (is (= :abandoned (:status r)) "only the runaway guard ends it, honestly unsolved"))))
 
 (deftest a-ship-carries-an-answer-even-when-the-last-round-landed-nothing
@@ -407,7 +425,7 @@
                                                :max-revisions-hard 3}}})
             branches (branch-ids conn)]
         (testing "round 0 ran the board (the default strategy)"
-          (is (contains? branches "T0")))
+          (is (owner-ran? branches 0)))
         (testing "after SWITCH: decompose, the next round ran the decompose loop"
           (is (contains? branches "DT") "the decompose root attempt ran"))))))
 
@@ -426,7 +444,7 @@
                                         :max-revisions 1 :max-revisions-hard 3}}})
       (let [branches (branch-ids conn)]
         (testing "round 0 ran the board (the default strategy)"
-          (is (contains? branches "T0")))
+          (is (owner-ran? branches 0)))
         (testing "the loop auto-advanced along the ladder on its own"
           ;; board -> team -> decompose: a strategy that keeps failing its
           ;; soft-cap rounds hands over without waiting for the supervisor.
