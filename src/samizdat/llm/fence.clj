@@ -402,7 +402,21 @@
   #"(?s)<invoke\s+name=\"([^\"]+)\"[^>]*>(.*?)</invoke>")
 
 (def ^:private parameter-re
-  #"(?s)<parameter\s+name=\"([^\"]+)\"[^>]*>(.*?)</parameter>")
+  ;; The close is `</parameter` plus ANYTHING up to the `>`, not the exact tag.
+  ;;
+  ;; A model that opened with `<parameter name="path">` mirrors the `name=`
+  ;; into the close and writes `</parameter-name>`. With an exact-tag pattern
+  ;; the value does not stop there — it runs on to the NEXT parameter's close,
+  ;; so `path` swallowed `</parameter-name>\n<parameter name="content">(ns …`
+  ;; and `content` disappeared entirely. Live in run c377260b: the model's one
+  ;; correct write in 300 turns, a complete boundary test, was destroyed here
+  ;; and then reported back to it as "write_file needs `content`".
+  ;;
+  ;; Tolerating the drift costs nothing — no legitimate parameter value
+  ;; contains a literal `</parameter` — and silently merging two parameters is
+  ;; the worst available failure: it produces a call that looks well-formed and
+  ;; is wrong.
+  #"(?s)<parameter\s+name=\"([^\"]+)\"[^>]*>(.*?)</param(?:eter)?[^>]*>")
 
 (defn- xml-value
   "A parameter's value. Verbatim, except that something which is entirely a

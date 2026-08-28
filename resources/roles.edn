@@ -42,10 +42,12 @@
         run does better. It does not write project code: that is the
         implementer's job and doing it here hides the loop problem behind a
         patch."
+  ;; `websearch` is investigation: a supervisor diagnosing an endpoint or a
+  ;; library's behaviour has the same need an implementor does.
   :tools #{"read_file" "grep" "lsp" "skill" "doc" "complete" "manual"
            "introspect" "cells" "cell" "manifest" "prompt" "policy"
            "fetch_turn" "fetch_artifact" "recall" "remember" "forget" "outcome"
-           "experiment" "message" "eval" "shell" "done" "give_up"}
+           "experiment" "message" "eval" "shell" "websearch" "done" "give_up"}
   :prompt "roles/supervisor"
   :sees #{:run-health :gate-health :failures}}
 
@@ -53,6 +55,9 @@
  {:doc "Reads the work against what was asked and returns PASS or REVISE. It
         does not fix what it finds — a reviewer that edits has stopped
         reviewing and the next reviewer inherits its opinion as fact."
+  ;; Deliberately NO websearch. A reviewer judges the work against what was
+  ;; asked, and going off to read the internet is how a review becomes a
+  ;; second opinion about the domain instead of a check on the diff.
   :tools #{"read_file" "grep" "lsp" "doc" "complete" "fetch_artifact"
            "fetch_turn" "recall" "done" "give_up"}
   :prompt "roles/reviewer"

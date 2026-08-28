@@ -221,7 +221,15 @@
   ;; its run COULD have checked the claim.
   (let [rows [{:tool_name "read_file" :args {:path "x.clj"}}]
         answer "According to the docs at https://example.com it works."]
-    (is (some? (judge/source-block answer rows (tools/tool-names)))
-        "today's registered surface has no outside-reach tool, so the block fires")
+    (is (some? (judge/source-block answer rows ["read_file" "grep"]))
+        "a surface with no outside reach cannot have checked the claim, so it blocks")
     (is (nil? (judge/source-block answer rows ["read_file" "web_fetch"]))
-        "a registered outside-reach tool means the claim could have been checked")))
+        "a registered outside-reach tool means the claim could have been checked")
+    ;; The premise is an ARGUMENT for exactly this reason: registering
+    ;; `websearch` disabled this block by existing, which is the behaviour the
+    ;; docstring promises. Asserting against the LIVE surface made the test a
+    ;; statement about today's tool list rather than about the logic, so it
+    ;; broke the moment the harness gained the capability it was written to
+    ;; accommodate.
+    (is (nil? (judge/source-block answer rows (tools/tool-names)))
+        "and this harness now HAS one, so the block no longer fires")))

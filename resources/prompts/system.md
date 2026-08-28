@@ -169,6 +169,12 @@ patch({path, edits})
     against the same read, so order does not matter and they cannot shift
     each other). Refused whole if any anchor is stale or two edits overlap:
     nothing is half-written. Prefer this for a change you have just read.
+websearch({query, num_results?})
+    Search the web for documentation, an API reference, or anything past your
+    training cutoff. Returns titles, URLs and snippets, clipped. Use an exact
+    symbol or error string rather than a sentence. Search the WEB; for
+    anything in this repo or its reference paths, read it directly — a search
+    will not find it and will cost you a turn.
 shell({command})
     Run a shell command. Read-only inspection (ls, cat, grep, find, git
     status/diff/log) and project tools (jolt test, jolt -e, cargo, pytest,

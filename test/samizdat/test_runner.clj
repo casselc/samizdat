@@ -105,6 +105,7 @@
             [samizdat.mutation-test]
             [samizdat.repl-test]
             [samizdat.roles-test]
+            [samizdat.websearch-test]
             [samizdat.tape-test]
             [samizdat.infer-test]
             [samizdat.fork-test]
@@ -228,6 +229,7 @@
     samizdat.mutation-test
     samizdat.repl-test
     samizdat.roles-test
+    samizdat.websearch-test
     samizdat.tape-test
     samizdat.infer-test
     samizdat.fork-test

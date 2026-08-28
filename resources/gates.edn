@@ -1207,6 +1207,20 @@
           ;; offset to continue from. Was a literal 200 in the tool with no
           ;; way to continue past it (karamazov-2py).
           :grep-hits           200
+          ;; One search result, clipped. An unbounded result is a context
+          ;; leak dressed as an answer — the cost this tool must not become.
+          :websearch-chars     3000
+          ;; How many results one search asks for by default, the ceiling a
+          ;; caller may raise it to, and how long to wait. All three are the
+          ;; cost of a search against its usefulness, which is exactly the
+          ;; trade a project should be able to retune.
+          :websearch-results   5
+          :websearch-max-results 20
+          :websearch-timeout-ms 20000
+          ;; How much of a failed search's body the model is shown. Enough to
+          ;; diagnose (a rate-limit note, an auth complaint), not so much that
+          ;; a failure costs more context than a success.
+          :websearch-error-chars 200
           :inbox-lines         3
           :tree-lines          8
           :keep-pairs          10

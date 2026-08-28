@@ -155,6 +155,13 @@
    ;; reads nothing off the machine — the paths are the model's own words,
    ;; not a directory listing, and nothing resolves or opens them here.
    "plan"        {:reach :harness-only}
+   ;; The only tool that reaches OFF the machine. Nothing local is read and no
+   ;; secret is sent — the query is the model's own words and EXA_API_KEY is a
+   ;; rate-limit token, not a credential granting access to anything of ours —
+   ;; but the result is third-party text entering model space, so it crosses
+   ;; the redaction boundary like every other tool result.
+   "websearch"   {:reach :spawns-process
+                  :also "outbound HTTP only; query is model text, no local read"}
    "doc"         {:reach :in-process     :also "reads the live image, same as eval"}
    "complete"    {:reach :in-process     :also "reads the live image, same as eval"}
 

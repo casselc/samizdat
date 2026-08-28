@@ -118,6 +118,7 @@
    "verify-timeout"
    "verify-unknown"
    "watch-intervention"
+   "websearch-tool"
    "wind-down"   ])
 
 (defn prompt

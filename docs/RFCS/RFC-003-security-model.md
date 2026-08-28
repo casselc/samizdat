@@ -97,6 +97,10 @@ flowchart LR
     scrub --> lsp
     lsp --> redact
 
+    websearch[websearch tool: outbound HTTP to a search endpoint]
+    toolcall --> websearch
+    websearch --> redact
+
     plan[plan tool: records declared paths on the branch]
     toolcall --> plan
     plan --> redact
