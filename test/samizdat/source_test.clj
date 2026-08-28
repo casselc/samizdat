@@ -197,3 +197,15 @@
       (let [r (run "(f)) (g)")]
         (is (= :mechanics (:category r)))
         (is (str/includes? (:result r) "trailing delimiter"))))))
+
+(deftest an-eval-error-always-says-something
+  ;; Run bd56a286 turns 57 and 60: the model was handed `Eval error: ` — the
+  ;; label and nothing after it. `(or (ex-message e) (str e))` falls through on
+  ;; nil but NOT on "", so an exception with a blank message produced a
+  ;; completely empty diagnosis. An unactionable message is the failure mode
+  ;; this whole area has been about.
+  (let [r (base/run-tool {:branch {:id "B1"} :tool-name "eval"
+                          :args {:code "(throw (ex-info \"\" {}))"}})]
+    (is (= :failure (:category r)))
+    (is (re-find #"\S" (str/replace (:result r) #"(?i)eval error:" ""))
+        (str "nothing after the label: " (pr-str (:result r))))))

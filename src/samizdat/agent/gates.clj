@@ -116,8 +116,26 @@
 (defn- prompt [name]
   (sp/prompt name))
 
-(defn- fired-count [branch gate]
-  (count (filter #(= gate (:gate %)) (:gate-history branch))))
+(defn- fired-count
+  "How often `gate` has fired on this branch SINCE ITS LAST MET SETTLEMENT.
+
+  Since, not ever. A budget exists so one episode of nagging cannot become the
+  thing the model answers instead of the work — that is a bound on the
+  EPISODE, and counting from the start of the run made it a bound on the
+  gate's whole lifetime. Live in run bd56a286: :no-edits spent its three on an
+  early stall, was obeyed once, and was then silent while the branch went 143
+  turns without writing a file.
+
+  A met settlement is the episode boundary because it is exactly the statement
+  that the condition cleared — the branch did the thing the gate asked for.
+  Firings before it belong to a stall that is over (karamazov-gez)."
+  [branch gate]
+  (let [mine (filter #(= gate (:gate %)) (:gate-history branch))
+        after-met (->> mine
+                       reverse
+                       (take-while #(not= :met (:settled %)))
+                       reverse)]
+    (count after-met)))
 
 
 

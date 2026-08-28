@@ -222,3 +222,36 @@
     (is (nil? (telemetry/gate-lines
                (telemetry/gate-health [{:gate "g" :branch_id "B" :outcome "unmet"}])
                3)))))
+
+;; --- karamazov-gez: a budget bounds the EPISODE, not the run -----------------
+;; Run bd56a286: :no-edits fired 3 times (its whole budget), was obeyed once,
+;; and then the branch went 143 turns without writing a file with the gate
+;; permanently silent. The bound exists so a nudge cannot become the thing the
+;; model answers instead of the work — that reasoning is about one episode of
+;; nagging, and it was implemented as a bound on the run.
+
+(deftest a-gate-budget-re-arms-when-its-prediction-is-met
+  (let [g {:gate :no-edits :budget :max-no-edit-nudges}
+        cap (gates/threshold :max-no-edit-nudges)
+        hist (fn [& es] {:gate-history (vec es)})
+        fire (fn [t] {:gate :no-edits :turn t})
+        met  (fn [t] {:gate :no-edits :turn t :settled :met})]
+    (testing "under the cap it may still fire"
+      (is (not (gates/budget-exceeded? g (apply hist (map fire (range 1 cap)))))))
+    (testing "at the cap it is spent"
+      (is (gates/budget-exceeded? g (apply hist (map fire (range 1 (inc cap)))))))
+    (testing "a MET settlement ends the episode and re-arms the budget"
+      (is (not (gates/budget-exceeded?
+                g (apply hist (concat (map fire (range 1 (inc cap)))
+                                      [(met (+ cap 1))]))))
+          "the stall ended; a later stall gets its own budget"))
+    (testing "and the new episode is bounded again"
+      (is (gates/budget-exceeded?
+           g (apply hist (concat (map fire (range 1 (inc cap)))
+                                 [(met 100)]
+                                 (map fire (range 101 (+ 101 cap))))))
+          "re-arming must not mean unlimited"))
+    (testing "another gate's settlement does not re-arm this one"
+      (is (gates/budget-exceeded?
+           g (apply hist (concat (map fire (range 1 (inc cap)))
+                                 [{:gate :studying :turn 50 :settled :met}])))))))

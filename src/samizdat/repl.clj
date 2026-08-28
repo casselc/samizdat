@@ -219,7 +219,12 @@
                    {:ok true :value (pr-str value) :out (str out)})
                  (catch Throwable e
                    {:ok false
-                    :error (or (ex-message e) (str e))
+                    ;; not-empty, not `or`: `or` only falls through on NIL,
+                    ;; and an exception carrying an EMPTY message handed the
+                    ;; model the whole of "Eval error: " and nothing else.
+                    ;; Live in run bd56a286, twice. (str e) at least names the
+                    ;; exception type, which is something to act on.
+                    :error (or (not-empty (str (ex-message e))) (str e))
                     :error-type (str (type e))
                     :out (str out)})
                  (finally

@@ -289,7 +289,25 @@
                                                :branch-before before
                                                :branch-after after})
                             turn))
-    (assoc after :open-predictions (vec kept))))
+    ;; Stamp the MET settlements onto gate-history: that is the episode
+    ;; boundary a budget re-arms at (karamazov-gez). Without it a gate spends
+    ;; its whole run's allowance on the first stall and is silent for every
+    ;; stall after, however much worse.
+    (let [met-gates (into #{}
+                          (comp (filter (fn [p]
+                                          (contains?
+                                           #{:met :met-late}
+                                           (arbiter/settle p {:current-turn turn
+                                                              :tools-called tools-called
+                                                              :branch-before before
+                                                              :branch-after after}))))
+                                (map :gate))
+                          closed)]
+      (cond-> (assoc after :open-predictions (vec kept))
+        (seq met-gates)
+        (update :gate-history
+                (fnil into [])
+                (map (fn [g] {:gate g :turn turn :settled :met}) met-gates))))))
 
 (defn phase-valve
   "The release valve for the explore prologue (vf-b25): a branch that cannot
