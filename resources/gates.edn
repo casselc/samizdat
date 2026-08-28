@@ -1928,13 +1928,34 @@
          sooner than studying (4 turns against 10) and is more specific, so
          when both are true this is the more actionable steer. Studying says
          you have stopped; this says you are going and it is not being kept."
+   ;; TWO WAYS TO ARM, because there are two ways to be not-writing.
+   ;;
+   ;; A STALE PLAN is the sharp one: the branch has DECLARED files and has not
+   ;; written them, so it has said itself what it owes and there is nothing to
+   ;; infer. This reaches a branch that has never written at all, which the
+   ;; history rule below cannot — run bd56a286's T1 read for 316 turns and run
+   ;; 90674c19's T0 explored 32 turns past its own declaration, both invisible
+   ;; to a gate that arms on having written before (karamazov-gez).
+   ;;
+   ;; The HISTORY rule stays for a branch working without a plan: it wrote,
+   ;; then stopped. Armed after the first write so opening exploration is
+   ;; never nagged.
    :when (and (state/active? branch)
-              (supervisor/over-studying? (tool-vocab :file-write)
-                                         (:turns branch)
-                                         (threshold :no-edit-turns)))
+              (or (state/plan-stale? branch
+                                     (tool-vocab :file-write)
+                                     (threshold :no-edit-turns))
+                  (supervisor/over-studying? (tool-vocab :file-write)
+                                             (:turns branch)
+                                             (threshold :no-edit-turns))))
+   ;; Names the OUTSTANDING FILES when there is a plan. "Write something" is
+   ;; answerable with "which?"; "you said you would change these three and
+   ;; have not" is not.
    :message-form (str (prompt "no-edits")
                       "\n\nNothing has been written to a file in "
-                      (threshold :no-edit-turns) " turns.")
+                      (threshold :no-edit-turns) " turns."
+                      (when-let [owed (seq (state/unwritten branch))]
+                        (str "\n\nYou declared these and have not written them:\n"
+                             (clojure.string/join "\n" (map #(str "  - " %) owed)))))
    :prediction "the branch writes or edits a file"
    :window 3}
 

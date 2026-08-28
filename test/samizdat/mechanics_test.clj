@@ -312,3 +312,66 @@
     (is (= ["test/a_test.clj"] (:files (state/plan b))))
     (is (= ["test/a_test.clj"] (state/unwritten b))
         "the new plan's files are outstanding again")))
+
+;; --- the plan is a better arming signal than the write history --------------
+;; :no-edits armed on "this branch has written before", which is a heuristic
+;; groping for "is it supposed to be writing by now". A branch that has never
+;; written was unreachable — T1 of run bd56a286 read for 316 turns and T0 of
+;; run 90674c19 declared a plan and then explored 32 turns, both with the gate
+;; unable to say anything (karamazov-gez). A DECLARED, UNLANDED PLAN answers
+;; the question exactly: it is supposed to be writing, and it is not.
+
+(deftest a-stale-plan-is-the-arming-signal
+  (let [turns (fn [& ts] (mapv (fn [t] {:tool t}) ts))
+        b (fn [plan-files & ts]
+            (assoc (state/declare-plan {} {:files plan-files})
+                   :turns (vec (apply turns ts))))
+        vocab (gates/tool-vocab :file-write)
+        n 4]
+    (testing "no plan, no arming — a branch orienting is not stalled"
+      (is (not (state/plan-stale? {:turns (apply turns (repeat 10 "eval"))} vocab n))))
+    (testing "a plan whose files are all written is not stale"
+      (let [x (-> (state/declare-plan {} {:files ["a.clj"]})
+                  (state/note-write "a.clj")
+                  (assoc :turns (apply turns (repeat 10 "eval"))))]
+        (is (not (state/plan-stale? x vocab n)))))
+    (testing "declared and unwritten, with no file-write in the window: stale"
+      (is (state/plan-stale? (apply b ["a.clj"] (repeat n "eval")) vocab n)))
+    (testing "under the window it is not yet stale"
+      (is (not (state/plan-stale? (apply b ["a.clj"] (repeat (dec n) "eval")) vocab n))))
+    (testing "a recent write clears it even with files still owed"
+      (is (not (state/plan-stale? (apply b ["a.clj" "b.clj"]
+                                         (concat (repeat (dec n) "eval") ["write_file"]))
+                                  vocab n))))
+    (testing "it arms on a branch that has NEVER written — the hole this closes"
+      (let [never (apply b ["a.clj"] (repeat 20 "read_file"))]
+        (is (empty? (filter #{"write_file"} (map :tool (:turns never)))))
+        (is (state/plan-stale? never vocab n))))))
+
+(deftest the-no-edits-gate-arms-both-ways
+  ;; Two ways to be not-writing, and the gate must reach both. It used to
+  ;; reach only the second, which is why a branch that had never written was
+  ;; invisible to it (karamazov-gez).
+  (let [gate (first (filter #(= :no-edits (:gate %)) (gates/gates)))
+        n (gates/threshold :no-edit-turns)
+        turns (fn [t k] (vec (repeat k {:tool t})))
+        fires? (fn [b] (boolean ((:when gate) {:branch b})))]
+    (testing "a DECLARED, unlanded plan arms it even with no write in the branch's life"
+      (let [b (assoc (state/declare-plan {:status :active} {:files ["src/a.clj"]})
+                     :turns (turns "read_file" (inc n)))]
+        (is (empty? (filter #{"write_file"} (map :tool (:turns b))))
+            "precondition: this branch has never written")
+        (is (fires? b))
+        (is (str/includes? ((:message gate) {:branch b}) "src/a.clj")
+            "and the nudge names the file it owes, so it is answerable")))
+    (testing "landing the plan disarms it"
+      (let [b (-> (state/declare-plan {:status :active} {:files ["src/a.clj"]})
+                  (state/note-write "src/a.clj")
+                  (assoc :turns (turns "eval" (inc n))))]
+        (is (not (fires? b)))))
+    (testing "the history rule still covers a branch working without a plan"
+      (let [b {:status :active
+               :turns (into [{:tool "write_file"}] (turns "eval" n))}]
+        (is (fires? b))))
+    (testing "opening exploration with neither plan nor history is still not nagged"
+      (is (not (fires? {:status :active :turns (turns "read_file" 20)}))))))

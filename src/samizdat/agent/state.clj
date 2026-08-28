@@ -643,6 +643,25 @@
   (let [written (or (:repl-written branch) #{})]
     (vec (remove written (:files (plan branch))))))
 
+(defn plan-stale?
+  "Whether this branch has DECLARED files it has not written and has not
+  touched a file in the last `n` turns. `tools` is the :file-write vocabulary.
+
+  A SHARPER ARMING SIGNAL than the write history it replaces. :no-edits used to
+  arm on \"this branch has written something before\", which is a heuristic
+  groping for \"is it supposed to be writing by now\" — and it left a branch
+  that had never written completely unreachable, which is how one run read for
+  316 turns and another declared a plan and then explored for 32 more with no
+  gate able to say a word (karamazov-gez).
+
+  A declared, unlanded plan answers the question outright: the branch has said
+  what it owes, and it is not paying. No history heuristic needed."
+  [branch tools n]
+  (let [ts (vec (:turns branch))]
+    (and (seq (unwritten branch))
+         (>= (count ts) n)
+         (not-any? (set tools) (keep :tool (take-last n ts))))))
+
 (defn context-pressure
   "How close the LAST request came to the operating ceiling: nil, `:advisory`,
   `:urgent`, or `:over`. `policy` is gates.edn `:context-pressure`.
