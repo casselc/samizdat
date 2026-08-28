@@ -1272,29 +1272,33 @@
          detection engine lives in judge.clj; the vocabulary it matches on
          lives here, so it retunes per project at runtime."}
 
-  :focused-verify
+   :focused-verify
   ;; drg-4026 #47/48: the focused-verify conventions — which changed paths
   ;; count as test files, how a test path maps to its namespace, and the
   ;; command that runs just those namespaces. Project conventions, not
   ;; kernel code: a pytest or maven project retunes these without a
   ;; rebuild. The derivations live in verify.clj and read these at fire
   ;; time. :cmd-prefix is concatenated with the derived expression and a
-  ;; closing single quote for sh -c; the expression's namespaces come
-  ;; through :ns-whitelist-regex, so the quoted payload genuinely contains
-  ;; no single quotes (provenance R3-1).
-  {:value
-   {:test-file-regex "(?i)(^|/)(test|spec)s?/|[_-](test|spec)\\.[a-z]+$"
-    :root-strip-regex "^(test|gui|src)/"
-    :ext-strip-regex "\\.cljc?$"
-    :ns-whitelist-regex "[a-zA-Z0-9.*-]+"
-    :cmd-prefix "jolt -A:test -e '"
-    ;; The structured-argv twin of :cmd-prefix, for the bounded lane's
-    ;; shell-free runner: the executable and fixed args as a vector, with the
-    ;; derived -e expression appended as the one variable element. No shell
-    ;; composes anything, so there is no quote to get wrong.
-    :argv-prefix ["jolt" "-A:test" "-e"]}
-   :kind :threshold :capability-tunable? false
-   :doc "The focused-verify conventions as data (see the comment above)."}
+  ;; closing single quote for sh -c — the ORDINARY lane's runner; the
+  ;; expression's namespaces come through :ns-whitelist-regex, so the
+  ;; quoted payload genuinely contains no single quotes (provenance R3-1).
+  ;; The BOUNDED lane's executable and fixed argv are NOT here: they are
+  ;; controller-pinned code (samizdat.security.verification-env and
+  ;; samizdat.security.smolvm-verification-env, one pinned authority per
+  ;; verify environment, selected by trusted controller policy in
+  ;; samizdat.security.verification-provider), because this file is
+  ;; runtime-mutable by the very tier that lane's done gate
+  ;; judges — an argv authority read from here is one project/edit away
+  ;; from {:argv-prefix ["sh" "-c" "exit 0"]}, a gate the judged party can
+  ;; switch off.
+   {:value
+    {:test-file-regex "(?i)(^|/)(test|spec)s?/|[_-](test|spec)\\.[a-z]+$"
+     :root-strip-regex "^(test|gui|src)/"
+     :ext-strip-regex "\\.cljc?$"
+     :ns-whitelist-regex "[a-zA-Z0-9.*-]+"
+     :cmd-prefix "jolt -A:test -e '"}
+    :kind :threshold :capability-tunable? false
+    :doc "The focused-verify conventions as data (see the comment above)."}
 
   :ship-gates
   ;; drg-4026 #44: the model-free ship rungs as data, compiled at load by

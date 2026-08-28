@@ -144,18 +144,23 @@
   [{:keys [branch tool-name] :as ctx}]
   (let [known (known-values-for ctx)
         outcome (try
-                  {:ok (if (and (base/bounded? ctx) (= "done" tool-name))
-                         ;; The bounded lane's done is a ControlEvent the
-                         ;; CONTROLLER settles (M2), never the model's own
-                         ;; say-so: ship/bounded-done derives the focused argv
-                         ;; from the run's own edit receipts and runs it
-                         ;; shell-free with the root pinned as cwd and the
-                         ;; scrubbed environment. RED hands back bounded
-                         ;; evidence and the branch continues; only GREEN is
-                         ;; terminal. The ordinary `done` method — and its
-                         ;; `sh -c` verify — is unreachable in this lane.
-                         (ship/bounded-done ctx)
-                         (base/run-tool ctx))}
+                   {:ok (if (and (base/bounded? ctx) (= "done" tool-name))
+                          ;; The bounded lane's done is a ControlEvent the
+                          ;; CONTROLLER settles (M2), never the model's own
+                          ;; say-so: ship/bounded-done derives the pinned
+                          ;; verifier argv from the run's own edit receipts
+                          ;; and runs it inside the controller-owned
+                          ;; VerificationEnvironment (a fail-closed bubblewrap
+                          ;; sandbox over a private copy of the root — no
+                          ;; network, no host secrets or config, bounded
+                          ;; output/time/resources, cleanup/reaping). RED hands
+                          ;; back bounded evidence and the branch continues;
+                          ;; only GREEN is terminal, and an unavailable Linux
+                          ;; substrate refuses outright. The ordinary `done`
+                          ;; method — and its `sh -c` verify — is unreachable
+                          ;; in this lane.
+                          (ship/bounded-done ctx)
+                          (base/run-tool ctx))}
                   (catch Throwable e {:threw e}))]
     (if-let [e (:threw outcome)]
       (do (log/warn "tool" tool-name "threw:" (ex-message e))

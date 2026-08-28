@@ -1,0 +1,62 @@
+;; samizdat - a self-hosting agentic harness
+;; SPDX-License-Identifier: GPL-3.0-or-later
+;;
+;; The ExecutionEnvironment EDN SPI fixture set (RFC-012).
+;;
+;; Two classes of vector live here, and the difference is load-bearing:
+;;
+;; :shared-vectors carry golden digests that come from the OTHER repository.
+;; They are the cross-repository half of the contract: bbagent's ecosystem
+;; keeps the same canonicalization grammar over the same values, and when
+;; either side's keeper produces a different digest for one of these, the
+;; repositories have stopped keeping one contract — the conformance test
+;; fails rather than letting the drift ride. A shared vector's :alternative
+;; is an insertion-order-permuted spelling of the same value that must land
+;; on the SAME digest (the grammar is order-free).
+;;
+;; :regression-vectors carry golden digests computed through THIS keeper.
+;; They pin drift within this repository only. They are not evidence about
+;; the other side, and saying so here is the difference between a contract
+;; fixture and a vanity fixture.
+
+{:contract "execution-environment/edn-spi"
+ :keeper/surface '{coordinate samizdat.security.canonical-edn/coordinate
+                   canonical-tree samizdat.security.canonical-edn/canonical-tree}
+ :canonical/domain-tag :bb4t.coordinate/v1
+
+ :shared-vectors
+ [;; The canonical test vector, value and digest as the bbagent ecosystem
+  ;; pins it. If this digest moves, the two keepers no longer agree on the
+  ;; grammar itself.
+  {:fixture/id :order-free-map
+   :kind :bb4t/test-vector
+   :value {:a 1 :nested {:x #{3 2 1} :y [:ok]}}
+   :alternative-order-same-digest? true
+   :coordinate "sha256:2c1e6b7c6f844c15a7f6a67b0828b0fdc6d38c4fe6d436275bc802471c776d48"}]
+
+ :regression-vectors
+ [;; The environment-description vocabulary: an inert ExecutionEnvironment
+  ;; description takes the same kind and the same grammar on both sides, so
+  ;; a digest computed here names the same environment it would name there.
+  {:fixture/id :environment-description-shape
+   :kind :bb4t/execution-environment
+   :value {:executor/type :samizdat/bwrap-verification-env
+           :executor/mode :verify-only
+           :executor/operations #{:describe :verify}
+           :executor/network :none
+           :executor/namespaces #{:user :ipc :net :pid :uts}}
+   :coordinate "sha256:e3fd1b7d73e88ec4f88e482c61912524bd48acbbe6ed3cd319a4c4ca387fff2f"}
+
+  ;; The verify-input manifest vocabulary: entries sorted by path, files
+  ;; carrying bytes and a content digest, links carrying their target,
+  ;; directories carrying only their kind — over the PRIVATE COPY the
+  ;; verifier actually saw, never the authoritative tree.
+  {:fixture/id :verify-input-manifest-shape
+   :kind :samizdat.ve/verify-input
+   :value {:workspace/exclusions [".git" ".cpcache" ".cache" "node_modules" "target"]
+           :workspace/entries
+           [{:path "deps.edn" :kind :file :bytes 64
+             :digest "sha256:0000000000000000000000000000000000000000000000000000000000000000"}
+            {:path "src" :kind :directory}
+            {:path "test/ve" :kind :directory}]}
+   :coordinate "sha256:2d93125acc7cc9ca90e8af56524c7258ecb79549e98f5f8c95398fca42c7753e"}]}

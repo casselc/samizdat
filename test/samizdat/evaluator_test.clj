@@ -947,6 +947,64 @@
             (is (= 2 (:value (evaluate! conn binding "(+ 1 1)"))))
             (is (no-edit-litter? root))))))))
 
+(deftest absent-create-race-is-decided-by-native-no-replace-publication
+  ;; Both writers pass the lexical/root/symlink checks, see an absent target,
+  ;; write a complete same-directory temp, then stop at the sole seam before
+  ;; Jolt's native publication. Releasing them together therefore closes the
+  ;; former check-then-rename window deterministically: exactly one native
+  ;; no-replace call can publish, while the other observes :exists. This is not
+  ;; a scheduler-timing test and it touches no generic FFI surface.
+  (when bounded?
+    (let [{:keys [bind! evaluate!]} (evaluator-api)
+          root (str (fs/create-temp-dir {:prefix "samizdat-m2-create-race-"}))
+          conn-a (db/open! ":memory:")
+          conn-b (db/open! ":memory:")
+          ready (java.util.concurrent.CountDownLatch. 2)
+          go (java.util.concurrent.CountDownLatch. 1)
+          hook (fn [_tmp _target]
+                 (.countDown ready)
+                 (when-not (.await go 10 java.util.concurrent.TimeUnit/SECONDS)
+                   (throw (ex-info "race test release timed out" {}))))]
+      (try
+        (seed-project! root)
+        (let [a (bind! root "edit-create-race-a" {:profile :agent/project-develop})
+              b (bind! root "edit-create-race-b" {:profile :agent/project-develop})
+              outcomes (atom [])
+              worker (fn [conn binding content]
+                       (Thread.
+                        (fn []
+                          (try
+                            (swap! outcomes conj
+                                   {:ok (evaluate! conn binding
+                                                   (str "(project/edit \"raced.md\" :absent "
+                                                        (pr-str content) ")"))})
+                            (catch Throwable e
+                              (swap! outcomes conj {:error e}))))))]
+          (with-redefs-fn {(ns-resolve 'samizdat.evaluator '*before-create-publish*) hook}
+            (fn []
+              (let [ta (worker conn-a a "writer-a\n")
+                    tb (worker conn-b b "writer-b\n")]
+                (.start ta)
+                (.start tb)
+                (is (.await ready 10 java.util.concurrent.TimeUnit/SECONDS)
+                    "both writers reached native-publication boundary")
+                (.countDown go)
+                (.join ta)
+                (.join tb))))
+          (let [wins (filter :ok @outcomes)
+                losses (map #(error-data (:error %)) (filter :error @outcomes))]
+            (is (= 1 (count wins)) "exactly one same-name create publishes")
+            (is (= [:existing] (mapv :samizdat.evaluator/error losses))
+                "the losing native call reports the existing-create conflict")
+            (is (contains? #{"writer-a\n" "writer-b\n"}
+                           (file-text (str root "/raced.md")))
+                "the target is one whole candidate, never a replacement or torn write")
+            (is (no-edit-litter? root))))
+        (finally
+          (db/close conn-a)
+          (db/close conn-b)
+          (fs/delete-tree root))))))
+
 (deftest absent-edit-creates-files-but-never-directories
   (when bounded?
     (let [{:keys [bind! evaluate!]} (evaluator-api)]

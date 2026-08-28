@@ -1,0 +1,1 @@
+{:environment/available? false, :environment/refusal {:refusal/category :spi.refusal/guest-image-digest-mismatch, :refusal/reason "The guest image archive does not match the digest this host pinned"}, :spi/kind :spi.environment/availability, :spi/version 1}

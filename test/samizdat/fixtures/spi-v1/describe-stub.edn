@@ -1,0 +1,1 @@
+{:environment/coordinate "sha256:2a0c02538eadaf73ff6dffa13122e97818a03560cd9f778db01e923e3db7ee6b", :environment/description {:executor/network :none, :executor/type :test/stub, :executor/version "0.0.0-test"}, :spi/kind :spi.environment/describe, :spi/version 1}

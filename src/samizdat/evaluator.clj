@@ -31,20 +31,23 @@
   conflicts are refused with zero writes, as is the operator's run config —
   through the same files/run-config? seam the ordinary file tools and the
   shell policy use, invoked after confinement and before any existence check,
-  their authority ordering. Content is bounded; the write is a temp file in
-  the target's own directory atomically renamed into place, and the return is
+   their authority ordering. Content is bounded; the write is a temp file in
+   the target's own directory atomically published into place, and the return is
   the new content's canonical digest. Intent is recorded before actuation and
   outcome after; a replay consumes the recorded receipt and never re-executes
   the write."
   (:require [clojure.set :as set]
-            [clojure.string :as str]
-            [jolt.fs :as fs]
-            [jolt.sandbox :as sandbox]
-            [samizdat.agent.files :as files]
-            [samizdat.prompt :as prompt]
-            [samizdat.store.evaluator :as store]))
+             [clojure.string :as str]
+             [jolt.fs :as fs]
+             [jolt.sandbox :as sandbox]
+             [samizdat.agent.files :as files]
+             [samizdat.prompt :as prompt]
+             [samizdat.security.no-replace :as no-replace]
+             [samizdat.store.evaluator :as store]))
 
 (def jolt-coordinate "4af2362176160f2ed0e366689d7232b1a38adfec")
+(def jolt-publish-coordinate
+  "jolt-publish/v1:sha256:914ccd9f722efd98fe8e1e1381574a3efba04ae45a689e8c1918d420db82f0c1")
 (def sci-coordinate "32d62a5136ad3dc148588752f5bcc4cc30b14752")
 (def sci-version "0.13.53")
 (def profile-id :agent/project-read)
@@ -128,7 +131,7 @@
     :doc "Return a deterministic path, kind, byte-size, and sha256 content digest. The digest is computed through the bounded reader and the operation fails rather than returning a fake coordinate."}
    :project/edit
    {:name "project/edit" :arglists [["path" "base" "new-content"]]
-    :doc "Replace or create one regular file under the authorized project root and return its new {:path :kind :bytes :digest} — exactly what project/stat would report, so the digest is the next edit's anchor. base is the exact digest project/stat returned for the current content, or :absent to create a path that must not exist yet. A stale base, a missing anchor target, an existing create target, the operator's run config, a symbolic link in any component, a non-regular-file target, a missing parent, or content over the bound is refused and writes nothing. The write is a temp file in the target's directory, atomically renamed into place."}})
+    :doc "Replace or create one regular file under the authorized project root and return its new {:path :kind :bytes :digest} — exactly what project/stat would report, so the digest is the next edit's anchor. base is the exact digest project/stat returned for the current content, or :absent to create a path that must not exist yet. A stale base, a missing anchor target, an existing create target, the operator's run config, a symbolic link in any component, a non-regular-file target, a missing parent, or content over the bound is refused and writes nothing. The write is a temp file in the target's directory: create is an atomic Linux no-replace publication, replacement is an atomic rename."}})
 
 (def tool-docs
   {"eval" {:name "eval" :arglists [["code"]]
@@ -141,8 +144,9 @@
            :doc "Emit a completion request. M1 refuses successful completion because verification is unavailable."}})
 
 (defn runtime-snapshot []
-  (sandbox/inert
-   {:runtime/jolt-source jolt-coordinate
+   (sandbox/inert
+    {:runtime/jolt-source jolt-coordinate
+     :runtime/jolt-publish-source jolt-publish-coordinate
     :runtime/jolt-version (jolt.host/jolt-version)
     :runtime/sci-source sci-coordinate
     :runtime/sci-version sci-version
@@ -535,7 +539,7 @@
 ;; stat anchor. Confined, lexical-first and symlink-refusing exactly like the
 ;; read side; the parent directory must already exist; the target is a regular
 ;; file or absent. The write is a bounded temp file in the target's own
-;; directory, moved into place atomically — a reader never observes a
+;; directory, atomically published into place — a reader never observes a
 ;; half-written file, and a refused or failed edit leaves the tree
 ;; byte-identical.
 ;; ═══════════════════════════════════════════════════════════════════════════
@@ -543,6 +547,12 @@
 (def ^:private edit-base-pattern
   "The exact anchor shape: the digest project/stat returns."
   #"sha256:[0-9a-f]{64}")
+
+(def ^:dynamic ^:private *before-create-publish*
+  "Test-only deterministic race seam. It runs only after the caller-owned temp
+  is completely written and before Jolt's no-replace publication. Production
+  leaves it nil; it is not part of the evaluator or sandbox surface."
+  nil)
 
 (defn- validate-edit-arguments!
   "Lexical argument validation, before any filesystem access: new-content is
@@ -561,12 +571,12 @@
            {:base (pr-str base)})))
 
 (defn- replace-atomically!
-  "Write content-bytes to a temp file in the target's own directory and move
-  it onto abs.
+  "Write content-bytes to a temp file in the target's own directory and publish
+  it to abs.
 
-  A create moves WITHOUT replace-existing: a target that appeared since the
-  :absent check fails the move and surfaces as the :existing conflict — the
-  no-clobber create is atomic, not check-then-act. A replace is a single
+   A create uses Jolt's Linux no-replace primitive: a target that appeared since
+   the :absent check returns :exists and surfaces as the :existing conflict —
+   the no-clobber create is atomic, not check-then-rename. A replace is a single
   File.renameTo, which on the pinned runtime is one rename(2) — the atomic
   replace. Files/move with replace-existing is deliberately NOT used for it:
   on this host that code path deletes the destination before renaming, which
@@ -586,19 +596,23 @@
       (when perms
         (try (fs/set-posix-file-permissions tmp perms)
              (catch Throwable _ nil)))
-      (if create?
-        (try
-          (java.nio.file.Files/move
-           tmp (fs/path abs)
-           (into-array java.nio.file.CopyOption
-                       [java.nio.file.StandardCopyOption/ATOMIC_MOVE]))
-          (catch Throwable e
-            ;; The destination appeared between the :absent check and the
-            ;; move — the atomic no-clobber doing its job. Anything else is a
-            ;; genuine move failure and propagates.
-            (when (= :absent (classify abs))
-              (throw e))
-            (fail! :existing (message {:edit-existing true}) {:path rel})))
+       (if create?
+         (do
+           ;; tmp is owned by this function through its finally; Jolt borrows
+           ;; its and abs's path values synchronously and never retains them.
+           ;; A test may pause exactly here, after both contenders observed
+           ;; :absent and wrote temps, to prove the native publication—not the
+           ;; earlier check—decides the winner.
+           (when *before-create-publish* (*before-create-publish* tmp abs))
+           (case (no-replace/publish-create! tmp abs)
+             :published nil
+              :exists (fail! :existing (message {:edit-existing true}) {:path rel})
+              :unsupported (fail! :edit-create
+                                  (message {:edit-create-unsupported true})
+                                  {:path rel :status :unsupported})
+              :error (fail! :edit-create
+                            (message {:edit-create-failed true})
+                            {:path rel :status :error})))
         (when-not (try (.renameTo (java.io.File. (str tmp)) (java.io.File. abs))
                        (catch Throwable _ false))
           (fail! :edit-replace (message {:edit-replace true}) {:path rel})))

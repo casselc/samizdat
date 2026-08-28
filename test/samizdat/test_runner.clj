@@ -85,6 +85,10 @@
             [samizdat.decompose-test]
             [samizdat.decompose-run-test]
             [samizdat.verify-test]
+            [samizdat.verification-env-test]
+            [samizdat.smolvm-verification-env-test]
+            [samizdat.canonical-edn-test]
+            [samizdat.execution-env-spi-test]
             [samizdat.feature-test]
             [samizdat.telemetry-test]
             [samizdat.supervisor-test]
@@ -203,6 +207,10 @@
     samizdat.decompose-test
     samizdat.decompose-run-test
     samizdat.verify-test
+    samizdat.verification-env-test
+    samizdat.smolvm-verification-env-test
+    samizdat.canonical-edn-test
+    samizdat.execution-env-spi-test
     samizdat.feature-test
     samizdat.telemetry-test
     samizdat.supervisor-test
