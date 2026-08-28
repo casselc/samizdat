@@ -103,6 +103,21 @@
    {:name samizdat.prompt/render
     :summary "Render a prompt resource through selmer. Every harness message the model sees comes through here."}]}
 
+ {:group "Reading and writing Clojure"
+  :entries
+  [{:name samizdat.lisp/diagnose
+    :summary "Why a piece of Clojure would not load AS WRITTEN, or nil — reason plus 1-based line/col, naming both ends of a mismatch. Answers 'is this loadable now', which is a different question from lisp/balance's 'could this be repaired': the delimiters balancing does not promise it READS, and `(defn f [] :)` is perfectly balanced and is not Clojure."}
+   {:name samizdat.lisp/balance
+    :summary "The repair half: closes a trailing truncation or trims a trailing over-close when the result reads, and refuses anything mid-file because closing it would re-parent code. Returns data, not sentences — the words live in prompts/file-tool.md."}
+   {:name samizdat.lisp/first-odd-quote-line
+    :summary "The line where the running unescaped-quote count first goes odd — the line that most likely opened a string nobody closed, which is NOT where the reader complains."}
+   {:name samizdat.hashline/line-anchor
+    :summary "Mint a `<line>:<hash>` anchor: the line locates, the three-hex content hash of the trimmed line verifies. What read_file({anchors: true}) prints and the patch tool spends."}
+   {:name samizdat.hashline/apply-edits
+    :summary "Apply a batch of anchored edits atomically. Every edit resolves against the same read, so order does not matter; one stale anchor or two edits over a line refuses the whole batch rather than half-writing it."}
+   {:name samizdat.hashline/resolve-one
+    :summary "The refusal ladder behind an anchor: exact, drifted-so-follow-the-content, ambiguous-hash-so-the-explicit-line-wins, far-away-so-REFUSE, and gone-but-here-is-the-current-anchor. A false refuse costs one re-read; a false accept corrupts the file."}]}
+
  {:group "The record"
   :entries
   [{:name samizdat.store.journal/note!

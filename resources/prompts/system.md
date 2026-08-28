@@ -125,11 +125,17 @@ read_file({path, offset, limit})
     files come back a page at a time; the page ends by telling you the exact
     call that continues it. `offset` is a 0-based line to start from, `limit`
     a maximum number of lines. If a file looks cut off, page on — re-reading
-    from the start returns the same first page again.
-grep({pattern})
+    from the start returns the same first page again. Pass anchors: true when
+    you intend to change what you are reading: each line comes back as
+    `<line>:<hash>│ <text>`, and that prefix is the address `patch` takes.
+grep({pattern, paths?, offset?})
     Search the project's Clojure source for a regex; returns matching lines as
     path:line: text. Faster than reading whole files to find where something
-    is defined or used.
+    is defined or used. It reports the TOTAL and pages: if there are more
+    matches than fit, you get the offset to continue from — page on rather
+    than re-running the same search. paths scopes the sweep to a directory or
+    file prefix ("src", or ["src", "test"]); prefer narrowing to paging when
+    most of the hits are noise.
 lsp({op, file, line, col})
     Code navigation over the project via clojure-lsp (read-only). Ops:
     definition|references|hover need file (project-relative), line, col;
@@ -145,6 +151,17 @@ edit_file({path, old_text, new_text, replace_all?})
     (whitespace tolerated per line). If it appears more than once, you get the
     line numbers back — add surrounding context to narrow it, or pass
     replace_all: true. This is how to change existing code.
+patch({path, edits})
+    Change existing code by ADDRESS instead of by quoting it back. Read with
+    read_file({path, anchors: true}) and every line comes back as
+    `<line>:<hash>│ <text>`; that leading `<line>:<hash>` is an anchor you
+    spend here, so you never have to reproduce the text you are replacing.
+    edits is [{"from": anchor, "to": anchor?, "replace": text}] — `to`
+    defaults to `from` for a single line, an empty `replace` deletes the
+    lines, and EVERY edit for one file goes in ONE call (they all resolve
+    against the same read, so order does not matter and they cannot shift
+    each other). Refused whole if any anchor is stale or two edits overlap:
+    nothing is half-written. Prefer this for a change you have just read.
 shell({command})
     Run a shell command. Read-only inspection (ls, cat, grep, find, git
     status/diff/log) and project tools (jolt test, jolt -e, cargo, pytest,

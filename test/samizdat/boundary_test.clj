@@ -147,6 +147,10 @@
    "skill"       {:reach :host-bytes}
    "write_file"  {:reach :host-bytes}
    "edit_file"   {:reach :host-bytes}
+   ;; Anchored editing (karamazov-0kk). Same reach as edit_file and confined
+   ;; the same way — resolve-under-root, and the run config refused — because
+   ;; it is the same act by a different address.
+   "patch"       {:reach :host-bytes}
    "doc"         {:reach :in-process     :also "reads the live image, same as eval"}
    "complete"    {:reach :in-process     :also "reads the live image, same as eval"}
 

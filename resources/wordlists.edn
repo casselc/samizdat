@@ -242,4 +242,21 @@
  ;; model's own plan, and advising follow-ups is a legitimate way to end.
  #{"you " "your " "you'll" "you can" "you should" "you may" "you might"
    "let me know"}
-}
+
+ :skill-roots
+ ;; Project-relative directories a skill may live in, EARLIEST WINS. Two
+ ;; shapes are read from each: `<root>/<name>.md` (samizdat's flat form) and
+ ;; `<root>/<name>/SKILL.md` (a directory per skill plus its bundled
+ ;; resources — what Claude Code, pi, opencode, vis and the agents standard
+ ;; all write).
+ ;;
+ ;; A VECTOR, so order is precedence, and here rather than in src/ because
+ ;; which other harnesses' skills a project honours is a project's business.
+ ;; Discovery scanned only `.samizdat/skills/*.md`, which meant it could not
+ ;; read the skills checked into this very repository — including
+ ;; .agents/skills/beads/SKILL.md, the one AGENTS.md tells the agent to use
+ ;; (karamazov-15h). Adding a root costs nothing when the directory is
+ ;; absent: a missing root is skipped, never an error.
+ [".samizdat/skills"
+  ".agents/skills"
+  ".claude/skills"]}

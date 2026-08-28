@@ -289,6 +289,15 @@
    "src/samizdat/lisp.clj"
    {:threshold {256 "Reader recursion bound."}}
 
+   "src/samizdat/hashline.clj"
+   {:threshold
+    {3 "Hex chars in an anchor's content hash — the WIRE FORMAT, not a
+        tuning knob. Every anchor already printed into a branch's context
+        carries this width, so changing it at runtime would invalidate every
+        outstanding anchor mid-run, and it is also what makes our anchors
+        identical to the ones vis mints. The drift TOLERANCE, which is a real
+        judgement call, does live in gates.edn (:anchor)."}}
+
    "src/samizdat/store/db.clj"
    {:threshold {120 "Busy-timeout clamp for SQLite."}}
 
@@ -620,17 +629,9 @@
    #{
     "Review what you have and ship it."
     }
-   "src/samizdat/lisp.clj"
-   #{
-    " delimiter(s) to balance the text. If that placement is"
-    " placement is wrong, resend the corrected text."
-    " surrounding forms are not re-parented."
-    " wrong, resend the corrected text."
-    "an extra closing delimiter at position "
-    "an unterminated string or an unrecognized opener; cannot auto-close."
-    "an unterminated string starting at position "
-    "the text has unclosed delimiters that do not resolve by closing at the end."
-    }
+   ;; samizdat/lisp.clj is off the backlog entirely: `balance` answers in DATA
+   ;; (a reason plus line/col plus the reader's own words) and every sentence
+   ;; around it moved to resources/prompts/file-tool.md, keyed by reason.
    "src/samizdat/llm/client.clj"
    #{
     " :max-tokens or shorten the context."

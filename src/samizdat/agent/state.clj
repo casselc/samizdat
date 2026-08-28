@@ -593,6 +593,28 @@
   (cond-> (update branch :artifacts conj artifact)
     (:tier artifact) (update :tiers-seen (fnil conj #{}) (:tier artifact))))
 
+(defn context-pressure
+  "How close the LAST request came to the operating ceiling: nil, `:advisory`,
+  `:urgent`, or `:over`. `policy` is gates.edn `:context-pressure`.
+
+  TWO CEILINGS, and this is priced against the soft one. The hard ceiling is
+  the endpoint's context window, the number a request is REJECTED above; the
+  operating ceiling is the size a request should stay under so there is room
+  to work. vis states the trap plainly: \"on a 1M-window model, 150k of
+  handled context reads as saturation 15% with 850k headroom while
+  over-budget-hint is already saying FOLD SOON.\" Measuring against the hard
+  window means noticing pressure only once it is already fatal.
+
+  Pure, over the prompt-token count the provider reported."
+  [prompt-tokens {:keys [operating-ceiling advisory urgent]}]
+  (let [used (or prompt-tokens 0)]
+    (when (and (pos? used) (pos? (or operating-ceiling 0)))
+      (let [ratio (/ (double used) (double operating-ceiling))]
+        (cond (> ratio 1.0) :over
+              (>= ratio urgent) :urgent
+              (>= ratio advisory) :advisory
+              :else nil)))))
+
 (defn squeeze-context
   "Tighten this branch's compaction budget one notch (karamazov-d41).
 

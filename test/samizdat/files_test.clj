@@ -85,8 +85,128 @@
       (testing "a mid-file imbalance is written as-is with a clear warning"
         (let [r (files/write-file (ctx root "write_file"
                                        {:path "mid.clj" :content "(f)) (g)"}))]
-          (is (str/includes? (:result r) "does not balance"))
+          (is (str/includes? (:result r) "will not load"))
+          ;; karamazov-mea: the position is a line and column, not a char
+          ;; offset into a file the model has only seen part of.
+          (is (str/includes? (:result r) "line 1, col 4"))
           (is (= "(f)) (g)" (slurp (str root "/mid.clj"))))))
+      (finally (fs/delete-tree root)))))
+
+;; --- karamazov-2d3 / karamazov-ozv -------------------------------------------
+;; The three defects vis exposed, each verified live before the fix:
+;;   (a) edit_file wrote the file it had just broken
+;;   (b) and scored it :success / :progress? true
+;;   (c) and announced write_file's repair note — "auto-closed 1 unclosed
+;;       delimiter(s) … appended `)`" — for a repair the edit path deliberately
+;;       does NOT apply, so the model was told a closer had been added to a
+;;       file that still did not have one.
+;; vis's rule (token-optimization.md): "It re-parses the file after the write,
+;; so a syntax-breaking batch is refused whole and the file is left untouched."
+
+(deftest an-edit-that-breaks-the-file-is-refused-not-written
+  (let [root (str "/tmp/samizdat-files-" (random-uuid))
+        original "(ns demo)\n\n(defn f [] 1)\n"]
+    (fs/create-dirs root)
+    (try
+      (doseq [[label broken] [["unbalanced" "(defn f [] 1"]
+                              ["balanced but unreadable" "(defn f [] :)"]
+                              ["mismatched" "(defn f [] (vec [1 2)])"]]]
+        (spit (str root "/core.clj") original)
+        (testing label
+          (let [r (files/edit-file (ctx root "edit_file"
+                                        {:path "core.clj"
+                                         :old_text "(defn f [] 1)"
+                                         :new_text broken}))]
+            (is (= :mechanics (:category r)) "a call that would break the file is a miss")
+            (is (not (:progress? r)) "breaking the tree is never progress")
+            (is (= original (slurp (str root "/core.clj")))
+                "the file on disk is untouched")
+            (is (not (re-find #"(?i)auto-clos|auto-remov" (:result r)))
+                "never announce a repair the edit path does not apply"))))
+      (testing "the refusal says where the problem is, in line and column"
+        (spit (str root "/core.clj") original)
+        (let [r (files/edit-file (ctx root "edit_file"
+                                      {:path "core.clj"
+                                       :old_text "(defn f [] 1)"
+                                       :new_text "(defn f [] (vec [1 2)])"}))]
+          (is (re-find #"line \d+" (:result r)))
+          (is (re-find #"col \d+" (:result r)))))
+      (testing "a good edit still lands and still counts as progress"
+        (spit (str root "/core.clj") original)
+        (let [r (files/edit-file (ctx root "edit_file"
+                                      {:path "core.clj"
+                                       :old_text "(defn f [] 1)"
+                                       :new_text "(defn f [] 2)"}))]
+          (is (= :success (:category r)))
+          (is (:progress? r))
+          (is (= "(ns demo)\n\n(defn f [] 2)\n" (slurp (str root "/core.clj"))))))
+      (testing "a non-Clojure file is not syntax-gated"
+        (spit (str root "/notes.txt") "hello\n")
+        (let [r (files/edit-file (ctx root "edit_file"
+                                      {:path "notes.txt"
+                                       :old_text "hello" :new_text "(oops"}))]
+          (is (= :success (:category r)))
+          (is (= "(oops\n" (slurp (str root "/notes.txt"))))))
+      (finally (fs/delete-tree root)))))
+
+(deftest write-file-reports-balanced-but-unreadable-clojure
+  ;; karamazov-ozv: this used to be silent — "Wrote 17 chars to w.clj." and
+  ;; nothing else, because balance/scan answered the delimiter question and
+  ;; nobody asked the reader.
+  (let [root (str "/tmp/samizdat-files-" (random-uuid))]
+    (fs/create-dirs root)
+    (try
+      (let [r (files/write-file (ctx root "write_file"
+                                     {:path "w.clj" :content "(ns w)\n(def x :)\n"}))]
+        (is (re-find #"(?i)not clojure|does not read|invalid token" (:result r))
+            "the model is told, and told what the reader said")
+        (is (not (:repaired? r))))
+      (finally (fs/delete-tree root)))))
+
+(deftest anchored-read-and-patch-round-trip
+  ;; karamazov-0kk: the model spends a coordinate it was HANDED instead of
+  ;; reproducing the text it is replacing.
+  (let [root (str "/tmp/samizdat-files-" (random-uuid))]
+    (fs/create-dirs root)
+    (try
+      (spit (str root "/core.clj") "(ns demo)\n\n(defn f [] 1)\n")
+      (testing "a plain read is unchanged — anchors are opt-in"
+        (let [r (files/read-file (ctx root "read_file" {:path "core.clj"}))]
+          (is (str/includes? (:result r) "(ns demo)"))
+          (is (not (str/includes? (:result r) "│")))))
+      (testing "an anchored read prints an address beside every line"
+        (let [r (files/read-file (ctx root "read_file"
+                                      {:path "core.clj" :anchors true}))]
+          (is (str/includes? (:result r) "1:0b3│ (ns demo)"))
+          (is (str/includes? (:result r) "│ (defn f [] 1)"))))
+      (testing "an anchor read off that result patches the line"
+        (let [r (files/patch-file (ctx root "patch"
+                                      {:path "core.clj"
+                                       :edits [{:from "3:36d" :replace "(defn f [] 2)"}]}))]
+          (is (= :success (:category r)) (:result r))
+          (is (:progress? r))
+          (is (= "(ns demo)\n\n(defn f [] 2)\n" (slurp (str root "/core.clj"))))))
+      (testing "a stale anchor is refused, and the refusal hands back the live one"
+        (let [r (files/patch-file (ctx root "patch"
+                                      {:path "core.clj"
+                                       :edits [{:from "3:36d" :replace "(defn f [] 3)"}]}))]
+          (is (= :mechanics (:category r)))
+          (is (str/includes? (:result r) "Nothing was written"))
+          (is (re-find #"3:[0-9a-f]{3}" (:result r)) "the current anchor, so recovery is one call")
+          (is (= "(ns demo)\n\n(defn f [] 2)\n" (slurp (str root "/core.clj"))))))
+      (testing "a patch that would break the file is refused like an edit"
+        (let [r (files/patch-file (ctx root "patch"
+                                      {:path "core.clj"
+                                       :edits [{:from "3:38c" :replace "(defn f [] :)"}]}))]
+          (is (= :mechanics (:category r)))
+          (is (= "(ns demo)\n\n(defn f [] 2)\n" (slurp (str root "/core.clj"))))))
+      (testing "the run config is protected here too"
+        (fs/create-dirs (str root "/.samizdat"))
+        (spit (str root "/.samizdat/config.edn") "{}")
+        (is (= :mechanics (:category (files/patch-file
+                                      (ctx root "patch"
+                                           {:path ".samizdat/config.edn"
+                                            :edits [{:from "1:000" :replace "{}"}]}))))))
       (finally (fs/delete-tree root)))))
 
 (deftest write-then-read-roundtrips

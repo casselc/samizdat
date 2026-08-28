@@ -95,6 +95,7 @@
             [samizdat.files-test]
             [samizdat.edit-test]
             [samizdat.grep-test]
+            [samizdat.hashline-test]
             [samizdat.control-test]
             [samizdat.util-test]
             [samizdat.lisp-test]
@@ -215,6 +216,7 @@
     samizdat.files-test
     samizdat.edit-test
     samizdat.grep-test
+    samizdat.hashline-test
     samizdat.control-test
     samizdat.util-test
     samizdat.lisp-test

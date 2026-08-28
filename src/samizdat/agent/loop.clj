@@ -375,12 +375,27 @@
   ([branch response] (absorb-response branch response nil))
   ([branch response turn]
    (let [{:keys [tape parsed signals said]}
-         (infer/absorb (infer/of-branch branch) response turn)]
+         (infer/absorb (infer/of-branch branch) response turn)
+         ;; PROACTIVE, not reactive (karamazov-3y5). The only thing that used
+         ;; to tell a branch its prompt had grown too big was a failed
+         ;; request: the overflow came back, THEN the budget was squeezed.
+         ;; The provider reports the size of every request it accepted, so
+         ;; the wall is visible one turn before it is hit — squeeze on the
+         ;; approach and the overflow never happens. Still harness-side and
+         ;; invisible to the model, exactly like compaction always is; the
+         ;; model-facing half of vis's hint waits on a fold tool to name,
+         ;; because telling a model it is near a ceiling it has no lever to
+         ;; move is noise.
+         pressure (state/context-pressure
+                   (get-in response [:usage :prompt-tokens])
+                   (gates/threshold :context-pressure))]
      {:parsed parsed
       :signals signals
       :said said
-      :branch (-> (infer/into-branch branch tape)
-                  (state/record-mechanics signals))})))
+      :pressure pressure
+      :branch (cond-> (-> (infer/into-branch branch tape)
+                          (state/record-mechanics signals))
+                (contains? #{:urgent :over} pressure) state/squeeze-context)})))
 
 (defn no-call-step
   "No usable call. Say exactly what was wrong; a bare \"try again\" produces

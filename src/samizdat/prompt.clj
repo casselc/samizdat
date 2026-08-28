@@ -52,6 +52,7 @@
    "fetch-turn-miss"
    "file-thrash"
    "file-tool"
+   "grep-tool"
    "fork-thesis"
    "judge"
    "judge-exemptions"

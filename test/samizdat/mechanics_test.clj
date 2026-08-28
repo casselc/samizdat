@@ -122,3 +122,24 @@
               (state/record-outcome {:category :mechanics :progress? false})
               (state/record-outcome {:category :neutral :progress? false}))]
     (is (zero? (:consecutive-mechanics-failures b)))))
+
+;; --- karamazov-3y5 -----------------------------------------------------------
+;; Context pressure was measured only by hitting the wall: the overflow came
+;; back from the provider, and only THEN was the budget squeezed — after the
+;; failed request and its backoff were already spent.
+
+(deftest context-pressure-is-graded-against-the-operating-ceiling
+  (let [policy {:operating-ceiling 1000 :advisory 0.75 :urgent 0.90}]
+    (is (nil? (state/context-pressure 500 policy)) "well under: nothing")
+    (is (nil? (state/context-pressure 749 policy)) "just under advisory")
+    (is (= :advisory (state/context-pressure 750 policy)))
+    (is (= :advisory (state/context-pressure 899 policy)))
+    (is (= :urgent (state/context-pressure 900 policy)))
+    (is (= :urgent (state/context-pressure 1000 policy)) "at the ceiling, not over")
+    (is (= :over (state/context-pressure 1001 policy)))
+    (testing "no measurement is not pressure"
+      (is (nil? (state/context-pressure nil policy)))
+      (is (nil? (state/context-pressure 0 policy))))
+    (testing "no ceiling configured means the signal is off, not always-on"
+      (is (nil? (state/context-pressure 999999 {:operating-ceiling 0
+                                                :advisory 0.75 :urgent 0.9}))))))

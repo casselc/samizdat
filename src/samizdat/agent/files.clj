@@ -30,6 +30,7 @@
   (:require [samizdat.agent.gates :as gates]
             [clojure.string :as str]
             [jolt.fs :as fs]
+            [samizdat.hashline :as hashline]
             [samizdat.lisp :as lisp]
             [samizdat.prompt :as prompt]
             [samizdat.store.journal :as journal]))
@@ -50,6 +51,35 @@
 
 (defn- clojure-file? [path]
   (contains? clojure-exts (last (str/split (str path) #"\."))))
+
+(defn- syntax-note
+  "Render a `lisp/balance` verdict as the one sentence the model reads about
+  it. `balance` answers in DATA — a reason plus line/col and the reader's own
+  words — and every sentence around that data lives in file-tool.md, keyed by
+  reason. The reason is passed as a BOOLEAN per key rather than compared in
+  the template: selmer's `if` tests truthiness and has no equality operator
+  (the same reason telemetry/signals passes :base?/:userspace?)."
+  [{:keys [reason] :as verdict}]
+  (when reason
+    (msg (-> verdict
+             (dissoc :status :content :reason)
+             (assoc :syntax true (name reason) true)))))
+
+(defn- loads?
+  "Why `content` at `path` would not load, or nil when it is fine (or not a
+  Clojure file at all).
+
+  `lisp/diagnose`, NOT `lisp/balance`: balance answers \"can this be repaired\"
+  and a caller that refuses needs \"is this loadable now\". Asking the repair
+  question here is what made a refused edit report `auto-closed … appended
+  `)`` about a file nothing had been appended to.
+
+  Both halves of loadable, because the delimiters balancing does not promise
+  the text READS — `(defn f [] :)` is perfectly balanced and is not Clojure
+  (karamazov-ozv)."
+  [path content]
+  (when (clojure-file? path)
+    (lisp/diagnose content)))
 
 (defn- max-read-chars
   "How much of a file one `read` returns: the SMALLER of :file-read-chars and
@@ -152,7 +182,8 @@
   [{:keys [branch root args]}]
   (let [path (str (:path args))
         offset (or (some-> (:offset args) str parse-long) 0)
-        limit (some-> (:limit args) str parse-long)]
+        limit (some-> (:limit args) str parse-long)
+        anchors? (boolean (or (:anchors args) (get args "anchors")))]
     (cond
       (str/blank? path)
       (miss branch (msg {:needs-path true :tool "read_file"}))
@@ -162,7 +193,19 @@
         (if (fs/exists? abs)
           (let [content (slurp abs)
                 {:keys [text from next total]}
-                (page content offset (max-read-chars) limit)]
+                (page content offset (max-read-chars) limit)
+                ;; ANCHORS ARE OPT-IN (karamazov-0kk). Rendering
+                ;; `<line>:<hash>│ ` on every read would change what every
+                ;; existing flow sees for the sake of one tool, and a model
+                ;; copying a region back out would carry the gutter with it.
+                ;; A branch that means to `patch` asks for them; every other
+                ;; read is untouched, which is also what makes the two edit
+                ;; paths comparable.
+                text (if anchors?
+                       (hashline/render-lines
+                        (map-indexed (fn [i l] [(+ from i 1) l])
+                                     (str/split text #"\n" -1)))
+                       text)]
             {:result (str path
                           (when (pos? from) (str " (from line " from ")"))
                           ":\n" text
@@ -173,24 +216,124 @@
           (miss branch (msg {:no-file true :path path})))
         (miss branch (msg {:outside-root true :path path :verb "read"}))))))
 
+(defn patch-file
+  "Apply anchored `edits` to a file under the root, as ONE atomic batch.
+
+  Each edit is `{from, to?, replace}` where `from`/`to` are `<line>:<hash>`
+  anchors minted by `read_file({anchors: true})`. The model spends a
+  coordinate it was HANDED rather than reproducing the text it is replacing,
+  which is the failure edit_file's whitespace fallback exists to tolerate.
+
+  Refuses whole and writes nothing when any anchor does not resolve, when two
+  edits touch one line, or when the result would not load — the same rule
+  edit_file now follows (karamazov-2d3). :mechanics for a call made wrong,
+  :success when the batch lands."
+  [{:keys [branch root args]}]
+  (let [path (str (:path args))
+        edits (:edits args)]
+    (cond
+      (str/blank? path) (miss branch (msg {:needs-path true :tool "patch"}))
+      (not (sequential? edits)) (miss branch (msg {:needs-edits true}))
+      (empty? edits) (miss branch (msg {:needs-edits true}))
+      :else
+      (if-let [abs (resolve-under-root (or root ".") path)]
+        (cond
+          (run-config? root abs) (miss branch (msg {:protected true :path path}))
+          (not (fs/exists? abs)) (miss branch (msg {:no-file true :path path}))
+          :else
+          (let [content (str/replace (slurp abs) "\r\n" "\n")
+                edits (mapv (fn [e]
+                              {:from (str (or (:from e) (get e "from")))
+                               :to (some-> (or (:to e) (get e "to")) str)
+                               :replace (str (or (:replace e) (get e "replace") ""))})
+                            edits)
+                result (hashline/apply-edits content edits)]
+            (if-let [err (:error result)]
+              (miss branch (msg (assoc err :anchor-error true
+                                       :path path
+                                       (name (:reason err)) true)))
+              (if-let [broken (loads? path result)]
+                (miss branch (msg {:refused true :path path
+                                   :syntax (syntax-note broken)}))
+                (do
+                  (spit abs result)
+                  {:result (msg {:patched true :path path :edits (count edits)
+                                 :plural (when (> (count edits) 1) "es")})
+                   :category :success :progress? true :branch branch})))))
+        (miss branch (msg {:outside-root true :path path :verb "patched"}))))))
+
+(defn grep-limit
+  "How many matching lines one search reports before it hands back a
+  continuation, from gates.edn :context-budget."
+  []
+  (:grep-hits (gates/threshold :context-budget)))
+
+(defn grep-msg
+  "One of grep's branch-facing sentences, from prompts/grep-tool.md. Its own
+  template rather than file-tool.md's: read/write/edit speak about one path,
+  grep speaks about a result set, and cramming both into one file made the
+  conditionals unreadable."
+  [ctx]
+  (prompt/render "grep-tool" ctx))
+
+(defn- in-scope?
+  "Whether the root-relative path `rel` falls under any of `scopes` — a path
+  prefix each, matched at a segment boundary so `sub` selects `sub/b.clj` and
+  `submarine.clj` is not swept in with it. No scopes means the whole project."
+  [scopes rel]
+  (or (empty? scopes)
+      (boolean (some (fn [s]
+                       (let [s (str/replace (str s) #"^\./|/$" "")]
+                         (or (= rel s) (str/starts-with? rel (str s "/")))))
+                     scopes))))
+
 (defn grep-project
   "Search the project's source files for `pattern` (a regex string); return a
   seq of {:path :line :text} for each matching line, with paths relative to
   `root`. Globs the Clojure source extensions rather than walking the tree:
   glob skips hidden directories, so cache and VCS noise never matches, and the
   brace pattern covers files sitting directly in the root, which a plain
-  `**/*.clj` misses. Reading establishes nothing: :neutral."
-  [root pattern]
-  (let [root* (str (fs/canonicalize (or root ".")))
-        re (re-pattern pattern)
-        files (mapcat #(fs/glob root* (str "{*." % ",**/*." % "}")) clojure-exts)]
-    (mapcat (fn [p]
-              (let [rel (str (fs/relativize root* (fs/canonicalize (str p))))]
-                (keep-indexed (fn [i line]
-                                (when (re-find re line)
-                                  {:path rel :line (inc i) :text line}))
-                              (str/split (slurp (str p)) #"\n" -1))))
-            files)))
+  `**/*.clj` misses. Reading establishes nothing: :neutral.
+
+  `:paths` scopes the sweep to one or more path prefixes. Without it a wide
+  pattern answers the whole project, which is a lot of noise to push through a
+  result cap — the search that finds too much should be narrowable rather than
+  silently cut."
+  ([root pattern] (grep-project root pattern nil))
+  ([root pattern {:keys [paths]}]
+   (let [root* (str (fs/canonicalize (or root ".")))
+         re (re-pattern pattern)
+         scopes (remove str/blank? (map str (cond (nil? paths) []
+                                                  (coll? paths) paths
+                                                  :else [paths])))
+         files (mapcat #(fs/glob root* (str "{*." % ",**/*." % "}")) clojure-exts)]
+     (mapcat (fn [p]
+               (let [rel (str (fs/relativize root* (fs/canonicalize (str p))))]
+                 (when (in-scope? scopes rel)
+                   (keep-indexed (fn [i line]
+                                   (when (re-find re line)
+                                     {:path rel :line (inc i) :text line}))
+                                 (str/split (slurp (str p)) #"\n" -1)))))
+             files))))
+
+(defn grep-page
+  "The window of `hits` from `offset`, at most `limit` of them, as
+  {:hits :from :total :next}. `next` is the offset to ask for to continue, or
+  nil at the end.
+
+  The same shape read_file pages with, and for the same hard-won reason: this
+  tool used to `(take 200 hits)` and print nothing about the rest, with no
+  offset argument to continue from. A model could not tell a truncated answer
+  from a complete one, and could not have continued it if it had. Pure."
+  [hits offset limit]
+  (let [all (vec hits)
+        total (count all)
+        from (max 0 (min (or offset 0) total))
+        to (min total (+ from (max 1 limit)))]
+    {:hits (subvec all from to)
+     :from from
+     :total total
+     :next (when (< to total) to)}))
 
 ;; --- surgical edit ----------------------------------------------------------
 ;; Ported from dirge's edit tool (src/agent/tools/edit.rs): exact match first,
@@ -295,20 +438,28 @@
                                      (str (subs s 0 start) new-text (subs s end)))
                                    content
                                    (sort-by first > (if replace-all? ranges [(first ranges)])))
-                    ;; Any non-:balanced result means the edit broke the file —
-                    ;; a surgical edit must not silently auto-close (that would
-                    ;; re-parent code), so it is flagged for the model to fix.
-                    unbalanced (when (clojure-file? path)
-                                 (let [{:keys [status note]} (lisp/balance edited)]
-                                   (when (not= :balanced status)
-                                     (or note (msg {:unbalanced-generic true})))))]
-                (spit abs edited)
-                {:result (let [n (if replace-all? (count ranges) 1)]
-                           (msg {:edited true :path path :replacements n
-                                 :plural (when (> n 1) "s")
-                                 :fallback fallback :unbalanced unbalanced}))
-                 :category :success :progress? true :branch branch
-                 :fallback fallback}))))
+                    broken (loads? path edited)]
+                (if broken
+                  ;; REFUSED, and the file is left exactly as it was
+                  ;; (karamazov-2d3). It used to write the broken text, report
+                  ;; :success with :progress? true — so a branch earned credit
+                  ;; for breaking the tree and the thrash counters never saw it
+                  ;; — and hand back write_file's repair note, which is written
+                  ;; in the past tense about a repair this path deliberately
+                  ;; does not apply. A surgical edit must not auto-close (that
+                  ;; re-parents code); the answer is to refuse, not to narrate.
+                  ;; vis: "a syntax-breaking batch is refused whole and the
+                  ;; file is left untouched."
+                  (miss branch (msg {:refused true :path path
+                                     :syntax (syntax-note broken)}))
+                  (do
+                    (spit abs edited)
+                    {:result (let [n (if replace-all? (count ranges) 1)]
+                               (msg {:edited true :path path :replacements n
+                                     :plural (when (> n 1) "s")
+                                     :fallback fallback}))
+                     :category :success :progress? true :branch branch
+                     :fallback fallback}))))))
         (miss branch (msg {:outside-root true :path path :verb "edited"}))))))
 
 (defn stale-note
@@ -368,22 +519,32 @@
           (miss branch (msg {:protected true :path path}))
         ;; Paren repair for Clojure sources: models drop trailing closers, and
         ;; a file that does not read is a file that does not load. A trailing
-        ;; truncation or over-close is fixed mechanically and noted; a mid-file
-        ;; imbalance is written as-is with the imbalance reported, because
-        ;; closing it would silently re-parent code (see samizdat.lisp).
+        ;; truncation or over-close is fixed mechanically and noted; anything
+        ;; else is written as-is with the problem reported, because closing a
+        ;; mid-file imbalance would silently re-parent code (see samizdat.lisp).
+        ;;
+        ;; A WHOLESALE write reports and writes where edit_file refuses. The
+        ;; two are different acts: an edit lands in code the model did not
+        ;; write and can leave a working tree broken behind its back, while a
+        ;; write_file IS the file — refusing it leaves the model no way to
+        ;; replace a file it has decided is wrong. vis draws the line in the
+        ;; same place: its anchored `patch` refuses, its wholesale
+        ;; `Path.write_text` does not.
         (let [content (str content)
-              {:keys [status content* note]}
-              (if (clojure-file? path)
-                (let [r (lisp/balance content)]
-                  {:status (:status r) :content* (or (:content r) content) :note (:note r)})
-                {:status :balanced :content* content})]
+              verdict (when (clojure-file? path) (lisp/balance content))
+              status (:status verdict :balanced)
+              content* (or (:content verdict) content)]
           (when-let [parent (fs/parent abs)]
             (fs/create-dirs parent))
           (spit abs content*)
           {:result (msg {:wrote true :path path :chars (count content*)
                          :repaired (= :repaired status)
-                         :note note
-                         :unbalanced (when (= :unbalanced status) note)})
+                         ;; :unbalanced was the old key and it was a lie by
+                         ;; omission — balanced-but-unreadable source has
+                         ;; nothing unbalanced about it and used to report
+                         ;; nothing at all (karamazov-ozv).
+                         :broken (contains? #{:unbalanced :unreadable} status)
+                         :syntax (syntax-note verdict)})
            :category :success :progress? true :branch branch
            :repaired? (= :repaired status)}))
         (miss branch (msg {:outside-root true :path path :verb "written"}))))))

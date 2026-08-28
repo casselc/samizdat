@@ -1125,6 +1125,54 @@
         budget assembled ~33k-token prompts and the branch re-sent them on
         backoff, burning wall-clock against a wall."}
 
+ :context-pressure
+ {:value {:operating-ceiling 24000
+          :advisory 0.75
+          :urgent 0.90}
+  :kind :threshold :capability-tunable? false
+  :doc "WHEN A PROMPT IS GETTING TOO BIG, MEASURED BEFORE IT IS FATAL.
+
+        TWO CEILINGS. The HARD one is the endpoint's context window — the
+        size a request is rejected above. The OPERATING ceiling is this
+        number: the size a request should stay under so there is room left to
+        work. They are not the same question, and pricing pressure against
+        the hard one means noticing only once it is already too late. vis
+        puts it well: on a 1M-window model, 150k of handled context reads as
+        15% saturation with 850k headroom while its own hint is already
+        saying FOLD SOON.
+
+        :operating-ceiling  prompt tokens one request should stay under.
+                            NOT the context window — leave room for the
+                            reply, the tool result, and the next exchange.
+                            24000 suits a 32k local endpoint; raise it with
+                            the window.
+        :advisory           fraction of the ceiling that counts as close
+        :urgent             fraction at which the branch's compaction budget
+                            is squeezed a notch, one turn BEFORE the wall
+
+        Squeezing at :urgent rather than on overflow is the whole point. The
+        provider reports the size of every request it accepted, so the wall
+        is visible a turn early; recovery used to begin only after a request
+        had already failed and the backoff had been spent (karamazov-d41,
+        karamazov-3y5)."}
+
+ :anchor
+ {:value {:drift-tolerance 40}
+  :kind :threshold :capability-tunable? false
+  :doc "HOW FAR AN ANCHOR MAY HAVE DRIFTED AND STILL BE HONOURED.
+
+        An anchor is `<line>:<hash>` — the line locates, the hash verifies.
+        When the hash no longer sits at the stated line, this is how many
+        lines away its content may be found before the anchor is called
+        MISPLACED and the write refused.
+
+        Deliberately tight, and asymmetric on purpose: a false refuse costs
+        one re-read, a false accept corrupts a file. The common path never
+        reaches it — an anchor spent right after the read that minted it
+        resolves exactly — so this only forgives small drift when anchors are
+        reused across several edits without re-reading. Raising it past a
+        screenful trades the wrong-line guard for convenience."}
+
  :context-budget
  {:value {:tool-result-chars   4000
           :file-read-chars     60000
@@ -1132,6 +1180,10 @@
           :judge-rules-chars   6000
           :judge-transcript-chars 12000
           :grep-ranges         20
+          ;; How many matching lines one grep reports before handing back an
+          ;; offset to continue from. Was a literal 200 in the tool with no
+          ;; way to continue past it (karamazov-2py).
+          :grep-hits           200
           :inbox-lines         3
           :tree-lines          8
           :keep-pairs          10
