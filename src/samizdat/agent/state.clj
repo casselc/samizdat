@@ -724,6 +724,28 @@
          (when (seq slug) (str "-" slug))
          (when (pos? (or round 0)) (str "v" round)))))
 
+(defn orienting-too-long?
+  "Whether this branch has been READING without ever entering the contract:
+  no plan declared, nothing written, and `n` turns gone.
+
+  THE LAST ROUTE AROUND THE REPL SESSION. Its three arming conditions all
+  require the branch to have entered it — the entry refusal needs an `eval`
+  attempt, plan-stale? needs a declared plan, over-studying? needs a write —
+  so a branch that only reads satisfies none of them and no gate can speak.
+  Three branches across three runs found this: 316 turns, 148, and 87, all
+  invisible.
+
+  Reading is how you decide what to declare, so orientation stays free; what
+  ends is orientation WITHOUT END. A declared plan or a single write clears it
+  either way, because both mean the branch has said what it is doing."
+  [branch tools n]
+  (and (not (seq (:files (plan branch))))
+       ;; The TURN HISTORY, not :repl-written — that only tracks files a plan
+       ;; declared, and a branch that wrote without one is still a branch that
+       ;; is working rather than orienting.
+       (not-any? (set tools) (keep :tool (:turns branch)))
+       (>= (count (:turns branch)) n)))
+
 (defn plan-stale?
   "Whether this branch has DECLARED files it has not written and has not
   touched a file in the last `n` turns. `tools` is the :file-write vocabulary.

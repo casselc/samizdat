@@ -76,6 +76,22 @@
  {:value 2 :kind :re-fire-guard :capability-tunable? true
   :doc "How often the stall nudge may re-fire on one branch."}
 
+ :orient-turns
+ {:value 60 :kind :threshold :capability-tunable? true
+  :doc "Turns a branch may READ without declaring a plan or writing anything.
+
+        Reading is how a branch decides what to declare, so orientation is
+        free — but not endless. Three branches across three runs read for 316,
+        148 and 87 turns without ever entering the repl contract, invisible to
+        every gate because all three arming conditions require having entered
+        it first.
+
+        60 is set ABOVE the one branch that got this right, which declared at
+        turn 40 after reading from turn 1. A floor below that would interrupt
+        the behaviour we want. Raise it for a project whose codebase genuinely
+        takes longer to read into; lowering it below ~45 will start nagging
+        orientation that was going to succeed on its own."}
+
  :no-edit-turns
  {:value 4 :kind :threshold :capability-tunable? true
   :doc "Turns a branch may work WITHOUT writing to a file before the no-edits
@@ -1513,7 +1529,8 @@
                     "cell" "prompt" "manifest" "experiment" "remember"
                     "forget"}
   :settle-called
-  {:no-edits         #{"write_file" "edit_file" "patch"}
+  {:orienting        #{"plan" "write_file" "edit_file" "patch"}
+   :no-edits         #{"write_file" "edit_file" "patch"}
    :milestone        #{"done"}
    :branch-out       #{"branch_theses"}
    :repopulate       #{"branch_theses"}
@@ -1950,6 +1967,34 @@
                       (when-let [g (state/stated-goal branch)]
                         (str "\n\nYou are working on: " g)))
    :prediction "the branch produces a new confirmed artifact or discharges a sub-claim"
+   :window 3}
+
+  {:gate :orienting
+   :priority 10.4
+   :budget :max-no-edit-nudges
+   :doc "READING WITHOUT ENTERING THE CONTRACT. The branch has declared no
+         plan, written nothing, and spent :orient-turns turns reading.
+
+         This is the last route around the repl session, and three branches
+         across three runs took it — 316 turns, 148, and 87. Every arming
+         condition the session has requires the branch to have entered it
+         first: the entry refusal needs an `eval` attempt, :no-edits needs a
+         declared plan or a write history. A branch that only reads satisfies
+         none of them, so nothing could speak to it at all.
+
+         Fires BEFORE :no-edits (10.4 against 10.5) because it is the earlier
+         and more specific state: not `you declared and did not land`, but
+         `you have not said what you are doing at all`."
+   :when (and (state/active? branch)
+              (state/orienting-too-long? branch
+                                         (tool-vocab :file-write)
+                                         (threshold :orient-turns)))
+   :message-form (str (prompt "orienting")
+                      "\n\nYou have read for " (count (:turns branch))
+                      " turns without saying what you are looking for."
+                      (when-let [g (state/stated-goal branch)]
+                        (str "\n\nYou are working on: " g)))
+   :prediction "the branch declares a plan or writes a file"
    :window 3}
 
   {:gate :no-edits

@@ -69,6 +69,7 @@
    "no-call-imitation"
    "no-edits"
    "outside-role-surface"
+   "orienting"
    "parse-error-causes"
    "parse-error-repaired"
    "plan-tool"

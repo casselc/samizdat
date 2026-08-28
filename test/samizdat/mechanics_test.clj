@@ -531,3 +531,39 @@
     (let [s (board/surface-block {:siblings [{:id "t2" :title "OTHER" :status "open"}]
                                   :mine "t1"})]
       (is (str/includes? s "OTHER")))))
+
+;; --- reading is not a way around the contract -------------------------------
+;; Three branches across three runs took the same route: never call `eval`, so
+;; the entry refusal cannot fire; never declare, so plan-stale? has nothing to
+;; measure; never write, so over-studying? cannot arm. bd56a286's T1 read for
+;; 316 turns, c377260b's revise branch for 148, d304f539's T0 for 87 — none of
+;; them reachable by any gate, because every precondition needs the branch to
+;; have entered the contract first. The contract bound the path THROUGH the
+;; REPL and not the branch that never entered it.
+
+(deftest orientation-is-free-but-not-unbounded
+  (let [n (gates/threshold :orient-turns)
+        vocab (gates/tool-vocab :file-write)
+        reading (fn [k] (vec (repeat k {:tool "shell"})))]
+    (testing "a branch orienting is not asked for a plan — reading is how you
+              decide what to declare"
+      (is (not (state/orienting-too-long? {:turns (reading (dec n))} vocab n))))
+    (testing "past the floor with nothing declared, it is"
+      (is (state/orienting-too-long? {:turns (reading n)} vocab n)))
+    (testing "a declared plan ends it, whatever the reading since"
+      (is (not (state/orienting-too-long?
+                (assoc (state/declare-plan {} {:files ["a.clj"]})
+                       :turns (reading (* 3 n)))
+                vocab n))))
+    (testing "and so does having written — a branch already working is not
+              orienting, it is between sessions"
+      (is (not (state/orienting-too-long?
+                {:turns (conj (reading (* 3 n)) {:tool "write_file"})} vocab n))))))
+
+(deftest the-orient-floor-is-well-clear-of-real-orientation
+  ;; Measured: the run that DID declare did so at turn 40, having read from
+  ;; turn 1. A floor below that would have interrupted the one branch that got
+  ;; this right, which is the failure the arm-after-first-write guard exists to
+  ;; prevent. Set above it, with room.
+  (is (> (gates/threshold :orient-turns) 40)
+      "the floor must not interrupt orientation that was going to succeed"))
