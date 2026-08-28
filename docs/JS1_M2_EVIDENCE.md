@@ -310,3 +310,106 @@ CPU/memory-cgroup claim: bwrap has per-process RLIMIT_AS plus NPROC and a wall
 clock, not an aggregate host-reservation mechanism. The earlier M2 records
 above are functional-history records; this section supersedes their no-SmolVM
 statement only.
+
+## M2 exact lane closure (`bin/js1-m2`)
+
+`bin/js1-m2` is the M2 lane `bin/js1-m1` promised: one entry point that
+refuses inexact evidence and runs every M2 gate against pinned bytes.
+
+- Samizdat under test: `d85e24b0ec960e74783a0ae9aabdccc706619e9d`
+  (`fix: pin controller Chez into the sandboxed verifier environment`),
+  tracked-clean at run time; the lane script itself was untracked during the
+  run (the check ignores untracked files, the js1-m1 contract) and is
+  committed by the closure commit that carries this record.
+- Jolt: `f8899905d98a0abdcc6b4ae61dfd5c8bdb9c7277` — the
+  `js1-m2-verify-closure` worktree, tracked-clean; vendor/sci
+  `32d62a5136ad3dc148588752f5bcc4cc30b14752` / `0.13.53`, tracked-clean.
+- Interpreter/toolchain: `JOLT_CHEZ=/usr/local/bin/scheme` (csv10.4.1, ta6le),
+  pinned by the lane for every Jolt invocation — host and sandboxed alike.
+- Substrate: Linux, bwrap 0.11.1, prlimit, unprivileged user namespaces,
+  smolvm 1.7.5 with `/dev/kvm`.
+
+### The gate (all commands as the lane runs them)
+
+```text
+bin/js1-m2 check
+  Samizdat d85e24b0ec960e74783a0ae9aabdccc706619e9d
+  Jolt f8899905d98a0abdcc6b4ae61dfd5c8bdb9c7277
+  SCI 32d62a5136ad3dc148588752f5bcc4cc30b14752 / 0.13.53
+
+bin/js1-m2 test
+  Jolt ABI probe (sh test/chez/atomic-publish-abi-probe.sh)
+    ATOMIC-PUBLISH-ABI-PROBE OK
+  Jolt publish race (bin/jolt run test/chez/atomic-publish-test.clj)
+    ATOMIC-PUBLISH-TEST OK
+  bounded M1/M2 (SAMIZDAT_BOUNDED_TEST=1, vendored SCI pinned via -Sdeps):
+    samizdat.evaluator-test 23 tests, 286 assertions, 0 failures, 0 errors
+  VE/SPI/process (verification-env + execution-env-spi + proc):
+    43 tests, 324 assertions, 0 failures, 0 errors
+  ordinary suite (jolt -M:test):
+    1522 tests, 6007 assertions, 0 failures, 0 errors
+  explicit bwrap adversarial — substrate demanded first:
+    :substrate :real-spawns
+    samizdat.verification-env-test 13 tests, 94 assertions,
+    0 failures, 0 errors (REAL bwrap spawns)
+
+SAMIZDAT_SMOLVM_IMAGE=/tmp/bbagent-worker-image.tar \
+SAMIZDAT_SMOLVM_IMAGE_SHA256=sha256:4d52ba6f932d833cc39f5fe20a8d1f5d618226caa8ed80c80431299156acda19 \
+bin/js1-m2 test-smolvm   (the optional gate; configured-only)
+  :smolvm-substrate :real-machines
+  samizdat.smolvm-verification-env-test 27 tests, 174 assertions,
+  0 failures, 0 errors
+```
+
+### What the lane adds beyond running suites by hand
+
+- Every Jolt invocation runs through one pinned launcher (the worktree's
+  `bin/jolt`, prepended to PATH so the VE controller resolves THAT launcher
+  as the sandboxed verifier) and one pinned Chez.
+- The adversarial step DEMANDS the substrate: `bwrap`/`prlimit` on PATH and
+  an in-tree probe that `verification-env/available?` and `resolve-verifier`
+  both hold. Without them the VE suite greenly pins refusal — valid coverage,
+  but not adversarial evidence — and the lane refuses instead of recording
+  it. The step then re-runs the adversarial suite standalone so its summary
+  line is its own, not a sum.
+- `test-smolvm` is configured-only: it refuses to run without
+  `SAMIZDAT_SMOLVM_IMAGE` + `SAMIZDAT_SMOLVM_IMAGE_SHA256`, demands the real
+  machine substrate the same way, and prints one clear result line. A
+  refusal-path green can never masquerade as a configured result.
+
+### Development-loop note: the lane caught a missing toolchain pin
+
+The first `bin/js1-m2 test` run failed itself at the VE step: every
+sandboxed spawn died with `No threaded Chez Scheme 10.x found`. The
+constructed child env pinned every sandbox path but not the verifier's
+interpreter; the clean f8899905 worktree (unlike the original dirty checkout)
+carries no built Chez under `.cache/local`, and this host's working threaded
+Chez is named `scheme` — a name `bin/jolt` discovery never tries (`chez`
+exists on PATH but aborts on an incompatible boot). Bounded done was
+fail-closed refusing, correctly, everywhere. The fix is commit `d85e24b`:
+`child-env` carries the controller's own `JOLT_CHEZ` resolution (toolchain
+pinning, `JOLT_PWD`'s standing; `scrubbed-process-env` keeps credentials out
+of the name), `coordinate` names the constructed child env so two controllers
+pinning different verifier toolchains name different environments, and the
+env-contract test pins both halves. The whole lane then ran green on the
+clean tree.
+
+### Nonclaims
+
+This closure is this machine's evidence: Linux x86-64, bwrap 0.11.1, prlimit,
+unprivileged user namespaces, Chez csv10.4.1/ta6le, smolvm 1.7.5 + KVM, and
+the SmolVM gate's one configured image by digest. The lane makes no macOS,
+BSD, Windows, non-x86-64, or aggregate-resource claim; it does not touch
+Jolt, bbagent, or the frozen M1 branch; it does not start M3 (no TurnLease,
+stale-turn authority, scheduler changes, provider epochs, shared evaluators,
+`project/run`, JS2, or an upstream rebase); and the counts above are the
+current tree's — the earlier sections of this document are functional
+history, not superseded coordinates. The `JOLT_CHEZ` child-env pin is
+fail-closed, not a bind: when the controller's Chez is not visible under the
+sandbox allowlist, the pinned verifier dies and bounded done refuses — no
+host path is ever bound for it.
+
+**M2 exact lane: PASS — pinned Jolt f8899905 ABI/race GREEN; bounded M1/M2
+GREEN; VE/SPI/process GREEN; ordinary suite GREEN (1522); explicit bwrap
+adversarial GREEN on a demanded real substrate; optional configured SmolVM
+GREEN (27/174); evidence recorded; STOP FOR REVIEW.**
