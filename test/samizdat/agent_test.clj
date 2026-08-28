@@ -310,8 +310,17 @@
   ;; rebuild. Pin the move: the keys exist, carry the live vocabulary, and
   ;; settle's table still keys by gate.
   (is (= #{"eval" "shell"} (gates/tool-vocab :verification)))
-  (is (= #{"write_file" "edit_file"} (gates/tool-vocab :file-write)))
   (is (contains? (gates/tool-vocab :shipping) "write_file"))
+  ;; EVERY tool that writes a file must be in both, or a branch using it
+  ;; scores as having shipped nothing and gets nudged for work it is doing.
+  ;; `patch` was added to the loop and to neither, which is exactly the shape
+  ;; of the omission this now pins: assert the RULE, not a frozen set, so the
+  ;; next write tool fails here rather than silently going uncounted.
+  (doseq [t ["write_file" "edit_file" "patch"]]
+    (is (contains? (gates/tool-vocab :file-write) t)
+        (str t " writes files but is missing from :file-write"))
+    (is (contains? (gates/tool-vocab :shipping) t)
+        (str t " writes files but is missing from :shipping")))
   (let [settle-called (gates/tool-vocab :settle-called)]
     (is (map? settle-called))
     (is (= #{"done"} (:milestone settle-called)))

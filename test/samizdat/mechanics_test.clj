@@ -31,6 +31,7 @@
             [samizdat.agent.gates :as gates]
             [samizdat.agent.loop :as aloop]
             [samizdat.agent.state :as state]
+            [samizdat.agent.supervisor :as supervisor]
             [samizdat.llm.message :as message]
             [samizdat.store.journal :as journal]))
 
@@ -143,3 +144,39 @@
     (testing "no ceiling configured means the signal is off, not always-on"
       (is (nil? (state/context-pressure 999999 {:operating-ceiling 0
                                                 :advisory 0.75 :urgent 0.9}))))))
+
+;; --- the no-edits nudge ------------------------------------------------------
+;; Run c99c6fd6 spent turns 45-50 in the REPL — six evals around one arity bug
+;; in a function it had never written down — while write_file sat at 3 from
+;; turn 25. The studying gate could not see it: `eval` is work, the branch was
+;; not idle, and studying's threshold is 10. This is the narrower question,
+;; asked sooner: you are busy, and none of it is landing on disk.
+
+(defn- turns-of [& tools] (mapv (fn [t] {:tool t}) tools))
+
+(deftest no-edits-fires-only-once-the-branch-has-written-something
+  (let [vocab (gates/tool-vocab :file-write)
+        n (gates/threshold :no-edit-turns)
+        fires? (fn [turns] (supervisor/over-studying? vocab turns n))]
+    (testing "opening exploration is never nagged — nothing written yet"
+      (is (not (fires? (apply turns-of (repeat 12 "eval")))))
+      (is (not (fires? (apply turns-of (repeat 12 "read_file"))))))
+    (testing "fires once it HAS written and then stopped for the threshold"
+      (is (fires? (apply turns-of "write_file" (repeat n "eval")))))
+    (testing "quiet while it is still writing"
+      (is (not (fires? (turns-of "write_file" "eval" "write_file" "eval")))))
+    (testing "under the threshold is not yet a stall"
+      (is (not (fires? (apply turns-of "write_file" (repeat (dec n) "eval"))))))
+    (testing "patch counts as writing — it is a file tool like the others"
+      (is (not (fires? (apply turns-of "write_file" "eval" "patch"
+                              (repeat (dec n) "eval")))))
+      (is (fires? (apply turns-of "patch" (repeat n "eval")))))))
+
+(deftest the-no-edits-gate-is-declared-and-settleable
+  (let [g (first (filter #(= :no-edits (:gate %)) (gates/gates)))]
+    (is (some? g) "the gate exists in gates.edn")
+    (is (= :max-no-edit-nudges (:budget g)) "and is bounded, so it cannot nag forever")
+    (is (some? (:prediction g)) "it declares a prediction, like every gate")
+    (is (= #{"write_file" "edit_file" "patch"}
+           (get (gates/tool-vocab :settle-called) :no-edits))
+        "settled by the thing it asks for: a file actually written")))

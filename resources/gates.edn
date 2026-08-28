@@ -76,6 +76,29 @@
  {:value 2 :kind :re-fire-guard :capability-tunable? true
   :doc "How often the stall nudge may re-fire on one branch."}
 
+ :no-edit-turns
+ {:value 4 :kind :threshold :capability-tunable? true
+  :doc "Turns a branch may work WITHOUT writing to a file before the no-edits
+        nudge fires, once it has written at least one.
+
+        Distinct from :studying-turns, and much shorter, because it catches a
+        different failure. Studying is a branch that stopped doing anything —
+        read, grep, read again. This is a branch that is BUSY: prototyping in
+        the REPL, form after form, learning things it never commits. Run
+        c99c6fd6 spent turns 45-50 that way, six evals around a single arity
+        bug in a function it had not written down, while write_file sat at 3
+        from turn 25 onward.
+
+        Four is deliberately tight. The nudge is cheap, bounded by
+        :max-no-edit-nudges, and the cost it prevents is a whole run's turns
+        spent in a REPL whose state dies with the run."}
+
+ :max-no-edit-nudges
+ {:value 3 :kind :re-fire-guard :capability-tunable? true
+  :doc "How often the no-edits nudge may re-fire on one branch. Bounded for
+        dirge's reason: a nudge that can repeat forever becomes the thing the
+        model is responding to instead of the work."}
+
  :studying-turns
  {:value 10 :kind :threshold :capability-tunable? true
   :doc "Consecutive inspection-only turns (read/grep/eval/…), after the branch
@@ -1453,9 +1476,13 @@
  ;; run-tools (provenance R3-6): a name the loop cannot dispatch is a gate whose
  ;; prediction silently narrows to :unmet.
  {:verification #{"eval" "shell"}
-  :shipping #{"write_file" "edit_file" "shell" "reload_cells" "manifest"
-              "done" "give_up" "thesis" "branch_theses"}
-  :file-write #{"write_file" "edit_file"}
+  ;; `patch` writes files exactly as `write_file` and `edit_file` do; it was
+  ;; added to the loop and to none of these, so a branch editing by anchor
+  ;; scored as having shipped NOTHING and drew studying nudges for work it
+  ;; was doing (karamazov-0kk landed the tool, this landed the vocabulary).
+  :shipping #{"write_file" "edit_file" "patch" "shell" "reload_cells"
+              "manifest" "done" "give_up" "thesis" "branch_theses"}
+  :file-write #{"write_file" "edit_file" "patch"}
   ;; The storm guard's tool classification (karamazov-ekk). :storm-exempt is
   ;; the read-only surface — repeated identical reads are over-studying's
   ;; business, not a storm — plus done/give_up, whose repetition belongs to
@@ -1472,7 +1499,8 @@
                     "cell" "prompt" "manifest" "experiment" "remember"
                     "forget"}
   :settle-called
-  {:milestone        #{"done"}
+  {:no-edits         #{"write_file" "edit_file" "patch"}
+   :milestone        #{"done"}
    :branch-out       #{"branch_theses"}
    :repopulate       #{"branch_theses"}
    :emergency-review #{"done" "thesis"}
@@ -1883,6 +1911,31 @@
                       "\n\nNothing has advanced in " (:turns-since-progress branch)
                       " turns.")
    :prediction "the branch produces a new confirmed artifact or discharges a sub-claim"
+   :window 3}
+
+  {:gate :no-edits
+   :priority 10.5
+   :budget :max-no-edit-nudges
+   :doc "BUSY BUT NOT COMMITTING. The branch has written a file before and has
+         not written one in :no-edit-turns turns — it is working, usually in
+         the REPL, and none of it is landing anywhere that survives the run.
+
+         Armed only after the first write, like :progress-stalled and
+         :studying: a run reading its way into an unfamiliar codebase must
+         never be nagged for not having written anything yet.
+
+         Sits between :progress-stalled and :studying on purpose. It fires
+         sooner than studying (4 turns against 10) and is more specific, so
+         when both are true this is the more actionable steer. Studying says
+         you have stopped; this says you are going and it is not being kept."
+   :when (and (state/active? branch)
+              (supervisor/over-studying? (tool-vocab :file-write)
+                                         (:turns branch)
+                                         (threshold :no-edit-turns)))
+   :message-form (str (prompt "no-edits")
+                      "\n\nNothing has been written to a file in "
+                      (threshold :no-edit-turns) " turns.")
+   :prediction "the branch writes or edits a file"
    :window 3}
 
   {:gate :studying

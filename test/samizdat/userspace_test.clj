@@ -9,6 +9,7 @@
   harness's files nor another project's copy is affected. A layer that is
   shared is not userspace no matter which directory it lives in."
   (:require [clojure.java.io :as io]
+            [clojure.edn :as edn]
             [clojure.string :as str]
             [clojure.test :refer [deftest is testing use-fixtures]]
             [jolt.fs :as jfs]
@@ -390,7 +391,13 @@
     (is (= ["Mine"] (mapv :group (manual/groups)))))
   (testing "and none of it wrote the harness's own files"
     (is (re-find #":cull-threshold" (us/template :policy "gates")))
-    (is (not (re-find #"99" (us/template :policy "gates"))))
+    ;; The VALUE, not the digits. A bare "99" anywhere in a 2000-line
+    ;; gates.edn — another threshold, a doc citing a run id — collided with
+    ;; this sentinel and failed a test about something else entirely. Assert
+    ;; the thing actually at stake: the template still holds its own value.
+    (is (= 3 (get-in (edn/read-string (us/template :policy "gates"))
+                     [:cull-threshold :value]))
+        "the project's 99 did not write through to the shipped template")
     (is (not= "this project's own reprieve wording" (us/template :prompt "cull-reprieve")))
     (is (re-find #"The tape" (us/template :policy "manual")))))
 

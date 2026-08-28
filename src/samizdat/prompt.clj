@@ -67,6 +67,7 @@
    "memory-tool"
    "milestone"
    "no-call-imitation"
+   "no-edits"
    "parse-error-causes"
    "parse-error-repaired"
    "planner"
