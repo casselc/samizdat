@@ -100,8 +100,47 @@
     :summary "Score a branch's trajectory from the journal on the A-T letter scale, steps-so-far only — the offline validation entry point. Run it over a completed and an exhausted run and compare curves before wiring anything to the number."}
    {:name samizdat.agent.gates/trajectory-policy
     :summary "The trajectory-scoring policy from gates.edn: repeats, stride, criteria, and the not-yet-consulted abandon threshold."}
-   {:name samizdat.prompt/render
-    :summary "Render a prompt resource through selmer. Every harness message the model sees comes through here."}]}
+    {:name samizdat.prompt/render
+     :summary "Render a prompt resource through selmer. Every harness message the model sees comes through here."}]}
+
+ {:group "Bounded verification"
+  :entries
+  [{:name samizdat.security.verification-env/run
+    :summary "The M2 VerificationEnvironment: bounded done's tests run inside a controller-owned, fail-closed bubblewrap sandbox over a private copy of the root — never a direct host spawn."}
+   {:name samizdat.security.verification-env/available?
+    :summary "Whether this host can run that sandbox (Linux + bwrap + prlimit + user namespaces). When false, bounded done refuses outright rather than degrade."}
+   {:name samizdat.security.verification-env/focused-argv
+    :summary "The bounded lane's verifier argv: the controller-PINNED executable and fixed args (code, not gates.edn) plus the one derived focused -e expression."}
+    {:name samizdat.security.verification-env/coordinate
+     :summary "A stable digest naming the pinned sandbox policy itself — the value the journal's ship-verify row carries as :verify-env."}
+    {:name samizdat.security.canonical-edn/coordinate
+     :summary "This repository's independent keeper of the canonical EDN grammar (RFC-012): sha256 over the tagged tree of [:bb4t.coordinate/v1 kind tree], domain-separated by kind. Cross-pinned against the other ecosystem's keeper by shared golden vectors — a moved digest means the contract drifted."}
+    {:name samizdat.security.canonical-edn/canonical-tree
+     :summary "The inert EDN domain as an ordered tagged tree — the form both keepers digest. Rejects anything alive or ambiguous (metadata, records, floats, lazy seqs, objects)."}
+    {:name samizdat.security.verification-env/describe-envelope
+     :summary "What the sandbox IS, as the execution environment SPI's describe envelope: the inert shape-only description beside its recomputed coordinate — the name a second repository can check (RFC-012)."}
+    {:name samizdat.security.verification-env/verify-envelope
+     :summary "One run projected into the SPI's run envelope — attribution, input coordinate, invocation index, status, streams, duration — exactly what the ship gate journals beside its verdict; nil when nothing spawned."}
+    {:name samizdat.security.verification-env/workspace-manifest
+     :summary "The manifest of a workspace as the verifier's private copy of it: entries sorted by path, files with byte size and content digest, links as links, exclusions applied by name and recorded."}
+    {:name samizdat.security.verification-env/input-coordinate
+     :summary "The canonical-EDN coordinate naming exactly what one verification ran against — the PRIVATE COPY, taken after staging and before the spawn so it names the input the run started from (RFC-012)."}
+    {:name samizdat.security.verification-env/invocation-count
+     :summary "How many sandboxed verifications this process's environment attempted. Real spawns only — probes, refusals and staging failures never move it; a future replay must not either."}
+    {:name samizdat.security.smolvm-verification-env/run
+     :summary "The SmolVM VerificationEnvironment — the bounded done's second controller-owned verify provider, ported from bbagent's measured execution substrate: every run boots an ephemeral machine whose only host filesystem is the project mounted read-only, overlays a writable layer inside the VM, hides the manifest's excluded paths, drops to the project owner's identity with no capabilities, and runs the pinned IN-IMAGE verifier argv. The project is bracketed by its input coordinate; a project that moved under a run is :project-changed and claims no coordinate."}
+    {:name samizdat.security.smolvm-verification-env/available?
+     :summary "Whether this host can run that environment (Linux + the measured smolvm manager version + the configured guest image + a real minimum machine spawn). When false, bounded done refuses outright rather than degrade."}
+    {:name samizdat.security.smolvm-verification-env/guest-image
+     :summary "The configured guest image archive (SAMIZDAT_SMOLVM_IMAGE, digest-pinned by SAMIZDAT_SMOLVM_IMAGE_SHA256) and its digest — trusted-controller environment, never gates.edn, never model-facing. The digest participates in the environment's coordinate, so a different image is a different environment."}
+    {:name samizdat.security.smolvm-verification-env/focused-argv
+     :summary "This environment's verifier argv: the pinned IN-IMAGE toolchain (babashka — its identity is the image digest, never a host path) and fixed args plus the one derived focused -e expression shared with every other lane."}
+    {:name samizdat.security.smolvm-verification-env/input-manifest
+     :summary "The project input manifest and its coordinate — the live-tree bracket. The same grammar and kind the bwrap environment's private-copy coordinate uses, so both environments name one input the same way; absolute or escaping symlinks are refused (the machine cannot be handed them faithfully) and the excluded paths the walk refused are exactly the paths the prelude hides from the workload."}
+    {:name samizdat.security.smolvm-verification-env/verify-envelope
+     :summary "One run projected into the SPI's run envelope — including the :project-changed status the bwrap environment cannot produce: an unanchored run carries no input coordinate and its process outcome is demoted to :output/process."}
+    {:name samizdat.security.verification-provider/selected
+    :summary "Trusted controller selection between the bounded lane's verify environments (:bwrap default, :smolvm via SAMIZDAT_VERIFY_ENV) — code and the harness process's own environment, never gates.edn. Fail closed both ways: an unavailable selected provider refuses with its own reason, and an unrecognized name refuses as :unknown-provider rather than quietly running the default."}]}
 
  {:group "The record"
   :entries
@@ -117,5 +156,7 @@
     :summary "The concrete failures behind the rates over any set of turn rows — parse errors, provider failures, tool failures, each with the turn and branch to fetch."}
    {:name samizdat.session/render
     :summary "The live session tally since a named mark — what changed while your last adjustment was in force."}
+   {:name samizdat.store.evaluator/history
+    :summary "The append-only bounded-evaluator computations and semantic receipts for one binding, in replay order."}
    {:name samizdat.events/subscribe
     :summary "A channel of every event published from now on, for watching a run without polling."}]}]

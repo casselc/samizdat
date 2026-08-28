@@ -20,6 +20,7 @@ These are design documents, not a change log. Past defects live in
 | [009](RFC-009-storage.md) | Storage | The durable record a resume rebuilds from |
 | [010](RFC-010-adaptation.md) | Adaptation | How the harness gets better: two memories, two roles, one selection pressure |
 | [011](RFC-011-board-workflow.md) | Board workflow | Owned tasks worked one at a time, a critic on each task's own diff |
+| [012](RFC-012-execution-environment-spi.md) | Execution environment SPI | What a sandboxed run can honestly say about itself as data a second repository can check: envelopes, coordinates, goldens |
 
 ## How to read a layer boundary
 

@@ -12,6 +12,8 @@
             [samizdat.agent.state :as state]
             [samizdat.agent.verify :as verify]
             [samizdat.lexicon :as lexicon]
+            [samizdat.security.verification-provider :as vprov]
+            [samizdat.store.evaluator :as estore]
             [samizdat.store.journal :as journal]
             [samizdat.util :as util]
             [samizdat.session :as session]))
@@ -410,6 +412,171 @@
                           :verdict :pass
                           :claim-status :confirmed
                           :tier :slow})))))
+
+;; --- the bounded lane's done: a ControlEvent the controller verifies (M2) -----
+;;
+;; In the bounded lane the model cannot run anything — its whole vocabulary is
+;; eval/doc/complete/done over the trusted evaluator surface — so the ordinary
+;; ship gate's `sh -c` verify is unreachable BY DESIGN, and done arrives as a
+;; completion REQUEST (tools.clj routes it here before the ordinary method).
+;; What settles it is the controller's own verification inside the M2
+;; verify environment the trusted controller SELECTED
+;; (samizdat.security.verification-provider — the bwrap
+;; VerificationEnvironment over a private copy, or the SmolVM ephemeral
+;; machine ported from bbagent's measured substrate): the changed paths
+;; come from the binding's tamper-evident edit receipts (never from a
+;; model-supplied command), the argv is the controller's PINNED verifier
+;; authority plus the one derived focused expression, and the run happens
+;; inside the selected fail-closed environment — no network, no host
+;; secrets/config, no write to the authoritative tree, bounded
+;; output/time, cleanup and reaping. Only a green run is terminal; every
+;; other outcome is bounded evidence handed back so the branch keeps
+;; iterating — and when the selected environment's substrate is
+;; unavailable, the whole thing REFUSES rather than degrading to another
+;; provider or a host spawn.
+
+(defn- edited-paths
+  "Every path THIS binding changed through project/edit, in first-write order
+  — the controller's own record of what the run changed, read from the
+  evaluator's append-only receipts rather than from anything the model claims
+  or from git (a bounded root need not be a repo). Only :done-phase edit
+  receipts count: a refused or errored edit wrote nothing. A missing conn or
+  binding id reads as 'nothing changed' — the gate fails closed."
+  [conn binding]
+  (if-let [binding-id (and conn (:binding/id binding))]
+    (into [] (comp (mapcat :receipts)
+                   (filter #(and (= :project/edit (:op %))
+                                 (= :done (:phase %))))
+                   (map #(first (:args %)))
+                   (distinct))
+          (estore/history conn binding-id))
+    []))
+
+(defn bounded-done
+  "The bounded lane's `done`: verify, then terminate — and only GREEN
+  terminates.
+
+  The controller — not the model — decides WHAT runs and WHERE: the run's
+  edited paths from its own receipts, the verifier argv from the SELECTED
+  provider's PINNED authority over the focused derivation (never gates.edn —
+  that file is runtime-mutable by the very tier this gate judges), and the
+  whole run inside the controller-owned verify environment selected by
+  trusted controller policy (security.verification-provider — bwrap's
+  private-copy sandbox or the SmolVM ephemeral machine, never a host spawn):
+  no network, no host secrets, no write to the authoritative tree, bounded
+  output/time, and cleanup/reaping however the run ends. The model's only
+  influence on any of it is which files it chose to write through the
+  anchored edit path; a file NAME crafted to inject a command yields no
+  namespace (ns-from-test-path's whitelist), so it can shrink the argv
+  toward empty — where the gate refuses — and can never widen it into a
+  command.
+
+  RED is not terminal: the branch gets the bounded tail of the failure and
+  keeps iterating. Neither is 'nothing to run': a hollow done (no edits) and
+  a change with no verifiable test both refuse with evidence. And when the
+  selected environment's substrate is unavailable, the done REFUSES with the
+  reason — there is no fallback to another provider or to a direct host
+  spawn, and no trust-on-unknown clause here at all: the ordinary lane's
+  :verify-unknown policy exists for a loop whose git might genuinely be
+  unable to tell, which a bounded receipt log never is."
+  [{:keys [branch] :as ctx}]
+  (let [answer (some-> (base/arg ctx :answer) str str/trim not-empty)
+        changed (edited-paths (:conn ctx) (base/bounded-binding ctx))
+        env-ok? (vprov/available?)
+        argv (vprov/focused-argv changed)
+        vresult (when (and env-ok? argv)
+                  (vprov/run (:root ctx) changed
+                             (get-in ctx [:config :run :verify-timeout-ms])))
+        unavailable-reason (cond
+                             (not env-ok?) (vprov/unavailable-reason)
+                             (:unavailable? vresult) (:reason vresult :unknown))
+        block (cond
+                (empty? changed)
+                (base/bounded-message {:done-nothing-changed true})
+
+                (nil? argv)
+                (base/bounded-message {:done-no-verifiable-test true})
+
+                ;; Fail closed on the substrate BEFORE any red/green reading:
+                ;; an unavailable sandbox is not a failing test, and it is
+                ;; never licence to spawn on the host instead.
+                unavailable-reason
+                (base/bounded-message {:done-verify-env-unavailable true
+                                       :reason unavailable-reason})
+
+                ;; vresult is present from here on, so verify-block's
+                ;; red / timeout / green clauses decide and its
+                ;; trust-on-unknown fallthrough is unreachable.
+                :else
+                (verify/verify-block {:verify-on? true :result vresult
+                                      :changed changed :require-test? true}))]
+    ;; The same record the ordinary ship gate keeps: a gate that was configured
+    ;; on and did nothing must not read identically to one that ran green.
+    ;; An environment that refused (unavailable) never counts as a run.
+    (let [ran? (boolean (and vresult (not (:unavailable? vresult))))]
+      (session/observe! (if ran?
+                          [:verify (if (:green? vresult) :green :red)]
+                          [:verify :skipped]))
+      (when ran? (session/observe! [:verify :ran]))
+      (when (and (:conn ctx) (:run-id ctx))
+        (journal/note! (:conn ctx) (:run-id ctx) :ship-verify
+                       {:branch-id (:id branch) :turn (:turn ctx)
+                        :data (if ran?
+                                (let [envelope (vprov/verify-envelope vresult)]
+                                  (cond-> {:ran true
+                                           :green (:green? vresult) :timeout (:timeout? vresult)
+                                           :blocked (some? block)
+                                           ;; WHICH environment produced the verdict: the
+                                           ;; selected provider's policy coordinate, not prose.
+                                           :verify-env (vprov/coordinate)}
+                                    ;; The run envelope itself (RFC-012): the
+                                    ;; attribution, input coordinate,
+                                    ;; invocation index, duration and capture
+                                    ;; of the execution that produced the
+                                    ;; verdict — present exactly when a real
+                                    ;; spawn happened; a failed staging has
+                                    ;; no spawn and so no envelope.
+                                    envelope (assoc :envelope envelope)))
+                                (cond-> {:ran false
+                                         :blocked (some? block)
+                                         ;; A keyword, not a sentence, like the ordinary
+                                         ;; lane's: this row is queried.
+                                         :why (cond
+                                                (empty? changed) :nothing-changed
+                                                (nil? argv) :no-test-among-changed
+                                                :else :verify-env-unavailable)}
+                                  ;; The catalogued refusal when the
+                                  ;; environment answered the request with
+                                  ;; one — the same envelope shape a second
+                                  ;; repository renders, beside the stable
+                                  ;; :why token.
+                                  (:refusal vresult) (assoc :refusal
+                                                            (:refusal vresult))))})))
+    (if block
+      (base/fail branch (str "`done` refused.\n\n" block)
+                 :control-event :done :done-block block)
+      (let [final (or answer (base/bounded-message {:done-green true}))]
+        {:branch (assoc branch :final-answer final :status :done)
+         :category :success
+         :progress? true
+         :done? true
+         :control-event :done
+         ;; The green point the safe-state rung rewinds to, exactly as in the
+         ;; ordinary lane.
+         :verified-green? true
+         :answer final
+         :result (str "Answer accepted.\n\n" final)
+         ;; A green controller verification IS the bounded lane's confirmed
+         ;; artifact — machine-checked, not self-reported, the same reasoning
+         ;; as the ordinary lane's green ship-verify artifact. :code is the
+         ;; derived verifier argv itself: the exact thing that ran, pinned
+         ;; prefix and all.
+         :artifact {:kind :test
+                    :claim final
+                    :code (pr-str argv)
+                    :verdict :pass
+                    :claim-status :confirmed
+                    :tier :slow}}))))
 
 (defmethod base/run-tool "give_up" [{:keys [branch] :as ctx}]
   (let [reason (or (base/arg ctx :reason) "no reason given")]

@@ -215,6 +215,42 @@
       (assoc ctx :llm-adapter (registry/adapter-for provider) :llm-config llm))
     ctx))
 
+(def ^:private bounded-profile-capabilities
+  "The controller-fixed requested and authorized capability set per bounded
+  profile. This table, not userspace, decides what a profile requests and is
+  authorized for: the controller's authority statement, which the evaluator
+  then intersects with the request, the runtime's catalog maximum, and the
+  compiled vocabulary."
+  {:agent/project-read #{:project/read :project/list :project/search
+                         :project/stat}
+   :agent/project-develop #{:project/read :project/list :project/search
+                            :project/stat :project/edit}})
+
+(defn bounded-binding
+  "Mint a controller-owned bounded binding only when userspace requested the
+  bounded lane through [:run :bounded :profile]. The controller — this
+  function, not userspace — fixes the requested and authorized capability
+  sets per profile, so a model cannot widen its own authority through config;
+  a wider or unknown profile request fails closed here, before any binding or
+  run exists. Dynamic resolution keeps SCI absent from ordinary startup."
+  [root run-id config]
+  (when-let [requested (get-in config [:run :bounded :profile])]
+    (let [profile (cond (keyword? requested) requested
+                        (string? requested) (keyword requested))
+          capabilities (get bounded-profile-capabilities profile)]
+      (when-not capabilities
+        (throw (ex-info "Unsupported bounded profile; expected :agent/project-read or :agent/project-develop"
+                        {:samizdat.evaluator/error :unsupported-profile
+                         :requested requested})))
+      (let [bind! (or (try (requiring-resolve 'samizdat.evaluator/bind!)
+                           (catch Throwable _ nil))
+                      (throw (ex-info "Pinned bounded evaluator runtime is unavailable"
+                                      {:samizdat.evaluator/error :runtime-unavailable})))]
+        (bind! root run-id
+               {:profile profile
+                :requested capabilities
+                :controller-authorized capabilities})))))
+
 (defn run-turn
   "Advance one branch by one turn, through the manifest.
 
@@ -263,17 +299,20 @@
                                       :max-turns max-turns
                                       :beam-width 1
                                       :prompt-digest (branch-loop/prompt-digest)})
-        branch (state/new-branch {:id "B1" :problem problem
-                                  :messages (branch-loop/initial-messages
-                                             problem (workflow-prompt definition))})
         ;; The project root the file tools are confined to, and the shell tool
         ;; runs in. Configurable so a run can target another checkout.
         root (or (get-in config [:run :root]) (System/getProperty "user.dir"))
+        bounded (bounded-binding root run-id config)
+        branch (state/new-branch
+                {:id "B1" :problem problem
+                 :messages (branch-loop/initial-messages
+                            problem (workflow-prompt definition)
+                            (:trusted-orientation bounded))})
         ;; Make the project's own namespaces requirable from `eval` before any
         ;; branch takes a turn. The system prompt's whole first section is
         ;; REPL-first against the project under work, and without this that
         ;; instruction is unreachable the moment :run :root is not the harness.
-        _ (repl/ensure-project-roots! root)
+        _ (when-not bounded (repl/ensure-project-roots! root))
         ctx {:conn conn :run-id run-id :config config
              :llm-adapter llm-adapter :llm-config llm-config
              :root root
@@ -300,7 +339,14 @@
              ;; A per-run eval session, so defs the agent makes with `eval`
              ;; persist across its turns (define, then use) — REPL-first
              ;; development against the live image.
-             :repl-session (repl/new-session)
+              :repl-session (when-not bounded (repl/new-session))
+              ;; The profile marker is the binding's own minted profile, not a
+              ;; constant: the bounded lane's signal stays honest about which
+              ;; profile the controller actually granted.
+              :evaluator/profile (when bounded
+                                   (get-in bounded [:spec :context-spec
+                                                    :context/profile]))
+              :evaluator/binding bounded
              :max-turns max-turns}]
     (runs/open-branch! conn run-id {:branch-id "B1"})
     ;; The window findings are evaluated over.
@@ -352,4 +398,5 @@
         ;; The run's eval namespace does not outlive the run
         ;; (provenance CR1-6): one namespace per run, never removed, was
         ;; unbounded growth on a serve process.
-        (repl/close-session (:repl-session ctx)))))))
+        (when-let [session (:repl-session ctx)]
+          (repl/close-session session)))))))
