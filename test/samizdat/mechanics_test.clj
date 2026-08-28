@@ -32,6 +32,7 @@
             [samizdat.agent.loop :as aloop]
             [samizdat.agent.state :as state]
             [samizdat.agent.telemetry :as telemetry]
+            [cells.board :as board]
             [samizdat.agent.supervisor :as supervisor]
             [samizdat.llm.message :as message]
             [samizdat.store.journal :as journal]))
@@ -497,3 +498,36 @@
     (is (state/planned? b))
     (is (state/planned? (state/note-write b "a.clj"))
         "partly landed is still an open session — do not close it mid-way")))
+
+;; --- karamazov-b3z: a child sees the surface it sits in ---------------------
+;; A task owner got its own contract and nothing about the whole: which sibling
+;; parts exist, what the overarching goal is, what another owner is already
+;; building. Metan measured the plain conditioning string passed between layers
+;; at ~72% of what recursion buys — the cheapest channel there is, and this had
+;; none of it. A live worker went off-task onto a superficially-similar
+;; recalled fix precisely because nothing said what its part was FOR.
+
+(deftest the-surface-names-the-goal-and-the-siblings
+  (let [goal "Build a small FPS level"
+        siblings [{:id "t2" :title "Build the raylib window layer" :status "open"}
+                  {:id "t3" :title "Enemy AI and waves" :status "in_progress"}]
+        s (board/surface-block {:goal goal :siblings siblings :mine "t1"})]
+    (is (str/includes? s goal) "the whole this part serves")
+    (is (str/includes? s "Build the raylib window layer"))
+    (is (str/includes? s "Enemy AI and waves"))
+    (is (str/includes? s "in_progress")
+        "and whether somebody is already on it — that is the do-not-duplicate signal"))
+  (testing "the owner's OWN task is not listed back as a sibling"
+    (let [s (board/surface-block
+             {:goal "G" :mine "t1"
+              :siblings [{:id "t1" :title "MINE" :status "in_progress"}
+                         {:id "t2" :title "OTHER" :status "open"}]})]
+      (is (not (str/includes? s "MINE")))
+      (is (str/includes? s "OTHER"))))
+  (testing "no siblings means no surface section rather than an empty heading"
+    (is (nil? (board/surface-block {:goal "G" :siblings [] :mine "t1"})))
+    (is (nil? (board/surface-block {:goal "G" :siblings nil :mine "t1"}))))
+  (testing "a surface with siblings but no goal still says what else exists"
+    (let [s (board/surface-block {:siblings [{:id "t2" :title "OTHER" :status "open"}]
+                                  :mine "t1"})]
+      (is (str/includes? s "OTHER")))))

@@ -238,6 +238,37 @@
                :branch (assoc branch :task {:id (:id t) :title (:title t)})))
       (assoc data :board/verdict :empty)))))
 
+(defn surface-block
+  "THE SURFACE a task sits in: the overarching goal and the sibling parts, one
+  line each with who is on them. nil when there are no siblings — a heading
+  over an empty list is a per-turn tax on the common case.
+
+  A task owner used to get its own contract and nothing about the whole, so it
+  could not tell which interfaces were shared, what another owner was already
+  building, or what its part was FOR. Metan (research/2608.24735v1) ablated
+  exactly this channel and put the plain conditioning string passed between
+  layers at ~72% of what recursion buys — the cheapest thing there is, and
+  this had none of it. A live worker went off-task onto a superficially
+  similar recalled fix for want of it (karamazov-b3z).
+
+  DELIBERATELY THIN: titles and status, never contracts or bodies. The parent
+  holds the surface and each child holds its own implementation; handing a
+  child its siblings' contracts would put us back to everybody reading
+  everything, which is the thing the layering exists to avoid."
+  [{:keys [goal siblings mine]}]
+  (let [others (remove #(= (str (:id %)) (str mine)) siblings)]
+    (when (seq others)
+      (str "## Where this fits\n\n"
+           (when (seq (str goal))
+             (str "The whole this serves: " goal "\n\n"))
+           "Other parts of it, so you know what NOT to build and which "
+           "interfaces are shared:\n"
+           (str/join "\n"
+                     (for [t others]
+                       (str "  - " (:title t) " [" (:status t) "]")))
+           "\n\nThose are somebody else's to build. If your part needs one of "
+           "them, define the interface and keep going — do not build theirs."))))
+
 (defn- owner-prompt
   "The implementor's prompt suffix: its role identity and the repl-workflow
   skill (the file on disk is the deliverable, not the eval)."
@@ -278,7 +309,19 @@
                                   (prompt/render "task-claimed"
                                                  {:id task :title (:title t)
                                                   :contract (:contract t)
-                                                  :tests (:tests t)}))
+                                                  :tests (:tests t)
+                                                  ;; WHERE THIS FITS. The
+                                                  ;; parent holds the surface;
+                                                  ;; the child gets its own
+                                                  ;; contract plus a one-line
+                                                  ;; map of the rest, never
+                                                  ;; the siblings' contracts
+                                                  ;; (karamazov-b3z).
+                                                  :surface
+                                                  (surface-block
+                                                   {:goal (:problem data)
+                                                    :mine task
+                                                    :siblings (tasks/board conn {:run-id run-id})})}))
                              {:pinned? true :task-id task}))]
                   (myc/run-compiled (wf/worker-compiled) ictx {:branch b :turn 1}))
                 (catch Throwable e
