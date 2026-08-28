@@ -5,6 +5,7 @@
 ;; pass costs a model call and most moments in a run do not need one.
 (ns cells.oversight
   (:require [clojure.string :as str]
+            [clojure.tools.logging :as log]
             [mycelium.cell :as cell]
             [samizdat.agent.loop :as turn]
             [samizdat.agent.state :as state]
@@ -19,9 +20,25 @@
             [mycelium.core :as myc]))
 
 (defn- safely
-  "A supervisor stage that throws leaves the run alone and the stream alive."
-  [f fallback]
-  (try (f) (catch Throwable _ fallback)))
+  "A supervisor stage that throws leaves the run alone and the stream alive.
+
+  LOGGED, always. The first version swallowed silently, and a stream whose
+  failures are invisible cannot be told apart from one that never started —
+  which is exactly the confusion it caused the first time it ran."
+  [what f fallback]
+  (try (f)
+       (catch Throwable e
+         (log/warn "oversight" what "failed:" (ex-message e))
+         fallback)))
+
+(defn- clip
+  "First `n` characters, safely. Collapsing whitespace shortens the string, so
+  indexing the ORIGINAL length into the COLLAPSED one overruns it — a crash
+  that could only happen once a pass actually succeeded, which is the worst
+  time to find it."
+  [s n]
+  (let [t (str/replace (str s) #"\s+" " ")]
+    (subs t 0 (min n (count t)))))
 
 ;; --- gather -----------------------------------------------------------------
 
@@ -54,7 +71,7 @@
    :effects [:db]
    :requires [:conn :run-id]}
   (fn [{:keys [conn run-id]} data]
-    (safely
+    (safely :gather
      (fn []
        (let [turns (journal/turns conn run-id)
              firings (journal/gate-firings conn run-id)
@@ -93,7 +110,7 @@
    :effects [:net :db]
    :requires [:conn :run-id :config]}
   (fn [{:keys [conn run-id] :as ctx} data]
-    (safely
+    (safely :reason
      (fn []
        (let [dig (telemetry/digest {:idle-turns (:oversight/idle data)
                                     :unmet-gates (:oversight/unmet data)}
@@ -139,20 +156,31 @@
    :effects [:db]
    :requires [:conn :run-id]}
   (fn [{:keys [conn run-id]} data]
-    (safely
+    (safely :apply
      (fn []
        (journal/note! conn run-id :oversight
                       {:data {:idle (:oversight/idle data)
                               :unmet (:oversight/unmet data)
-                              :notes (some-> (:oversight/answer data) str
-                                             (str/replace #"\s+" " ")
-                                             (subs 0 (min 400 (count (str (:oversight/answer data))))))}})
+                              :notes (some-> (:oversight/answer data)
+                                             (clip (gates/threshold :oversight-note-chars)))}})
        data)
      data)))
 
 (cell/defcell :oversight/quiet
-  {:doc "The run is fine. Cost nothing and say nothing — the correct outcome
-        for most passes, and the reason the stream is affordable at all."
-   :pure true
-   :requires []}
-  (fn [_ data] data))
+  {:doc "The run is fine. No model call — the correct outcome for most passes,
+        and the reason the stream is affordable at all.
+
+        It still leaves a HEARTBEAT. Saying nothing and not running look
+        identical from outside otherwise, and telling those two apart is the
+        whole of knowing whether the harness is watching itself. It is one
+        cheap row against a run's thousands."
+   :effects [:db]
+   :requires [:conn :run-id]}
+  (fn [{:keys [conn run-id]} data]
+    (safely :quiet
+     (fn []
+       (journal/note! conn run-id :oversight-quiet
+                      {:data {:idle (:oversight/idle data)
+                              :unmet (:oversight/unmet data)}})
+       data)
+     data)))

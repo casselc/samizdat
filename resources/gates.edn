@@ -76,6 +76,14 @@
  {:value 2 :kind :re-fire-guard :capability-tunable? true
   :doc "How often the stall nudge may re-fire on one branch."}
 
+ :oversight-note-chars
+ {:value 400 :kind :threshold :capability-tunable? true
+  :doc "How much of the supervisor's conclusion is kept on the pass record.
+
+        Enough to read back what it decided without storing a whole reply per
+        pass. The full reasoning lives in its branch's messages; this is the
+        index into it."}
+
  :oversight-unmet-floor
  {:value 2 :kind :threshold :capability-tunable? true
   :doc "Gate firings a run may leave UNMET before the supervisor stream spends

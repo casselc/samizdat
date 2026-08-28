@@ -114,3 +114,16 @@
                         ["d304f539 T0" 87] ["986f33d8 T0 after its one write" 47]]]
       (is (worth-a-look? {:idle-turns idle} floors)
           (str run " stalled for " idle " turns and nothing looked at it")))))
+
+(deftest clipping-a-note-survives-whitespace-collapse
+  ;; The bug this replaces could only fire once a pass SUCCEEDED: the note was
+  ;; indexed with the original length after the whitespace had been collapsed,
+  ;; so any multi-line answer overran the shortened string. It would have
+  ;; thrown on the first real supervisor conclusion and been swallowed whole by
+  ;; the (then silent) stage guard.
+  (let [clip (do (cells/load-cells!) @(ns-resolve 'cells.oversight 'clip))]
+    (is (= "a b c" (clip "a\n\n\nb\t\tc" 400))
+        "collapsing must not leave the index past the end")
+    (is (= "abc" (clip "abc" 400)) "shorter than the limit is returned whole")
+    (is (= "ab" (clip "abcdef" 2)) "longer than the limit is cut to it")
+    (is (= "" (clip nil 400)) "a pass with no answer clips to empty, not a throw")))
