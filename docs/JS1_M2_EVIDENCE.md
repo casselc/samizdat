@@ -236,11 +236,9 @@ STOP FOR REVIEW.**
 ## M2 create-race closure (Linux only)
 
 - Jolt base Git coordinate: `4af2362176160f2ed0e366689d7232b1a38adfec`
-- Jolt no-replace extension coordinate:
-  `jolt-publish/v1:sha256:914ccd9f722efd98fe8e1e1381574a3efba04ae45a689e8c1918d420db82f0c1`
-  (SHA-256 of `stdlib/jolt/publish.clj`; it is a source-content coordinate,
-  **not** a Git commit, because this task explicitly leaves the Jolt worktree
-  uncommitted.)
+- Jolt no-replace extension commit: `f8899905`
+  (`js1-m2-verify-closure`; the source-content coordinate recorded during
+  implementation was superseded by this committed coordinate.)
 
 `jolt.publish/publish!` is a private-FFI, status-only Linux primitive. The
 target-header probe compiles the real glibc declaration of `renameat2` and
