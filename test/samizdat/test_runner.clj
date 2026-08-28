@@ -98,6 +98,7 @@
             [samizdat.files-test]
             [samizdat.edit-test]
             [samizdat.eval-mode-test]
+            [samizdat.aspect-manifest-test]
             [samizdat.grep-test]
             [samizdat.hashline-test]
             [samizdat.control-test]
@@ -240,6 +241,7 @@
     samizdat.files-test
     samizdat.edit-test
     samizdat.eval-mode-test
+    samizdat.aspect-manifest-test
     samizdat.grep-test
     samizdat.hashline-test
     samizdat.control-test

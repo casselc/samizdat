@@ -1,0 +1,10 @@
+{:schema 1
+ :library {:id yogthos/samizdat
+           :version "35b01fddd20fa9e6d77678eadc2a2bcc6fb9ac2d"}
+ :aspects
+ [{:id :samizdat.embed/beam-run
+   :match {:ns samizdat.embed
+           :call samizdat.agent.beam/run!
+           :arity 1}
+   :advice-role :samizdat/run
+   :expect {:matches 1}}]}
