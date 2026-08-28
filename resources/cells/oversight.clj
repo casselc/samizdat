@@ -98,6 +98,20 @@
 
 ;; --- reason -----------------------------------------------------------------
 
+(defn resume-branch
+  "The carried branch, ready for another pass.
+
+  Keeps the MESSAGES — the supervisor's memory of what it already noticed and
+  already tried — and clears the terminal state. A branch that concluded once
+  is finished forever otherwise: run b2ffb2ad's supervisor called `done` on
+  pass one and its next four passes resumed a completed branch and returned
+  instantly, so it spoke once and went quiet for the rest of the run.
+
+  Concluding is not the same as having nothing left to say. A pass ends; the
+  stream does not."
+  [b]
+  (-> b (dissoc :final-answer :verdict :done? :status) (assoc :advisory? true)))
+
 (cell/defcell :oversight/reason
   {:doc "One turn of the supervisor ROLE, in the stream's OWN branch.
 
@@ -128,7 +142,7 @@
              ;; run-scoped resources every driver provides, and the carry is
              ;; this pass's value. Putting it in ctx would have meant claiming
              ;; the beam driver provides it, which it does not.
-             b (or (:oversight/carry data)
+             b (or (some-> (:oversight/carry data) resume-branch)
                    (assoc (state/new-branch
                            {:id bid :problem prob
                             :messages (turn/initial-messages

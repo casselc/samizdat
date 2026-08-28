@@ -127,3 +127,23 @@
     (is (= "abc" (clip "abc" 400)) "shorter than the limit is returned whole")
     (is (= "ab" (clip "abcdef" 2)) "longer than the limit is cut to it")
     (is (= "" (clip nil 400)) "a pass with no answer clips to empty, not a throw")))
+
+(deftest the-carry-continues-the-conversation-without-freezing-it
+  ;; Run b2ffb2ad: S0 stuck at 23 turns across FIVE passes. The supervisor
+  ;; called `done` on its first pass, and because the carry hands the whole
+  ;; branch to the next pass, every later pass resumed an already-finished
+  ;; branch and returned immediately. The supervisor spoke once and was
+  ;; silent for the rest of the run — the exact failure the stream exists to
+  ;; prevent, reintroduced by the mechanism meant to give it memory.
+  ;;
+  ;; The carry must preserve what it LEARNED and not that it had STOPPED.
+  (let [resume (do (cells/load-cells!) @(ns-resolve 'cells.oversight 'resume-branch))
+        finished {:id "S0" :messages [{:role "user" :content "hello"}
+                                      {:role "assistant" :content "a conclusion"}]
+                  :final-answer "done for now" :verdict :done :advisory? true}
+        next-pass (resume finished)]
+    (is (= 2 (count (:messages next-pass)))
+        "the conversation so far is kept — that is the whole point of a stream")
+    (is (nil? (:final-answer next-pass)) "not already answered")
+    (is (nil? (:verdict next-pass)) "not already finished")
+    (is (:advisory? next-pass) "still an advisory branch, not shippable work")))
