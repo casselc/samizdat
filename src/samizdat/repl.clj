@@ -84,6 +84,23 @@
                 "— start the harness from the project root, or use absolute paths in eval")
       {:root root* :cwd here})))
 
+(defn declared-roots
+  "The absolute source roots `root` declares, resolved.
+
+  A declared path may be ABSOLUTE — a project that puts a library outside its
+  own tree on the classpath, which is how fps-game reaches its raylib FFI
+  binding. `(io/file parent child)` joins an absolute child ONTO the parent
+  instead of replacing it, so resolving those the same way as relative ones
+  produced `/…/fps-game//Users/…/raylib-jolt-examples/src`: a directory that
+  does not exist. The require then failed inside `eval` while succeeding from
+  a shell in the same directory, and the run spent its budget reading that
+  library's source with `shell` because nothing else could see it (628ffd2e)."
+  [root]
+  (mapv (fn [p]
+          (let [f (io/file p)]
+            (str (if (.isAbsolute f) f (io/file root p)))))
+        (project-paths root)))
+
 (defn ensure-project-roots!
   "Make the project at `root` loadable from `eval`, and return the paths added.
 
@@ -108,7 +125,7 @@
   [root]
   (when root
     (warn-if-not-cwd! root)
-    (let [added (mapv #(str (io/file root %)) (project-paths root))
+    (let [added (declared-roots root)
           current (vec (host/source-roots))
           missing (remove (set current) added)]
       (when (seq missing)

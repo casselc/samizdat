@@ -122,6 +122,7 @@
             [samizdat.proc-test]
             [samizdat.board-bt-test]
             [samizdat.finalization-test]
+            [samizdat.replroots-test]
             [samizdat.oversight-test]
             [samizdat.mechanics-test]
             [samizdat.repair-test]
@@ -182,6 +183,7 @@
     mycelium.workflow-test
     samizdat.board-bt-test
     samizdat.finalization-test
+    samizdat.replroots-test
     samizdat.oversight-test
     samizdat.mechanics-test
     samizdat.repair-test
