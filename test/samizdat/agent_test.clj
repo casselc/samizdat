@@ -335,7 +335,6 @@
   (is (= 2 (gates/threshold :cull-mechanics-multiple)))
   (is (= 2 (gates/threshold :safe-state-multiple)))
   (is (= 4 (gates/threshold :max-branch-theses)))
-  (is (= 15 (gates/threshold :reflection-cadence)))
   (is (= [:progress :momentum :distinctness :viability]
          (gates/threshold :critic-objectives)))
   (is (= 3 (gates/threshold :decompose-max-depth)))
@@ -1753,42 +1752,24 @@
       (is (re-find #"(?i)4 .*fence|4 .*malformed" (:inactive-reason dead))
           "the two kinds are counted separately, so the record stays true"))))
 
-(deftest reflection-nudge-fires-on-cadence-and-settles
-  ;; The periodic self-reflection rung: lowest priority, fires on a cadence
-  ;; rather than because something is wrong, and settles on the branch actually
-  ;; inspecting or reshaping its loop.
-  (let [refl (gates/by-name :reflection)]
-    (testing "it is the lowest-priority gate"
-      (is (= 13 (:priority refl)))
-      (is (= 13 (apply max (map :priority (gates/gates))))
-          "nothing sits below reflection, so a real steer always outranks it"))
-    (testing "fires on a turn that is a multiple of 15, while active"
-      (is ((:when refl) {:branch (branch-with :turns (vec (repeat 15 {})))}))
-      (is ((:when refl) {:branch (branch-with :turns (vec (repeat 30 {})))})))
-    (testing "silent off-cadence and at turn 0"
-      (is (not ((:when refl) {:branch (branch-with :turns (vec (repeat 14 {})))})))
-      (is (not ((:when refl) {:branch (branch-with :turns [])}))))
-    (testing "passed over when a human directive also holds"
-      (let [chosen (arbiter/decide {:branch (branch-with :turns (vec (repeat 15 {})))
-                                    :max-turns 40 :directive {:payload "do X"}})]
-        (is (= :human-directive (:gate chosen)))
-        (is (some #{:reflection} (:passed-over chosen)))))
-    (testing "settles :met when the branch inspected or reshaped its loop"
-      (is (= :met (arbiter/settle {:gate :reflection :turn 1 :window 1}
-                                  {:current-turn 2 :tools-called ["introspect"]
-                                   :branch-before (branch-with) :branch-after (branch-with)})))
-      ;; A turn past the window with the wrong tool is no longer :unmet on the
-      ;; spot — it is still OPEN through the grace, because a gate's advice
-      ;; commonly costs a turn to attempt and another to verify, and settling
-      ;; the moment the window passes made slow-but-followed advice read
-      ;; exactly like ignored advice.
-      (is (nil? (arbiter/settle {:gate :reflection :turn 1 :window 1}
-                                {:current-turn 3 :tools-called ["eval"]
-                                 :branch-before (branch-with) :branch-after (branch-with)})))
-      (is (= :unmet (arbiter/settle {:gate :reflection :turn 1 :window 1}
-                                    {:current-turn 20 :tools-called ["eval"]
-                                     :branch-before (branch-with) :branch-after (branch-with)}))
-          "past the grace it is genuinely unmet"))))
+(deftest the-reflection-gate-is-retired-and-stays-retired
+  ;; RETIRED, on evidence: it fired in every run of this campaign and was met
+  ;; in none of them — 0 for 9 across two model tiers. Two reasons, and the
+  ;; second is why rewording it would not have helped.
+  ;;
+  ;; It fired ON A CADENCE rather than because anything was wrong, so most of
+  ;; its firings interrupted a branch that was fine. And it asked the
+  ;; IMPLEMENTER to inspect and reshape its own loop — which is the
+  ;; supervisor's job, done now by the oversight stream with the right role,
+  ;; the right context and the evidence to judge a change afterwards. A gate
+  ;; asking the wrong role to do someone else's work cannot be fixed by better
+  ;; wording.
+  (is (nil? (gates/by-name :reflection))
+      "if this fails, something re-added the gate — read karamazov-634 first")
+  (is (nil? (gates/threshold :reflection-cadence)))
+  (testing "the reflection POLICY is a different thing and stays: it bounds
+            how much of a turn the task reflector sees"
+    (is (some? (lexicon/policy :reflection)))))
 
 (deftest the-studying-gate-catches-inspect-without-shipping
   (let [studying (branch-with :turns (vec (concat [{:tool "write_file"}]
@@ -1819,29 +1800,32 @@
 
 
 (deftest pilot-gates-are-config-data
-  ;; Tier 3a: :reflection and :prologue-cap moved from closures in gates.clj
-  ;; to :gates entries in gates.edn with EDN :when forms — the steer policy
-  ;; as data, the same direction as the manifest dispatches. The forms are
-  ;; compiled once at load into the closure shape the arbiter reads, and
-  ;; call the same accessors the closures did: (threshold k) reads the
-  ;; config atom at fire time, so tuning stays runtime-editable.
-  (let [refl (gates/by-name :reflection)
+  ;; Tier 3a: gates moved from closures in gates.clj to :gates entries in
+  ;; gates.edn with EDN :when forms — the steer policy as data, the same
+  ;; direction as the manifest dispatches. The forms are compiled once at load
+  ;; into the closure shape the arbiter reads, and call the same accessors the
+  ;; closures did: (threshold k) reads the config atom at fire time, so tuning
+  ;; stays runtime-editable.
+  ;;
+  ;; :reflection was the other pilot and has since been retired on evidence
+  ;; (0 for 9); :orienting stands in, being the same shape — an EDN :when that
+  ;; reads a threshold, and a :message-form rather than a plain file.
+  (let [orient (gates/by-name :orienting)
         pro (gates/by-name :prologue-cap)]
-    (is (= 13 (:priority refl)) "the data entry replaces the closure")
     (is (= 9 (:priority pro)))
-    (is (fn? (:when refl)) "the EDN form compiled into a predicate fn")
-    (let [b15 (assoc (branch-with) :turns (vec (repeat 15 {})))
-          b14 (assoc (branch-with) :turns (vec (repeat 14 {})))]
-      (is ((:when refl) {:branch b15}) "fires on the cadence")
-      (is (not ((:when refl) {:branch b14}))))
+    (is (fn? (:when orient)) "the EDN form compiled into a predicate fn")
+    (is (fn? (:when pro)))
+    (let [floor (gates/threshold :orient-turns)
+          reading (fn [n] (assoc (branch-with) :turns (vec (repeat n {:tool "shell"}))))]
+      (is ((:when orient) {:branch (reading floor)}) "fires at the floor")
+      (is (not ((:when orient) {:branch (reading (dec floor))}))
+          "and not before it — orientation below the floor is free"))
     (let [pro-b (-> (branch-with :phase :build :any-progress? false)
                     (assoc :turns (vec (repeat 8 {}))))]
       (is ((:when pro) {:branch pro-b}))
       (is (not ((:when pro) {:branch (assoc pro-b :phase :explore)}))
           "explore is deliberately exempt — a reframe sends one back there")
       (is (not ((:when pro) {:branch (assoc pro-b :any-progress? true)}))))
-    (is (str/includes? ((:message refl) {}) "introspect")
-        "the reflection prose moved to a prompt file")
     (is (str/includes? ((:message pro) {:branch (assoc (branch-with)
                                                        :turns (vec (repeat 8 {})))})
                        "8 turns in")

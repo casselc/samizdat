@@ -84,7 +84,6 @@
    "plan-not-landed"
    "prologue-cap"
    "prompt-tool"
-   "reflection"
    "repl-needs-a-plan"
    "repopulate"
    "residual-report"

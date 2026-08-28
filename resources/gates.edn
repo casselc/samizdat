@@ -146,26 +146,6 @@
  {:value 3 :kind :re-fire-guard :capability-tunable? true
   :doc "How often the studying nudge may re-fire on one branch."}
 
- :max-reflection-nudges
- {:value 3 :kind :re-fire-guard :capability-tunable? false
-  :doc "How often the reflection nudge may re-fire on one branch.
-
-        It had no budget at all — it fires on a cadence rather than on a
-        condition, so nothing bounded it. Measured across four live runs: 11
-        firings, zero compliance. An unbounded nudge that nothing ever acts on
-        is a per-firing tax on the branch's context, paid to ask again for
-        something already declined ten times.
-
-        Not capability-tunable, for the same reason the cadence is not: the
-        tier under observation should not loosen the terms on which it is
-        invited to reshape the machinery observing it.
-
-        Three rather than one because the ask is legitimate — a run that never
-        reconsiders its own machinery keeps whatever friction it started with
-        — and the branch may only be in a position to act on it later in a
-        run. If the met-rate stays at zero with a budget, the ask itself is
-        aimed at the wrong role, and that is the next thing to change."}
-
  :max-stuck-hints
  {:value 3 :kind :re-fire-guard :capability-tunable? true
   :doc "How often the stuck hint may re-fire on one branch."}
@@ -478,13 +458,6 @@
   :doc "Most theses one branch_theses call may propose. A cost ceiling:
         every proposal beyond the first becomes a sibling branch — a
         concurrent provider call per turn plus its own process."}
-
- :reflection-cadence
- {:value 15 :kind :threshold :capability-tunable? false
-  :doc "Turns between reflection nudges. Not capability-tunable: the nudge
-        invites the branch to reshape its own loop (reload_cells), and the
-        tier under observation should not loosen the cadence at which it is
-        invited to mutate the machinery observing it."}
 
  :share
  {:value {:statuses #{:confirmed} :require-relevance? true}
@@ -1603,27 +1576,7 @@
  ;; tuning a threshold stays runtime-editable; only the form structure
  ;; compiles at load. :message-file names a prompts/ file; {{turn-count}}
  ;; and {{max-turns}} interpolate at fire time.
- [{:gate :reflection
-   :priority 13
-   :budget :max-reflection-nudges
-   :doc "A quiet-turn nudge to reflect on the loop itself. Lowest priority, so
-         it is passed over whenever any real steer holds and surfaces only on a
-         turn where nothing else does. The loop is a mycelium workflow the
-         branch can see (introspect) and reshape (reload_cells); a run that
-         never reconsiders its own machinery keeps whatever friction it started
-         with. Fires on a cadence, not a condition, which is why it sits below
-         every gate that fires because something is wrong."
-   :when (and (state/active? branch)
-              ;; The branch's OWN turns: a fork reflects on a fresh cadence
-              ;; rather than inheriting its parent's position (blt.16).
-              (pos? (state/own-turn-count branch))
-              (zero? (mod (state/own-turn-count branch)
-                          (threshold :reflection-cadence))))
-   :message-file "reflection"
-   :prediction "the branch inspects or reshapes its loop"
-   :window 1}
-
-  {:gate :prologue-cap
+ [{:gate :prologue-cap
    :priority 9
    :budget nil
    :doc "The branch has produced nothing at all. Every other guard is
