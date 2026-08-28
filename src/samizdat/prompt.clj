@@ -68,6 +68,7 @@
    "milestone"
    "no-call-imitation"
    "no-edits"
+   "outside-role-surface"
    "parse-error-causes"
    "parse-error-repaired"
    "plan-tool"

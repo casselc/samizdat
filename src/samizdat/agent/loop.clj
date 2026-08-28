@@ -42,6 +42,7 @@
             [samizdat.agent.gates :as gates]
             [samizdat.agent.infer :as infer]
             [samizdat.agent.phases :as phases]
+            [samizdat.agent.roles :as roles]
             [samizdat.agent.state :as state]
             [samizdat.agent.storm :as storm]
             [samizdat.agent.tools :as tools]
@@ -64,33 +65,43 @@
   []
   (:tool-result-chars (gates/threshold :context-budget)))
 
-(defn system-prompt
-  "The system prompt, with the template catalogue substituted in.
+(defn system-prompt-for
+  "The system prompt as ROLE sees it: the tool catalogue filtered to that
+  role's surface (resources/roles.edn).
 
-  The catalogue is generated rather than written into the file because it is
-  pure data and would otherwise drift: before this, the only way the model
-  learned which templates exist was to guess a name and read the list off the
-  error, which meant a template it had not guessed was effectively invisible.
+  Roles used to be the implementer's world plus a suffix, so a supervisor was
+  handed 31 tools written for somebody building the project and its own prompt
+  had to argue it back out of them — a whole paragraph explaining that its file
+  tools cannot reach the harness source, which was there because this prompt
+  had just told it it has file tools. Constructing the catalogue instead means
+  the argument is unnecessary: a role is not shown a tool it may not call, and
+  calling one anyway is refused rather than discouraged.
+
+  The catalogue is still HAND WRITTEN prose in system.md; only WHICH entries
+  appear is computed. A nil role keeps all of it, which is what a workflow
+  that names no role has always had.
+
+  The TEXT comes through the :system chain (prompt-chain.edn, LR-7), so a
+  project can replace the shipped prompt outright or suppress it entirely.
+  First-present-wins: a level replaces, never concatenates. A suppressed base
+  is legitimate — a workflow's own :prompt then IS the instruction set — so
+  this renders empty rather than falling back to the shipped file."
+  [role]
+  (roles/scope-catalogue
+   (prompt/render-str (or (prompt/layer :system) "")
+     {:templates ""
+      :skills (skills/render-catalog)})
+   role))
+
+(defn system-prompt
+  "The whole system prompt, unscoped — every tool the harness has.
 
   The tool documentation IS hand written, because a prompt is prose and
   generated prose reads like it. `samizdat.prompt-test` asserts every name in
   `tools/tool-names` appears here, so a new tool cannot be added without being
   documented — that is what kept the whole Lean surface unreachable."
   []
-  ;; Tier 2d-era seam, now selmer: {{templates}} stays until the coding
-  ;; prompt replaces system.md outright; the skill catalogue is always in
-  ;; the prompt but cheap — names and trigger descriptions only, never
-  ;; bodies — so the model knows what it can `skill load` and WHEN,
-  ;; without spending a turn to discover them.
-  ;;
-  ;; The TEXT comes through the :system chain (prompt-chain.edn, LR-7), so a
-  ;; project can replace the shipped prompt outright or suppress it entirely.
-  ;; First-present-wins: a level replaces, never concatenates. A suppressed
-  ;; base is legitimate — a workflow's own :prompt then IS the instruction
-  ;; set — so this renders empty rather than falling back to the shipped file.
-  (prompt/render-str (or (prompt/layer :system) "")
-    {:templates ""
-     :skills (skills/render-catalog)}))
+  (system-prompt-for nil))
 
 (defn judge-exemptions
   "The DO-NOT-FLAG list shipped to the audit and review judges. A var rather
@@ -140,9 +151,10 @@
   its own instructions at the start (a review workflow adds review guidance on
   top of the base prompt, keeping the whole tool surface). nil/blank leaves the
   base prompt untouched."
-  ([problem] (initial-messages problem nil))
-  ([problem prompt-suffix]
-   [{:role "system" :content (cond-> (system-prompt)
+  ([problem] (initial-messages problem nil nil))
+  ([problem prompt-suffix] (initial-messages problem prompt-suffix nil))
+  ([problem prompt-suffix role]
+   [{:role "system" :content (cond-> (system-prompt-for role)
                                (not (str/blank? prompt-suffix))
                                (str "\n\n" prompt-suffix))}
     ;; The opening user turn is prose the model reads and a project may want

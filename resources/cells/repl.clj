@@ -32,9 +32,20 @@
                 :repl/may-eval? false)))
 
 (cell/defcell :repl/declare
-  {:doc "The commitment: files to create or edit, tests to write, one line of
-        goal. An empty declaration is not one — naming no file is exactly the
-        state this step exists to rule out."
+  {:doc "The commitment, made with the `plan` tool:
+
+          plan({\"files\": [\"src/…\"], \"tests\": [\"test/…\"], \"goal\": \"one line\"})
+
+        `files` is what will be created or edited, `tests` what will be
+        written; both land in the same debt, so a declared test nobody writes
+        blocks the exit exactly as a declared source file does. At least one
+        path is required — an empty declaration is not one, and naming no file
+        is exactly the state this step exists to rule out.
+
+        Enforced by the phases.edn refusal :repl-needs-a-plan, which withholds
+        `eval` until this has happened. Calling plan again REPLACES the
+        previous declaration rather than adding to it: the contract is commit
+        to a hypothesis, not never change your mind."
    :pure true
    :requires []}
   (fn [_ {:keys [branch] :as data}]
@@ -55,8 +66,12 @@
 
 (cell/defcell :repl/land
   {:doc "Exit. What the branch said it would change and has not yet written.
-        Empty means the session may close; anything else is the debt `done` is
-        refused on. The REPL dies with the branch — only a file survives."
+        Empty means the session may close; anything else is the debt the
+        phases.edn refusal :plan-not-landed withholds `done` on, naming the
+        outstanding paths back. Discharged by a SUCCESSFUL write from any
+        :file-write tool (write_file, edit_file, patch) — reading a file you
+        promised to change is not changing it. The REPL dies with the branch;
+        only a file survives it."
    :pure true
    :requires []}
   (fn [_ {:keys [branch] :as data}]

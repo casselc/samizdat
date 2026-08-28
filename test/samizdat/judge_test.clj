@@ -129,10 +129,23 @@
     (is (str/includes? file "VERDICT: COMPLETE"))
     (is (str/includes? file "FINDINGS:"))
     (is (str/includes? file "[critical]")))
-  (let [p (judge/critic-prompt {:rules "R" :transcript "T" :evidence "E"
-                               :answer "A" :diff nil})]
-    (is (str/includes? p "## The agent's rules"))
-    (is (str/includes? p "Is this task complete and correct?"))))
+  ;; THE CRITIC IS SHOWN WHAT WAS ASKED. It used to be handed the implementer's
+  ;; system prompt as "rules" and the implementer's transcript, and never the
+  ;; requirement — it was asked whether the task was complete with the task
+  ;; absent from the message, and inferred it from the implementer's own
+  ;; account of it, which is the one source that cannot contradict the work
+  ;; under review.
+  (let [p (judge/critic-prompt {:requirement "BUILD A WIDGET"
+                                :evidence "E" :answer "A" :diff "D"})]
+    (is (str/includes? p "## What was asked"))
+    (is (str/includes? p "BUILD A WIDGET") "the requirement itself is in the message")
+    (is (str/includes? p "Judge the DIFF against WHAT WAS ASKED"))
+    (is (not (str/includes? p "## Transcript"))
+        "the implementer's transcript is not poured in by default"))
+  (testing "a caller with a reason may still show the transcript"
+    (let [p (judge/critic-prompt {:requirement "R" :transcript "T"
+                                  :evidence "E" :answer "A" :diff nil})]
+      (is (str/includes? p "## Transcript")))))
 
 (deftest diff-review-blocks-on-severity
   (testing "a critical or high finding blocks; a low one does not"

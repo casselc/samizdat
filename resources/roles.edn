@@ -1,0 +1,69 @@
+;; WHAT EACH ROLE IS, AND WHAT IT MAY TOUCH.
+;;
+;; Roles used to be one world plus a suffix: every role got the implementer's
+;; system prompt — all 31 tools, the REPL-first workflow, how to change code —
+;; and then its own prompt argued it back out of the parts that were not its
+;; job. The supervisor's role prompt still carries the scar: a whole paragraph
+;; explaining that its file tools cannot reach the harness source, which is
+;; there because the shared prompt had just told it it has file tools. One
+;; supervisor spent 108 of a run's 211 turns hunting a source tree it was
+;; never going to be allowed to open (karamazov-i1u).
+;;
+;; So roles are CONSTRUCTED here rather than subtracted in prose. A role's
+;; surface is the tools it may call; the catalogue it is shown is filtered to
+;; that surface, and calling outside it is refused rather than discouraged.
+;;
+;; :tools  the tool surface. :all means every registered tool.
+;; :prompt the role prompt appended to the (scoped) system prompt, or nil.
+;; :sees   what its opening context is built from — documentation for the
+;;         reader and for the supervisor deciding what to tune; the cells that
+;;         assemble each role's context name the same keys.
+;;
+;; SEPARATE CONTEXTS ARE NOT THE SAME AS SEALED ONES. Every role already runs
+;; on its own branch with its own message stream, and that stays true: no role
+;; reads another's history directly. The supervisor investigates ACROSS that
+;; boundary on purpose — fetch_turn, fetch_artifact, introspect and recall are
+;; how it looks at what an implementer did — but what it learns arrives as a
+;; tool result in its own stream, which is the difference between reading a
+;; record and inheriting a context.
+{:implementor
+ {:doc "Builds the thing. Guided by its manifests through a task: claim it,
+        declare what it will change, explore, land the files, ship. The only
+        role that writes to the project."
+  :tools :all
+  :prompt "roles/implementor"
+  :sees #{:task :problem :shared-tree :skills}}
+
+ :supervisor
+ {:doc "The meta process. Does not care how the feature is implemented; cares
+        whether the implementer is moving through its steps and what to tune
+        when it is not. Reads the run's health, investigates the record, and
+        changes the harness — manifests, cells, prompts, policy — so the next
+        run does better. It does not write project code: that is the
+        implementer's job and doing it here hides the loop problem behind a
+        patch."
+  :tools #{"read_file" "grep" "lsp" "skill" "doc" "complete" "manual"
+           "introspect" "cells" "cell" "manifest" "prompt" "policy"
+           "fetch_turn" "fetch_artifact" "recall" "remember" "forget" "outcome"
+           "experiment" "message" "eval" "shell" "done" "give_up"}
+  :prompt "roles/supervisor"
+  :sees #{:run-health :gate-health :failures}}
+
+ :reviewer
+ {:doc "Reads the work against what was asked and returns PASS or REVISE. It
+        does not fix what it finds — a reviewer that edits has stopped
+        reviewing and the next reviewer inherits its opinion as fact."
+  :tools #{"read_file" "grep" "lsp" "doc" "complete" "fetch_artifact"
+           "fetch_turn" "recall" "done" "give_up"}
+  :prompt "roles/reviewer"
+  :sees #{:requirement :diff :answer}}
+
+ :critic
+ {:doc "One call, not a loop: the requirement, the diff, and the deterministic
+        evidence, in and a verdict out. Holds no tools deliberately — a critic
+        that can go and look is a critic that can be talked round by what it
+        finds, and the point of it is an opinion formed from the requirement
+        and the change alone."
+  :tools #{}
+  :prompt nil
+  :sees #{:requirement :diff :evidence :answer}}}

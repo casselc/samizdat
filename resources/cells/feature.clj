@@ -104,13 +104,28 @@
   artifacts; the tests must be green) do not apply — they gated the verdict
   on the very condition it was reporting, and every advisory role exhausted
   its budget unable to conclude (karamazov-t86)."
-  [{:keys [conn run-id] :as ctx} compiled bid prob suffix]
+  ([ctx compiled bid prob suffix] (run-role ctx compiled bid prob suffix nil))
+  ([{:keys [conn run-id] :as ctx} compiled bid prob suffix role]
   (runs/open-branch! conn run-id {:branch-id bid})
   (let [b (assoc (state/new-branch {:id bid :problem prob
-                                    :messages (turn/initial-messages prob suffix)})
-                 :advisory? true)
+                                    ;; ROLE-SCOPED: the tool catalogue this
+                                    ;; role is shown is filtered to what it
+                                    ;; may call, so its own prompt no longer
+                                    ;; has to argue it out of the rest.
+                                    :messages (turn/initial-messages prob suffix role)})
+                 :advisory? true
+                 ;; The branch carries its role, which is what the
+                 ;; :outside-role-surface refusal reads. A branch with no role
+                 ;; is unrestricted, so a workflow that names none is unchanged.
+                 :role role)
         out (myc/run-compiled compiled ctx {:branch b :turn 1})]
-    {:verdict (:verdict out) :answer (get-in out [:branch :final-answer])}))
+    {:verdict (:verdict out) :answer (get-in out [:branch :final-answer])})))
+
+(defn- run-role-as
+  "run-role with the ROLE named first — the call sites read better that way and
+  the role is the thing that must not be forgotten."
+  [role ctx compiled bid prob suffix]
+  (run-role ctx compiled bid prob suffix role))
 
 (defn- review-decision
   "PASS/REVISE from the reviewer's verdict + answer. A reviewer that could not
@@ -212,7 +227,7 @@
         (let [prob (str "Review this feature's work.\n\nFeature:\n" (:problem branch)
                         "\n\nThe implementors reported:\n" (:final-answer branch))
               {:keys [verdict answer]}
-              (try (run-role (wf/role-ctx ctx :reviewer) (wf/compiled-manifest "reviewer")
+              (try (run-role-as :reviewer (wf/role-ctx ctx :reviewer) (wf/compiled-manifest "reviewer")
                              (str "R" (revision data)) prob
                              (wf/prompt-text "roles/reviewer"))
                    (catch Throwable e {:verdict :error :answer (ex-message e)}))
@@ -458,7 +473,7 @@
                         ;; the supervisor itself.
                         (try (wf/render-catalog conn) (catch Throwable _ "")))
               {:keys [verdict answer]}
-              (try (run-role (wf/role-ctx ctx :supervisor) (wf/compiled-manifest "supervisor")
+              (try (run-role-as :supervisor (wf/role-ctx ctx :supervisor) (wf/compiled-manifest "supervisor")
                              (str "S" (revision data)) prob
                              (wf/prompt-text "roles/supervisor"))
                    (catch Throwable e {:verdict :error :answer (ex-message e)}))

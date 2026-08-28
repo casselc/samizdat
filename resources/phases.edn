@@ -122,6 +122,23 @@
   ;; session closes by LANDING what it said it would, so exploration cannot
   ;; quietly become the deliverable — T1 of that same run read for 316 turns
   ;; and wrote nothing.
+  ;; THE ROLE SURFACE, enforced. resources/roles.edn says which tools each role
+  ;; may call; this is what makes that a boundary rather than a suggestion.
+  ;;
+  ;; Without it a role prompt has to argue the model out of capabilities the
+  ;; system prompt advertised — the supervisor's still carries the scar of
+  ;; that, a paragraph explaining its file tools cannot reach the harness
+  ;; source, written after one spent 108 of a run's 211 turns hunting a source
+  ;; tree it was never going to be allowed to open. A role is no longer SHOWN
+  ;; a tool outside its surface; this is the case where it asks anyway.
+  ;;
+  ;; A branch with no :role is unrestricted, so a workflow that names no role
+  ;; behaves exactly as it did before roles existed.
+  {:rule :outside-role-surface
+   :when (not (samizdat.agent.roles/may-use? (:role branch) tool-name))
+   :tools :all
+   :message-file "outside-role-surface"}
+
   {:rule :plan-not-landed
    :when (seq (samizdat.agent.state/unwritten branch))
    :tools #{"done"}

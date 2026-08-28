@@ -35,6 +35,7 @@
             [samizdat.agent.storm :as storm]
             ;; Same reason as gates/storm above: the repl-session refusal
             ;; :when forms name samizdat.agent.state fully qualified.
+            [samizdat.agent.roles :as roles]
             [samizdat.agent.state :as state]
             [samizdat.prompt :as prompt]))
 
@@ -223,6 +224,9 @@
                                        ;; names back: a refusal that cannot
                                        ;; say WHICH file is outstanding is one
                                        ;; more unactionable message.
+                                       :role (some-> (:role branch) name)
+                                       :role-doc (some-> (:role branch)
+                                                         roles/doc)
                                        :unwritten (str/join "\n"
                                                             (map #(str "  - " %)
                                                                  (state/unwritten branch)))})
