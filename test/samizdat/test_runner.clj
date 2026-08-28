@@ -90,6 +90,7 @@
             [samizdat.supervisor-test]
             [samizdat.gitdiff-test]
             [samizdat.skills-test]
+            [samizdat.source-test]
             [samizdat.security.secrets-test]
             [samizdat.config-test]
             [samizdat.files-test]
@@ -211,6 +212,7 @@
     samizdat.supervisor-test
     samizdat.gitdiff-test
     samizdat.skills-test
+    samizdat.source-test
     samizdat.security.secrets-test
     samizdat.config-test
     samizdat.files-test
