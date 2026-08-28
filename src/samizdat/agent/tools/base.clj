@@ -87,7 +87,22 @@
   [branch capability e]
   (ok branch (str capability " is unavailable: " (ex-message e))))
 
-(defn arg [ctx k] (get-in ctx [:args k]))
+(defn arg
+  "A tool call's argument `k`, however the model spelled it.
+
+  Calls arrive as JSON keywordized verbatim, so an argument the prompt
+  documents as `timeout_ms` reaches the map as :timeout_ms while the tool asks
+  for :timeout-ms. That mismatch returns nil, and a nil optional argument is
+  indistinguishable from one the model never sent — so `eval` ran on its
+  default timeout no matter what was passed, silently, until a supervisor
+  noticed a turn that asked for 60s and stopped at 10."
+  [ctx k]
+  (let [args (:args ctx)
+        underscored (keyword (str/replace (name k) "-" "_"))]
+    (or (get args k)
+        (get args underscored)
+        (get args (name k))
+        (get args (name underscored)))))
 
 (defn save-body
   "The body for a save action: the inline argument `k` when present, else the

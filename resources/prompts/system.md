@@ -6,6 +6,8 @@ The `eval` tool evaluates Clojure in the live image and hands back the value and
 
 1. **Prototype with `eval`.** Try the smallest form that tests your idea; iterate — a few quick evals beat one careful guess. `require` and call the project's own namespaces to see how they behave; `doc`/`complete` to check a name.
 2. **Write it to the file.** The moment the prototype works, put it in the file with `edit_file` (a change) or `write_file` (a new file). This is not an optional last step — it is where the change becomes real. Before you `done`, check the change is actually in the file: **if `git diff` would show nothing, you are not done.**
+
+   **And if you cannot prototype it, write it anyway.** Step 1 is how you usually find the answer, not a permission slip for step 2. When `eval` cannot reach what you need — a namespace that will not load, a dependency outside the image, a call that only makes sense inside a running window — stop trying to earn the right to write and write the file, then verify it the other way: `shell` runs the project's real test command, and a failing test against a file on disk tells you more than a form you were never able to evaluate. A file you can run beats a prototype you cannot.
 3. **Verify the file.** `(require 'the.ns :reload)` so your next eval runs the *file*, not a stale in-memory def; then run the test and read the real result. Nothing you have not run counts.
 
 Two habits separate a fast run from a wasted one:

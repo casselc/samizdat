@@ -31,6 +31,7 @@
             [samizdat.agent.gates :as gates]
             [samizdat.agent.loop :as aloop]
             [samizdat.agent.state :as state]
+            [samizdat.agent.tools.base :as base]
             [samizdat.agent.telemetry :as telemetry]
             [cells.board :as board]
             [samizdat.agent.supervisor :as supervisor]
@@ -567,3 +568,25 @@
   ;; prevent. Set above it, with room.
   (is (> (gates/threshold :orient-turns) 40)
       "the floor must not interrupt orientation that was going to succeed"))
+
+;; --- snake_case args reach kebab-case lookups -------------------------------
+
+(deftest an-arg-documented-with-an-underscore-reaches-a-hyphenated-lookup
+  ;; A tool call arrives as JSON and is keywordized verbatim, so `timeout_ms`
+  ;; becomes :timeout_ms. eval read :timeout-ms and got nil, so every eval ran
+  ;; on the 10s default no matter what the model asked for — silently, since a
+  ;; missing optional arg is indistinguishable from one that was never sent.
+  ;;
+  ;; Found by the SUPERVISOR, not by a test: it read a worker's turn that
+  ;; passed 60000 and timed out at 10000, and opened a plan to find out why
+  ;; (run 498450e1).
+  (testing "the underscore spelling the prompt documents"
+    (is (= 60000 (base/arg {:args {:timeout_ms 60000}} :timeout-ms))))
+  (testing "the hyphen spelling, for a caller that already normalised"
+    (is (= 60000 (base/arg {:args {:timeout-ms 60000}} :timeout-ms))))
+  (testing "a plain string key, which is how some callers build args"
+    (is (= 60000 (base/arg {:args {"timeout_ms" 60000}} :timeout-ms))))
+  (testing "absent stays absent — an unsent optional arg must not resolve"
+    (is (nil? (base/arg {:args {}} :timeout-ms))))
+  (testing "an ordinary single-word arg is unaffected"
+    (is (= "x" (base/arg {:args {:code "x"}} :code)))))
