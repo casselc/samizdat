@@ -12,6 +12,10 @@
   (:require [clojure.test :refer [deftest testing is]]
             [samizdat.agent.gates :as gates]
             [samizdat.cells :as cells]
+            [mycelium.cell :as cell]
+            [mycelium.core :as myc]
+            [samizdat.store.db :as db]
+            [samizdat.store.runs :as runs]
             [samizdat.agent.oversight :as ov]))
 
 ;; --- when a pass is due -----------------------------------------------------
@@ -147,3 +151,62 @@
     (is (nil? (:final-answer next-pass)) "not already answered")
     (is (nil? (:verdict next-pass)) "not already finished")
     (is (:advisory? next-pass) "still an advisory branch, not shippable work")))
+
+(defn- event-count [conn run-id kind]
+  (:n (first (db/fetch conn ["SELECT count(*) AS n FROM events
+                               WHERE run_id = ? AND kind = ?" run-id kind]))))
+
+(deftest every-oversight-stage-actually-runs
+  ;; CELLS ARE LOAD-STRINGED, so nothing type- or arity-checks them until the
+  ;; moment they run — inside a guard that catches and logs rather than throws.
+  ;; A stage could therefore be broken for a whole run and the only trace was
+  ;; one WARN nobody was reading. That is exactly what happened: renaming
+  ;; `safely` to take a stage label missed one nested call site, so EVERY
+  ;; reasoning pass of run 5a2605b1 died with "Wrong number of args (2)" and
+  ;; the stream looked merely quiet.
+  ;;
+  ;; So: run the stages for real and assert on their OUTPUT, which a swallowed
+  ;; exception cannot fake.
+  (cells/load-cells!)
+  (let [conn (db/open! ":memory:")
+        rid (runs/start-run! conn {:problem "p"})
+        ctx {:conn conn :run-id rid :config {}}]
+    (testing "gather reaches its verdict rather than the guard's fallback"
+      (let [out ((:handler (cell/get-cell! :oversight/gather)) ctx {})]
+        ;; The fallback also sets worth-a-look? false, so assert on a key only
+        ;; the real path produces.
+        (is (contains? out :oversight/idle)
+            "gather fell into its exception guard — check the log for
+             'oversight :gather failed'")
+        (is (contains? out :oversight/unmet))))
+    (testing "quiet writes its heartbeat"
+      (let [out ((:handler (cell/get-cell! :oversight/quiet)) ctx {:oversight/idle 1 :oversight/unmet 0})]
+        (is (some? out))
+        (is (pos? (event-count conn rid "oversight-quiet"))
+            "no heartbeat row — a quiet stream is indistinguishable from a dead one")))
+    (testing "apply records the pass"
+      ((:handler (cell/get-cell! :oversight/apply)) ctx {:oversight/idle 9 :oversight/unmet 2
+                                              :oversight/answer "a\n\nconclusion"})
+      (is (pos? (event-count conn rid "oversight"))))))
+
+(deftest the-reasoning-stage-runs-all-the-way-through
+  ;; THE ONE THAT MATTERS. The arity bug lived in :oversight/reason, which the
+  ;; stage test above cannot reach because reason takes a model turn. So stub
+  ;; the turn and assert reason still carries its answer out — a swallowed
+  ;; exception anywhere in its body (the catalog call, the digest, the prompt
+  ;; render) leaves the answer nil, which is exactly how run 5a2605b1 looked
+  ;; from outside: passes recorded, nothing learned.
+  (cells/load-cells!)
+  (let [conn (db/open! ":memory:")
+        rid (runs/start-run! conn {:problem "p"})
+        ctx {:conn conn :run-id rid :config {}}]
+    (with-redefs [myc/run-compiled (fn [_ _ data]
+                                     {:branch (assoc (:branch data)
+                                                     :final-answer "nothing is wrong")})]
+      (let [out ((:handler (cell/get-cell! :oversight/reason))
+                 ctx {:oversight/idle 30 :oversight/unmet 2
+                      :oversight/turns [] :oversight/firings []})]
+        (is (= "nothing is wrong" (:oversight/answer out))
+            "reason fell into its guard — check the log for 'oversight :reason failed'")
+        (is (some? (:oversight/branch out))
+            "the branch must come back out, or the stream has no memory")))))

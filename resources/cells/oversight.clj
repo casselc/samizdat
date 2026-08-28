@@ -133,7 +133,7 @@
              prob (prompt/render "oversight-pass"
                                  {:digest dig
                                   :learned (seq (knowledge/standing conn))
-                                  :catalog (safely #(wf/render-catalog conn) "")})
+                                  :catalog (safely :catalog #(wf/render-catalog conn) "")})
              ;; ONE branch for the run, carried by the stream. Opened once;
              ;; re-opening an existing id is a no-op that returns the row.
              bid "S0"
