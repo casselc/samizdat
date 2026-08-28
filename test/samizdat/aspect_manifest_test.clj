@@ -38,21 +38,62 @@
           (is (keyword? (:advice-role aspect)))
           (is (= 1 (get-in aspect [:expect :matches]))))))))
 
-(deftest semantic-lifecycles-match-definition-entries
+(deftest semantic-join-points-match-exact-source-boundaries
   (let [read-manifest #(some-> % io/resource slurp edn/read-string)
         core (read-manifest "META-INF/jolt/aspects/samizdat-m2-core.edn")
         embed (read-manifest "META-INF/jolt/aspects/samizdat-m2-embed.edn")
-        by-id (into {} (map (juxt :id :match))
-                    (concat (:aspects core) (:aspects embed)))]
+        aspects (concat (:aspects core) (:aspects embed))
+        by-id (into {} (map (juxt :id identity))
+                    aspects)
+        match #(get-in by-id [% :match])
+        role #(get-in by-id [% :advice-role])]
+    (is (= 9 (count (:aspects core))))
+    (is (= 10 (count aspects)))
+    (is (= (count aspects) (count by-id)) "aspect ids are unique")
+    (is (= #{:samizdat.agent.beam/control-loop
+             :samizdat.store.runs/branch-open
+             :samizdat.store.runs/branch-close
+             :samizdat.agent.beam/turn
+             :samizdat.agent.infer/model
+             :samizdat.agent.infer/tool-selection
+             :samizdat.agent.loop/tool
+             :samizdat.agent.arbiter/steer
+             :samizdat.llm.client/http-post
+             :samizdat.embed/beam-run}
+           (set (keys by-id))))
     (is (= {:entry 'samizdat.agent.beam/run! :arity 1}
-           (get by-id :samizdat.embed/beam-run)))
+           (match :samizdat.embed/beam-run)))
+    (is (= :samizdat/run (role :samizdat.embed/beam-run)))
+    (is (= {:entry 'samizdat.agent.beam/run-rounds :arity 3}
+           (match :samizdat.agent.beam/control-loop)))
+    (is (= :samizdat/control-loop
+           (role :samizdat.agent.beam/control-loop)))
+    (is (= {:entry 'samizdat.store.runs/open-branch! :arity 3}
+           (match :samizdat.store.runs/branch-open)))
+    (is (= :samizdat/branch-open
+           (role :samizdat.store.runs/branch-open)))
+    (is (= {:entry 'samizdat.store.runs/close-branch! :arity 5}
+           (match :samizdat.store.runs/branch-close)))
+    (is (= :samizdat/branch-close
+           (role :samizdat.store.runs/branch-close)))
     (is (= {:entry 'samizdat.agent.beam/advance-branch :arity 3}
-           (get by-id :samizdat.agent.beam/turn)))
+           (match :samizdat.agent.beam/turn)))
+    (is (= :samizdat/turn (role :samizdat.agent.beam/turn)))
     (is (= {:entry 'samizdat.llm.client/chat :arity 4}
-           (get by-id :samizdat.agent.infer/model)))
+           (match :samizdat.agent.infer/model)))
+    (is (= :samizdat/model (role :samizdat.agent.infer/model)))
+    (is (= {:entry 'samizdat.agent.infer/absorb :arity 3}
+           (match :samizdat.agent.infer/tool-selection)))
+    (is (= :samizdat/tool-selection
+           (role :samizdat.agent.infer/tool-selection)))
     (is (= {:entry 'samizdat.agent.tools/run-tool :arity 1}
-           (get by-id :samizdat.agent.loop/tool)))
+           (match :samizdat.agent.loop/tool)))
+    (is (= :samizdat/tool (role :samizdat.agent.loop/tool)))
+    (is (= {:entry 'samizdat.agent.arbiter/decide :arity 1}
+           (match :samizdat.agent.arbiter/steer)))
+    (is (= :samizdat/steer (role :samizdat.agent.arbiter/steer)))
     (is (= {:ns 'samizdat.llm.client
             :call 'jolt.http-client/post
             :arity 2}
-           (get by-id :samizdat.llm.client/http-post)))))
+           (match :samizdat.llm.client/http-post)))
+    (is (= :http/client (role :samizdat.llm.client/http-post)))))

@@ -44,14 +44,26 @@ and resumes from its journal.
 ## Build-time instrumentation seams
 
 Samizdat publishes inert compiler-aspect manifests under
-`META-INF/jolt/aspects/`. They name the M2 run, turn, model, and tool function
-entries plus the outbound HTTP call site and semantic advice roles, but contain no executable advice
-and introduce no OpenTelemetry dependency. An application selects the
-manifests at build time and supplies a compatible consumer: OpenTelemetry,
+`META-INF/jolt/aspects/`. They name the M2 run and scheduler lifecycles, branch
+open/close boundaries, turns, model calls, tool selection and execution,
+steering decisions, and the outbound HTTP call site. The manifests contain no
+executable advice and introduce no OpenTelemetry dependency. An application
+selects them at build time and supplies a compatible consumer: OpenTelemetry,
 an event journal, policy enforcement, profiling, or another bounded observer.
+
+The roles distinguish duration scopes from instantaneous facts. A consumer can
+represent `:samizdat/control-loop`, `:samizdat/turn`, `:samizdat/model`, and
+`:samizdat/tool` as spans while recording branch open/close, parsed tool
+selection, and steering as events. The library fixes the semantic boundary;
+the consumer owns its representation and data policy.
 
 The manifest `:library` version is the compatibility id of the instrumented
 semantic surface, not necessarily the newest resource-only Git commit. A
 compiler rejects a consumer whose declared compatibility id differs, or whose
 expected entry or call-site count no longer matches, instead of silently producing a
 partially instrumented application.
+
+The current compatibility id remains `35b01fddd20fa9e6d77678eadc2a2bcc6fb9ac2d`:
+the commits that publish and extend these manifests change resources, tests,
+and documentation only. The selected source definitions are unchanged from
+that revision.

@@ -4,7 +4,22 @@
            ;; Resource-only commits may advance without changing this contract.
            :version "35b01fddd20fa9e6d77678eadc2a2bcc6fb9ac2d"}
  :aspects
- [{:id :samizdat.agent.beam/turn
+ [{:id :samizdat.agent.beam/control-loop
+   :match {:entry samizdat.agent.beam/run-rounds
+           :arity 3}
+   :advice-role :samizdat/control-loop
+   :expect {:matches 1}}
+  {:id :samizdat.store.runs/branch-open
+   :match {:entry samizdat.store.runs/open-branch!
+           :arity 3}
+   :advice-role :samizdat/branch-open
+   :expect {:matches 1}}
+  {:id :samizdat.store.runs/branch-close
+   :match {:entry samizdat.store.runs/close-branch!
+           :arity 5}
+   :advice-role :samizdat/branch-close
+   :expect {:matches 1}}
+  {:id :samizdat.agent.beam/turn
    :match {:entry samizdat.agent.beam/advance-branch
            :arity 3}
    :advice-role :samizdat/turn
@@ -14,10 +29,20 @@
            :arity 4}
    :advice-role :samizdat/model
    :expect {:matches 1}}
+  {:id :samizdat.agent.infer/tool-selection
+   :match {:entry samizdat.agent.infer/absorb
+           :arity 3}
+   :advice-role :samizdat/tool-selection
+   :expect {:matches 1}}
   {:id :samizdat.agent.loop/tool
    :match {:entry samizdat.agent.tools/run-tool
            :arity 1}
    :advice-role :samizdat/tool
+   :expect {:matches 1}}
+  {:id :samizdat.agent.arbiter/steer
+   :match {:entry samizdat.agent.arbiter/decide
+           :arity 1}
+   :advice-role :samizdat/steer
    :expect {:matches 1}}
   {:id :samizdat.llm.client/http-post
    :match {:ns samizdat.llm.client
