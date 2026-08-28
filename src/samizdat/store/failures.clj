@@ -30,6 +30,7 @@
   require the exact indexed values back. Sync is app-managed here, no triggers."
   (:require [clojure.string :as str]
             [clojure.tools.logging :as log]
+            [db.jdbc]
             [jdbc.core :as jdbc]
             [samizdat.lexicon :as lexicon]
             [samizdat.prompt :as prompt]

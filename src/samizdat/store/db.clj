@@ -17,7 +17,7 @@
 ;; SPDX-License-Identifier: GPL-3.0-or-later
 
 (ns samizdat.store.db
-  "SQLite connection and migration runner (jolt-lang/db over libsqlite3).
+  "SQLite connection and migration runner over the shared native driver SPI.
 
   Writes funnel through one connection on purpose. Five branches appending to
   the journal concurrently means concurrent FFI calls into libsqlite3, and
@@ -26,6 +26,9 @@
   question; readers open their own connections."
   (:require [clojure.string :as str]
             [clojure.tools.logging :as log]
+            ;; Installs the native driver-backed java.sql shim before
+            ;; clojure.jdbc's jdbc.core namespace is compiled.
+            [db.jdbc]
             [jdbc.core :as jdbc]
             [samizdat.store.migrations :as migrations]))
 
@@ -109,7 +112,12 @@
   ([conn q opts] (with-conn (jdbc/execute! conn q opts))))
 
 (defn last-insert-id [conn]
-  (with-conn (jdbc/last-insert-id conn)))
+  ;; The maintained shared jdbc.core intentionally has no driver-specific
+  ;; generated-id verb. Samizdat's store is SQLite-only, and this connection-
+  ;; local query remains inside the same serialized section as its caller's
+  ;; INSERT (with-conn's monitor is reentrant).
+  (with-conn
+    (:id (jdbc/fetch-one conn "SELECT last_insert_rowid() AS id"))))
 
 (defn now
   "An ISO-8601 timestamp. One function so every table sorts the same way."
@@ -117,8 +125,7 @@
   (str (java.time.Instant/now)))
 
 (defn close [conn]
-  ;; jdbc.core's connection is a map carrying a :close thunk, not an object.
-  (when-let [f (:close conn)] (f)))
+  (.close conn))
 
 (defn schema-version [conn]
   (or (-> (jdbc/fetch-one conn "PRAGMA user_version") vals first) 0))

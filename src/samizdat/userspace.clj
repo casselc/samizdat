@@ -58,6 +58,11 @@
 
 (defonce ^:private project (atom nil))
 
+;; An embedded harness and the served system must never silently replace one
+;; another's project connection. Ordinary bind! remains the deliberately loose
+;; REPL/test seam; long-lived lifecycle owners claim an exclusive lease.
+(defonce ^:private project-owner (atom nil))
+
 ;; {[kind name] body} for the bound project.
 ;;
 ;; Reads are HOT: a prompt is rendered on every gate message and every turn
@@ -92,15 +97,57 @@
   Returns the previous binding, so a caller that needs to restore it (a test,
   a tool operating on another project) can."
   [conn]
+  (when-let [owner @project-owner]
+    (throw (ex-info "userspace is owned by a long-lived lifecycle"
+                    {:owner owner})))
   (let [prev @project]
     (reset! project conn)
     (invalidate!)
     prev))
 
+(defn claim!
+  "Exclusively bind `conn` to the opaque lifecycle `owner`.
+
+  Fails rather than replacing another long-lived binding. The owner token is
+  returned and must be passed to `release!`; callers should not attach meaning
+  to it beyond identity."
+  [owner conn]
+  (when (or (nil? owner) (nil? conn))
+    (throw (ex-info "userspace claim needs an owner and connection" {})))
+  (if (compare-and-set! project-owner nil owner)
+    (try
+      (when (some? @project)
+        (throw (ex-info "userspace is already bound" {})))
+      (reset! project conn)
+      (invalidate!)
+      owner
+      (catch Throwable e
+        (compare-and-set! project-owner owner nil)
+        (throw e)))
+    (throw (ex-info "userspace is already owned by another lifecycle"
+                    {:owner @project-owner}))))
+
+(defn release!
+  "Release the exclusive binding held by `owner`.
+
+  A mismatched owner is an error: unbinding somebody else's live project is
+  worse than leaking one's own handle during failed cleanup."
+  [owner]
+  (when-not (identical? owner @project-owner)
+    (throw (ex-info "userspace release does not match its owner"
+                    {:owner owner :current-owner @project-owner})))
+  (reset! project nil)
+  (invalidate!)
+  (compare-and-set! project-owner owner nil)
+  nil)
+
 (defn unbind!
   "Detach from the project store — reads fall back to the shipped template.
   The state a test and a bare REPL run in."
   []
+  (when-let [owner @project-owner]
+    (throw (ex-info "userspace is owned; release it with the matching owner"
+                    {:owner owner})))
   (reset! project nil)
   (invalidate!)
   nil)

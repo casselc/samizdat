@@ -29,6 +29,7 @@
   supervisor, because a run that is wedged is exactly the run that will never
   reach another boundary to drain a queue at."
   (:require [clojure.data.json :as json]
+            [db.jdbc]
             [jdbc.core :as jdbc]
             [samizdat.store.db :as db]
             [samizdat.store.journal :as journal]))

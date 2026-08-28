@@ -26,6 +26,7 @@
   failure mode stays loud."
   (:require [clojure.test :refer [deftest testing is]]
             [clojure.string :as str]
+            [db.jdbc]
             [jdbc.core :as jdbc]
             [samizdat.agent.gates :as gates]
             [samizdat.agent.loop :as branch-loop]

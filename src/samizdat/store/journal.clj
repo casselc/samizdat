@@ -31,6 +31,7 @@
   (:require [clojure.data.json :as json]
             [clojure.string :as str]
             [clojure.tools.logging :as log]
+            [db.jdbc]
             [jdbc.core :as jdbc]
             [samizdat.events :as events]
             [samizdat.session :as session]

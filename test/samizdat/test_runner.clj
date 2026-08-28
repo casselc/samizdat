@@ -94,6 +94,7 @@
             [samizdat.config-test]
             [samizdat.files-test]
             [samizdat.edit-test]
+            [samizdat.embed-test]
             [samizdat.evaluator-store-test]
             [samizdat.evaluator-test]
             [samizdat.grep-test]
@@ -212,6 +213,7 @@
     samizdat.config-test
     samizdat.files-test
     samizdat.edit-test
+    samizdat.embed-test
     samizdat.evaluator-store-test
     samizdat.evaluator-test
     samizdat.grep-test

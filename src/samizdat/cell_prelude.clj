@@ -23,6 +23,7 @@
             [samizdat.agent.gitdiff]
             [samizdat.agent.judge]
             [samizdat.agent.planner]
+            [samizdat.agent.reflect]
             [samizdat.agent.telemetry]
             [samizdat.engine.proc]))
 

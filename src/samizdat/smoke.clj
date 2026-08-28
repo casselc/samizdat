@@ -27,6 +27,7 @@
   as skipped when the toolchain is absent, since only Phase 5 needs it."
   (:require [clojure.data.json :as json]
             [clojure.string :as str]
+            [db.jdbc]
             [jdbc.core :as jdbc]
             [jolt.http-client :as http]
             [jolt.process :as p]

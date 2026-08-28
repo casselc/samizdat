@@ -35,6 +35,7 @@
   (:require [clojure.set]
             [clojure.string :as str]
             [clojure.tools.logging :as log]
+            [db.jdbc]
             [jdbc.core :as jdbc]
             [samizdat.lexicon :as lexicon]
             [samizdat.llm.message :as message]

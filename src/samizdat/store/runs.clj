@@ -31,6 +31,7 @@
             ;; :retention :run-record-days break every subsequent run start
             ;; (karamazov-blt.31).
             [clojure.tools.logging :as log]
+            [db.jdbc]
             [jdbc.core :as jdbc]
             [samizdat.store.db :as db]
             [samizdat.store.journal :as journal]

@@ -2,20 +2,19 @@
 
  ;; Git deps are fetched into ~/.jolt/gitlibs by jolt. Full SHAs only —
  ;; `git fetch` can't resolve short ones.
- :deps {;; provider calls (clj-http-lite over jolt.ffi sockets + OpenSSL + libz)
-        ;; v0.0.3 honours :conn-timeout: it bounds the connect itself through a
-        ;; non-blocking socket, which needs jolt 0.6.8's :varargs FFI marker
-        ;; (fcntl is variadic, and on Apple arm64 a fixed-arity binding
-        ;; silently corrupts the stack-passed argument).
-        jolt-lang/http-client
-        {:git/url "https://github.com/jolt-lang/http-client"
-         :git/tag "v0.0.3"
-         :git/sha "add8184b819b69dcfed1305b9577eb8794f76409"}
+ :deps {;; provider calls (clj-http-lite over the maintained jolt-tcp transport,
+        ;; OpenSSL, and libz). This is the same coordinate and exact revision
+        ;; used by the observability demo, so one jolt.http-client namespace is
+        ;; selected when Samizdat is embedded there.
+        io.github.casselc/http-client
+        {:git/url "https://github.com/casselc/http-client.git"
+         :git/sha "eba91d0536fee73ee192f68676915e48be23b348"}
 
-        ;; durable sessions: jdbc.core over the system libsqlite3 via jolt.ffi
-        jolt-lang/db
-        {:git/url "https://github.com/jolt-lang/db"
-         :git/sha "c3ed5b333b5feed615d49c118493a00edc537739"}
+        ;; durable sessions: the shared driver SPI and jdbc.core implementation
+        ;; used by embedded drivers such as jolt-chdb too
+        io.github.casselc/db
+        {:git/url "https://github.com/casselc/db.git"
+         :git/sha "25f5cb08ac6f1d598e5621782a2318343710c61a"}
 
         ;; nREPL middleware (sessions, interruptible eval, completion, lookup) so
         ;; an editor can drive the running harness. See core/start-nrepl!.
@@ -27,7 +26,7 @@
         ;; reconciles the duplicate libssl/libcrypto natives to a single load.
         jolt-lang/jolt-crypto
         {:git/url "https://github.com/jolt-lang/jolt-crypto"
-         :git/sha "1ab72aa5f73be7ec41f01086953ffb43ecd3d84e"}
+         :git/sha "8a3247f698fbd462cddae9b206a7e3b3aac1bb92"}
 
          org.clojure/data.json
          {:git/url "https://github.com/clojure/data.json"

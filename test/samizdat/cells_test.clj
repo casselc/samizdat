@@ -29,6 +29,32 @@
 
 (def ^:private tmp (atom nil))
 
+(defn- source-requires [path]
+  (with-open [reader (java.io.PushbackReader.
+                      (clojure.java.io/reader (str path)))]
+    (let [form (read reader)
+          ns-name (second form)
+          clauses (filter #(and (seq? %) (= :require (first %))) form)
+          required (into #{}
+                         (comp (mapcat rest)
+                               (keep #(cond
+                                        (symbol? %) %
+                                        (vector? %) (first %)
+                                        :else nil)))
+                         clauses)]
+      [ns-name required])))
+
+(defn- static-source-graph []
+  (into {} (map source-requires) (fs/glob "src" "**.clj")))
+
+(defn- reachable-namespaces [graph root]
+  (loop [pending [root] seen #{}]
+    (if-let [current (peek pending)]
+      (if (seen current)
+        (recur (pop pending) seen)
+        (recur (into (pop pending) (get graph current)) (conj seen current)))
+      seen)))
+
 (defn- cell-file! [dir id-kw body]
   (fs/create-dirs dir)
   (spit (str dir "/" (name id-kw) ".clj")
@@ -75,10 +101,12 @@
                       (keep clojure.java.io/resource)
                       (mapcat #(re-seq #"\[(samizdat\.[a-z0-9.-]+)" (slurp %)))
                       (map second)
-                      set)]
+                      (map symbol)
+                      set)
+        reachable (reachable-namespaces (static-source-graph) 'samizdat.embed)]
     (is (seq required) "the shipped cells were readable")
     (doseq [ns-name required]
-      (is (some? (find-ns (symbol ns-name)))
+      (is (contains? reachable ns-name)
           (str ns-name " is required by a shipped cell but is not loaded — add"
                " it to samizdat.cell-prelude or it will be missing from a"
                " built binary")))))

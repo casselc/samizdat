@@ -50,6 +50,8 @@
 
 (defonce system (atom nil))
 
+(def ^:private userspace-owner ::served-system)
+
 (defn started? [] (some? @system))
 
 (defn config [] (:config @system))
@@ -76,12 +78,42 @@
   policy; the reload-on-every-start half (rather than trusting an atom that
   survives stop!/start!) is what lets a long-lived interpreted session pick
   up edits without a process restart."
-  [conn]
-  (userspace/bind! conn)
-  (gates/reload-config!)
-  (lexicon/reload!)
-  (phases/reload!)
-  conn)
+  ([conn] (bind-project! nil conn))
+  ([owner conn]
+   (if owner
+     (do
+       (userspace/claim! owner conn)
+       (try
+         (gates/reload-config!)
+         (lexicon/reload!)
+         (phases/reload!)
+         conn
+         (catch Throwable e
+           (userspace/release! owner)
+           (throw e))))
+     (do
+       (userspace/bind! conn)
+       (gates/reload-config!)
+       (lexicon/reload!)
+       (phases/reload!)
+       conn))))
+
+(defn prepare-config!
+  "Load runtime configuration and initialize its process-wide provider state.
+
+  Shared by the served and embedded lifecycles so provider probing, response
+  bounds, and session reset cannot drift between entry points. Does not open a
+  database or start a server."
+  [overrides]
+  (let [cfg (config/load-config overrides)
+        _ (session/reset!)
+        _ (platform/set-max-response-ms! (get-in cfg [:llm :max-response-ms]))
+        probed (llm-client/probe-llama-cpp (:llm cfg))
+        cfg (cond-> cfg probed (update :llm merge probed))]
+    (when probed
+      (log/info "endpoint identified as llama.cpp:"
+                (:total-slots probed) "KV slots — prefix caching on"))
+    cfg))
 
 (defn start!
   "Bring the system up. `overrides` is merged into the config, so a REPL
@@ -101,57 +133,43 @@
   ([handler overrides]
    (when (started?)
      (throw (ex-info "system already started; call stop! first" {})))
-   (let [cfg (config/load-config overrides)
-         ;; A fresh session tally per process start. Short-term memory is
-         ;; scoped to the process on purpose: a pattern that shows up across
-         ;; three runs is exactly the pattern a single-run digest cannot see,
-         ;; and a tally that survived a restart would be measuring a harness
-         ;; that no longer exists.
-         _ (session/reset!)
-         ;; Process-wide, and set here rather than in core so that every entry
-         ;; point gets it: the tests, the benchmark runner and a REPL session
-         ;; all bring the system up through start! without going through -main.
-         _ (platform/set-max-response-ms! (get-in cfg [:llm :max-response-ms]))
-         ;; Ask the endpoint what it is, once, at startup. A llama.cpp server
-         ;; answers /props with a total_slots; anything else answers something
-         ;; else, and the probe returns nil. RFC-005 recorded that :local was
-         ;; decided by which config key an endpoint sat under, so a
-         ;; llama-server configured as :openai silently lost prefix pinning —
-         ;; asking is what fixes that, and asking is specifically NOT the same
-         ;; as sending the knob hopefully, which a strict OpenAI-compatible
-         ;; server answers with a 422 on the whole request.
-         ;;
-         ;; Merged into the LLM config so it reaches chat-body the way every
-         ;; other endpoint fact does, and so a test can set it directly.
-         probed (llm-client/probe-llama-cpp (:llm cfg))
-         cfg (cond-> cfg probed (update :llm merge probed))
-         _ (when probed
-             (log/info "endpoint identified as llama.cpp:"
-                       (:total-slots probed) "KV slots — prefix caching on"))
+   (when (userspace/bound?)
+     (throw (ex-info "another Samizdat lifecycle already owns userspace" {})))
+   (let [cfg (prepare-config! overrides)
          c (db/open! (get-in cfg [:db :path]))
-         ;; Point the userspace reads at THIS project's store, and reload the
-         ;; policy caches AFTER the bind so they hold the project's own
-         ;; gates/wordlists/phases (bind-project! carries the ordering
-         ;; argument). From here on a cell, manifest, policy table or prompt
-         ;; resolves to the project's own version — seeded from the shipped
-         ;; template on first read — so two projects running this binary can
-         ;; evolve different loops and neither can edit the other's. Unbound
-         ;; (a bare REPL, a unit test) the same reads fall back to the
-         ;; templates, which is what the harness did before the store existed.
-         _ (bind-project! c)
-         server (adapter/run-server handler {:port (get-in cfg [:http :port])})]
-     (reset! system {:config cfg :conn c :server server})
-     (log/info "samizdat up on port" (get-in cfg [:http :port])
-               "provider" (get-in cfg [:llm :provider])
-               "model" (get-in cfg [:llm :model])
-               "db" (get-in cfg [:db :path]))
-     ;; Nothing can be running yet, so any row that says it is, is a leftover
-     ;; from a process that died. This is the only moment that inference is
-     ;; sound. See store.runs/reconcile-orphans!.
-     (let [n (runs/reconcile-orphans! c)]
-       (when (pos? n)
-         (log/info "marked" n "run(s) interrupted: still flagged running with no process")))
-     :started)))
+         bound? (atom false)
+         server* (atom nil)]
+     (try
+       ;; Point the userspace reads at THIS project's store, and reload the
+       ;; policy caches AFTER the bind so they hold the project's own
+       ;; gates/wordlists/phases (bind-project! carries the ordering argument).
+       (bind-project! userspace-owner c)
+       (reset! bound? true)
+       (let [server (adapter/run-server handler {:port (get-in cfg [:http :port])})]
+         (reset! server* server)
+         (reset! system {:config cfg :conn c :server server})
+         (log/info "samizdat up on port" (get-in cfg [:http :port])
+                   "provider" (get-in cfg [:llm :provider])
+                   "model" (get-in cfg [:llm :model])
+                   "db" (get-in cfg [:db :path]))
+         ;; Nothing can be running yet, so any row that says it is, is a leftover
+         ;; from a process that died. This is the only moment that inference is
+         ;; sound. See store.runs/reconcile-orphans!.
+         (let [n (runs/reconcile-orphans! c)]
+           (when (pos? n)
+             (log/info "marked" n
+                       "run(s) interrupted: still flagged running with no process")))
+         :started)
+       (catch Throwable e
+         ;; A failed bind or server startup owns no durable lifecycle. Undo each
+         ;; resource that did start so a retry is possible in the same process.
+         (when-let [server @server*]
+           (try (adapter/stop-server server) (catch Throwable _ nil)))
+         (when @bound?
+           (try (userspace/release! userspace-owner) (catch Throwable _ nil)))
+         (try (db/close c) (catch Throwable _ nil))
+         (reset! system nil)
+         (throw e))))))
 
 (defn stop!
   "Tear the system down. Best effort per resource: one failing close must not
@@ -182,7 +200,7 @@
                        ;; Unbind BEFORE the connection closes: a userspace read
                        ;; against a closed handle would throw where the same
                        ;; read against no handle simply serves the template.
-                       ["userspace" #(userspace/unbind!)]
+                       ["userspace" #(userspace/release! userspace-owner)]
                        ["database" #(db/close (:conn s))]]]
       (try (f) (catch Throwable e (log/warn "stopping" label "failed:" (ex-message e)))))
     (reset! system nil)
