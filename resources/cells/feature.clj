@@ -376,7 +376,14 @@
                                      ;; verdict: at it, the supervisor decides.
                                      :at-cap? (>= rev soft-cap)
                                      :soft-cap soft-cap}
-                                    (journal/turns conn run-id))
+                                    (journal/turns conn run-id)
+                                    ;; Per-branch gate outcomes: which steering
+                                    ;; this run is doing and which a branch has
+                                    ;; been ignoring. The rollup the session
+                                    ;; tally keeps is per GATE, which hides a
+                                    ;; gate one branch obeys and another does
+                                    ;; not (karamazov-b9v).
+                                    (journal/gate-firings conn run-id))
               ;; The mark the supervisor's deltas are measured from. Stamped
               ;; BEFORE it is shown anything, so `since` covers the interval
               ;; from its last intervention to now — the interval its last

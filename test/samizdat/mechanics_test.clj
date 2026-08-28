@@ -31,6 +31,7 @@
             [samizdat.agent.gates :as gates]
             [samizdat.agent.loop :as aloop]
             [samizdat.agent.state :as state]
+            [samizdat.agent.telemetry :as telemetry]
             [samizdat.agent.supervisor :as supervisor]
             [samizdat.llm.message :as message]
             [samizdat.store.journal :as journal]))
@@ -180,3 +181,44 @@
     (is (= #{"write_file" "edit_file" "patch"}
            (get (gates/tool-vocab :settle-called) :no-edits))
         "settled by the thing it asks for: a file actually written")))
+
+;; --- gate health, per branch -------------------------------------------------
+;; Run ace34d83: :no-edits fired 6 times and was ignored 3 of them — every one
+;; of those by T0, which had stalled. S0 got the same nudge and complied. Rolled
+;; up per GATE across the run, met > 0, so the gate read as working and the
+;; watch never raised :gate-ignored. The branch that was actually stuck was
+;; invisible, and the supervisor's digest carried no gate health at all.
+
+(deftest gate-health-is-reported-per-branch
+  (let [rows [{:gate "no-edits" :branch_id "T0" :outcome "unmet"}
+              {:gate "no-edits" :branch_id "T0" :outcome "unmet"}
+              {:gate "no-edits" :branch_id "T0" :outcome "unmet"}
+              {:gate "no-edits" :branch_id "S0" :outcome "met"}
+              {:gate "studying" :branch_id "T0" :outcome "unmet"}
+              {:gate "milestone" :branch_id "S0" :outcome "met-late"}]
+        h (telemetry/gate-health rows)]
+    (testing "a gate ignored by one branch is not hidden by another obeying it"
+      (is (= {:fired 3 :met 0 :unmet 3} (select-keys (get h ["T0" "no-edits"])
+                                                     [:fired :met :unmet])))
+      (is (= {:fired 1 :met 1 :unmet 0} (select-keys (get h ["S0" "no-edits"])
+                                                     [:fired :met :unmet]))))
+    (testing "met-late counts as met — the advice worked, the window was wrong"
+      (is (= 1 (:met (get h ["S0" "milestone"])))))))
+
+(deftest the-digest-names-a-gate-a-branch-is-ignoring
+  (let [rows (concat (repeat 3 {:gate "no-edits" :branch_id "T0" :outcome "unmet"})
+                     [{:gate "no-edits" :branch_id "S0" :outcome "met"}])
+        line (telemetry/gate-lines (telemetry/gate-health rows) 3)]
+    (is (string? line))
+    (is (re-find #"T0" line) "the branch that is ignoring it is named")
+    (is (re-find #"no-edits" line))
+    (is (not (re-find #"S0" line))
+        "a branch that obeyed the same gate is not reported as ignoring it"))
+  (testing "nothing to say when every gate is being obeyed"
+    (is (nil? (telemetry/gate-lines
+               (telemetry/gate-health [{:gate "g" :branch_id "B" :outcome "met"}])
+               3))))
+  (testing "under the firing floor is not yet evidence"
+    (is (nil? (telemetry/gate-lines
+               (telemetry/gate-health [{:gate "g" :branch_id "B" :outcome "unmet"}])
+               3)))))
