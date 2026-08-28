@@ -96,7 +96,17 @@
     (let [{:keys [code problem note]} (source/vet (str (base/arg ctx :code))
                                                   {:whole? true})]
       (if problem
-        (base/malformed branch (prompt/render "eval-syntax" {:syntax note}))
+        ;; WHICH KIND of problem, so the advice matches it. The template used
+        ;; to append a delimiter hint to every refusal, including reasons that
+        ;; have nothing to do with delimiters: run ace34d83 refused a bad
+        ;; string escape six times and told the model about parens each time,
+        ;; which is where T0 spent its last six turns.
+        (base/malformed branch
+                        (prompt/render "eval-syntax"
+                                       {:syntax note
+                                        (name (:reason problem)) true
+                                        :delimiter (not= :does-not-read
+                                                         (:reason problem))}))
         (eval-vetted ctx code note)))))
 
 (defmethod base/run-tool "doc" [{:keys [branch] :as ctx}]

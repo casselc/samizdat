@@ -177,3 +177,23 @@
       (let [r (run "(* 6 7)")]
         (is (str/includes? (:result r) "=> 42"))
         (is (not (str/includes? (:result r) "[harness]")))))))
+
+(deftest the-advice-matches-the-actual-problem
+  ;; Run ace34d83: the model wrote "\*\*(.+?)\*\*" — an invalid Clojure string
+  ;; escape — and every refusal appended "the harness closes a dropped trailing
+  ;; delimiter for you", which is advice about parens. It retried the same form
+  ;; six times and the branch ended there. A refusal that misdirects is worse
+  ;; than one that only states the error.
+  (let [run (fn [code] (base/run-tool {:branch {:id "B1"} :tool-name "eval"
+                                       :args {:code code}}))]
+    (testing "a bad string escape is not given delimiter advice"
+      (let [r (run "(re-find #\"x\" \"\\*\")")]
+        (is (= :mechanics (:category r)))
+        (is (not (str/includes? (:result r) "trailing delimiter"))
+            "delimiter advice on a token error is what caused the loop")
+        (is (str/includes? (:result r) "TOKEN")
+            "it names the real class of problem")))
+    (testing "a genuine mid-file delimiter problem still gets delimiter advice"
+      (let [r (run "(f)) (g)")]
+        (is (= :mechanics (:category r)))
+        (is (str/includes? (:result r) "trailing delimiter"))))))
