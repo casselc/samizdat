@@ -63,7 +63,8 @@ compiler rejects a consumer whose declared compatibility id differs, or whose
 expected entry or call-site count no longer matches, instead of silently producing a
 partially instrumented application.
 
-The current compatibility id remains `35b01fddd20fa9e6d77678eadc2a2bcc6fb9ac2d`:
-the commits that publish and extend these manifests change resources, tests,
-and documentation only. The selected source definitions are unchanged from
-that revision.
+The current compatibility id is published once as
+`samizdat.instrumentation/compatibility-id` and remains
+`35b01fddd20fa9e6d77678eadc2a2bcc6fb9ac2d`. The selected source definitions
+are unchanged from that revision; providers depend on this neutral identity
+namespace instead of depending on one another or duplicating the literal.

@@ -1,10 +1,8 @@
 (ns samizdat.aspect-manifest-test
   (:require [clojure.edn :as edn]
             [clojure.java.io :as io]
-            [clojure.test :refer [deftest is testing]]))
-
-(def ^:private compatibility-id
-  "35b01fddd20fa9e6d77678eadc2a2bcc6fb9ac2d")
+            [clojure.test :refer [deftest is testing]]
+            [samizdat.instrumentation :as instrumentation]))
 
 (def ^:private manifest-resources
   ["META-INF/jolt/aspects/samizdat-m2-core.edn"
@@ -30,7 +28,8 @@
         (is (some? resource))
         (is (= 1 (:schema manifest)))
         (is (= 'yogthos/samizdat (get-in manifest [:library :id])))
-        (is (= compatibility-id (get-in manifest [:library :version])))
+        (is (= instrumentation/compatibility-id
+               (get-in manifest [:library :version])))
         (is (seq (:aspects manifest)))
         (doseq [aspect (:aspects manifest)]
           (is (keyword? (:id aspect)))
