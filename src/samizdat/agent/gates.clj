@@ -183,7 +183,24 @@
   every other prompt seam."
   [{:keys [message-file message-suffix]}]
   (fn [{:keys [branch max-turns]}]
-    (let [ctx {:turn-count (state/turn-count branch) :max-turns max-turns}]
+    ;; `goal` is in EVERY gate's render context, so any message template can
+    ;; re-anchor the branch to what it said it was doing. Eighteen of nineteen
+    ;; gates used to steer without it — "you are doing badly" with no "at
+    ;; WHAT" — and a model cannot compare an outcome against an intention it
+    ;; is expected to remember. Opt-in per template rather than appended
+    ;; everywhere: a gate that does not need it should not carry it.
+    (let [f (state/last-failure branch)
+          ctx {:turn-count (state/turn-count branch)
+               :max-turns max-turns
+               ;; THE TWO THINGS A DECISION NEEDS, in every gate's context so
+               ;; any template can use them: what this branch said it is doing,
+               ;; and — when it is being steered because something broke —
+               ;; what broke, in the failure's own words, with the turn number
+               ;; that makes it fetchable.
+               :goal (state/stated-goal branch)
+               :failed-tool (:tool f)
+               :failed-error (:error f)
+               :failed-turn (:turn f)}]
       (str (some-> message-file sp/prompt (sp/render-str ctx))
            (some-> message-suffix (sp/render-str ctx))))))
 

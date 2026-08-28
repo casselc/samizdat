@@ -7,3 +7,7 @@ Stop opening new lines of attack — no new sub-claims, encodings, or constructi
 - **You hold nothing confirmed.** Do not search. Spend the remaining turns on the single most promising verification: the smallest claim you believe is true and can check now.
 
 Ship what you have.
+
+{% if goal %}
+You are working on: {{goal}} — judge "done" against that, not against how much you have done.
+{% endif %}

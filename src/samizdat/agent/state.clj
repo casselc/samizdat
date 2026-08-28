@@ -643,6 +643,46 @@
   (let [written (or (:repl-written branch) #{})]
     (vec (remove written (:files (plan branch))))))
 
+(defn last-failure
+  "The most recent turn that went wrong, as `{:turn :tool :error}`, or nil.
+
+  The other half of `stated-goal`. A gate that fires BECAUSE something failed
+  and does not say WHAT failed asks the model to repair from memory — only
+  :stuck named its failure; every other gate said \"something is going wrong\"
+  and left the model to work it out.
+
+  Mechanics count, not just failures: a call the harness could not use is a
+  thing to fix, and it is the commonest thing a streak gate fires on."
+  [branch]
+  (->> (:turns branch)
+       (filter #(contains? #{:failure :mechanics} (:category %)))
+       last
+       ((fn [t] (when t (select-keys t [:turn :tool :error]))))
+       (#(when (seq %) %))))
+
+(defn stated-goal
+  "What this branch has SAID it is doing, most specific first: the repl
+  session's goal, then the claimed task, then the thesis, then the run's
+  problem. nil when it has stated nothing.
+
+  Steering used to arrive without it. Eighteen of nineteen gates fired with no
+  mention of the branch's own goal, so a nudge said \"you are doing badly\"
+  and never \"at WHAT\" — and a model cannot compare an outcome against an
+  intention it is expected to remember. A live team worker went off-task onto
+  a superficially-similar recalled fix with nothing to re-anchor it.
+
+  Most specific FIRST because that is what it is answerable against: the run's
+  problem is true all run and steers nothing, while \"you claimed
+  MAKE-THE-WIDGET-SPIN\" is a thing this turn can be measured against."
+  [branch]
+  (->> [(get-in branch [:repl-plan :goal])
+        (get-in branch [:task :title])
+        (get-in branch [:thesis :goal])
+        (:problem branch)]
+       (map #(some-> % str str/trim))
+       (remove str/blank?)
+       first))
+
 (defn plan-stale?
   "Whether this branch has DECLARED files it has not written and has not
   touched a file in the last `n` turns. `tools` is the :file-write vocabulary.

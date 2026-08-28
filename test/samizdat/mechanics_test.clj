@@ -375,3 +375,70 @@
         (is (fires? b))))
     (testing "opening exploration with neither plan nor history is still not nagged"
       (is (not (fires? {:status :active :turns (turns "read_file" 20)}))))))
+
+;; --- re-anchoring: a nudge quotes what the branch said it was doing ---------
+;; 18 of 19 gates fired without naming the branch's own stated goal, so every
+;; steer arrived as "you are doing badly" with no "at WHAT". A model cannot
+;; compare an outcome against an intention it has to remember. A live team
+;; worker went off-task on a superficially-similar recalled fix and nothing
+;; re-anchored it (dogfood insight, run a3c9fd3d).
+
+(deftest a-branch-states-its-goal-most-specific-first
+  (testing "the repl plan's goal is the most immediate thing it committed to"
+    (is (= "fix the wall collision"
+           (state/stated-goal {:repl-plan {:goal "fix the wall collision"}
+                               :task {:title "T"} :thesis {:goal "G"}
+                               :problem "P"}))))
+  (testing "then the claimed task"
+    (is (= "T" (state/stated-goal {:task {:title "T"} :thesis {:goal "G"} :problem "P"}))))
+  (testing "then the thesis"
+    (is (= "G" (state/stated-goal {:thesis {:goal "G"} :problem "P"}))))
+  (testing "and the run's problem is the floor, never nothing"
+    (is (= "P" (state/stated-goal {:problem "P"}))))
+  (testing "a branch that has stated nothing at all says so by returning nil"
+    (is (nil? (state/stated-goal {})))
+    (is (nil? (state/stated-goal {:repl-plan {:goal "  "} :problem ""})))))
+
+(deftest the-steering-gates-re-anchor-to-that-goal
+  (let [b {:id "b" :status :active
+           :task {:id "t1" :title "MAKE-THE-WIDGET-SPIN"}
+           :problem "P" :turns (vec (repeat 12 {:tool "read_file"}))
+           :any-progress? true :turns-since-progress 12
+           :consecutive-failures 5}
+        msg (fn [g] (str ((:message (first (filter #(= g (:gate %)) (gates/gates))))
+                          {:branch b :turn 5 :max-turns 50})))]
+    (doseq [g [:progress-stalled :studying :stuck]]
+      (is (str/includes? (msg g) "MAKE-THE-WIDGET-SPIN")
+          (str g " steers without saying what the branch is supposed to be doing")))))
+
+;; --- the other half: a failure steer names what failed ----------------------
+;; Only :stuck named the failure it fired on. Every other gate said "something
+;; is going wrong" and left the model to work out what — the same shape as
+;; steering without a goal, one step further on. A model cannot repair a
+;; failure it has to remember.
+
+(deftest a-branch-can-name-its-most-recent-failure
+  (testing "the newest failing turn, with its tool and its own words"
+    (let [b {:turns [{:turn 1 :tool "eval" :category :failure :error "OLD"}
+                     {:turn 2 :tool "shell" :category :success}
+                     {:turn 3 :tool "edit_file" :category :failure :error "NEWEST"}]}]
+      (is (= {:turn 3 :tool "edit_file" :error "NEWEST"} (state/last-failure b)))))
+  (testing "mechanics count as failures to repair — a call made wrong is a thing to fix"
+    (let [b {:turns [{:turn 1 :tool "eval" :category :mechanics :error "MALFORMED"}]}]
+      (is (= "MALFORMED" (:error (state/last-failure b))))))
+  (testing "nothing to report when nothing failed"
+    (is (nil? (state/last-failure {:turns [{:turn 1 :tool "eval" :category :success}]})))
+    (is (nil? (state/last-failure {})))))
+
+(deftest failure-driven-gates-name-the-failure-and-how-to-look
+  (let [b {:id "b" :status :active :task {:title "GOAL-X"} :problem "P"
+           :consecutive-mechanics-failures 6
+           :turns (vec (repeat 8 {:turn 9 :tool "eval" :category :failure
+                                  :error "THE-ERROR-TEXT"}))}
+        msg (fn [g] (str ((:message (first (filter #(= g (:gate %)) (gates/gates))))
+                          {:branch b :turn 9 :max-turns 50})))]
+    (testing "mechanics-streak names the failing call rather than the count alone"
+      (let [m (msg :mechanics-streak)]
+        (is (str/includes? m "THE-ERROR-TEXT"))
+        (is (str/includes? m "fetch_turn")
+            "and says how to look at it — information plus the tool to investigate")))))

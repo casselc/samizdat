@@ -1621,6 +1621,10 @@
               (>= (or (:consecutive-mechanics-failures branch) 0)
                   (threshold :mechanics-streak-threshold)))
    :message-file "mechanics-streak"
+   ;; Names the failing call and how to pull the whole record. A streak gate
+   ;; that reports only its own count tells the model it is failing without
+   ;; telling it at what.
+   :message-suffix "{% if failed-error %}\n\nThe last one, on turn {{failed-turn}} via `{{failed-tool}}`:\n\n> {{failed-error}}\n\nfetch_turn({\"turn\": {{failed-turn}}}) has the whole record if that is not enough to act on.{% endif %}{% if goal %}\n\nYou are working on: {{goal}}{% endif %}"
    :prediction "the branch gives up honestly, or produces a well-formed call"
    :window 2}
 
@@ -1641,6 +1645,7 @@
               (>= (or (:storm-strikes branch) 0)
                   (threshold :storm-strikes-to-force)))
    :message-file "storm-force"
+   :message-suffix "{% if failed-error %}\n\nMost recent failure, turn {{failed-turn}} via `{{failed-tool}}`:\n\n> {{failed-error}}\n\nfetch_turn({\"turn\": {{failed-turn}}}) has the full record.{% endif %}{% if goal %}\n\nYou are working on: {{goal}}{% endif %}"
    :prediction "the branch abandons the repeated call honestly — give_up with
                 an account of what was tried, or a genuinely different
                 approach"
@@ -1675,6 +1680,7 @@
    :when (and (>= (:consecutive-failures branch) (threshold :cull-threshold))
               (state/confirmed-in-last branch (threshold :cull-recent-window)))
    :message-file "emergency-review"
+   :message-suffix "{% if goal %}\n\nYou are working on: {{goal}}{% endif %}"
    :prediction "the branch ships or changes technique"
    :window 3}
 
@@ -1689,6 +1695,7 @@
          (vf-8fl), which is the same failure the zebra run produced."
    :when (state/has-relevant-confirmed? branch)
    :message-file "milestone"
+   :message-suffix "{% if goal %}\n\nYou are working on: {{goal}}{% endif %}"
    :prediction "the branch ships within two turns"
    :window 2}
 
@@ -1774,7 +1781,7 @@
                notified (:notified-fractions branch #{})]
            (boolean (some #(and (>= used %) (not (contains? notified %)))
                           (threshold :turn-budget-notices))))
-   :message-suffix "**Turn budget**: you have used {{turn-count}} of {{max-turns}} turns. Land what you can verify rather than opening a new line of attack."
+   :message-suffix "**Turn budget**: you have used {{turn-count}} of {{max-turns}} turns. Land what you can verify rather than opening a new line of attack.{% if goal %} You are working on: {{goal}}{% endif %}"
    ;; Says what it MEASURES. The rule reads :settle-called :turn-budget,
    ;; which is #{"done" "give_up"} — terminating, not converging. A branch
    ;; that edits and writes its way toward finishing was settling `unmet`
@@ -1811,7 +1818,9 @@
          which gate is unmet, because 'not yet' with no reason produces
          another identical attempt."
    :when (some? done-block)
-   :message-form done-block
+   :message-form (str done-block
+                      (when-let [g (state/stated-goal branch)]
+                        (str "\n\nJudge \"done\" against what you set out to do: " g)))
    :prediction "the branch supplies the missing evidence or gives up"
    :window 3}
 
@@ -1826,6 +1835,13 @@
    :when (state/safe-state-due? branch (threshold :cull-threshold)
                                (threshold :safe-state-multiple))
    :message-form (str (prompt "safe-state")
+                      (when-let [f (state/last-failure branch)]
+                        (str "\n\nMost recent failure, turn " (:turn f) " via `"
+                             (:tool f) "`:\n\n> " (:error f)
+                             "\n\nfetch_turn({\"turn\": " (:turn f)
+                             "}) has the full record."))
+                      (when-let [g (state/stated-goal branch)]
+                        (str "\n\nYou are working on: " g))
                       "\n\nYour last green test run was at turn "
                       (:green-snapshot branch) ". "
                       (if (:ok safe-state-coverage)
@@ -1860,6 +1876,8 @@
          beside the turn-budget bookkeeping."
    :when (>= (:consecutive-failures branch) (threshold :stuck-threshold))
    :message-form (str (prompt "stuck")
+                      (when-let [g (state/stated-goal branch)]
+                        (str "\n\nYou are working on: " g))
                       (when-let [c (:last-failed-claim branch)]
                         (str "\n\n**Withheld**, until you put a different approach"
                              " on record:\n\n> " c "\n\nThat claim will not reach an"
@@ -1891,6 +1909,8 @@
    :when (>= (get-in branch [:file-touch :streak] 0)
              (threshold :file-thrash-threshold))
    :message-form (str (prompt "file-thrash")
+                      (when-let [g (state/stated-goal branch)]
+                        (str "\n\nYou are working on: " g))
                       (when-let [fs (seq (get-in branch [:file-touch :files]))]
                         (str "\n\nThe files in the streak: "
                              (str/join ", " (sort fs)))))
@@ -1907,9 +1927,14 @@
    :when (and (:any-progress? branch)
               (>= (:turns-since-progress branch)
                   (threshold :progress-stall-threshold)))
+   ;; RE-ANCHORED. A steer that says "nothing has advanced" without saying at
+   ;; WHAT asks the model to compare an outcome against an intention it has to
+   ;; remember. Naming the goal it stated is what makes the nudge answerable.
    :message-form (str (prompt "progress-stalled")
                       "\n\nNothing has advanced in " (:turns-since-progress branch)
-                      " turns.")
+                      " turns."
+                      (when-let [g (state/stated-goal branch)]
+                        (str "\n\nYou are working on: " g)))
    :prediction "the branch produces a new confirmed artifact or discharges a sub-claim"
    :window 3}
 
@@ -1953,6 +1978,8 @@
    :message-form (str (prompt "no-edits")
                       "\n\nNothing has been written to a file in "
                       (threshold :no-edit-turns) " turns."
+                      (when-let [g (state/stated-goal branch)]
+                        (str "\n\nYou are working on: " g))
                       (when-let [owed (seq (state/unwritten branch))]
                         (str "\n\nYou declared these and have not written them:\n"
                              (clojure.string/join "\n" (map #(str "  - " %) owed)))))
@@ -1974,9 +2001,11 @@
               (supervisor/over-studying? (tool-vocab :shipping)
                                          (:turns branch)
                                          (threshold :studying-turns)))
-   :message-form (supervisor/stall-nudge (tool-vocab :shipping)
-                                         (:turns branch)
-                                         (threshold :studying-turns))
+   :message-form (str (supervisor/stall-nudge (tool-vocab :shipping)
+                                              (:turns branch)
+                                              (threshold :studying-turns))
+                      (when-let [g (state/stated-goal branch)]
+                        (str "\n\nYou are working on: " g)))
    :prediction "the branch commits a change, runs a test, or ships"
    :window 3}]
 
