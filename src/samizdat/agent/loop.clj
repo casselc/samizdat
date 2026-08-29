@@ -423,12 +423,9 @@
   model spent its whole budget thinking and wants more tokens or reasoning
   turned off; a refused connection wants waiting. Telling a supervisor only
   that `the provider failed` gives it nothing to act on."
-  ([ctx branch turn error] (provider-error-step ctx branch turn error nil))
-  ([{:keys [conn run-id]} branch turn error reason]
-   (provider-error-step {:conn conn :run-id run-id} branch turn error reason nil))
-  ([{:keys [conn run-id]} branch turn error reason inference-epoch-id]
-   (provider-error-step {:conn conn :run-id run-id} branch turn error reason
-                        {:inference-epoch-id inference-epoch-id}))
+   ([ctx branch turn error] (provider-error-step ctx branch turn error nil nil))
+   ([{:keys [conn run-id]} branch turn error reason]
+    (provider-error-step {:conn conn :run-id run-id} branch turn error reason nil))
   ([{:keys [conn run-id]} branch turn error reason
     {:keys [inference-epoch-id inference-invocation-id]}]
    (session/observe! [:provider (or reason :call-failed)])
