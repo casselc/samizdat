@@ -163,6 +163,24 @@
         assertion and its message, which is the pair the branch has to compare;
         a whole suite's output would bury the one line that matters."}
 
+ :mutation-diff-lines
+ {:value 40 :kind :budget :capability-tunable? true
+  :doc "How many lines of a REJECTED cell edit are kept, per side, when the
+        mutation protocol rolls it back.
+
+        The record has to be small enough that it is always kept — a diff
+        nobody keeps is the failure it exists to fix. Common prefix and suffix
+        are dropped before this applies, so a one-line change inside a
+        three-hundred-line cell costs one line and this cap only bites on a
+        rewrite. A clipped span is marked :truncated so it never reads as the
+        whole change.
+
+        From WikiSkill (research/2608.27454v1 s3.2.4): their skill-impact.md
+        keeps every proposal's diff with its accept/reject outcome, and their
+        case study turns on it — the rejection at iteration 0 is what lets
+        iteration 1 propose something different and be accepted. samizdat kept
+        the reason and restored the files over the attempt (karamazov-mpd)."}
+
  :max-suspect-test-nudges
  {:value 2 :kind :re-fire-guard :capability-tunable? true
   :doc "How often suspect-the-test may re-fire in one episode — and an episode

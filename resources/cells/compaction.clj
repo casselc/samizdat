@@ -120,7 +120,15 @@
           enough? (cmp/snip-bought-enough? freed window (:snip-sufficient p) aggressive)
           route (if (and (cmp/fold? t) (not enough?)) :prune :none)]
       (when (= route :none)
-        (note! conn run-id {:tier (some-> t name) :action "cap" :freed freed}))
+        ;; :before AND :ratio, not just what was freed. Cap is the rung that
+        ;; fires most, so it is the one whose calibration most needs auditing —
+        ;; and "freed 518 tokens at tier aggressive-cap" cannot answer whether
+        ;; the tier was right, because the pressure that chose it is missing.
+        ;; Fold recorded :before all along; this is cap catching up
+        ;; (karamazov-be8).
+        (note! conn run-id {:tier (some-> t name) :action "cap" :freed freed
+                            :before (:compaction/before data)
+                            :ratio (:compaction/ratio data)}))
       (assoc data
              :branch (assoc branch :messages messages)
              :compaction/freed freed

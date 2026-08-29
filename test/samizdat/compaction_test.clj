@@ -17,7 +17,8 @@
             [samizdat.cells :as cells]
             [samizdat.manifests :as manifests]
             [mycelium.cell :as cell]
-            [samizdat.config :as config]))
+            [samizdat.config :as config]
+            [samizdat.store.journal]))
 
 (def ^:private ladder
   {:aggressive-cap 0.60 :fold 0.75 :aggressive-fold 0.78 :force 0.80 :turn-start 0.90})
@@ -202,6 +203,46 @@
       (is (< (:aggressive-tail p) (:protect-tail p))))
     (testing "the summary floor is below its ceiling"
       (is (< (:floor (:summary p)) (:ceiling (:summary p)))))))
+
+;; --- what the journal records -------------------------------------------------
+
+(deftest a-cap-records-the-pressure-that-triggered-it
+  ;; CAP IS THE MOST-USED RUNG AND WAS THE ONLY ONE WHOSE TRIGGER WENT
+  ;; UNRECORDED. Run 623ccae8 capped 153 times (86,772 tokens freed) and
+  ;; 69880d84 fourteen more, all noting {:tier :action :freed} and never the
+  ;; pressure — while fold, which fires far less often, recorded :before and
+  ;; :after all along.
+  ;;
+  ;; The cost is not hypothetical. Reading 69880d84 back, aggressive-cap fires
+  ;; while max(prompt_tokens) is 22,905 against a 128,000 window whose
+  ;; aggressive rung is 76,800. Either one oversized result spiked the measure
+  ;; and was clipped back down — the first cap freed 17,999 tokens in one go —
+  ;; or the ladder is miscalibrated. The number that decides it is the one
+  ;; that was not written down (karamazov-be8).
+  (cells/load-cells!)
+  (let [notes (atom [])
+        big (apply str (repeat 40000 "x"))
+        data {:compaction/tier :aggressive-cap
+              :compaction/ratio 0.83
+              :compaction/before 61000
+              :branch {:messages (into [{:role "user" :content "go"}]
+                                       (repeat 8 {:role "user" :content big}))}}]
+    (with-redefs [samizdat.store.journal/note!
+                  (fn [_ _ kind m] (swap! notes conj (assoc (:data m) ::kind kind)) nil)]
+      ((:handler (cell/get-cell! :compaction/cap))
+       {:conn ::conn :run-id "r1"
+        :llm-config {:context-window 128000}}
+       data))
+    (let [n (first (filter #(= "cap" (:action %)) @notes))]
+      (is (some? n) "the cap noted something")
+      (is (= 61000 (:before n))
+          "the pressure it measured, so the ladder's calibration is auditable
+           from the journal instead of by inference")
+      (is (= 0.83 (:ratio n))
+          "and the fraction of the window that pressure was")
+      (testing "without losing what it already recorded"
+        (is (= "aggressive-cap" (:tier n)))
+        (is (pos? (:freed n)))))))
 
 ;; --- the routing lives in the manifest, not in a cell ------------------------
 

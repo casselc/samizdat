@@ -133,6 +133,68 @@
         (is (some #(= "mutation-rolled-back" (:kind %)) events)
             "the failed mutation is on the record for the agent to learn from")))))
 
+(deftest the-diff-records-the-change-and-not-the-file
+  ;; The record has to be small enough to ALWAYS keep. A diff nobody keeps is
+  ;; the bug this exists to fix, so a one-line edit inside a long cell must
+  ;; record as one line.
+  (let [before (str/join "\n" (map #(str "line " %) (range 300)))
+        after  (str/replace before "line 150" "line 150 CHANGED")
+        d      (mut/changed-span before after 40)]
+    (is (= ["line 150"] (:removed d)))
+    (is (= ["line 150 CHANGED"] (:added d)))
+    (is (= 151 (:at d)) "1-indexed, so it reads like a line number")
+    (is (not (:truncated d))))
+  (testing "identical content is not a change"
+    (is (nil? (mut/changed-span "a\nb" "a\nb" 40))))
+  (testing "a pure insertion removes nothing"
+    (let [d (mut/changed-span "a\nc" "a\nb\nc" 40)]
+      (is (= [] (:removed d)))
+      (is (= ["b"] (:added d)))))
+  (testing "a pure deletion adds nothing"
+    (let [d (mut/changed-span "a\nb\nc" "a\nc" 40)]
+      (is (= ["b"] (:removed d)))
+      (is (= [] (:added d)))))
+  (testing "a span past the cap is clipped and SAYS so, rather than reading as
+            the whole change"
+    (let [d (mut/changed-span "x" (str/join "\n" (map str (range 100))) 5)]
+      (is (= 5 (count (:added d))))
+      (is (true? (:truncated d)))))
+  (testing "a rewrite with nothing in common still reports both sides"
+    (let [d (mut/changed-span "a\nb" "c\nd" 40)]
+      (is (= ["a" "b"] (:removed d)))
+      (is (= ["c" "d"] (:added d))))))
+
+(deftest a-rollback-records-what-was-actually-tried
+  ;; THE RECORD ABOVE KEEPS THE VERDICT AND THROWS AWAY THE EVIDENCE.
+  ;; :mutation-rolled-back carried a reason string; restore-files! then wrote
+  ;; the checkpoint's original content back over the agent's edit, so what the
+  ;; agent TRIED was gone. A later run learns "something was rolled back
+  ;; because X" and cannot learn not to try it again.
+  ;;
+  ;; From WikiSkill (research/2608.27454v1 s3.2.4): their skill-impact.md keeps
+  ;; the unified diff of every proposal with its accept/reject outcome, and
+  ;; their case study turns on it — iteration 0 is rejected, and BECAUSE the
+  ;; diff survives, iteration 1 proposes something different and is accepted
+  ;; (karamazov-mpd).
+  (with-open []
+    (let [conn (db/open! ":memory:")
+          rid (runs/start-run! conn {:problem "p"})]
+      (write-cells! (str @root "/cells") "(fn [_ d] (update d :n inc))")
+      (cells/load-cells! (:dirs (opts)))
+      (spit (str @root "/cells/mini.clj")
+            "(ns cells.mini)\n(defcell :mini/step {} (fn [_ d] (BOOM d)))")
+      (mut/apply-cell-edit! (assoc (opts) :conn conn :run-id rid))
+      (let [ev (->> (journal/events-since conn rid 0 100)
+                    (filter #(= "mutation-rolled-back" (:kind %)))
+                    first)
+            attempt (str (:data ev))]
+        (is (some? ev) "still journaled")
+        (is (re-find #"BOOM" attempt)
+            "and the attempt itself is recoverable — the token that made it
+             wrong has to survive, or the next run re-derives the same edit")
+        (is (re-find #"mini" attempt)
+            "named to the file it targeted")))))
+
 ;; --- the store-backed proposal (per-project userspace) -----------------------
 
 (deftest a-good-proposal-commits-a-project-version

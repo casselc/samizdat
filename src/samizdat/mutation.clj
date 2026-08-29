@@ -38,6 +38,7 @@
             [clojure.tools.logging :as log]
             [mycelium.cell :as cell]
             [mycelium.core :as myc]
+            [samizdat.agent.gates :as gates]
             [samizdat.cells :as cells]
             [samizdat.prompt :as prompt]
             [samizdat.store.journal :as journal]
@@ -51,6 +52,50 @@
   [files]
   (doseq [[path content] files]
     (spit path content)))
+
+(defn changed-span
+  "The lines `before` and `after` actually differ by, as
+  `{:removed [...] :added [...] :at n}`, or nil when they are the same.
+
+  Common prefix and suffix are dropped, so a one-line change inside a
+  three-hundred-line cell records as one line and not as the file. Both spans
+  are capped at `cap` lines: the record has to be small enough to always keep,
+  and a diff nobody keeps is the bug this exists to fix. `:truncated` says so
+  rather than letting a clipped span read as the whole change."
+  [before after cap]
+  (let [a (vec (str/split-lines (str before)))
+        b (vec (str/split-lines (str after)))]
+    (when (not= a b)
+      (let [n (min (count a) (count b))
+            pre (or (first (for [i (range n) :when (not= (a i) (b i))] i)) n)
+            suf (or (first (for [i (range (- n pre))
+                                 :let [x (- (count a) 1 i) y (- (count b) 1 i)]
+                                 :when (not= (a x) (b y))]
+                             i))
+                    (- n pre))
+            rm (subvec a pre (- (count a) suf))
+            ad (subvec b pre (- (count b) suf))]
+        (cond-> {:at (inc pre)
+                 :removed (vec (take cap rm))
+                 :added (vec (take cap ad))}
+          (or (> (count rm) cap) (> (count ad) cap))
+          (assoc :truncated true))))))
+
+(defn- attempt-of
+  "What the agent actually wrote, read off disk BEFORE the checkpoint is
+  restored over it. One entry per changed file.
+
+  Best effort: this runs on the failure path, and a rollback that threw while
+  describing itself would trade a working recovery for a record of it."
+  [files]
+  (vec (keep (fn [[path original]]
+               (try
+                 (let [now (slurp path)]
+                   (when-let [d (changed-span original now
+                                              (gates/threshold :mutation-diff-lines))]
+                     (assoc d :path (str path))))
+                 (catch Throwable _ nil)))
+             files)))
 
 (defn- soak
   "Dry-run the loop with the edited cells to catch a cell that compiles and
@@ -121,14 +166,19 @@
   ;; (good) files so the loader's known-good content re-syncs. The reload of
   ;; good files cannot fail; if it somehow does, the registry restore above
   ;; already left the running system working.
+  (let [attempt (attempt-of files)]
   (restore-files! files)
   (cell/registry-restore! registry)
   (try (cells/load-cells! (or dirs cells/default-dirs)) (catch Throwable _ nil))
+  ;; WHAT WAS TRIED, not only that something was. Read before restore-files!
+  ;; above overwrites it — the reason alone lets the next run re-derive the
+  ;; same edit, which is the failure WikiSkill's skill-impact.md exists to
+  ;; prevent (karamazov-mpd).
   (when (and conn run-id)
     (journal/note! conn run-id :mutation-rolled-back
-                   {:data {:reason reason}}))
+                   {:data {:reason reason :attempt attempt}}))
   (log/warn "cell mutation rolled back:" reason)
-  {:status :rolled-back :reason reason})
+  {:status :rolled-back :reason reason}))
 
 (defn apply-cell-edit!
   "Run the mutation protocol after the agent has edited cell files on disk.
