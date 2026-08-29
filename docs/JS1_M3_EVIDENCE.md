@@ -161,3 +161,42 @@ epoch→turn→eval→receipt records, TurnLease stale-effect refusal and truste
 done follow-through, audited idempotent human/controller budget extension,
 bounded-workflow refusal outside the lease-compatible mode, and read-only REPL
 evidence projection are green. STOP FOR REVIEW.
+
+## Superseding v26 Closure
+
+The earlier final-closure section is superseded by the invocation-level and
+parent-session-stability closure below.
+
+- M3 v26 code under test: `c586b4057db75f7135854878cf0dfe11a31b6506`
+- Parent-session compile fix: `b1d69867c1d02d34f9130309ae55c9baffc55c29`
+- `InferenceEpoch` is reusable realization provenance; each provider call now
+  records a distinct `InferenceInvocation`, and turn/eval/intent/outcome rows
+  carry and validate the same invocation identity.
+- Production bounded resume opens initial branches for a durable exposed run
+  with zero branch rows, so crash-before-first-turn recovery no longer depends
+  on a test-only reconstruction path.
+- `bin/js1-m3` refuses dirty Samizdat, bounded-Jolt, and SCI worktrees.
+
+Clean gates at `b1d6986`:
+
+```text
+bin/js1-m3 test
+  M3 authority/provenance/lease: 49 tests, 246 assertions, 0 failures/errors
+  bounded evaluator: 25 tests, 294 assertions, 0 failures/errors
+  ordinary suite: 1573 tests, 6320 assertions, 0 failures/errors
+
+bin/js1-m2 test (outer wrapper exceeded its 10-minute host timeout only after
+its ABI, race, bounded, VE/SPI/process, and ordinary substeps all passed):
+  Jolt ABI probe: PASS
+  atomic publish race: PASS
+  bounded evaluator: 25 tests, 294 assertions, 0 failures/errors
+  VE/SPI/process: 43 tests, 324 assertions, 0 failures/errors
+  ordinary suite: 1573 tests, 6320 assertions, 0 failures/errors
+  explicit real-bwrap adversarial substep, rerun independently: 13 tests,
+  94 assertions, 0 failures/errors
+```
+
+The former parent-session crash was traced to duplicate six-argument overloads
+on `provider-error-step`; the duplicate overload was removed in `b1d6986`.
+The isolated agent suite and both clean ordinary-suite runs now complete.
+No M4 or JS2 work follows this closure. STOP FOR REVIEW.
