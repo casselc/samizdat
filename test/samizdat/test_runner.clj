@@ -110,6 +110,7 @@
             [samizdat.repl-guard-test]
             [samizdat.repl-test]
             [samizdat.roles-test]
+            [samizdat.sandbox-test]
             [samizdat.websearch-test]
             [samizdat.toolerr-test]
             [samizdat.tape-test]
@@ -244,6 +245,7 @@
     samizdat.repl-guard-test
     samizdat.repl-test
     samizdat.roles-test
+    samizdat.sandbox-test
     samizdat.websearch-test
     samizdat.toolerr-test
     samizdat.tape-test
