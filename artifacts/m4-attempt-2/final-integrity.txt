@@ -1,0 +1,15 @@
+== CONTROLLER ==
+d03564521b3bdf0733e42b13e7e89c2563d2be19
+tracked mods: 0
+untracked: 0
+
+== TARGET ==
+ M src/samizdat/util.clj
+ M test/samizdat/util_test.clj
+?? .samizdat/
+ src/samizdat/util.clj       | 11 +++++++----
+ test/samizdat/util_test.clj | 14 +++++++++++++-
+ 2 files changed, 20 insertions(+), 5 deletions(-)
+== final digests ==
+47a9dc70910f34ec6495e1dc3243c6dfe906c6034ec8911f385c1c1f0538b5d5  samizdat-canary-target-m4a2/src/samizdat/util.clj
+993111148964d83823981e678502c3057f4284f6df746b8cc866e9ccf650e174  samizdat-canary-target-m4a2/test/samizdat/util_test.clj

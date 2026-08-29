@@ -1,0 +1,222 @@
+;; JS1 M4 attempt 2. Inert EDN; no secrets. Attempt 1 (artifacts/js1-m4-self-hosting-canary.edn)
+;; is a separate, frozen record and is not superseded by this one.
+{:m4/attempt 2
+ :m4/decision :pass
+ :m4/record-date "2026-08-29"
+
+ :coordinates
+ {:attempt-2-executable-oracle "d03564521b3bdf0733e42b13e7e89c2563d2be19"
+  :attempt-1-evidence-oracle   "0ad7070368ae79ebbbba95a998f5ffda4b551dd9"
+  :m3-executable-oracle        "b1d69867c1d02d34f9130309ae55c9baffc55c29"
+  :m3-evidence-oracle          "64effe150269fdebfdd9ccb619cab89187494b75"
+  :upstream-base               "effcf7dbf439bd3baa2718bc3e780f2031ecae59"
+  :upstream-moved? false
+  :forward-port-performed? false
+  :attempt-1-rebased? false
+  :jolt "f8899905d98a0abdcc6b4ae61dfd5c8bdb9c7277"
+  :sci  "32d62a5136ad3dc148588752f5bcc4cc30b14752"
+  :sci-version "0.13.53"
+  :hardening-commits ["d3f01ec" "284eb93" "d035645"]}
+
+ :hardening
+ {:surface-fidelity
+  {:namespace "samizdat.agent.surface"
+   :context-block-filtered? true :gate-table-filtered? true
+   :closes-finding :f-1}
+  :tool-call-protocol
+  {:envelope-documented? true :xml-form-documented? true
+   :in-eval-distinction-documented? true :derived-from-surface? true
+   :closes-finding :f-2}
+  :anchored-mutation
+  {:form "(project/edit path base old-text new-text)"
+   :spec-asked-for "project/replace with its own :project/replace capability"
+   :deviation
+   "Implemented as an ARITY of project/edit under the existing :project/edit
+    capability. The pinned runtime's jolt.sandbox/profiles is a CLOSED maximum
+    enforced by resolve-context-spec, and checked-operations rejects duplicate
+    operation ids, so a separate capability would require editing the frozen
+    Jolt — refused by bin/js1-m3 on SHA, and it would move the RuntimeCoordinate
+    embedded in every durable binding. Every REQUIRED semantic in the contract
+    is met; the surface name and the separate capability id are not."
+   :required-semantics-met? true
+   :receipts-distinguishable-by-arg-count? true
+   :closes-finding :f-3}
+  :progressive-verification
+  {:order [:focused :closure]
+   :closure-only-after-focused-green? true
+   :both-required-for-completion? true
+   :model-can-select-verifier? false
+   :closure-argv-has-derived-element? false
+   :closes-finding :f-4}
+  :repeat-observation-signal
+  {:namespace "samizdat.agent.observation" :evidence-derived? true
+   :blocks-reads? false :new-policy-engine? false}
+  :secondary {:budget-wording-fixed :f-5 :sci-lifecycle-journalled :f-6}}
+
+ :hardening-gate
+ {:command "bin/js1-m3 test" :exit 0
+  :focused  {:tests 49   :assertions 246  :failures 0 :errors 0}
+  :bounded  {:tests 32   :assertions 350  :failures 0 :errors 0}
+  :ordinary {:tests 1585 :assertions 6373 :failures 0 :errors 0}
+  :closure-preflight-on-untouched-target
+  {:initially-red? true :failures 21 :errors 3
+   :cause "tests that assumed the host: ve/available? unmocked, and a test writing into the checkout"
+   :fixed-in "d035645" :then-green? true :duration-ms 343157}}
+
+ :controller {:path "samizdat-controller-m4a2" :sha "d03564521b3bdf0733e42b13e7e89c2563d2be19"
+              :tracked-modifications 0 :untracked 0 :unchanged? true}
+
+ :target
+ {:path "samizdat-canary-target-m4a2"
+  :base "d03564521b3bdf0733e42b13e7e89c2563d2be19"
+  :base-differs-from-attempt-1? true
+  :why "the closure gate runs the TARGET's own suite; a target at the older base
+        would have the harness verify a codebase that is not itself"
+  :task-defect-unsolved-at-base? true
+  :task-files-byte-identical-to-attempt-1? true
+  :base-digests {"src/samizdat/util.clj" "sha256:9dbc01d242d920365d88af0d0c4c1a21247ada54511693cec3939b28a785f705"
+                 "test/samizdat/util_test.clj" "sha256:6263ca9237ac3d2367c10f61a52ad6e1f17ff63bd08befa81107a0dbbc6b6f60"}
+  :final-digests {"src/samizdat/util.clj" "sha256:47a9dc70910f34ec6495e1dc3243c6dfe906c6034ec8911f385c1c1f0538b5d5"
+                  "test/samizdat/util_test.clj" "sha256:993111148964d83823981e678502c3057f4284f6df746b8cc866e9ccf650e174"}
+  :final-digests-match-last-receipts? true
+  :unexplained-mutation? false
+  :protected-config-mutated? false
+  :unrelated-definitions-destroyed? false}
+
+ :task {:id :js1-m4-truncate-middle-totality :identical-to-attempt-1? true}
+
+ :run
+ {:id "af519213-5304-4812-9452-96ad20dc5337"
+  :database "m4a2-evidence/m4a2-canary.sqlite3"
+  :binding-id "bind:af519213-5304-4812-9452-96ad20dc5337"
+  :instance-id "inst:af519213-5304-4812-9452-96ad20dc5337"
+  :profile :agent/project-develop
+  :capabilities #{:project/read :project/list :project/search :project/stat :project/edit}
+  :orientation-digest "sha256:347502fb9bb66121b910dcfb1586625e9411ba25b37745d03279d95b9b98a285"
+  :initial-budget 60 :final-budget 60 :budget-extensions 0
+  :turns-used 50
+  :terminal-status :completed :branch-status :done
+  :ended-at "2026-08-29T21:31:33.809Z"}
+
+ :provider
+ {:adapter :openai :endpoint-kind :local-openai-compatible-router
+  :model "fireworks.kimi-k2p7-code"
+  :epochs 1 :epoch-id "46159545-ffe5-4a63-b8be-7350a3bb13d8"
+  :switched? false :mixed-provider? false :provider-errors 0
+  :inference-invocations 52 :credentials-in-record? false}
+
+ :recovery
+ [{:cycle 1 :method :sigkill :after-committed-mutation? true
+   :interrupted-after-turn 16 :resumed-at-turn 17
+   :mutation-receipts-in-history 3 :replayed-evaluations 10
+   :receipts-before 18 :receipts-after 18
+   :evals-before 16 :evals-after 16
+   :completions-before 16 :completions-after 16
+   :edit-outcomes-before 3 :edit-outcomes-after 3
+   :target-digest-unchanged? true :target-mtime-unchanged? true
+   :replay-new-project-mutations 0
+   :binding-identity-unchanged? true :context-spec-unchanged? true
+   :runtime-coordinate-unchanged? true :orientation-digest-unchanged? true
+   :durable-budget-before 60 :durable-budget-after 60
+   :work-continued? true}
+  {:cycle 2 :method :sigkill :after-committed-mutation? true
+   :after-helper-defined? true
+   :interrupted-after-turn 27 :resumed-at-turn 28
+   :mutation-receipts-in-history 3 :replayed-evaluations 18
+   :receipts-before 24 :receipts-after 24
+   :evals-before 27 :evals-after 27
+   :target-digest-unchanged? true :target-mtime-unchanged? true
+   :replay-new-project-mutations 0
+   :helper-reconstructed-and-callable? true
+   :durable-budget-before 60 :durable-budget-after 60
+   :work-continued? true}]
+
+ :sci-context-lifecycle
+ [{:phase :allocated     :context-id "1a64e5ed-2310-4633-b819-5b51c1711098"}
+  {:phase :reconstructed :context-id "31ebf67d-9cba-480e-91ae-5ab780fb2b43"
+   :supersedes "1a64e5ed-2310-4633-b819-5b51c1711098" :replayed-evaluations 10}
+  {:phase :reconstructed :context-id "ff440987-3f53-4267-abfd-ed02db6b3be0"
+   :supersedes "31ebf67d-9cba-480e-91ae-5ab780fb2b43" :replayed-evaluations 18}]
+
+ :persistent-helper
+ {:defined? true :name "truncate-middle" :first-def-eval-seq 17
+  :evals-referencing 37
+  :survived-reconstruction? true
+  :called-after-reconstruction-on-turns [29 30 31 32 33]}
+
+ :verification
+ {:done-attempts 1
+  :focused {:green true :exit 0 :duration-ms 3338}
+  :closure {:green true :exit 0 :duration-ms 343452
+            :suite "Ran 1585 tests. 6254 assertions passed, 0 failures, 0 errors."}
+  :both-required? true :model-selected-verifier? false
+  :verify-env "js1-ve/v1:bab68fdf5a128ea0094ce345680d8eb0101792a0e703f8a29bfc28e4ad82a861"
+  :input-coordinate "sha256:ec59d43fd8554e2adf8"}
+
+ :interventions
+ {:harness-watch 4
+  :operator [{:id 5 :kind :review :applied-at-turn 49 :substance :stop-revalidating-call-done}]
+  :operator-process-interruptions 2
+  :budget-extensions 0
+  :hidden-authority-supplied? false :task-manually-solved? false
+  :target-manually-edited? false :verification-bypassed? false}
+
+ :trajectory
+ {:turns 50
+  :by-tool {"eval" 49 "done" 1}
+  :by-category {:neutral 39 :failure 10 :success 1}
+  :evaluations {:total 49 :completed 39 :failed 10}
+  :semantic-operations {:total 12 :project/read 5 :project/stat 4 :project/edit 3}
+  :ops-per-eval 0.24 :ops-per-model-turn 0.24
+  :multi-operation-evals 0
+  :anchored-mutations 3 :whole-file-rewrites-of-existing-file 0
+  :repeated-observation-signatures {"read src/samizdat/util.clj" 3
+                                    "read test/samizdat/util_test.clj" 2
+                                    "stat src/samizdat/util.clj" 2
+                                    "stat test/samizdat/util_test.clj" 2}
+  :turn-lease-timeouts 0 :provider-errors 0}
+
+ :comparison
+ {:disclaimer "n=1 either side. Evidence, not statistical proof. Attempt 2 also
+               changed model and ran on a stable provider path, so no causal
+               claim is made for the hardening."
+  :attempt-1 {:turns 120 :budget-extensions 2 :evals 94 :failed-evals 35
+              :semantic-ops 78 :repeated-reads-of-util 29
+              :first-mutation-turn 28 :anchored-mutations 0
+              :whole-file-rewrites 1 :destroyed-definitions ["sh-quote" "generation-cache"]
+              :source-diff-lines 86 :helpers-defined 0
+              :done-attempts 4 :focused-green 0 :closure-gate :absent
+              :sigkill-after-mutation? false :replayed-mutation-receipts 0
+              :provider-errors 5 :provider-switches 2
+              :operator-interventions 3 :status :fail}
+  :attempt-2 {:turns 50 :budget-extensions 0 :evals 49 :failed-evals 10
+              :semantic-ops 12 :repeated-reads-of-util 3
+              :first-mutation-turn 4 :anchored-mutations 3
+              :whole-file-rewrites 0 :destroyed-definitions []
+              :source-diff-lines 11 :helpers-defined 1
+              :done-attempts 1 :focused-green 1 :closure-green 1
+              :sigkill-after-mutation? true :replayed-mutation-receipts 3
+              :provider-errors 0 :provider-switches 0
+              :operator-interventions 1 :status :pass}}
+
+ :nonclaims
+ ["n=1 either side; the comparison is evidence, not proof, and no causal claim
+   is made for the hardening."
+  "Nothing is established about any one model's general capability."
+  "Not autonomous long-horizon reliability: one operator review nudge was
+   needed at turn 49 after the agent spent turns 29-49 re-validating a helper
+   one assertion per turn without shipping."
+  "ops/eval FELL from 0.83 to 0.24 and multi-operation evaluations went from 13
+   to ZERO: the compound-observation leverage attempt 1 showed did not recur."
+  "The repeated-unchanged-observation signal did NOT fire in this run — too few
+   semantic operations to reach threshold. It is proven by unit tests only."
+  "project/replace does not exist under that name; see the recorded deviation."
+  "This is not a JS2 readiness signal, and project/run was not added."]
+
+ :preserved
+ {:journal-db {:path "m4a2-evidence/m4a2-canary.sqlite3"
+               :sha256 "0ed5230773588f24c83be2be3e0ae0304d14d01148cd8d48a06cc3a5d589dc45"
+               :tracked? false :why-untracked ".gitignore excludes *.sqlite3"}
+  :committed-supporting-records "artifacts/m4-attempt-2/"
+  :attempt-1-untouched? true
+  :attempt-1-journal-sha256 "fd67ab0a91a5ab177c48a6dc1ccd044135c8f0342d4c46d2babf171ac543230e"}}

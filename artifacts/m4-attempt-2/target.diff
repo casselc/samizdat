@@ -1,0 +1,41 @@
+diff --git a/src/samizdat/util.clj b/src/samizdat/util.clj
+index 804856e..6d32b33 100644
+--- a/src/samizdat/util.clj
++++ b/src/samizdat/util.clj
+@@ -76,7 +76,10 @@
+   (if (<= (count s) max-len)
+     s
+     (let [marker " … "
+-          marker-len (count marker)
+-          head-len (quot (- max-len marker-len) 2)
+-          tail-len (- max-len marker-len head-len)]
+-      (str (subs s 0 head-len) marker (subs s (- (count s) tail-len))))))
++          marker-len (count marker)]
++      (if (< max-len marker-len)
++        (subs s 0 max-len)
++        (let [usable-len (- max-len marker-len)
++              head-len (quot usable-len 2)
++              tail-len (- usable-len head-len)]
++          (str (subs s 0 head-len) marker (subs s (- (count s) tail-len))))))))
+diff --git a/test/samizdat/util_test.clj b/test/samizdat/util_test.clj
+index fb07a5e..b2fe6db 100644
+--- a/test/samizdat/util_test.clj
++++ b/test/samizdat/util_test.clj
+@@ -34,4 +34,16 @@
+ 
+   (testing "middle marker present"
+     (let [result (util/truncate-middle "abcdefghijklmnopqrstuvwxyz" 10)]
+-      (is (str/includes? result " … ")))))
++      (is (str/includes? result " … "))))
++
++  (testing "max-len smaller than marker returns a short string"
++    (let [result (util/truncate-middle "abcdefghijklmnopqrstuvwxyz" 2)]
++      (is (= 2 (count result)))))
++
++  (testing "max-len equal to marker length minus one"
++    (let [result (util/truncate-middle "abcdefghijklmnopqrstuvwxyz" 4)]
++      (is (= 4 (count result)))
++      (is (= " … " (subs result 0 3)))))
++
++  (testing "max-len zero returns empty string"
++    (is (= "" (util/truncate-middle "abcdefghijklmnopqrstuvwxyz" 0)))))

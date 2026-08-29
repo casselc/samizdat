@@ -1,0 +1,24 @@
+[
+  {
+    "context-id": "1a64e5ed-2310-4633-b819-5b51c1711098",
+    "instance-id": "inst:af519213-5304-4812-9452-96ad20dc5337",
+    "binding-id": "bind:af519213-5304-4812-9452-96ad20dc5337",
+    "phase": "allocated"
+  },
+  {
+    "context-id": "31ebf67d-9cba-480e-91ae-5ab780fb2b43",
+    "instance-id": "inst:af519213-5304-4812-9452-96ad20dc5337",
+    "binding-id": "bind:af519213-5304-4812-9452-96ad20dc5337",
+    "supersedes": "1a64e5ed-2310-4633-b819-5b51c1711098",
+    "replayed-evaluations": 10,
+    "phase": "reconstructed"
+  },
+  {
+    "context-id": "ff440987-3f53-4267-abfd-ed02db6b3be0",
+    "instance-id": "inst:af519213-5304-4812-9452-96ad20dc5337",
+    "binding-id": "bind:af519213-5304-4812-9452-96ad20dc5337",
+    "supersedes": "31ebf67d-9cba-480e-91ae-5ab780fb2b43",
+    "replayed-evaluations": 18,
+    "phase": "reconstructed"
+  }
+]

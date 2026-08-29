@@ -1,0 +1,10 @@
+=== 2nd interruption: state BEFORE kill (helper exists) ===
+last turn  27
+evals      27
+receipts   24
+completions 27
+edit outcomes 3
+pending    0
+helper def at seq: [17, 18, 21, 25]
+47a9dc70910f34ec6495e1dc3243c6dfe906c6034ec8911f385c1c1f0538b5d5  /home/chuck/opencode/src/samizdat-canary-target-m4a2/src/samizdat/util.clj
+mtime=1788038367

@@ -1,0 +1,14 @@
+INFO samizdat.system - samizdat up on port 3992 provider :openai model fireworks.kimi-k2p7-code db /home/chuck/opencode/src/m4a2-evidence/m4a2-canary.sqlite3
+INFO samizdat.system - marked 1 run(s) interrupted: still flagged running with no process
+INFO samizdat.core - provider :openai reachable, fireworks.kimi-k2p7-code available
+jolt js1-runtime-final-1-gf8899905 nREPL server started on port 7892 (127.0.0.1) — .nrepl-port written
+;; middleware: nrepl.middleware/default-middleware
+;; connect your editor; ^C to stop
+
+samizdat
+  http   http://127.0.0.1:3992/health
+  nrepl  127.0.0.1:7892
+  model  openai / fireworks.kimi-k2p7-code (ok)
+
+INFO samizdat.watch - watch: raised :tool-failing - `eval` fails more often than it works
+INFO samizdat.watch - watch: raised :steering-ignored - the branch is not responding to steering AT ALL — 5 gate firings across the run and 0 of them got what they asked for. More nagging will not help; the loop itself, or the model, is the thing to change

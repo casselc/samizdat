@@ -1,0 +1,7 @@
+`samizdat.util/truncate-middle`, in src/samizdat/util.clj, is not total. It is documented to shorten a string to at most `max-len` characters by keeping a head and a tail around the literal middle marker " … ", but when `max-len` is smaller than that marker it derives negative head/tail lengths and throws instead of returning a string.
+
+That is reachable, not hypothetical. Its production caller in src/samizdat/security/policy.clj passes the shell tool's output bound, and that bound is runtime-tunable policy data in resources/gates.edn — so a bound retuned below the marker's width turns shell-output handling into a crash instead of a short string.
+
+Make `truncate-middle` total: for any string `s` and any non-negative integer `max-len`, it must return a string of at most `max-len` characters, and it must keep its current head/marker/tail behaviour unchanged whenever the marker fits. Pin the new behaviour with focused assertions added to test/samizdat/util_test.clj, and keep the three assertions already there passing.
+
+Change only src/samizdat/util.clj and test/samizdat/util_test.clj.

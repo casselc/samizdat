@@ -1,0 +1,16 @@
+=== ACTUAL interruption point (process dead; DB authoritative) ===
+last turn       16
+run status/cap  ('running', 60)
+evals           16
+receipts        18
+completions     16
+edit outcomes   3
+pending evals   0
+invocations     17
+sci lifecycle:
+   {"context-id":"1a64e5ed-2310-4633-b819-5b51c1711098","instance-id":"inst:af519213-5304-4812-9452-96ad20dc5337","binding-id":"bind:af519213-5304-4812-9452-96ad20dc5337","phase":"allocated"}
+=== target at interruption ===
+47a9dc70910f34ec6495e1dc3243c6dfe906c6034ec8911f385c1c1f0538b5d5  /home/chuck/opencode/src/samizdat-canary-target-m4a2/src/samizdat/util.clj
+993111148964d83823981e678502c3057f4284f6df746b8cc866e9ccf650e174  /home/chuck/opencode/src/samizdat-canary-target-m4a2/test/samizdat/util_test.clj
+/home/chuck/opencode/src/samizdat-canary-target-m4a2/src/samizdat/util.clj mtime=1788038367 bytes=3742
+/home/chuck/opencode/src/samizdat-canary-target-m4a2/test/samizdat/util_test.clj mtime=1788038323 bytes=2010

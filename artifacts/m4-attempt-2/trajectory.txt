@@ -1,0 +1,31 @@
+run: {"id": "af519213-5304-4812-9452-96ad20dc5337", "status": "completed", "model": "fireworks.kimi-k2p7-code", "max_turns": 60, "started_at": "2026-08-29T21:17:33.649Z", "ended_at": "2026-08-29T21:31:33.809Z", "terminal_reason": null}
+turns: 50
+  by tool: {"eval": 49, "done": 1}
+  by category: {"neutral": 39, "failure": 10, "success": 1}
+evals: 49 {"completed": 39, "failed": 10}
+  evals containing def/defn: [8, 17, 18, 21, 25, 27, 28]
+operations total: 12
+  by op: {":project/read": 5, ":project/stat": 4, ":project/edit": 3}
+  per-eval: [1, 1, 1, 1, 1, 0, 1, 0, 0, 0, 0, 0, 0, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 1, 1, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+  multi-operation evals: 0
+  ops/eval: 0.24
+  ops/model-turn: 0.24
+  repeated observation signatures: {":project/read [\"src/samizdat/util.clj\"]": 3, ":project/read [\"test/samizdat/util_test.clj\"]": 2, ":project/stat [\"src/samizdat/util.clj\"]": 2, ":project/stat [\"test/samizdat/util_test.clj\"]": 2}
+epochs:
+   {"id": "46159545-ffe5-4a63-b8be-7350a3bb13d8", "turn": 1, "provider": "openai", "model": "fireworks.kimi-k2p7-code", "adapter": "OpenAI", "config_digest": "ac8be217b11bca396b865f50a9daf34f766c0c405575754a1a4742358bcc690f", "closed_at": null}
+invocations: 52
+interventions:
+   [1, "message", "watch", "applied", 13, "{\"text\":\"[harness] Something is going wrong with how this run is being spent, and it is worth stopping to look at before"]
+   [2, "message", "watch", "applied", 21, "{\"text\":\"[harness] Something is going wrong with how this run is being spent, and it is worth stopping to look at before"]
+   [3, "message", "watch", "applied", 22, "{\"text\":\"[harness] Something is going wrong with how this run is being spent, and it is worth stopping to look at before"]
+   [4, "message", "watch", "applied", 34, "{\"text\":\"[harness] Something is going wrong with how this run is being spent, and it is worth stopping to look at before"]
+   [5, "review", "m4a2-operator", "applied", 49, "[operator] You have validated the same helper a dozen times, one assertion per turn, and every one has come back true. F"]
+ship-verify events:
+   126 {"ran":true,"stage":"focused","green":true,"timeout":false,"blocked":false,"closure-ran":true,"closure-green":true,"closure-timeout":false,"closure-envelope":{"version":1,"kind":"run","invocation-index":2,"attribution":{"coordinate":"sha256:e3fd1b7d73e88ec4f88e482c61912524bd48acbbe6ed3cd319a4c4ca387fff2f","type":"bwrap-verification-env"},"input":{"coordinate":"sha256:ec59d43fd8554e2adf8e59da072b82b38f087727c924c8e10207343cb0f53df0"},"status":"completed","exit":0,"stdout":{"text":"  [base-test] model-facing sentences still in src\/: 140 across 36 files\n[gui.api] poller callback failed: boom\n\nRan 1585 tests. 6254 assertions passed, 0 failures, 0 errors.\n\n{:type :summary, :test 1585, :pass 6254, :fail 0, :error 0}\n","bytes":235,"truncated?":false},"stderr":{"text":"WARN samizdat.agent.tools - tool done threw: Turn authority expired; refusing stale model effect\nWARN samizdat.agent.beam - branch B1 exceeded the turn deadline on turn 1\nWARN samizdat.agent.beam - branch B1 died on turn 1 : sleep interrupted\nINFO samizdat.agent.beam - distilled 1 finding(s) and 0 verdict(s) into memory\nWARN samizdat.agent.beam - branch B1 exceeded the turn deadline on turn 1\nINFO samizdat.securi
+edit receipts:
+   intent ["src/samizdat/util.clj" "sha256:9dbc01d242d920365d88af0d0c4c1a21247ada54511693cec3939b28a785f705" "  (if (<= (count s)  | 
+   outcome  | {:bytes 3671, :digest "sha256:ede6dae8e95f1df2c84b464ebeb06443754fcd36dd874274e8faccbf2e6d5689", :kind :file, :path "src/samizdat/util.clj"}
+   intent ["test/samizdat/util_test.clj" "sha256:6263ca9237ac3d2367c10f61a52ad6e1f17ff63bd08befa81107a0dbbc6b6f60" "  (testing \"m | 
+   outcome  | {:bytes 2010, :digest "sha256:993111148964d83823981e678502c3057f4284f6df746b8cc866e9ccf650e174", :kind :file, :path "test/samizdat/util_test.clj"}
+   intent ["src/samizdat/util.clj" "sha256:ede6dae8e95f1df2c84b464ebeb06443754fcd36dd874274e8faccbf2e6d5689" "  (if (<= (count s)  | 
+   outcome  | {:bytes 3742, :digest "sha256:47a9dc70910f34ec6495e1dc3243c6dfe906c6034ec8911f385c1c1f0538b5d5", :kind :file, :path "src/samizdat/util.clj"}
