@@ -69,7 +69,6 @@
    :any-progress? false
    :thesis nil
    :last-review nil
-   :last-audit nil
    ;; Tool-call mechanics only, for the capability tier. Never verification or
    ;; progress signals: a signal may tune a guard that fires on the same thing
    ;; the signal measures (dirge PR 740).
@@ -958,22 +957,23 @@
                  proved (set (map :claim confirmed))
                  grouped (group-by artifact-substantiates (:artifacts b))
                  provenance #(mapv (fn [a] (select-keys a [:claim :kind :tier :turn])) %)
-                 audit (:last-audit b)]
-             (cond-> {:branch (:id b)
-                      :goal goal
-                      :outstanding (vec (remove proved subClaims))
-                      :proved (vec (filter proved subClaims))
-                      :established (provenance (get grouped :established))
-                      :existential (provenance (get grouped :existential))
-                      :measured (provenance (get grouped :measured))
-                      :ambiguous (provenance (get grouped :ambiguous))}
-               ;; Drift is only reportable when the audit actually restated
-               ;; what the evidence establishes; an audit with no ESTABLISHED
-               ;; line has nothing to compare against the goal.
-               (:established audit)
-               (assoc :drift {:goal goal
-                              :established (:established audit)
-                              :relaxation? (:relaxation? audit)}))))
+                 ]
+             ;; The :drift section that used to hang off (:last-audit b) is
+             ;; gone with it. It was gated on the audit having restated what
+             ;; the evidence establishes, and nothing ever wrote an audit —
+             ;; :last-audit was seeded nil and assigned by nobody — so the
+             ;; section could not render and the four keys it fed the residual
+             ;; template were dead with it (karamazov-83p). Restore both ends
+             ;; together if an audit step is ever built; half of a feature is
+             ;; worse than neither half, because it reads as one that works.
+             {:branch (:id b)
+              :goal goal
+              :outstanding (vec (remove proved subClaims))
+              :proved (vec (filter proved subClaims))
+              :established (provenance (get grouped :established))
+              :existential (provenance (get grouped :existential))
+              :measured (provenance (get grouped :measured))
+              :ambiguous (provenance (get grouped :ambiguous))}))
          branches)
    :failures (vec failures)
    :gate-tally (vec gate-tally)})
@@ -1014,14 +1014,7 @@
          :existential (claim-lines (:existential b))
          :measured (claim-lines (:measured b))
          :ambiguous (claim-lines (:ambiguous b))
-         :drift (boolean (:drift b))
-         :drift-established (:established (:drift b))
-         :drift-goal (:goal (:drift b))
-         ;; Whether the audit found a WEAKENING is the one judgement in this
-         ;; report. It reaches the template as a flag and the template says
-         ;; both readings, so a project can reword either without touching a
-         ;; conditional in compiled code.
-         :drift-relaxation (boolean (:relaxation? (:drift b)))})
+         })
       :failures (when (seq (:failures r))
                   (str/join "\n" (for [f (:failures r)]
                                    (str "- [" (:branch_id f) " t" (:turn f) " "

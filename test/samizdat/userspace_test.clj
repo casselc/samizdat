@@ -558,3 +558,31 @@
           (is (str/includes? (str (:result lst)) "phases")
               "unedited tables list too — the whole surface is discoverable")))
       (finally (us/unbind!) (gates/reload-config!) (db/close c)))))
+
+(deftest seeding-the-same-entry-from-parallel-branches-writes-one-version
+  ;; karamazov-cuv. save! takes the writer lock for its insert, but the
+  ;; load-latest that decides whether to seed at all sat outside it — so two
+  ;; branches reaching an unseeded entry in the same instant both read nil,
+  ;; both seeded, and the second appended a version whose body was
+  ;; byte-identical to the first.
+  ;;
+  ;; Live in run a3ba69bb: roles/implementor v1 and v2, 1ms apart at run
+  ;; start, when four fan-out workers each triggered the first read. Harmless
+  ;; in content and not harmless in the history: a version that changed
+  ;; nothing is the one thing an append-only record must not contain, and it
+  ;; breaks first-write-wins for anything reading it.
+  (let [conn (db/open! ":memory:")
+        _ (doseq [f (mapv (fn [_] (future (store/seed! conn :prompt "roles/implementor" "BODY")))
+                          (range 8))]
+            @f)
+        rows (db/fetch conn ["SELECT version, body FROM userspace WHERE name = ?"
+                             "roles/implementor"])]
+    (is (= [1] (mapv :version rows)) "one seed, however many branches raced for it")
+    (is (= ["BODY"] (mapv :body rows))))
+  (testing "and a project edit still appends, identical body or not — an edit
+            that turned out to be a no-op is a fact about what was tried, and
+            suppressing it would make the history lie by omission"
+    (let [conn (db/open! ":memory:")]
+      (store/seed! conn :prompt "p" "BODY")
+      (store/save! conn :prompt "p" "BODY")
+      (is (= [1 2] (sort (mapv :version (db/fetch conn ["SELECT version FROM userspace WHERE name = ?" "p"]))))))))

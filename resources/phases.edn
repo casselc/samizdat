@@ -184,8 +184,15 @@
  ;; weakening; a cross-checked confirmation beats a one-shot; independent
  ;; engines compose (one Prolog + one Z3 beats two Z3s).
  :finished-key
- [(if (:relaxation? (:last-audit branch)) 0 1)
-  (if (contains? (:tiers-seen branch) :slow) 1 0)
+ ;; The first component used to be
+ ;;   (if (:relaxation? (:last-audit branch)) 0 1)
+ ;; and it was a CONSTANT. :last-audit was seeded nil by new-branch and
+ ;; written by nothing, so the component was always 1 and never separated any
+ ;; two branches. The rule it claimed to enforce — a branch that proved the
+ ;; asked claim beats one that proved a weakening — has never once applied.
+ ;; Removed rather than left in: a ranking component that cannot discriminate
+ ;; reads as a rule the harness keeps (karamazov-83p).
+ [(if (contains? (:tiers-seen branch) :slow) 1 0)
   (count (distinct (keep :kind (confirmed-artifacts branch))))
   (count (confirmed-artifacts branch))
   (:id branch)]}

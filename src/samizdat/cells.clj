@@ -121,7 +121,7 @@
         :when (and url (not (contains? covered (last (str/split r #"/")))))]
     {:id r :content (slurp url) :file? false}))
 
-(defn- defcell-ids
+(defn defcell-ids
   "The cell ids a cell file defines, by reading its `defcell` forms — so a
   reload attributes a cell to its file even though re-registration is not a
   'new' method, and so we never have to clear the shared registry to tell

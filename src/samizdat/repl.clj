@@ -36,7 +36,9 @@
             [clojure.java.io :as io]
             [clojure.string :as str]
             [clojure.tools.logging :as log]
-            [jolt.host :as host]))
+            [jolt.host :as host]
+            [samizdat.prompt :as prompt]
+            [samizdat.repl.guard :as guard]))
 
 (defn- project-paths
   "The source paths `root` declares in its own deps.edn: `:paths` plus every
@@ -232,6 +234,18 @@
                (try
                  (let [value (binding [*ns* ns* *out* out]
                                (let [forms (read-string (str "[" code "\n]"))]
+                                 ;; REFUSED BEFORE THE FIRST FORM RUNS, not per
+                                 ;; form: the forms share a process, so form 1
+                                 ;; having already run does not make form 2's
+                                 ;; exit survivable — and a partial eval that
+                                 ;; then kills the server is the worst of both
+                                 ;; (karamazov-1xx).
+                                 (when (guard/terminating-form? forms)
+                                   (throw (ex-info (prompt/render
+                                                    "eval-terminates-process"
+                                                    {:calls (str/join " and "
+                                                                      (guard/offending forms))})
+                                                   {:samizdat/refused :process-exit})))
                                  (reduce (fn [_ form] (eval form)) nil forms)))]
                    {:ok true :value (pr-str value) :out (str out)})
                  (catch Throwable e

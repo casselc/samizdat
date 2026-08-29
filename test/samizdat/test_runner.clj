@@ -104,6 +104,8 @@
             [samizdat.lsp-test]
             [samizdat.cells-test]
             [samizdat.mutation-test]
+            [samizdat.ratelimit-test]
+            [samizdat.repl-guard-test]
             [samizdat.repl-test]
             [samizdat.roles-test]
             [samizdat.websearch-test]
@@ -234,6 +236,8 @@
     samizdat.lsp-test
     samizdat.cells-test
     samizdat.mutation-test
+    samizdat.ratelimit-test
+    samizdat.repl-guard-test
     samizdat.repl-test
     samizdat.roles-test
     samizdat.websearch-test

@@ -22,7 +22,8 @@
   A good edit commits and changes behavior; a broken one (syntax, wiring, or a
   cell that throws on valid input) rolls back cleanly and is journaled, so a
   bad edit can never brick the loop."
-  (:require [clojure.string :as str]
+  (:require [samizdat.store.userspace :as store]
+            [clojure.string :as str]
             [clojure.test :refer [deftest testing is use-fixtures]]
             [jolt.fs :as fs]
             [mycelium.cell :as cell]
@@ -271,3 +272,44 @@
       (is (= before (us/template :cell "loop"))
           "the harness's own file is untouched — that is what makes it a template")
       (finally (us/unbind!) (db/close c)))))
+
+(deftest a-cell-body-may-not-be-saved-under-a-name-that-does-not-own-it
+  ;; karamazov-990, from run e1491f04 — the first fully validated agent
+  ;; self-edit, and a real fix. The supervisor guarded a prompt sentence that
+  ;; had been sending it to chase a phantom crash, then saved the WHOLE
+  ;; feature cell file under the new name `feature/supervise`. Every
+  ;; :feature/* cell was then defined twice, and load-cells! loads stored
+  ;; files name-sorted, so the copy sorted later and won.
+  ;;
+  ;; A SOAK CANNOT CATCH THIS. The body compiles, the cells register, the
+  ;; dry-run passes, and the mutation reports success. The damage appears
+  ;; later, when somebody edits the canonical file and loses silently. So it
+  ;; is refused before anything is installed — and there is nothing to roll
+  ;; back, because nothing went wrong.
+  (let [conn (db/open! ":memory:")]
+    (us/bind! conn)
+    (try
+      (store/save! conn :cell "feature"
+                   "(ns cells.feature) (cell/defcell :feature/route {} (fn [_ d] d))")
+      (testing "the same id under a different name is shadowing"
+        (is (= [[:feature/route "feature"]]
+               (mut/shadowed-cells
+                "feature/supervise"
+                "(ns cells.copy) (cell/defcell :feature/route {} (fn [_ d] d))"))))
+      (testing "editing the file that owns the id is not"
+        (is (empty? (mut/shadowed-cells
+                     "feature"
+                     "(ns cells.feature) (cell/defcell :feature/route {} (fn [_ d] d))"))))
+      (testing "and a genuinely new cell under a new name is not"
+        (is (empty? (mut/shadowed-cells
+                     "mine" "(ns cells.mine) (cell/defcell :mine/thing {} (fn [_ d] d))"))))
+      (testing "the proposal is REFUSED, and the refusal names the owner and
+                the way out rather than only saying no"
+        (let [r (mut/propose-cell!
+                 {:name "feature/supervise"
+                  :body "(ns cells.copy) (cell/defcell :feature/route {} (fn [_ d] d))"
+                  :loop-def {:cells {} :edges {}}})]
+          (is (= :rolled-back (:status r)))
+          (is (str/includes? (str (:reason r)) "feature"))
+          (is (str/includes? (str (:reason r)) "Save under the owning name"))))
+      (finally (us/unbind!)))))

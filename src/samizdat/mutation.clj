@@ -39,7 +39,9 @@
             [mycelium.cell :as cell]
             [mycelium.core :as myc]
             [samizdat.cells :as cells]
+            [samizdat.prompt :as prompt]
             [samizdat.store.journal :as journal]
+            [samizdat.store.userspace :as store]
             [samizdat.userspace :as userspace]))
 
 (def ^:private soak-timeout-ms 10000)
@@ -197,6 +199,38 @@
 ;; with the reason — which is the right split: the store holds versions that
 ;; were live, the journal holds every attempt and its verdict.
 
+(defn shadowed-cells
+  "Cell ids in `body` that ANOTHER stored cell file already defines, as
+  `[[id owning-name] ...]`. Empty when the save is honest.
+
+  WHY THIS IS A REFUSAL AND NOT A WARNING. `load-cells!` loads the stored
+  files name-sorted, so two files defining the same id both register and the
+  later name wins. Nothing about that is visible: the body compiles, the cells
+  register, the soak passes, and the mutation reports success. The damage
+  appears later, when somebody edits the CANONICAL file and their version is
+  silently shadowed by the stale copy.
+
+  Live in run e1491f04 — the first fully validated agent self-edit, and a real
+  fix. The supervisor guarded a prompt sentence that had been sending it to
+  chase a phantom crash, then saved the WHOLE feature cell file under the new
+  name `feature/supervise`. Every `:feature/*` cell was then defined twice,
+  with the copy sorting later and winning. The edit was right and only the
+  name was wrong, which is exactly the mistake a check can catch and a soak
+  cannot (karamazov-990).
+
+  Best effort: a body that will not read is not this function's complaint to
+  make — `load-string` below reports that far better."
+  [name body]
+  (try
+    (let [ids (set (cells/defcell-ids body))]
+      (when (seq ids)
+        (vec (for [[other b] (some-> (userspace/conn) (store/latest-bodies :cell))
+                   :when (not= (str other) (str name))
+                   id (set (cells/defcell-ids b))
+                   :when (contains? ids id)]
+               [id other]))))
+    (catch Throwable _ nil)))
+
 (defn propose-cell!
   "Validate a candidate cell body, and commit it as a new version of this
   project's cell only if it survives.
@@ -220,6 +254,7 @@
   written to the store."
   [{:keys [name body loop-def extra-defs soak-input compile-fn rationale conn run-id]}]
   (let [compile-fn (or compile-fn myc/pre-compile)
+        shadowing (shadowed-cells name body)
         snapshot (cell/registry-snapshot)
         fail (fn [reason]
                (cell/registry-restore! snapshot)
@@ -228,6 +263,17 @@
                                 {:data {:cell name :reason reason}}))
                (log/warn "cell proposal rejected:" name reason)
                {:status :rolled-back :reason reason})]
+    (if (seq shadowing)
+      ;; REFUSED BEFORE INSTALLING. A save under the wrong name is not a bad
+      ;; edit that a soak can catch — the body compiles, the cells register,
+      ;; the soak passes, and the damage only appears later when the canonical
+      ;; file is edited and silently loses. Nothing to roll back either,
+      ;; because nothing went wrong.
+      (fail (prompt/render "cell-shadowed"
+                           {:ids (str/join ", " (map first shadowing))
+                            :one (= 1 (count shadowing))
+                            :owners (str/join ", " (distinct (map second shadowing)))
+                            :name name}))
     (try
       ;; INSTALL the candidate into the live image, on top of the project's
       ;; other cells. Syntax errors surface here.
@@ -263,4 +309,4 @@
                   (log/info "cell" name "committed as version" v)
                   {:status :committed :version v})))))
       (catch Throwable e
-        (fail (str "the candidate did not load — " (or (ex-message e) (str e))))))))
+        (fail (str "the candidate did not load — " (or (ex-message e) (str e)))))))))

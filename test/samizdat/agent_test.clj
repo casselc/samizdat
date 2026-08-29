@@ -2151,20 +2151,33 @@
         "no signal, no transition")))
 
 (deftest winner-rubric-is-resource-data
-  ;; drg-4026 #30: the finished-key rubric (non-relaxation > slow-tier >
-  ;; engine-diversity > confirmed-count > id) moved from a tuple literal in
-  ;; state.clj to phases.edn forms compiled at load. Behavior is unchanged;
-  ;; retuning the rubric is a data edit.
-  (is (= 5 (count (phases/finished-key-forms))))
-  (let [strong (assoc (branch-with)
-                      :artifacts [{:claim-status :confirmed :kind :z3 :turn 1}])
-        weak   (-> (branch-with)
-                   (assoc :artifacts [{:claim-status :confirmed :kind :z3 :turn 1}])
-                   (assoc :last-audit {:relaxation? true}))]
-    (is (= [1 0 1 1 "B1"] (state/finished-key strong)))
-    (is (= [0 0 1 1 "B1"] (state/finished-key weak))
-        "a relaxation ranks below a direct proof")
-    (is (= [strong weak] (state/rank-finished [weak strong])))))
+  ;; drg-4026 #30: the finished-key rubric moved from a tuple literal in
+  ;; state.clj to phases.edn forms compiled at load. Retuning it is a data
+  ;; edit.
+  ;;
+  ;; THE NON-RELAXATION COMPONENT IS GONE (karamazov-83p), and this test is
+  ;; why it survived so long. It read (:relaxation? (:last-audit branch)), and
+  ;; :last-audit was seeded nil by new-branch and written by NOTHING in the
+  ;; harness — so the component was a constant in production and never
+  ;; separated two branches. The test passed because it manufactured the key
+  ;; by hand. A test that supplies an input production cannot produce is
+  ;; testing the function and not the feature, and it is exactly how a dead
+  ;; ranking rule keeps a green tick.
+  (is (= 4 (count (phases/finished-key-forms))))
+  (let [b (assoc (branch-with)
+                 :artifacts [{:claim-status :confirmed :kind :z3 :turn 1}])]
+    (is (= [0 1 1 "B1"] (state/finished-key b)))
+    (testing "every remaining component reads something the harness writes"
+      (is (= [1 1 1 "B1"] (state/finished-key (assoc b :tiers-seen #{:slow})))
+          "tiers-seen is set by record-outcome")))
+  (testing "and a branch with more confirmed artifacts still outranks one with
+            fewer, which is the rubric's real job"
+    (let [more (assoc (branch-with)
+                      :artifacts [{:claim-status :confirmed :kind :z3 :turn 1}
+                                  {:claim-status :confirmed :kind :prolog :turn 2}])
+          less (assoc (branch-with)
+                      :artifacts [{:claim-status :confirmed :kind :z3 :turn 1}])]
+      (is (= [more less] (state/rank-finished [less more]))))))
 
 (deftest every-context-budget-key-is-actually-read
   ;; A knob that is documented, parsed, and read by nothing is worse than no
