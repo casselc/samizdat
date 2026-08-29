@@ -336,7 +336,12 @@
              (is (nil? @ran)
                  "NOTHING was spawned — no fallback to a host spawn")))))))
   (testing "an unresolvable pinned verifier refuses the same way"
-    (with-redefs [ve/resolve-verifier (fn [] nil)]
+    ;; available? is pinned true so this asserts the rung it names. Left to the
+    ;; host, the ladder short-circuits at :sandbox-unavailable wherever bwrap
+    ;; is absent — including inside the controller's OWN VerificationEnvironment,
+    ;; which is where the closure gate runs this suite.
+    (with-redefs [ve/available? (fn [] true)
+                  ve/resolve-verifier (fn [] nil)]
       (with-project
        (fn [root]
          (let [r (ve/run root ["test/ve/benign_test.clj"] 60000)]

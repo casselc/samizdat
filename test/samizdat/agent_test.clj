@@ -796,6 +796,7 @@
     (testing "G. focused RED => the closure suite is never run"
       (let [closure-ran (atom false)]
         (with-redefs [estore/history (fn [_ _] (apply history-with changed))
+                      ve/available? (fn [] true)
                       ve/run (fn [_ _ _] {:green? false :output "1 failure"})
                       ve/run-closure (fn [_ _ _]
                                        (reset! closure-ran true)
@@ -809,6 +810,7 @@
     (testing "H. focused GREEN, closure RED => completion refused with evidence"
       (let [closure-ran (atom false)]
         (with-redefs [estore/history (fn [_ _] (apply history-with changed))
+                      ve/available? (fn [] true)
                       ve/run (fn [_ _ _] {:green? true :output "focused ok"})
                       ve/run-closure
                       (fn [_ _ _] (reset! closure-ran true)
@@ -826,6 +828,7 @@
     (testing "I. focused GREEN and closure GREEN => completion accepted"
       (let [order (atom [])]
         (with-redefs [estore/history (fn [_ _] (apply history-with changed))
+                      ve/available? (fn [] true)
                       ve/run (fn [_ _ _] (swap! order conj :focused)
                                {:green? true :output ""})
                       ve/run-closure (fn [_ _ _] (swap! order conj :closure)
@@ -840,6 +843,7 @@
     (testing "J. both verifiers are controller-owned; the model chooses neither"
       (let [args (atom [])]
         (with-redefs [estore/history (fn [_ _] (apply history-with changed))
+                      ve/available? (fn [] true)
                       ve/run (fn [root chg _] (swap! args conj [:focused root chg])
                                {:green? true :output ""})
                       ve/run-closure (fn [root chg _]
@@ -863,6 +867,7 @@
 
     (testing "an unavailable closure substrate refuses rather than shipping"
       (with-redefs [estore/history (fn [_ _] (apply history-with changed))
+                    ve/available? (fn [] true)
                     ve/run (fn [_ _ _] {:green? true :output ""})
                     ve/run-closure (fn [_ _ _] {:green? false :unavailable? true
                                                 :reason :no-bwrap :output ""})]
@@ -890,6 +895,7 @@
     (testing "GREEN: focused green AND closure green => terminal"
       (let [seen (atom nil)]
         (with-redefs [estore/history (fn [_ _] (history-with "src/x.clj" "test/x_test.clj"))
+                      ve/available? (fn [] true)
                       ve/run
                       (fn [root changed timeout-ms]
                         (reset! seen {:root root :changed changed
@@ -913,6 +919,7 @@
                 "no shell composes anything")))))
     (testing "RED: bounded evidence comes back and the branch continues"
       (with-redefs [estore/history (fn [_ _] (history-with "src/x.clj" "test/x_test.clj"))
+                    ve/available? (fn [] true)
                     ve/run
                     (fn [_ _ _] {:green? false :output "FAIL in x-test\n1 assertion failed"})
                     ve/run-closure (fn [_ _ _] {:green? true :output ""})]
@@ -927,6 +934,7 @@
           (is (nil? (:final-answer (:branch r))) "nothing shipped"))))
     (testing "a timeout reads as red evidence, not as a ship"
       (with-redefs [estore/history (fn [_ _] (history-with "test/x_test.clj"))
+                    ve/available? (fn [] true)
                     ve/run (fn [_ _ _] {:green? false :timeout? true :output ""})
                     ve/run-closure (fn [_ _ _] {:green? true :output ""})]
         (let [r (tools/run-tool bounded-ctx)]
@@ -935,6 +943,7 @@
     (testing "no edits at all => refused as hollow, and nothing is spawned"
       (let [ran (atom false)]
         (with-redefs [estore/history (fn [_ _] [])
+                      ve/available? (fn [] true)
                       ve/run (fn [& _] (reset! ran true)
                                {:green? true :output ""})
                       ve/run-closure (fn [& _] (reset! ran true)
@@ -946,6 +955,7 @@
     (testing "edits but no verifiable test among them => refused, nothing spawned"
       (let [ran (atom false)]
         (with-redefs [estore/history (fn [_ _] (history-with "src/x.clj"))
+                      ve/available? (fn [] true)
                       ve/run (fn [& _] (reset! ran true)
                                {:green? true :output ""})
                       ve/run-closure (fn [& _] (reset! ran true)
@@ -972,6 +982,7 @@
             (is (not @ran) "nothing was spawned — no fallback to the host")))))
     (testing "the environment itself reporting unavailability refuses the same way"
       (with-redefs [estore/history (fn [_ _] (history-with "test/x_test.clj"))
+                    ve/available? (fn [] true)
                     ve/run (fn [_ _ _] {:green? false :unavailable? true
                                         :reason :no-verifier-executable
                                         :output ""})]
@@ -981,6 +992,7 @@
     (testing "containment: a crafted edited path contributes no command, model args select nothing"
       (let [seen (atom nil)]
         (with-redefs [estore/history (fn [_ _] (history-with crafted "test/x_test.clj"))
+                      ve/available? (fn [] true)
                       ve/run (fn [_ changed _] (reset! seen changed)
                                {:green? true :output ""})
                       ve/run-closure (fn [_ _ _] {:green? true :output ""})]
