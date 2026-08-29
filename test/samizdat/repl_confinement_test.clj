@@ -37,8 +37,8 @@
             [clojure.string :as str]
             [clojure.test :refer [deftest testing is use-fixtures]]
             [jolt.fs :as fs]
-            [samizdat.config :as config]
-            [samizdat.repl.route :as route]))
+            [samizdat.repl.route :as route]
+            [samizdat.security.sandbox :as sandbox]))
 
 (use-fixtures :once (fn [f] (try (f) (finally (route/release-all!)))))
 
@@ -57,6 +57,21 @@
 
 (defn- ev [root code]
   (route/eval-for (as-implementor root) code nil 15000))
+
+(defn- sandboxed?
+  "Whether an OS sandbox is actually in force here.
+
+  THE RESOLVED BACKEND, not the config setting. `:sandbox :auto` is what the
+  operator asked for; `backend-for` is what the platform can deliver, and off
+  macOS it is `:none` (karamazov-zrq.8). Guarding on the setting was the bug
+  that made these pass locally and fail on CI's Linux: :auto is not :none, but
+  it resolves to it.
+
+  The filesystem assertions below are TWO-SIDED rather than skipped. A test
+  that quietly passes on the platform where the protection does not exist
+  would hide exactly the gap zrq.8 is open about."
+  []
+  (not= :none (sandbox/backend-for :auto (System/getProperty "os.name"))))
 
 ;; --- the door to the unconfined image ---------------------------------------
 
@@ -100,8 +115,13 @@
   (let [root (project!)
         here (str (fs/cwd))
         r (ev root (str "(slurp \"" here "/src/samizdat/repl/route.clj\")"))]
-    (is (not (:ok r))
-        "the project image read the harness's own source by absolute path")))
+    (if (sandboxed?)
+      (is (not (:ok r))
+          "the project image read the harness's own source by absolute path")
+      (is (:ok r)
+          (str "WITHOUT a sandbox this is expected to succeed. If it now fails, "
+               "the platform grew a backend and this test should assert "
+               "confinement here too (karamazov-zrq.8).")))))
 
 (deftest the-project-can-still-read-itself
   ;; The other half of the same rule. Denying a tree that CONTAINS the project
@@ -126,8 +146,13 @@
   (let [root (project!)
         outside (str (fs/create-temp-dir) "/escape.txt")]
     (ev root (pr-str (list 'spit outside "escaped")))
-    (is (not (.exists (io/file outside)))
-        "eval wrote to a path outside the run root")))
+    (if (sandboxed?)
+      (is (not (.exists (io/file outside)))
+          "eval wrote to a path outside the run root")
+      (is (.exists (io/file outside))
+          (str "WITHOUT a sandbox this write is expected to land. The subprocess "
+               "split still holds — the harness cannot be hot-patched — but "
+               "filesystem confinement is macOS-only until karamazov-zrq.8.")))))
 
 (deftest eval-cannot-mutate-the-live-harness-image
   ;; The payload of the escape: model-authored code taking effect in the
@@ -162,9 +187,11 @@
   ;; hunting in the file. Ten turns, once.
   (let [root (project!)
         r (ev root "(do (require 'jolt.process) (jolt.process/sh \"echo\" \"X\"))")]
-    (when (not= :none (config/eval-sandbox root))
-      (is (not (:ok r)))
-      (is (str/includes? (str (:error r)) "not the problem")
-          "the refusal read as a defect in the model's own code")
-      (is (str/includes? (str (:error r)) "shell")
-          "the refusal did not name the tool to reach for instead"))))
+    (if (sandboxed?)
+      (do (is (not (:ok r)))
+          (is (str/includes? (str (:error r)) "not the problem")
+              "the refusal read as a defect in the model's own code")
+          (is (str/includes? (str (:error r)) "shell")
+              "the refusal did not name the tool to reach for instead"))
+      (is (:ok r)
+          "WITHOUT a sandbox the shell is reachable from the REPL — zrq.8"))))

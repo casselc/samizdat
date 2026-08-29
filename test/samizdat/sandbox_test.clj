@@ -73,19 +73,24 @@
 ;; --- the footgun that leaked /etc/passwd ------------------------------------
 
 (deftest deny-read-paths-are-resolved-through-symlinks
-  ;; /etc -> private/etc. Writing the unresolved path denies nothing at all,
-  ;; and the failure is SILENT: the profile loads, the rule never matches.
-  (let [p (sandbox/seatbelt-profile (assoc spec :deny-read ["/etc" "/tmp/x" "/var/y"]))]
-    (is (str/includes? p "/private/etc")
-        "/etc was written unresolved — this is the bug that leaked /etc/passwd")
-    (is (str/includes? p "/private/tmp/x"))
-    (is (str/includes? p "/private/var/y"))))
+  ;; Writing an UNRESOLVED path denies nothing at all, and the failure is
+  ;; SILENT: the profile loads and the rule never matches. On macOS /etc is a
+  ;; symlink to private/etc and that is the bug that leaked /etc/passwd; the
+  ;; PROPERTY is "whatever the kernel would canonicalise this to is what gets
+  ;; written", which is what to assert on any platform. Hardcoding
+  ;; /private/etc made this a macOS-only test and it failed on CI's Linux,
+  ;; where /etc is not a symlink and resolves to itself.
+  (let [paths ["/etc" "/tmp/x" "/var/y"]
+        p (sandbox/seatbelt-profile (assoc spec :deny-read paths))]
+    (doseq [path paths]
+      (is (str/includes? p (sandbox/resolved path))
+          (str path " was written unresolved")))))
 
 (deftest writable-paths-are-resolved-too
   ;; A writable path that does not resolve is a project the image cannot
   ;; write to — the same silent mismatch pointing the other way.
   (let [p (sandbox/seatbelt-profile (assoc spec :scratch-paths ["/tmp"]))]
-    (is (str/includes? p "/private/tmp"))))
+    (is (str/includes? p (sandbox/resolved "/tmp")))))
 
 ;; --- what the image may and may not do --------------------------------------
 
@@ -162,7 +167,7 @@
   (let [p (sandbox/seatbelt-profile
            (assoc spec :deny-read ["/etc" nil ""] :exec-roots ["/opt/homebrew" nil]))]
     (is (not (str/includes? p "\"nil\"")))
-    (is (str/includes? p "/private/etc"))))
+    (is (str/includes? p (sandbox/resolved "/etc")))))
 
 ;; --- backend selection ------------------------------------------------------
 
