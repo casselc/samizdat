@@ -64,9 +64,22 @@
     (if (:ok r)
       (base/ok branch (scrubbed (str prefix "=> " (:value r)
                                      (when (seq (:out r)) (str "\n" (:out r))))))
-      (assoc (base/fail branch (scrubbed (str prefix "Eval error: " (:error r)
-                                              (when (seq (:out r))
-                                                (str "\n" (:out r))))))
+      (assoc (base/fail branch
+                        (scrubbed (str prefix "Eval error: " (:error r)
+                                       (when (seq (:out r)) (str "\n" (:out r)))
+                                       ;; WHERE it ran, every time it fails.
+                                       ;; A branch that cannot tell a stale
+                                       ;; session from a broken file reads
+                                       ;; every eval failure as a defect in
+                                       ;; its own code and goes looking in the
+                                       ;; file — which is exactly what run
+                                       ;; f2014821 did for ten turns until a
+                                       ;; supervisor pass told it otherwise
+                                       ;; (karamazov-60c).
+                                       (when (:where r)
+                                         (str "\n\n"
+                                              (prompt/render "eval-error"
+                                                             {:where (:where r)}))))))
              ;; Same flag run-shell carries: a timed-out eval burned its
              ;; whole budget, and the loop weights it accordingly.
              :timeout? (= "timeout" (:error-type r))))))

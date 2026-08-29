@@ -236,13 +236,36 @@
                    {:ok true :value (pr-str value) :out (str out)})
                  (catch Throwable e
                    {:ok false
+                    ;; EVERY RUNG, because each of the ones above it has been
+                    ;; observed returning nothing usable.
+                    ;;
                     ;; not-empty, not `or`: `or` only falls through on NIL,
                     ;; and an exception carrying an EMPTY message handed the
-                    ;; model the whole of "Eval error: " and nothing else.
-                    ;; Live in run bd56a286, twice. (str e) at least names the
-                    ;; exception type, which is something to act on.
-                    :error (or (not-empty (str (ex-message e))) (str e))
+                    ;; model the whole of "Eval error: " and nothing else
+                    ;; (run bd56a286, twice).
+                    ;;
+                    ;; Then ex-data, which is where Jolt puts what it knows —
+                    ;; {:jolt/error {:type :unresolved-symbol :symbol … :suggestions […]}}
+                    ;; is strictly more actionable than any prose rendering of
+                    ;; it, and it survives when the message does not.
+                    ;;
+                    ;; `(str e)` LAST, not first, because a Jolt condition is
+                    ;; not a JVM Throwable and prints as the literal
+                    ;; `#object[:object]` — an error the model cannot read,
+                    ;; which is worse than a crash because it looks like an
+                    ;; answer. Four of those cost run f2014821 ten turns and
+                    ;; took a supervisor pass to unstick (karamazov-60c).
+                    :error (or (not-empty (str (ex-message e)))
+                               (some-> (ex-data e) not-empty pr-str)
+                               (not-empty (str (type e)))
+                               (str e))
                     :error-type (str (type e))
+                    ;; WHERE it ran. An eval failure is about the live image,
+                    ;; which may hold half-loaded state for a namespace whose
+                    ;; file on disk is perfectly correct — and nothing said so,
+                    ;; so a branch reads it as a defect in its own code and
+                    ;; goes looking in the file.
+                    :where (str ns*)
                     :out (str out)})
                  (finally
                    (try (__reader-features-set! features)

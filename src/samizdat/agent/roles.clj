@@ -90,25 +90,68 @@
   "A tool catalogue entry's opening line: `name({…})` hard against the margin."
   #"^([a-z_][a-z0-9_]*)\(\{")
 
+(def ^:private section-head
+  "A catalogue section: `### Doing work`. Sections are what group entries, and
+  a section's PROSE is written about the entries under it."
+  #"^###\s+(.*)$")
+
+(defn- sections
+  "The text split into `{:head line-or-nil :lines [...]}` at every `###`,
+  in order. Anything before the first heading is one headless section."
+  [lines]
+  (reduce (fn [acc line]
+            (if (re-find section-head line)
+              (conj acc {:head line :lines []})
+              (if (seq acc)
+                (update-in acc [(dec (count acc)) :lines] conj line)
+                [{:head nil :lines [line]}])))
+          []
+          lines))
+
+(defn- filter-entries
+  "One section's lines with every entry the role may not call removed, along
+  with the indented prose that belongs to it."
+  [lines allowed]
+  (:out (reduce (fn [{:keys [keep?] :as acc} line]
+                  (if-let [[_ nm] (re-find entry-head line)]
+                    ;; A new entry decides for itself and for the indented
+                    ;; prose that follows it.
+                    (let [k (contains? allowed nm)]
+                      (assoc acc :keep? k :out (cond-> (:out acc) k (conj line))))
+                    ;; Anything else belongs to the entry above it, unless we
+                    ;; are not inside one at all.
+                    (if (and (not keep?) (re-find #"^\s+\S" line))
+                      acc
+                      (assoc acc :out (conj (:out acc) line) :keep? true))))
+                {:out [] :keep? true}
+                lines)))
+
 (defn scope-catalogue
-  "`text` with every tool entry the role may not use removed, prose and all.
+  "`text` with every tool entry the role may not use removed, prose and all —
+  and any catalogue SECTION whose entries were all removed dropped whole.
+
+  The section rule is most of the win, and filtering entries alone missed it.
+  The harness-mutation section is nine tool entries wrapped in four paragraphs
+  explaining what cells and manifests are, why the loop belongs to the
+  project, and where the line between base and userspace falls. Strip the
+  entries and every word of that prose stays — thousands of characters telling
+  a role about a capability it has just been shown it does not have, which is
+  worse than telling it nothing.
+
+  HAD entries and lost them all, not merely `has none`: a section that never
+  documented a tool is prose standing on its own — the breadcrumb index, the
+  turn format — and belongs to every role.
+
   A nil role, or one the table does not name, gets the text unchanged."
   [text role]
   (if (or (nil? (spec role)) (= :all (surface role)))
     text
     (let [allowed (surface role)]
-      (->> (str/split-lines (str text))
-           (reduce (fn [{:keys [out keep?] :as acc} line]
-                     (if-let [[_ nm] (re-find entry-head line)]
-                       ;; A new entry decides for itself and for the indented
-                       ;; prose that follows it.
-                       (let [k (contains? allowed nm)]
-                         (assoc acc :keep? k :out (cond-> out k (conj line))))
-                       ;; Anything else belongs to the entry above it, unless
-                       ;; we are not inside one at all.
-                       (if (and (not keep?) (re-find #"^\s+\S" line))
-                         acc
-                         (assoc acc :out (conj out line) :keep? true))))
-                   {:out [] :keep? true})
-           :out
+      (->> (sections (str/split-lines (str text)))
+           (mapcat (fn [{:keys [head lines]}]
+                     (let [entries (keep #(second (re-find entry-head %)) lines)]
+                       (if (and head (seq entries) (not-any? allowed entries))
+                         nil
+                         (cond->> (filter-entries lines allowed)
+                           head (cons head))))))
            (str/join "\n")))))

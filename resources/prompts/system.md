@@ -197,11 +197,7 @@ shell({command})
     in your context or the output.
 ```
 
-### Changing {% if self-hosting %}the harness itself{% else %}the loop you run in{% endif %}
-
-The agentic loop you are running in is a graph of cells wired by a manifest, and **it belongs to this project, not to the harness.** The harness ships a template; this project holds its own copy, seeded from that template the first time it was read, and every edit you make is a new version of the copy. So a loop you improve here stays here — no other project is affected, and the shipped template is never written. That is what makes the loop yours to evolve.
-
-**Before you edit a cell or a manifest, `skill load mycelium`** — the guide to structuring them well.
+### Guidance you can load
 
 {{skills}}
 
@@ -211,6 +207,15 @@ skill({action, name?})
     matches its description in the list above. Only the one-line triggers are
     in your prompt, never the bodies, so a guide costs context only when you
     reach for it. `list` reprints the catalogue.
+```
+
+### Changing {% if self-hosting %}the harness itself{% else %}the loop you run in{% endif %}
+
+The agentic loop you are running in is a graph of cells wired by a manifest, and **it belongs to this project, not to the harness.** The harness ships a template; this project holds its own copy, seeded from that template the first time it was read, and every edit you make is a new version of the copy. So a loop you improve here stays here — no other project is affected, and the shipped template is never written. That is what makes the loop yours to evolve.
+
+**Before you edit a cell or a manifest, `skill load mycelium`** — the guide to structuring them well.
+
+```
 cells
     List the loop's cells as LOADED: id, effects (pure or what it touches), and
     where each came from — so you know what you can edit.

@@ -30,12 +30,36 @@
  {:doc "Builds the thing. Guided by its manifests through a task: claim it,
         declare what it will change, explore, land the files, ship. The only
         role that writes to the project."
-  :tools :all
-  ;; :all is a SENTINEL, never expanded — but steering the run is not part of
-  ;; doing the work in it. A branch that could cull its siblings or raise its
-  ;; own turn cap has stopped being an implementor. Denials are how a broad
-  ;; surface keeps a narrow carve-out without giving up the sentinel.
-  :denied #{"intervene"}
+  ;; EXPLICIT, not `:all`. The catalogue a role is shown is filtered to its
+  ;; surface, so `:all` meant the implementor's system prompt carried every
+  ;; tool the harness has — measured at 30,625 characters, of which 21,210 was
+  ;; the catalogue and 9,000 was the "Changing the harness itself" block
+  ;; alone: how to save a cell, version a manifest, edit a policy table,
+  ;; rewrite a prompt, reload the loop, introspect its wiring. Nine tools an
+  ;; implementor building a game has no use for.
+  ;;
+  ;; MEASURED BEFORE CUTTING, across runs 498450e1, a3566c73 and f2014821:
+  ;; 641 implementor turns, ZERO calls to any of the nine. The block was
+  ;; costing every implementor turn and buying nothing. What it displaced is
+  ;; visible in the same runs — the TDD instruction sat at character 34,720
+  ;; of a 39,595-character system message, behind all of it.
+  ;;
+  ;; This is the division roles.edn already states in the other direction:
+  ;; roles/supervisor.md says the supervisor does not write project code
+  ;; because doing so hides the loop problem behind a patch. The converse is
+  ;; the same argument — an implementor that retunes the loop mid-task is
+  ;; changing the thing it is being measured by, and the supervisor is the
+  ;; role with the run-wide view needed to do that responsibly.
+  ;;
+  ;; `intervene` needs no :denied carve-out any more: an explicit surface
+  ;; excludes by absence, which is what made the sentinel need one.
+  :tools #{"thesis" "branch_theses" "done" "give_up"
+           "plan" "eval" "doc" "complete" "manual"
+           "read_file" "grep" "lsp" "write_file" "edit_file" "patch"
+           "shell" "websearch" "skill"
+           "task"
+           "remember" "recall" "outcome" "forget" "message"
+           "fetch_artifact" "fetch_turn"}
   :prompt "roles/implementor"
   :sees #{:task :problem :shared-tree :skills}}
 

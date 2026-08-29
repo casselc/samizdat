@@ -148,6 +148,28 @@
    :requires [:config :conn :run-id]}
   (fn [{:keys [conn config run-id]} {:keys [branch] :as data}]
     (let [existing (workable conn run-id)
+          ;; WHAT DEFINES DELIVERY, on every task the board opens.
+          ;;
+          ;; The field existed, the schema had it, task-claimed.md renders it
+          ;; under "TESTS — what defines delivery", the task tool documents it
+          ;; as half the delegation spec, and the same template tells an owner
+          ;; to set it on any subtask IT creates. The board set :title, :body,
+          ;; :contract and :type and never this one, so the block — which is
+          ;; `{% if tests %}` — silently rendered as nothing on every task the
+          ;; harness ever handed anybody.
+          ;;
+          ;; That matters because of WHERE it lands. A claimed task's statement
+          ;; is pinned in the owner's context and does not age out (RFC-004),
+          ;; so this is the one place a delivery requirement sits beside the
+          ;; work for the whole task. The same instruction exists in
+          ;; roles/implementor and the repl-workflow skill — measured at
+          ;; character 34,720 of a 39,595-character system message, behind
+          ;; 30KB of tool catalogue. Run f2014821 wrote five namespaces and
+          ;; zero tests across 124 turns with both of those in its prompt.
+          ;;
+          ;; Prose, so a project working in a language the seam paragraph does
+          ;; not fit can reword it without a rebuild.
+          tests (wf/prompt-text "task-tests")
           guidance (str (:board/guidance data))
           given (->> (or (:subtasks data) (get-in config [:run :subtasks]))
                      (remove #(str/blank? (str %)))
@@ -164,17 +186,19 @@
             [:findings [{:title (title-of (str "Address the review findings: " guidance))
                          :body guidance
                          :contract guidance
+                         :tests tests
                          :type "feature"}]]
 
             (seq given)
             [:subtasks (mapv (fn [s] {:title (title-of s) :body (str s)
-                                      :contract (str s) :type "feature"})
+                                      :contract (str s) :tests tests
+                                      :type "feature"})
                              given)]
 
             :else
             (let [prob (str (:problem branch))]
               [:problem [{:title (title-of prob) :body prob :contract prob
-                          :type "feature"}]]))]
+                          :tests tests :type "feature"}]]))]
       (if (nil? specs)
         (assoc data :board/planned (count existing))
         (let [ids (mapv #(tasks/create! conn (assoc % :run-id run-id)) specs)]
@@ -301,8 +325,20 @@
                   (tasks/claim! conn task run-id bid))
                 (let [b (-> (state/new-branch
                              {:id bid :problem prob
-                              :messages (turn/initial-messages prob (owner-prompt))})
-                            (assoc :task {:id task :title (:title t)})
+                              ;; ROLE-SCOPED, and role-ENFORCED. The board is
+                              ;; the default implement stage and it passed
+                              ;; neither: the owner was shown every tool the
+                              ;; harness has (roles/scope-catalogue never ran)
+                              ;; and could call any of them (:outside-role-surface
+                              ;; needs a :role on the branch to refuse). The
+                              ;; machinery roles.edn describes was wired into
+                              ;; feature.clj's advisory roles only, so the one
+                              ;; role that writes code was the one role without
+                              ;; a scoped world.
+                              :messages (turn/initial-messages prob (owner-prompt)
+                                                               :implementor)})
+                            (assoc :task {:id task :title (:title t)}
+                                   :role :implementor)
                             (state/add-message
                              "user"
                              (str "[harness] "

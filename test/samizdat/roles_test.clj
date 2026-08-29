@@ -66,11 +66,48 @@
         (is (not (str/includes? s "write_file({path, content})")))
         (is (not (str/includes? s "Write a file."))
             "the prose under a dropped tool must go with it")))
-    (testing "an :all role keeps everything"
-      (is (= cat (roles/scope-catalogue cat :implementor))))
+    (testing "the :all sentinel keeps everything"
+      ;; No SHIPPED role is :all any more — the implementor was the last one
+      ;; and it is an explicit surface now — but the sentinel is still the
+      ;; documented meaning of an omitted :tools, so it is pinned against a
+      ;; stubbed table rather than against whichever role happens to have it.
+      (with-redefs [roles/table (constantly {:everything {:doc "d"}})]
+        (is (= :all (roles/surface :everything)))
+        (is (= cat (roles/scope-catalogue cat :everything)))))
     (testing "an unknown role is not silently given everything"
       (is (= cat (roles/scope-catalogue cat nil))
           "nil means no role scoping, which is the pre-existing behaviour"))))
+
+(deftest a-section-whose-tools-all-go-goes-with-them
+  ;; Filtering entries alone left the section's PROSE behind — four paragraphs
+  ;; about what cells and manifests are, sitting above nothing, in the prompt
+  ;; of a role that had just been shown it cannot call any of it. Measured at
+  ;; ~7,500 characters of the board owner's system message.
+  (let [cat (str "### Doing work\n"
+                 "\n"
+                 "read_file({path})\n"
+                 "    Read a file.\n"
+                 "\n"
+                 "### Changing the harness\n"
+                 "\n"
+                 "The loop is a graph of cells and it belongs to this project.\n"
+                 "\n"
+                 "cell({action})\n"
+                 "    Edit a cell.\n"
+                 "\n"
+                 "### Breadcrumb index\n"
+                 "\n"
+                 "A bounded one-line index is injected each turn.\n")
+        s (roles/scope-catalogue cat :implementor)]
+    (is (str/includes? s "### Doing work"))
+    (is (str/includes? s "read_file({path})"))
+    (testing "the emptied section goes, heading and narrative with it"
+      (is (not (str/includes? s "### Changing the harness")))
+      (is (not (str/includes? s "belongs to this project"))))
+    (testing "a section that never documented a tool is prose in its own right
+              and stays — the breadcrumb index belongs to every role"
+      (is (str/includes? s "### Breadcrumb index"))
+      (is (str/includes? s "bounded one-line index")))))
 
 (deftest a-role-cannot-be-given-a-tool-that-does-not-exist
   ;; The same class of bug as `patch` missing from :file-write: a surface
