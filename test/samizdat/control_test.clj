@@ -159,6 +159,31 @@
         (is (= "completed" (:status (runs/get-run c rid))))
         (finally (swap! api-control/active dissoc rid))))))
 
+(deftest a-directive-against-an-ENDED-run-is-refused-whatever-ended-it
+  ;; The rule this enforces is already written at the call site: a directive
+  ;; against a run that has ended would sit `pending` forever, showing in the
+  ;; UI as an intervention that will never resolve (blt.38). The set that
+  ;; decided "has ended" listed completed/aborted/failed and MISSED the other
+  ;; two terminal statuses.
+  ;;
+  ;; `interrupted` is written by startup reconciliation — every row still
+  ;; saying `running` when the process comes up is a leftover, since the beam
+  ;; only ever runs in this process. Those runs are as over as an aborted one.
+  ;;
+  ;; `exhausted` is new here: the beam's exhaust path used to record :failed,
+  ;; which is also what a THROWN error records, so "the harness broke" and
+  ;; "the work honestly ran out of budget" were the same row (karamazov-emw).
+  (with-db [c]
+    (doseq [st ["completed" "aborted" "failed" "interrupted" "exhausted"]]
+      (let [rid (runs/start-run! c {:problem "p"})]
+        (runs/finish-run! c rid (keyword st) nil)
+        (let [r (api-control/intervene! c rid {:kind "message"
+                                           :payload {:text "do a thing"}})]
+          (is (= 409 (:status r))
+              (str "a directive against a " st " run is refused, not queued"))
+          (is (empty? (interventions/pending c rid))
+              (str "and nothing is left pending on a " st " run")))))))
+
 (deftest an-unknown-intervention-kind-is-a-400-not-a-500
   ;; provenance R3-12: submit! throws on an unknown kind, and intervene! let it
   ;; fly through to the server's catch-all 500. A bad request is the
