@@ -44,11 +44,13 @@
             [samizdat.agent.phases :as phases]
             [samizdat.agent.state :as state]
             [samizdat.agent.storm :as storm]
-            [samizdat.agent.tools :as tools]
-            [samizdat.agent.skills :as skills]
-            [samizdat.llm.message :as message]
-            [samizdat.prompt :as prompt]
-            [samizdat.session :as session]
+             [samizdat.agent.tools :as tools]
+             [samizdat.agent.skills :as skills]
+             [samizdat.llm.adapter :as llm-adapter]
+             [samizdat.llm.message :as message]
+             [samizdat.prompt :as prompt]
+             [samizdat.security.secrets :as secrets]
+             [samizdat.session :as session]
             [samizdat.store.artifacts :as artifacts]
             [samizdat.store.failures :as failures]
             [samizdat.store.interventions :as interventions]
@@ -268,6 +270,42 @@
 
 ;; --- one turn ---------------------------------------------------------------
 
+(defn- sha256-hex
+  [^String s]
+  (apply str (map #(format "%02x" %)
+                  (.digest (java.security.MessageDigest/getInstance "SHA-256")
+                           (.getBytes s "UTF-8")))))
+
+(defn nonsecret-llm-config
+  "The llm config as the inference provenance layer may see it: entries with
+  credential-shaped names or values are removed rather than digested, so an
+  epoch's realization digest never becomes a side channel for a key."
+  [llm-config]
+  (into {}
+        (remove (fn [[k v]]
+                  (or (secrets/sensitive-name? (name k))
+                      (and (string? v) (secrets/sensitive-value? v)))))
+        llm-config))
+
+(defn inference-realization-digest
+  "The NONSECRET config digest of an InferenceEpoch's safe realization: what a
+  provider call actually ran against, minus everything credential-shaped.  Two
+  calls whose realizations match share one epoch; any change to the digested
+  config opens a new one."
+  [llm-config]
+  (sha256-hex (binding [*print-length* nil *print-level* nil]
+                (pr-str (into (sorted-map) (nonsecret-llm-config llm-config))))))
+
+(defn adapter-coordinate
+  "A stable name for the adapter half of a safe realization.  Real adapters
+  answer their display name; anything else (a test stub) falls back to its
+  type, which is still one stable string per adapter implementation."
+  [adapter]
+  (if (nil? adapter)
+    ""
+    (try (llm-adapter/display-name adapter)
+         (catch Throwable _ (pr-str (class adapter))))))
+
 (defn call-model
   "One model call for `branch`, through the injected inference seam.
 
@@ -275,22 +313,33 @@
   `complete` is an argument — this is the branch-shaped wrapper the cells and
   the beam call. Same behaviour as before: one retry at a doubled budget when
   the response hit the token cap before emitting a tool call, and a provider
-  failure returned as {:ok false :error} rather than thrown."
+  failure returned as {:ok false :error} rather than thrown.
+
+  The call runs under an InferenceEpoch fixed BEFORE the provider seam fires.
+  The epoch is the run's still-open one whenever the safe realization —
+  provider, model, adapter and the nonsecret config digest — is unchanged, so
+  unchanged calls share one durable epoch; a realization change (a provider
+  switch on resume) closes the open epoch and begins a new one, and the call's
+  returned :inference-epoch-id is what its turn rows, eval rows and receipts
+  reference."
   ([ctx branch]
    (call-model ctx branch (or (:current-turn branch) 0)))
   ([ctx branch turn]
    (let [binding (tools/bounded-binding ctx)
-         epoch-id (when (and (:conn ctx) (:run-id ctx)) (str (random-uuid)))
-         _ (when epoch-id
-             (inference-store/begin!
-              (:conn ctx)
-              {:id epoch-id :run-id (:run-id ctx) :branch-id (:id branch)
-               :turn turn
-               :provider (get-in ctx [:llm-config :provider])
-               :model (get-in ctx [:llm-config :model])
-               :binding-id (:binding/id binding)
-               :spec-id (get-in binding [:spec :spec/coordinate])
-               :runtime (get-in binding [:spec :runtime-coordinate])}))
+         epoch (when (and (:conn ctx) (:run-id ctx))
+                 (inference-store/ensure!
+                  (:conn ctx)
+                  {:id (str (random-uuid))
+                   :run-id (:run-id ctx) :branch-id (:id branch) :turn turn
+                   :provider (get-in ctx [:llm-config :provider])
+                   :model (get-in ctx [:llm-config :model])
+                   :adapter (adapter-coordinate (:llm-adapter ctx))
+                   :config-digest (inference-realization-digest
+                                   (:llm-config ctx))
+                   :binding-id (:binding/id binding)
+                   :spec-id (get-in binding [:spec :spec/coordinate])
+                   :runtime (get-in binding [:spec :runtime-coordinate])}))
+         epoch-id (some-> epoch :id str)
          call ((infer/complete-fn ctx) (infer/of-branch branch))]
      (cond-> call epoch-id (assoc :inference-epoch-id epoch-id)))))
 

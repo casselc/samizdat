@@ -7,7 +7,7 @@
 - Upstream at the base: `effcf7d`
 - Bounded Jolt source: `4af2362176160f2ed0e366689d7232b1a38adfec`
 - SCI: `32d62a5136ad3dc148588752f5bcc4cc30b14752` / `0.13.53`
-- New schema: migrations `v21` through `v24`, after the M2 evaluator at `v20`
+- New schema: migrations `v21` through `v25`, after the M2 evaluator at `v20`
 
 This change is in Samizdat mechanism (`src/`), runtime-loaded policy/behavior
 (`resources/`), and tests. It does not edit Jolt core, its reader/host
@@ -21,19 +21,21 @@ Using `/usr/local/bin/scheme` and the pinned Jolt executable:
 
 ```text
 ordinary suite (jolt -M:test):
-  1559 tests, 6182 assertions, 0 failures, 0 errors
+  1564 tests, 6216 assertions, 0 failures, 0 errors
 
 bounded evaluator lane (SAMIZDAT_BOUNDED_TEST=1, pinned local SCI):
-  24 tests, 291 assertions, 0 failures, 0 errors
+  25 tests, 294 assertions, 0 failures, 0 errors
 
-focused TurnLease lane:
-  8 tests, 46 assertions, 0 failures, 0 errors
-
-focused authority/provenance lane:
-  5 tests, 38 assertions, 0 failures, 0 errors
+focused M3 authority, provenance, and TurnLease lane:
+  47 tests, 217 assertions, 0 failures, 0 errors
 ```
 
-`git diff --check` is clean. No commit or push was made.
+`git diff --check` is clean. The runs used the pinned
+`../jolt-m2-verify-closure` checkout because sibling `../jolt` cannot resolve
+`jolt.publish`; `bin/js1-m3` pins and checks that usable checkout, SCI, Chez,
+and a clean Samizdat tree before it emits exact evidence. The implementation
+worktree is intentionally uncommitted, so the exact gate refuses to label these
+working-tree runs as immutable evidence. No commit or push was made.
 
 ## Durable evaluator recovery
 
@@ -50,6 +52,9 @@ focused authority/provenance lane:
 - The bounded recovery test persists a definition, reconstructs from only the
   run record and durable history, and observes that definition in the fresh
   context.
+- Migration `v25` persists exact trusted-orientation bytes and a SHA-256
+  digest. A zero-history recovery test changes the prompt renderer and verifies
+  reconstruction installs persisted bytes, never the drifted prompt.
 
 This is a closed-world provenance check: accepting a local source hash while
 silently changing context defaults, authority, runtime, or history is not a
@@ -114,10 +119,20 @@ progress.
   binding/spec/runtime coordinates immediately before a branch provider call.
   The eventual turn row references that epoch, including provider-error and
   no-call settlements.
+- Migration `v25` records adapter and nonsecret realization digest. Calls with
+  the same realization reuse an open epoch; a provider switch closes it and
+  creates its successor. Epoch streams are insertion ordered, not UUID ordered,
+  so same-millisecond switches retain causal order.
+- Eval rows and intent/outcome receipts carry the dispatch epoch id. The focused
+  gate exercises provider epoch -> tool dispatch -> eval -> exact receipt.
 - Evaluator evidence exposed by the run API is a projection of durable binding,
   evaluation, receipt, completion, and epoch rows. The evidence path imports no
   evaluator namespace, allocates no SCI context, replays no source, and invokes
   no project operation.
+- Bounded requests are refused before run creation or resume when the selected
+  manifest is noniterating, because whole-run manifests bypass TurnLease. The
+  focused gate also covers controller-authorized human `extend`, pre-revocation
+  effects, and launched `done` verification followthrough.
 
 ## Nonclaims
 

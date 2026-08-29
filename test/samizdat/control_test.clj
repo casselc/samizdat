@@ -228,14 +228,17 @@
   {:id id :status :active :messages [] :turn 1})
 
 (deftest queued-extend-is-rejected-by-the-beam-drain
+  ;; A queued extend carries no budget authority of its own: without a
+  ;; controller token the beam drain routes it through the trusted controller
+  ;; transaction, which refuses it with the controller's own words.
   (with-db [c]
     (let [rid (runs/start-run! c {:problem "p"})]
-      (interventions/submit! c rid {:kind "extend" :payload {:turns 20}})
+      (interventions/submit! c rid {:kind "extend" :payload {:max_turns 20}})
       (let [r (drain c rid [(branch "B1")])]
         (is (nil? (:max-turns r)))
         (let [d (first (interventions/history c rid))]
           (is (= "rejected" (:status d)))
-          (is (str/includes? (:disposition d) "trusted human controller"))))
+          (is (str/includes? (:disposition d) "controller-minted authority"))))
       (testing "the round cap can still carry a controller-raised durable cap"
         (is (= 60 (beam/round-max-turns {:max-turns 40} {:max-turns 60})))
         (is (= 40 (beam/round-max-turns {:max-turns 40} {})))))))
@@ -251,7 +254,7 @@
         (is (nil? (:max-turns r)))
         (is (= "rejected" (:status d)))
         (is (str/includes? (str (:disposition d))
-                           "trusted human controller"))))))
+                           "max_turns must be positive"))))))
 
 (deftest fork-becomes-a-pending-thesis-the-spawn-cell-already-honours
   ;; No scheduler machinery of its own: :beam/spawn turns a branch's

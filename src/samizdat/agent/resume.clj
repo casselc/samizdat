@@ -276,10 +276,17 @@
                            (:status run) ")")
                       {:run-id run-id :status (:status run)})))
     (let [max-turns (:max_turns run)
-          width (:beam_width run)
-          root (or (get-in config [:run :root]) (System/getProperty "user.dir"))
-          durable-binding (evaluator-store/binding-for-run conn run-id)
-          _ (when (and durable-binding (> width 1))
+           width (:beam_width run)
+           root (or (get-in config [:run :root]) (System/getProperty "user.dir"))
+           durable-binding (evaluator-store/binding-for-run conn run-id)
+           loop-nm (workflow/active-loop-name config)
+           {turn-wf :compiled iterating? :iterating?}
+           (workflow/compile-turn-loop conn loop-nm)
+           _ (when (and durable-binding (not iterating?))
+               (throw (ex-info "A bounded evaluator requires an iterating turn workflow"
+                               {:samizdat.evaluator/error :bounded-noniterating-workflow
+                                :workflow loop-nm})))
+           _ (when (and durable-binding (> width 1))
               (throw (ex-info
                       "A durable bounded EvaluatorBinding cannot resume across multiple branches"
                       {:samizdat.evaluator/error :multi-branch-not-supported
@@ -305,14 +312,7 @@
           ;; and needs the same file root; the eval session is genuinely new,
           ;; because the old process's namespace died with it and nothing in
           ;; the journal can rebuild an in-image binding.
-          ;; The same compiled per-turn manifest run! drives, recompiled here:
-          ;; a resume enters run-rounds directly, so without this it would
-          ;; silently fall back to the bare composition and finish a critic or
-          ;; feature run on the factory loop.
-          loop-nm (workflow/active-loop-name config)
-          {turn-wf :compiled iterating? :iterating?}
-          (workflow/compile-turn-loop conn loop-nm)
-          ctx {:conn conn :run-id run-id :config config :problem (:problem run)
+           ctx {:conn conn :run-id run-id :config config :problem (:problem run)
                :llm-adapter llm-adapter :llm-config llm-config
                :max-turns max-turns :beam? (> width 1) :beam-width width
                :root root

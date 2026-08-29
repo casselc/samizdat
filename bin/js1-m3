@@ -1,0 +1,76 @@
+#!/bin/sh
+# Exact JS1 M3 closure gates. Ordinary Samizdat never invokes this lane.
+set -eu
+
+JOLT_SHA=f8899905d98a0abdcc6b4ae61dfd5c8bdb9c7277
+SCI_SHA=32d62a5136ad3dc148588752f5bcc4cc30b14752
+SCI_VERSION=0.13.53
+CHEZ=${JOLT_CHEZ:-/usr/local/bin/scheme}
+ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd -P)
+JOLT=${JOLT_HOME:-"$ROOT/../jolt-m2-verify-closure"}
+
+fail() {
+  printf 'js1-m3: %s\n' "$*" >&2
+  exit 1
+}
+
+sha() { git -C "$ROOT" rev-parse HEAD; }
+
+check() {
+  [ -x "$JOLT/bin/jolt" ] || fail "no Jolt checkout at $JOLT"
+  [ -x "$CHEZ" ] || fail "no Chez at $CHEZ (set JOLT_CHEZ)"
+  [ "$(git -C "$JOLT" rev-parse HEAD)" = "$JOLT_SHA" ] \
+    || fail "Jolt is not pinned at $JOLT_SHA"
+  [ "$(git -C "$JOLT/vendor/sci" rev-parse HEAD)" = "$SCI_SHA" ] \
+    || fail "SCI is not pinned at $SCI_SHA"
+  [ "$(tr -d '\r\n' < "$JOLT/vendor/sci/resources/SCI_VERSION")" = "$SCI_VERSION" ] \
+    || fail "SCI version is not $SCI_VERSION"
+  dirty=$(git -C "$ROOT" status --porcelain --untracked-files=no --ignore-submodules=all)
+  [ -z "$dirty" ] || fail "tested Samizdat checkout has tracked modifications; exact evidence refused"
+  printf 'Samizdat %s\nJolt %s\nSCI %s / %s\n' "$(sha)" "$JOLT_SHA" "$SCI_SHA" "$SCI_VERSION"
+}
+
+run_ns() {
+  label=$1
+  shift
+  printf '\n== js1-m3: %s ==\n' "$label"
+  reqs='(quote clojure.test)'
+  nses=''
+  for ns in "$@"; do
+    reqs="$reqs (quote $ns)"
+    nses="$nses (quote $ns)"
+  done
+  (cd "$ROOT" && JOLT_CHEZ="$CHEZ" "$JOLT/bin/jolt" -A:test -e "(require $reqs)
+    (let [{:keys [fail error] :as r} (clojure.test/run-tests$nses)]
+      (println r) (System/exit (if (pos? (+ fail error)) 1 0)))")
+}
+
+focused() {
+  run_ns 'M3 authority, provenance, and lease closure' \
+    samizdat.m3-controller-test samizdat.control-test samizdat.agent-turn-lease-test
+}
+
+bounded() {
+  printf '\n== js1-m3: pinned bounded evaluator ==\n'
+  (cd "$ROOT" && SAMIZDAT_BOUNDED_TEST=1 JOLT_CHEZ="$CHEZ" "$JOLT/bin/jolt" \
+    -Sdeps "{:deps {borkdude/sci {:local/root \"$JOLT/vendor/sci\"}}}" \
+    -A:test -e '(require (quote clojure.test) (quote samizdat.evaluator-test))
+      (let [{:keys [fail error] :as r} (clojure.test/run-tests (quote samizdat.evaluator-test))]
+        (println r) (System/exit (if (pos? (+ fail error)) 1 0)))')
+}
+
+full() {
+  printf '\n== js1-m3: ordinary suite ==\n'
+  (cd "$ROOT" && ulimit -n 1024 2>/dev/null && JOLT_CHEZ="$CHEZ" "$JOLT/bin/jolt" -M:test) \
+    || fail 'ordinary suite failed'
+}
+
+case ${1:-} in
+  check) check ;;
+  sha) printf 'Samizdat %s\n' "$(sha)" ;;
+  focused) check; focused ;;
+  bounded) check; bounded ;;
+  full) check; full ;;
+  test) check; focused; bounded; full ;;
+  *) printf 'usage: bin/js1-m3 check|sha|focused|bounded|full|test\n' >&2; exit 2 ;;
+esac

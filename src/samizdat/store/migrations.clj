@@ -663,7 +663,33 @@
   ;; minting fresh authority while stale work may still exist.
   ["ALTER TABLE runs ADD COLUMN terminal_reason TEXT"])
 
+(def ^:private v25
+  ;; M3 closure records.
+  ;;
+  ;; The durable binding carries the EXACT trusted-orientation bytes and their
+  ;; digest, so resume restores what the run was actually oriented on instead of
+  ;; re-rendering a mutable prompt resource (a drifted prompt must not be able
+  ;; to change a resumed run's trusted surface).
+  ;;
+  ;; Evaluator eval rows and receipts carry the InferenceEpoch id of the model
+  ;; call whose tool dispatch produced them, closing the causal chain from
+  ;; provider invocation to semantic operation.
+  ;;
+  ;; An InferenceEpoch spans every provider call with an UNCHANGED safe
+  ;; realization — provider, model, adapter and a digest of the nonsecret llm
+  ;; config.  adapter/config_digest record that realization; closed_at closes an
+  ;; epoch the moment the realization changes (a provider switch on resume), so
+  ;; at most one epoch per run is open and reuse is a durable fact rather than
+  ;; an inference from timestamps.
+  ["ALTER TABLE evaluator_bindings ADD COLUMN orientation TEXT"
+   "ALTER TABLE evaluator_bindings ADD COLUMN orientation_digest TEXT"
+   "ALTER TABLE evaluator_evals ADD COLUMN inference_epoch_id TEXT"
+   "ALTER TABLE evaluator_receipts ADD COLUMN inference_epoch_id TEXT"
+   "ALTER TABLE inference_epochs ADD COLUMN adapter TEXT NOT NULL DEFAULT ''"
+   "ALTER TABLE inference_epochs ADD COLUMN config_digest TEXT NOT NULL DEFAULT ''"
+   "ALTER TABLE inference_epochs ADD COLUMN closed_at TEXT"])
+
 (def migrations
   "Ordered. Index 0 is migration 1; PRAGMA user_version holds the count applied."
   [v1 v2 v3 v4 v5 v6 v7 v8 v9 v10 v11 v12 v13 v14 v15 v16 v17 v18 v19 v20
-   v21 v22 v23 v24])
+   v21 v22 v23 v24 v25])

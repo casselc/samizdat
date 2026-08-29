@@ -803,21 +803,36 @@
          "\n\n" (message {:orientation-guidance true
                           :orientation-develop develop?}))))
 
+(defn orientation-digest
+  "The content coordinate of trusted-orientation bytes.  The durable binding
+  persists bytes and digest together, so a resume can restore the exact bytes
+  and verify them without consulting the (mutable) prompt resource that first
+  rendered them."
+  [^String orientation]
+  (str "sha256:" (bytes-digest (.getBytes orientation "UTF-8"))))
+
 (declare verify-binding!)
 
 (defn- binding-value
-  [work-id spec observer instance]
-  (let [instance-id (:instance-id observer)
-        binding {:samizdat.evaluator/kind :binding
-                 :binding/id (str "bind:" work-id)
-                 :work-id (str work-id)
-                 :instance/id instance-id
-                 :spec spec
-                 :instance (atom instance)
-                 :owner (atom nil)
-                 :poisoned (atom false)
-                 :world-observer (:world-observer observer)}]
-    (assoc binding :trusted-orientation (trusted-orientation binding))))
+  "One binding value.  Fresh mints render the trusted orientation from the
+  prompt resources; `persisted-orientation` (a resume) installs the exact bytes
+  restored from the durable binding instead — never a re-render."
+  ([work-id spec observer instance]
+   (binding-value work-id spec observer instance nil))
+  ([work-id spec observer instance persisted-orientation]
+   (let [binding {:samizdat.evaluator/kind :binding
+                  :binding/id (str "bind:" work-id)
+                  :work-id (str work-id)
+                  :instance/id (:instance-id observer)
+                  :spec spec
+                  :instance (atom instance)
+                  :owner (atom nil)
+                  :poisoned (atom false)
+                  :world-observer (:world-observer observer)}
+         orientation (or persisted-orientation (trusted-orientation binding))]
+     (assoc binding
+            :trusted-orientation orientation
+            :orientation-digest (orientation-digest orientation)))))
 
 (defn bind!
   "Create one controller-minted EvaluatorBinding. The profile comes from the
@@ -834,7 +849,9 @@
 (defn persist-binding!
   "Persist a minted binding as the run's exact reconstruction authority.
   Must be called before the first model turn; idempotent only for an identical
-  binding/run pair."
+  binding/run pair.  The exact trusted-orientation bytes and their digest are
+  part of the record: a later resume restores THESE bytes and checks the
+  digest rather than re-rendering a prompt that may have drifted."
   [conn run-id binding]
   (verify-binding! binding)
   (store/register-binding!
@@ -844,7 +861,9 @@
          :instance-id (:instance/id binding)
          :spec-id (get-in binding [:spec :spec/coordinate])
          :context-spec (get-in binding [:spec :context-spec])
-         :runtime (get-in binding [:spec :runtime-coordinate])})
+         :runtime (get-in binding [:spec :runtime-coordinate])
+         :orientation (:trusted-orientation binding)
+         :orientation-digest (:orientation-digest binding)})
   binding)
 
 (defn describe [binding]
@@ -1010,7 +1029,13 @@
   exact trusted root, current RuntimeCoordinate, deterministic spec/binding/
   instance identities, and then the whole durable history is replayed into one
   newly allocated SCI context.  History validation happens before allocation;
-  replay consumes receipts and performs zero real world operations."
+  replay consumes receipts and performs zero real world operations.
+
+  The trusted orientation is RESTORED, never re-rendered: the durable record's
+  exact bytes are checked against its own digest and installed as the resumed
+  binding's orientation, so a prompt resource that drifted between the crash
+  and the resume cannot change a bounded run's trusted surface.  A record with
+  missing bytes or a mismatched digest is a closed failure."
   [conn run-id root]
   (let [row (or (store/binding-for-run conn run-id)
                 (fail! :binding-missing
@@ -1019,15 +1044,26 @@
         context (:context_spec row)
         expected-context-coordinate
         (sandbox/canonical-coordinate (dissoc context :context/coordinate))
-        current-root (canonical-root root)]
+        current-root (canonical-root root)
+        orientation (:orientation row)]
     (when-not (= (:context/coordinate context) expected-context-coordinate)
        (fail! :context-coordinate-mismatch
               (message {:context-coordinate-mismatch true})
-             {:run-id run-id}))
+              {:run-id run-id}))
     (when-not (= current-root (:context/root context))
        (fail! :root-mismatch
               (message {:root-mismatch true})
-             {:durable (:context/root context) :current current-root}))
+              {:durable (:context/root context) :current current-root}))
+    (when (or (str/blank? (str orientation))
+              (str/blank? (str (:orientation_digest row))))
+      (fail! :orientation-missing
+             (message {:orientation-missing true})
+             {:run-id run-id}))
+    (when-not (= (:orientation_digest row) (orientation-digest orientation))
+      (fail! :orientation-digest-mismatch
+             (message {:orientation-digest-mismatch true})
+             {:run-id run-id
+              :digest (:orientation_digest row)}))
     (let [runtime (runtime-coordinate)]
       (when-not (= runtime (:runtime row))
         (fail! :runtime-mismatch
@@ -1045,11 +1081,12 @@
                {:expected expected :actual actual}))
       ;; A shell with no SCI context. rebuild-internal! validates all history
       ;; coordinates/pending states first, then allocates exactly one fresh
-      ;; context and replays every committed evaluation into it.
+      ;; context and replays every committed evaluation into it.  The
+      ;; orientation is the durable record's own bytes.
       (let [binding (binding-value work-id spec
                                    {:instance-id (:instance_id row)
                                     :world-observer nil}
-                                   nil)]
+                                   nil orientation)]
         (rebuild-internal! conn binding)))))
 
 (defn rebuild! [conn binding]
@@ -1065,7 +1102,11 @@
     :token — a caller-held Jolt interrupt token (a later TurnLease's). It may
              only NARROW the evaluation: the spec's :context/timeout-ms
              ceiling still applies on a private per-evaluation token, and the
-             caller's token is never fired by the spec's timer."
+             caller's token is never fired by the spec's timer.
+    :inference-epoch-id — the InferenceEpoch of the model call whose tool
+             dispatch produced this evaluation. Recorded on the eval row and
+             on every intent/outcome receipt, closing the causal chain from
+             provider invocation to semantic operation."
   ([conn binding source] (evaluate-recorded! conn binding source nil))
   ([conn binding source opts]
    (verify-binding! binding)
@@ -1076,23 +1117,26 @@
        (fail! :instance-busy (message {:evaluator-busy true}) {}))
      (try
        (let [instance @(:instance binding)
-             eval-id (store/begin! conn (assoc (identity-map binding) :source source))
-              hook (:hook instance)
-              effect-permit! (or (:effect-permit! opts) (fn [f] (f)))]
-          (reset! hook
-                  (fn [op args run]
-                    ;; The durable intent append is the semantic operation's
-                    ;; initiation/TurnLease linearization point.  The ensuing
-                    ;; bounded read/edit runs outside the lease monitor; once
-                    ;; initiated it is not retroactively unauthorized.
-                    (let [seqn (effect-permit!
-                                #(store/intent! conn eval-id op args))]
+             epoch-id (:inference-epoch-id opts)
+             eval-id (store/begin! conn (assoc (identity-map binding) :source source
+                                               :inference-epoch-id epoch-id))
+             hook (:hook instance)
+             effect-permit! (or (:effect-permit! opts) (fn [f] (f)))]
+         (reset! hook
+                 (fn [op args run]
+                   ;; The durable intent append is the semantic operation's
+                   ;; initiation/TurnLease linearization point.  The ensuing
+                   ;; bounded read/edit runs outside the lease monitor; once
+                   ;; initiated it is not retroactively unauthorized.
+                   (let [seqn (effect-permit!
+                               #(store/intent! conn eval-id op args epoch-id))]
                      (try
                        (let [value (sandbox/inert (run))]
-                         (store/outcome! conn eval-id seqn {:result value})
+                         (store/outcome! conn eval-id seqn {:result value} epoch-id)
                          value)
                        (catch Throwable e
-                         (store/outcome! conn eval-id seqn {:error (ex-message e)})
+                         (store/outcome! conn eval-id seqn {:error (ex-message e)}
+                                         epoch-id)
                          (throw e))))))
          (try
            (let [value (evaluate-guarded! (:state instance) source

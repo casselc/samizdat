@@ -81,10 +81,16 @@
   {:doc "Phase policy first, then the tool, then the branch bookkeeping the
         outcome demands (outcome counters, artifact banking, repeat-failure
         escalation)."
-   :effects [:db :fs :proc]
-   :requires []}
-  (fn [ctx {:keys [branch turn parsed] :as data}]
-    (merge data (turn/tool-step ctx branch turn parsed))))
+    :effects [:db :fs :proc]
+    :requires []}
+  (fn [ctx {:keys [branch turn parsed call] :as data}]
+    ;; The model call's InferenceEpoch rides the dispatch ctx, so the
+    ;; evaluator's eval rows and receipts record which provider invocation
+    ;; produced them.
+    (merge data (turn/tool-step (if-let [epoch-id (:inference-epoch-id call)]
+                                  (assoc ctx :inference-epoch-id epoch-id)
+                                  ctx)
+                                branch turn parsed))))
 
 (cell/defcell :journal/record
   {:doc "The durable record of the turn: the turn row, any artifact and its

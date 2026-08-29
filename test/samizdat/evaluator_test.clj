@@ -27,6 +27,7 @@
             [samizdat.security.policy :as policy]
             [samizdat.store.db :as db]
             [samizdat.store.evaluator :as store]
+            [samizdat.store.inference :as inference]
             [samizdat.store.journal :as journal]
             [samizdat.store.runs :as runs]
             [samizdat.workflow :as workflow]))
@@ -325,16 +326,48 @@
                                             :max-turns 3})
               binding (bind! root run-id {})]
           (persist! conn run-id binding)
-          (is (= 41 (:value (evaluate! conn binding
-                                      "(do (def durable-x 41) durable-x)"))))
-          (let [rebuilt (reconstruct! conn run-id root)]
-            (is (= (:binding/id binding) (:binding/id rebuilt)))
-            (is (= (:instance/id binding) (:instance/id rebuilt)))
-            (is (= 42 (:value (evaluate! conn rebuilt "(inc durable-x)"))))
-            (is (= (:context/coordinate
-                    (get-in binding [:spec :context-spec]))
-                   (:context/coordinate
-                    (get-in rebuilt [:spec :context-spec]))))))))))
+          ;; A durable binding is an M3 run: every evaluation under it must
+          ;; carry the InferenceEpoch of the model call that dispatched it.  The
+          ;; epoch resolves to this exact binding/spec/runtime, so one epoch
+          ;; serves both evaluations (reconstruct! restores the same identity).
+          (let [epoch-id "epoch:durable-binding"
+                _ (inference/begin!
+                   conn {:id epoch-id :run-id (str run-id) :branch-id "B1" :turn 1
+                         :provider :stub :model "m"
+                         :binding-id (:binding/id binding)
+                         :spec-id (get-in binding [:spec :spec/coordinate])
+                         :runtime (get-in binding [:spec :runtime-coordinate])})]
+            (is (= 41 (:value (evaluate! conn binding
+                                        "(do (def durable-x 41) durable-x)"
+                                        {:inference-epoch-id epoch-id}))))
+            (let [rebuilt (reconstruct! conn run-id root)]
+              (is (= (:binding/id binding) (:binding/id rebuilt)))
+              (is (= (:instance/id binding) (:instance/id rebuilt)))
+              (is (= 42 (:value (evaluate! conn rebuilt "(inc durable-x)"
+                                           {:inference-epoch-id epoch-id}))))
+              (is (= (:context/coordinate
+                      (get-in binding [:spec :context-spec]))
+                     (:context/coordinate
+                      (get-in rebuilt [:spec :context-spec])))))))))))
+
+(deftest reconstruction-restores-persisted-orientation-with-zero-history
+  (when bounded?
+    (let [{:keys [bind! persist! reconstruct!]} (evaluator-api)]
+      (with-root [root conn]
+        (let [run-id (runs/start-run! conn {:problem "orientation recovery"
+                                            :max-turns 3})
+              binding (bind! root run-id {})
+              persisted (:trusted-orientation binding)]
+          (persist! conn run-id binding)
+          (is (empty? (store/history conn (:binding/id binding))))
+          ;; A changed prompt renderer must not affect a zero-history resume:
+          ;; reconstruct! installs the durable bytes before allocating SCI.
+          (with-redefs-fn {(requiring-resolve 'samizdat.evaluator/trusted-orientation)
+                           (constantly "DRIFTED PROMPT")}
+            (fn []
+              (let [rebuilt (reconstruct! conn run-id root)]
+                (is (= persisted (:trusted-orientation rebuilt)))
+                (is (not= "DRIFTED PROMPT" (:trusted-orientation rebuilt)))))))))))
 
 (deftest no-network-current-turn-smoke
   (when bounded?

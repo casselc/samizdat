@@ -72,6 +72,7 @@
             [samizdat.agent.state :as state]
             [samizdat.agent.tools.base :as base]
             [samizdat.prompt :as prompt]
+            [samizdat.security.controller :as controller]
             [samizdat.session :as session]
             [samizdat.watch :as watch]
             [samizdat.repl :as repl]
@@ -357,7 +358,7 @@
   the control API promising something the scheduler would not do. `:max-turns`
   and `:paused?` are nil when no directive touched them, so the caller keeps
   whatever it had."
-  [{:keys [conn run-id]} branches directives turn]
+  [{:keys [conn run-id config] :as ctx} branches directives turn]
   (reduce
    (fn [{:keys [branches] :as acc} d]
      (let [kind (:kind d)
@@ -448,14 +449,43 @@
                                    %)
                                 bs))))))
 
-         "extend"
-         ;; Queue data is model/human-visible steer, not budget authority. The
-         ;; trusted controller route performs the atomic cap/audit/reopen act.
-         (do (interventions/resolve!
-              conn run-id (:id d) :rejected
-              (prompt/render "controller-safety" {:queued-extension true})
-              turn)
-             acc)
+          "extend"
+          ;; The safe boundary DOES apply a human extend — through the SAME
+          ;; trusted controller transaction the HTTP control surface uses, not
+          ;; a parallel scheduler path.  The intervention id is the
+          ;; idempotency key, so a crash between the transaction and this
+          ;; resolve replays rather than double-applies; the new cap is
+          ;; validated against the DURABLE runs row inside that one
+          ;; transaction (the durable max observed), never against this
+          ;; process's immutable ctx copy.  Refusals resolve rejected with the
+          ;; controller's own words — including the no-token case, which keeps
+          ;; pointing the operator at the trusted route.
+          (let [payload (directive-payload d)
+                asked (or (:max_turns payload) (:max-turns payload))
+                parsed-cap (when (some? asked)
+                             (try (Long/parseLong (str asked))
+                                  (catch Throwable _ ::malformed)))
+                result (if (or (= ::malformed parsed-cap)
+                               (not (and (integer? parsed-cap) (pos? parsed-cap))))
+                         {:ok false :code :bad-request
+                          :message (prompt/render "controller-safety"
+                                                  {:max-turns-positive true})}
+                         (controller/extend-budget!
+                          (controller/authority (:config ctx)) conn
+                          {:run-id run-id
+                           :request-id (str "intervention-" (:id d))
+                           :new-max parsed-cap
+                           :reason (str "human extend intervention " (:id d)
+                                        " at turn " turn ": raise cap to "
+                                        parsed-cap)}))]
+            (interventions/resolve!
+             conn run-id (:id d)
+             (if (:ok result) :applied :rejected)
+             (when-not (:ok result) (:message result))
+             turn)
+            (if (:ok result)
+              (assoc acc :max-turns (:new-max result))
+              acc))
 
          ("pause" "resume")
          ;; Run-level and last-writer-wins: two pauses are one pause, and a
@@ -882,9 +912,15 @@
         ;; internally. Running five of those concurrently would multiply the
         ;; whole job rather than explore five lines of one, so the beam is
         ;; width 1 there regardless of what was asked for.
-        requested-width (or beam-width (get-in config [:run :beam-width]) 5)
-         bounded-request? (some? (get-in config [:run :bounded :profile]))
-         ;; One durable SCI binding has one sequential history. Bounded mode
+         requested-width (or beam-width (get-in config [:run :beam-width]) 5)
+          bounded-request? (some? (get-in config [:run :bounded :profile]))
+          ;; A bounded binding is only safe behind one scheduled provider turn
+          ;; and its TurnLease.  Whole-run manifests bypass that boundary.
+          _ (when (and bounded-request? (not iterating?))
+              (throw (ex-info "A bounded evaluator requires an iterating turn workflow"
+                              {:samizdat.evaluator/error :bounded-noniterating-workflow
+                               :workflow loop-nm})))
+          ;; One durable SCI binding has one sequential history. Bounded mode
          ;; therefore uses this scheduler's deadline/TurnLease machinery at
          ;; width one even when the ordinary configured beam is wider.
          width (if (or bounded-request? (not iterating?)) 1 requested-width)
