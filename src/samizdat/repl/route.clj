@@ -150,9 +150,17 @@
 
 (defn denial
   "A kernel refusal rendered as policy, or nil when `error` is an ordinary
-  failure. Pure over the strings so the wording is testable without a sandbox."
-  [error root]
-  (when (and error (re-find exec-refusal (str error)))
+  failure. Pure over the strings so the wording is testable without a sandbox.
+
+  `sandboxed?` GATES IT, because the strings are not exclusive to the sandbox:
+  an ordinary `Permission denied` on a chmod-000 file inside the project would
+  otherwise be dressed up as policy and the model told its code is fine, which
+  is the same wrong-answer-that-looks-right this whole seam exists to remove.
+  Under `:sandbox :none` nothing here can be a kernel refusal at all. The
+  residual case — a genuine in-project permission error while the sandbox IS
+  on — still mislabels, and narrowing that needs the path out of the message."
+  [error root sandboxed?]
+  (when (and error sandboxed? (re-find exec-refusal (str error)))
     (prompt/render "image-denied"
                    {:root root
                     :detail (str/trim (str error))
@@ -161,8 +169,8 @@
 (defn- legible
   "`r` with a sandbox refusal reworded, and `:where` naming the image either
   way so a failure can never be mistaken for the wrong process."
-  [r root]
-  (if-let [d (and (not (:ok r)) (denial (:error r) root))]
+  [r root sandboxed?]
+  (if-let [d (and (not (:ok r)) (denial (:error r) root sandboxed?))]
     (assoc r :error d :policy-refusal? true)
     r))
 
@@ -219,7 +227,7 @@
                   (log/warn "project image eval timed out after" timeout "ms — image restarted")
                   {:ok false :error-type "timeout" :timeout? true
                    :error (prompt/render "image-timeout" {:ms timeout})})
-              (legible r root)))
+              (legible r root (not= :none backend))))
             {:ok false :error-type "image-down"
              :error (prompt/render "image-down" {})}))))))
 
@@ -244,7 +252,7 @@
     (repl/doc-sym sym)
     ;; The tool pr-strs :arglists itself, so this hands back the DATA rather
     ;; than a string of it — otherwise the model reads a quoted quote.
-    (or (read-value ctx (str "(if-let [v (resolve '" sym ")]"
+    (or (read-value ctx (str "(if-let [v (resolve (symbol " (pr-str (str sym)) "))]"
                              " (let [m (meta v)]"
                              "   {:name (str (:name m)) :arglists (:arglists m)"
                              "    :doc (str (:doc m))})"
@@ -258,6 +266,6 @@
     (or (read-value ctx (str "(->> (all-ns)"
                              " (mapcat (fn [n] (map #(str (ns-name n) \"/\" %)"
                              "                      (keys (ns-publics n)))))"
-                             " (filter #(clojure.string/includes? % \"" prefix "\"))"
+                             " (filter #(clojure.string/includes? % " (pr-str (str prefix)) "))"
                              " sort (take 50) vec"))
         [])))
