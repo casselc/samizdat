@@ -482,6 +482,29 @@
   (->> changed (filter verify/test-file?) (keep verify/ns-from-test-path)
        distinct vec))
 
+(def closure-fixed-args
+  "The PINNED argv tail of the CLOSURE verifier: the project's own whole
+  suite. Unlike the focused argv this has no derived element at all — the
+  model's edits do not shape it even by which namespaces they name — so it is
+  the strictly less model-influenced of the two gates."
+  ["-M:test"])
+
+(defn closure-argv
+  "The controller argv for the broader closure verification, or nil when the
+  pinned verifier cannot be resolved.
+
+  WHY A SECOND GATE. The focused verifier runs only the namespaces of the
+  changed TEST files, which is right for cheap iteration and cannot see what a
+  change did to anything else. JS1 M4 attempt 1 made that concrete: the agent
+  rewrote src/samizdat/util.clj from memory and deleted sh-quote and
+  generation-cache — both live production dependencies — and the focused
+  verifier over samizdat.util-test would have gone GREEN on it had the rewrite
+  merely compiled (attempt-1 finding F-4). Focused green now buys the right to
+  be checked against the whole suite, not the right to ship."
+  []
+  (when-let [exec (resolve-verifier)]
+    (into [exec] closure-fixed-args)))
+
 (defn focused-argv
   "The verifier argv for the bounded lane: the PINNED executable and fixed
   args, plus exactly one derived element — the focused -e expression
@@ -859,12 +882,15 @@
   refused request never stages, never spawns and never moves the
   invocation index, and `run` answers it with the refusal — never a
   euphemism, never red tests, and never licence to spawn on the host."
-  [changed]
-  (cond
-    (not (available?)) (unavailable-reason)
-    (nil? (focused-argv changed)) :no-verifiable-test
-    (nil? (resolve-verifier)) :no-verifier-executable
-    :else nil))
+  ([changed] (request-run-refusal changed :focused))
+  ([changed stage]
+   (cond
+     (not (available?)) (unavailable-reason)
+     ;; Only the focused gate needs something verifiable among the changed
+     ;; paths; the closure gate runs the whole suite and does not consult them.
+     (and (= :focused stage) (nil? (focused-argv changed))) :no-verifiable-test
+     (nil? (resolve-verifier)) :no-verifier-executable
+     :else nil)))
 
 (defn- refused
   "The result of a run request this environment REFUSED, in the shape each
@@ -927,8 +953,9 @@
   (timeout, tree reaping), captures bounded output from the redirect spool,
   redacts it, and deletes the stage however the run ends. Never throws: a
   staging or spawn failure reads as not-green with its message as evidence."
-  [root changed timeout-ms]
-  (if-let [refusal (request-run-refusal changed)]
+  ([root changed timeout-ms] (run root changed timeout-ms :focused))
+  ([root changed timeout-ms stage-kind]
+  (if-let [refusal (request-run-refusal changed stage-kind)]
     (refused refusal)
     (if-let [stage (try (str (fs/create-temp-dir {:prefix stage-prefix}))
                         (catch Throwable _ nil))]
@@ -954,7 +981,10 @@
                           :dir stage
                           :out-file out-path
                           :err-file err-path}
-                         (sandbox-argv stage ro-binds (focused-argv changed)))
+                         (sandbox-argv stage ro-binds
+                                       (if (= :closure stage-kind)
+                                         (closure-argv)
+                                         (focused-argv changed))))
                   ;; A spawn failure is a FAILED RUN, not a refused request:
                   ;; the index was claimed, so the attempt is attributable.
                   (catch Throwable t
@@ -985,7 +1015,14 @@
         (finally
           (try (fs/delete-tree stage) (catch Throwable _ nil))))
       {:green? false :timeout? false
-       :output (message {:ve-stage-failed true})})))
+       :output (message {:ve-stage-failed true})}))))
+
+(defn run-closure
+  "Run the CLOSURE verification — the project's whole suite — under the same
+  controller-owned environment, staging and bounds as `run`. `changed` is
+  carried only so a refusal reads identically; the argv ignores it."
+  [root changed timeout-ms]
+  (run root changed timeout-ms :closure))
 
 (def ^:private run-statuses
   "The statuses a verify run envelope may carry — the verify-only subset of

@@ -1457,3 +1457,223 @@
                  (:samizdat.evaluator/error
                   (thrown-data #(bind! root "bad-profile"
                                        {:profile :agent/shell}))))))))))
+
+;; ─── M4 attempt 2: the anchored (surgical) mutation form ───────────────────
+;;
+;; JS1 M4 attempt 1 had only the whole-file shape. A model that wanted to
+;; change one arithmetic expression had to reproduce an entire namespace
+;; verbatim, could not, regenerated it from its priors instead, and silently
+;; deleted two live production functions. The four-argument form replaces the
+;; ONE exact occurrence of an anchor and leaves every other byte alone.
+;;
+;; It runs under the SAME :project/edit capability — the pinned runtime's
+;; profile table is a closed maximum and rejects both an unlisted capability
+;; id and a duplicate operation id — so this is a narrower way to spend
+;; authority that already exists, not new authority.
+
+(deftest anchored-replacement-changes-one-occurrence-and-nothing-else
+  (when bounded?
+    (let [{:keys [bind! evaluate!]} (evaluator-api)]
+      (with-root [root conn]
+        (seed-project! root)
+        (let [original (str "(ns keep)\n"
+                            "(defn keep-me [] :kept)\n"
+                            "(defn target [] :old)\n"
+                            "(defn keep-me-too [] :also-kept)\n")
+              _ (spit (str root "/src/samizdat/c.clj") original)
+              binding (bind! root "anchored-ok" {:profile :agent/project-develop})
+              expected (str/replace original "(defn target [] :old)"
+                                    "(defn target [] :new)")
+              source (str "(let [s (project/stat \"src/samizdat/c.clj\") "
+                          "r (project/edit \"src/samizdat/c.clj\" (:digest s) "
+                          "\"(defn target [] :old)\" \"(defn target [] :new)\") "
+                          "after (project/stat \"src/samizdat/c.clj\")] "
+                          "[r after])")
+              [r after] (:value (evaluate! conn binding source))]
+          (testing "only the anchored text changes"
+            (is (= expected (file-text (str root "/src/samizdat/c.clj")))
+                "every byte outside the anchor survives verbatim")
+            (is (str/includes? (file-text (str root "/src/samizdat/c.clj"))
+                               "(defn keep-me [] :kept)"))
+            (is (str/includes? (file-text (str root "/src/samizdat/c.clj"))
+                               "(defn keep-me-too [] :also-kept)")))
+          (testing "the return is the canonical next anchor"
+            (is (= (digest-of expected) (:digest r)))
+            (is (= r after) "the return is exactly what project/stat reports")
+            (is (= :file (:kind r)))
+            (is (= (count (.getBytes ^String expected "UTF-8")) (:bytes r)))))))))
+
+(deftest anchored-replacement-refuses-every-unsafe-request-with-zero-writes
+  (when bounded?
+    (let [{:keys [bind! evaluate!]} (evaluator-api)]
+      (with-root [root conn]
+        (seed-project! root)
+        (let [original "(ns d)\n(defn twice [] :x)\n(defn twice-again [] :x)\n"
+              path (str root "/src/samizdat/d.clj")
+              _ (spit path original)
+              binding (bind! root "anchored-refusals"
+                             {:profile :agent/project-develop})
+              stat-digest (digest-of original)
+              refuse (fn [src] (eval-error evaluate! conn binding src))
+              untouched? #(= original (file-text path))]
+
+          (testing "an anchor that is not present is refused"
+            (is (= :anchor-missing
+                   (:samizdat.evaluator/error
+                    (refuse (str "(project/edit \"src/samizdat/d.clj\" \""
+                                 stat-digest "\" \"(defn absent [] 1)\" \"x\")"))))
+                )
+            (is (untouched?)))
+
+          (testing "an anchor occurring more than once is refused, never guessed"
+            (is (= :anchor-ambiguous
+                   (:samizdat.evaluator/error
+                    (refuse (str "(project/edit \"src/samizdat/d.clj\" \""
+                                 stat-digest "\" \":x\" \":y\")")))))
+            (is (untouched?)))
+
+          (testing "an empty anchor is not an anchor"
+            (is (= :invalid-arguments
+                   (:samizdat.evaluator/error
+                    (refuse (str "(project/edit \"src/samizdat/d.clj\" \""
+                                 stat-digest "\" \"\" \"x\")")))))
+            (is (untouched?)))
+
+          (testing "a stale digest is refused"
+            (is (= :stale
+                   (:samizdat.evaluator/error
+                    (refuse (str "(project/edit \"src/samizdat/d.clj\" \""
+                                 (digest-of "something else")
+                                 "\" \"(defn twice [] :x)\" \"x\")")))))
+            (is (untouched?)))
+
+          (testing ":absent is not a legal anchored base — creation is 3-arity"
+            (is (contains? #{:invalid-arguments :missing}
+                           (:samizdat.evaluator/error
+                            (refuse (str "(project/edit \"src/samizdat/d.clj\""
+                                         " :absent \"a\" \"b\")")))))
+            (is (untouched?)))
+
+          (testing "a path escaping the root is refused"
+            (is (contains? #{:path-escape :absolute-path}
+                           (:samizdat.evaluator/error
+                            (refuse (str "(project/edit \"../outside.clj\" \""
+                                         stat-digest "\" \"a\" \"b\")")))))
+            (is (untouched?)))
+
+          (testing "a non-string replacement is refused"
+            (is (= :invalid-arguments
+                   (:samizdat.evaluator/error
+                    (refuse (str "(project/edit \"src/samizdat/d.clj\" \""
+                                 stat-digest "\" \"(defn twice [] :x)\" 7)")))))
+            (is (untouched?)))
+
+          (testing "a missing target is refused"
+            (is (= :missing
+                   (:samizdat.evaluator/error
+                    (refuse (str "(project/edit \"src/samizdat/nope.clj\" \""
+                                 stat-digest "\" \"a\" \"b\")"))))))
+
+          (testing "the operator's run config is refused through the files seam"
+            (fs/create-dirs (str root "/.samizdat"))
+            (spit (str root "/.samizdat/config.edn") "{:run {:a 1}}")
+            (is (= :protected-path
+                   (:samizdat.evaluator/error
+                    (refuse (str "(project/edit \".samizdat/config.edn\" \""
+                                 (digest-of "{:run {:a 1}}")
+                                 "\" \"{:run\" \"{:evil\")")))))
+            (is (= "{:run {:a 1}}"
+                   (file-text (str root "/.samizdat/config.edn"))))))))))
+
+(deftest anchored-replacement-refuses-a-symlink-in-any-component
+  (when bounded?
+    (let [{:keys [bind! evaluate!]} (evaluator-api)]
+      (with-root [root conn]
+        (seed-project! root)
+        (let [target (str root "/real.clj")
+              _ (spit target "(ns real)\n(defn f [] 1)\n")
+              _ (fs/create-sym-link (str root "/link.clj") target)
+              binding (bind! root "anchored-symlink"
+                             {:profile :agent/project-develop})
+              e (eval-error evaluate! conn binding
+                            (str "(project/edit \"link.clj\" \""
+                                 (digest-of "(ns real)\n(defn f [] 1)\n")
+                                 "\" \"(defn f [] 1)\" \"(defn f [] 2)\")"))]
+          (is (= :symlink (:samizdat.evaluator/error e)))
+          (is (= "(ns real)\n(defn f [] 1)\n" (file-text target))
+              "the symlink's target is untouched"))))))
+
+(deftest anchored-replacement-records-receipts-and-replays-without-writing
+  (when bounded?
+    (let [{:keys [bind! evaluate! persist! reconstruct!]} (evaluator-api)]
+      (with-root [root conn]
+        (seed-project! root)
+        (let [original "(ns e)\n(defn f [] :old)\n"
+              path (str root "/src/samizdat/e.clj")
+              _ (spit path original)
+              run-id (runs/start-run! conn {:problem "anchored replay"
+                                            :max-turns 3})
+              binding (bind! root run-id {:profile :agent/project-develop})
+              _ (persist! conn run-id binding)
+              expected (str/replace original ":old" ":new")
+              ;; A durable binding is an M3 run: the evaluation must carry the
+              ;; InferenceEpoch and the per-call InferenceInvocation that
+              ;; dispatched it, exactly as the production path does.
+              epoch-id "epoch:anchored-replay"
+              _ (inference/begin!
+                 conn {:id epoch-id :run-id (str run-id) :branch-id "B1" :turn 1
+                       :provider :stub :model "m"
+                       :binding-id (:binding/id binding)
+                       :spec-id (get-in binding [:spec :spec/coordinate])
+                       :runtime (get-in binding [:spec :runtime-coordinate])})
+              invocation (:id (inference/invoke!
+                               conn {:id "invocation:anchored-replay-1"
+                                     :epoch-id epoch-id :run-id (str run-id)
+                                     :branch-id "B1" :turn 1}))
+              source (str "(let [s (project/stat \"src/samizdat/e.clj\")] "
+                          "(project/edit \"src/samizdat/e.clj\" (:digest s) "
+                          "\"(defn f [] :old)\" \"(defn f [] :new)\"))")
+              _ (evaluate! conn binding source
+                           {:inference-epoch-id epoch-id
+                            :inference-invocation-id invocation})
+              after-write (file-text path)
+              rows (store/history
+                    conn (:binding/id binding))
+              receipts (mapcat :receipts rows)
+              edits (filter #(= :project/edit (:op %)) receipts)]
+
+          (testing "the anchored call records an exact four-argument receipt"
+            (is (= 1 (count edits)))
+            (is (= 4 (count (:args (first edits))))
+                "the argument vector distinguishes the anchored form from the
+                 whole-file form in durable evidence")
+            (is (= "src/samizdat/e.clj" (first (:args (first edits))))))
+
+          (testing "replay consumes the mutation receipt and writes nothing"
+            (is (= expected after-write))
+            (let [mtime #(str (fs/last-modified-time path))
+                  before-mtime (mtime)
+                  rebuilt (reconstruct! conn run-id root)]
+              (is (some? rebuilt))
+              (is (= expected (file-text path))
+                  "reconstruction must not re-apply the recorded write")
+              (is (= before-mtime (mtime))
+                  "an unchanged mtime is the strong form: the file was not
+                   rewritten with identical bytes either"))))))))
+
+(deftest whole-file-edit-remains-correct-for-create-and-full-replacement
+  (when bounded?
+    (let [{:keys [bind! evaluate!]} (evaluator-api)]
+      (with-root [root conn]
+        (seed-project! root)
+        (let [binding (bind! root "whole-file-still-works"
+                             {:profile :agent/project-develop})
+              source (str "(let [made (project/edit \"fresh.md\" :absent \"one\") "
+                          "s (project/stat \"fresh.md\") "
+                          "whole (project/edit \"fresh.md\" (:digest s) \"two\")] "
+                          "[made whole])")
+              [made whole] (:value (evaluate! conn binding source))]
+          (testing "3-arity create and whole-file replace are unchanged"
+            (is (= (digest-of "one") (:digest made)))
+            (is (= (digest-of "two") (:digest whole)))
+            (is (= "two" (file-text (str root "/fresh.md"))))))))))

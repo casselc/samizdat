@@ -100,6 +100,14 @@
   [s n]
   (->> (str/split-lines (str s)) (remove str/blank?) (take-last n) (str/join "\n")))
 
+(defn tail-of
+  "The actionable tail of a verifier result's output, at the same context
+  budget the focused red rung uses. Public because the bounded lane's closure
+  gate renders its own red with the same shape."
+  [result]
+  (tail (:output result)
+        (:test-output-lines (gates/threshold :context-budget))))
+
 (defn verify-block
   "The pure ship decision. Returns nil when `done` may ship, or a block message
   explaining what to fix (which becomes the tool result the branch reads and

@@ -132,6 +132,7 @@
             [samizdat.tournament-test]
             [samizdat.trajectory-test]
             [samizdat.store-test]
+            [samizdat.surface-test]
             [samizdat.gui-api-test]
             [samizdat.gui-ops-test]
             [samizdat.gui-graph-test]
@@ -191,6 +192,7 @@
     samizdat.tournament-test
     samizdat.trajectory-test
     samizdat.store-test
+    samizdat.surface-test
     samizdat.llm-test
      samizdat.agent-test
      samizdat.agent-turn-lease-test

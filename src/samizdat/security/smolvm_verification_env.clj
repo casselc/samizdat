@@ -944,18 +944,30 @@
 ;; The run.
 ;; ═══════════════════════════════════════════════════════════════════════════
 
+(def closure-fixed-args
+  "The PINNED argv tail of the CLOSURE verifier: the project's whole suite.
+  No derived element at all — see the bwrap environment's closure-argv for why
+  the broader gate exists."
+  ["-M:test"])
+
+(defn closure-argv
+  "The controller argv for the broader closure verification in the guest."
+  []
+  (into [verifier-exec-name] closure-fixed-args))
+
 (defn request-run-refusal
   "Why a requested verification cannot run here, or nil when it may — the
   gate every run request passes FIRST: an unavailable substrate (Linux, the
   measured manager, the pinned image, a kernel that runs the minimum
   machine), or nothing verifiable among the changed paths. A refused request
   never spawns and never moves the invocation index."
-  [changed]
-  (cond
-    (not (available?)) (unavailable-reason)
-    (nil? (focused-argv changed)) :no-verifiable-test
-    (nil? (resolved-image)) :no-guest-image
-    :else nil))
+  ([changed] (request-run-refusal changed :focused))
+  ([changed stage]
+   (cond
+     (not (available?)) (unavailable-reason)
+     (and (= :focused stage) (nil? (focused-argv changed))) :no-verifiable-test
+     (nil? (resolved-image)) :no-guest-image
+     :else nil)))
 
 (defn- refused
   "The result of a run request this environment REFUSED, in the shape the
@@ -1053,8 +1065,9 @@
 
   The machine is ephemeral: it is destroyed with the process tree however
   the run ends, so nothing inside it can outlive the call."
-  [root changed timeout-ms]
-  (if-let [refusal (request-run-refusal changed)]
+  ([root changed timeout-ms] (run root changed timeout-ms :focused))
+  ([root changed timeout-ms stage-kind]
+  (if-let [refusal (request-run-refusal changed stage-kind)]
     (refused refusal)
     (try
       (let [before (input-manifest root)
@@ -1068,7 +1081,9 @@
         (if-not (string? identity)
           identity                                   ; the refusal result
           (let [image (:path (resolved-image))
-                argv (focused-argv changed)
+                argv (if (= :closure stage-kind)
+                       (closure-argv)
+                       (focused-argv changed))
                 hidden (:workspace/excluded-paths before)
                 host-ms (host-timeout-ms timeout-ms)
                 full-argv (into [(abs-bin manager-exec-name)]
@@ -1166,7 +1181,13 @@
         ;; is not-green evidence the model can act on, not a refusal: the
         ;; model can fix the tree. The catalogued refusals all refused above.
         {:green? false :timeout? false
-         :output (message {:ve-run-failed true :reason (ex-message e)})}))))
+         :output (message {:ve-run-failed true :reason (ex-message e)})})))))
+
+(defn run-closure
+  "Run the CLOSURE verification — the project's whole suite — in the same
+  ephemeral guest, under the same bounds as `run`."
+  [root changed timeout-ms]
+  (run root changed timeout-ms :closure))
 
 ;; ═══════════════════════════════════════════════════════════════════════════
 ;; The run envelope.

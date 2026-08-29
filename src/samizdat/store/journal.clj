@@ -248,6 +248,30 @@
                                 :data {:kind kind :claim claim
                                        :claim-status claim-status}}))
 
+(defn last-context
+  "The most recent SCI context lifecycle fact for a run, as data, or nil.
+
+  Read-only projection of the `evaluator-context` events. It never allocates a
+  context and never touches the evaluator — it reads the journal, like every
+  other read model here."
+  [conn run-id]
+  (when-let [row (db/fetch-one
+                  conn ["SELECT data FROM events
+                          WHERE run_id = ? AND kind = 'evaluator-context'
+                          ORDER BY id DESC LIMIT 1" (str run-id)])]
+    (try (json/read-str (:data row) :key-fn keyword)
+         (catch Throwable _ nil))))
+
+(defn contexts
+  "Every SCI context lifecycle fact for a run, oldest first."
+  [conn run-id]
+  (->> (db/fetch conn ["SELECT data FROM events
+                         WHERE run_id = ? AND kind = 'evaluator-context'
+                         ORDER BY id" (str run-id)])
+       (keep (fn [r] (try (json/read-str (:data r) :key-fn keyword)
+                          (catch Throwable _ nil))))
+       vec))
+
 (defn artifacts
   ([conn run-id]
    (db/fetch conn ["SELECT * FROM artifacts WHERE run_id = ? ORDER BY id" run-id]))

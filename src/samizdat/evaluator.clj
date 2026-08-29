@@ -41,9 +41,11 @@
              [jolt.fs :as fs]
              [jolt.sandbox :as sandbox]
              [samizdat.agent.files :as files]
+             [samizdat.agent.surface :as surface]
              [samizdat.prompt :as prompt]
              [samizdat.security.no-replace :as no-replace]
-             [samizdat.store.evaluator :as store]))
+             [samizdat.store.evaluator :as store]
+             [samizdat.store.journal :as journal]))
 
 (def jolt-coordinate "4af2362176160f2ed0e366689d7232b1a38adfec")
 (def jolt-publish-coordinate
@@ -52,7 +54,7 @@
 (def sci-version "0.13.53")
 (def profile-id :agent/project-read)
 (def develop-profile-id :agent/project-develop)
-(def top-level-tools ["eval" "doc" "complete" "done"])
+(def top-level-tools surface/bounded-top-level-tools)
 (def profile-capabilities
   "The :agent/project-read catalog maximum, derived from the sandbox's closed
   profile table — the one source of truth for what a profile may ever hold."
@@ -61,8 +63,7 @@
   "The :agent/project-develop catalog maximum: the read profile plus the one
   semantic mutation, from the same table."
   (:profile/max-capabilities (get sandbox/profiles develop-profile-id)))
-(def semantic-operation-order
-  [:project/read :project/list :project/search :project/stat :project/edit])
+(def semantic-operation-order surface/semantic-operation-order)
 (def compiled-capabilities
   "The operation vocabulary this build actually compiles — the code-level
   layer of the authority intersection in context-spec."
@@ -130,8 +131,16 @@
    {:name "project/stat" :arglists [["path"]]
     :doc "Return a deterministic path, kind, byte-size, and sha256 content digest. The digest is computed through the bounded reader and the operation fails rather than returning a fake coordinate."}
    :project/edit
-   {:name "project/edit" :arglists [["path" "base" "new-content"]]
-    :doc "Replace or create one regular file under the authorized project root and return its new {:path :kind :bytes :digest} — exactly what project/stat would report, so the digest is the next edit's anchor. base is the exact digest project/stat returned for the current content, or :absent to create a path that must not exist yet. A stale base, a missing anchor target, an existing create target, the operator's run config, a symbolic link in any component, a non-regular-file target, a missing parent, or content over the bound is refused and writes nothing. The write is a temp file in the target's directory: create is an atomic Linux no-replace publication, replacement is an atomic rename."}})
+   {:name "project/edit"
+    :arglists [["path" "base" "old-text" "new-text"]
+               ["path" "base" "new-content"]]
+    :doc "Mutate one regular file under the authorized project root and return its new {:path :kind :bytes :digest} — exactly what project/stat would report, so the digest is the next mutation's anchor. base is always the exact digest project/stat returned for the current content, or :absent to create.
+
+PREFER THE FOUR-ARGUMENT ANCHORED FORM for a change to an existing file: (project/edit path base old-text new-text) replaces the ONE exact occurrence of old-text with new-text and leaves every other byte of the file untouched. old-text must occur exactly once — zero occurrences and two or more occurrences are both refused, so the anchor can never silently hit the wrong place. This is the surgical form: use it to change one function without reproducing the rest of the namespace.
+
+The three-argument form (project/edit path base new-content) replaces the WHOLE file, and with base :absent creates a new one. Use it to create a file, or when you genuinely intend to rewrite the entire contents. Rewriting a whole existing file from memory is how unrelated definitions get silently deleted.
+
+Both forms refuse, and write nothing, on: a stale base, a missing anchor target, an existing create target, the operator's run config, a symbolic link in any component, a non-regular-file target, a missing parent, or content over the bound. The write is a temp file in the target's directory: create is an atomic Linux no-replace publication, replacement is an atomic rename."}})
 
 (def tool-docs
   {"eval" {:name "eval" :arglists [["code"]]
@@ -666,6 +675,96 @@
         {:path rel :kind :file :bytes (alength content-bytes)
          :digest (str "sha256:" (bytes-digest content-bytes))}))))
 
+(defn- occurrence-index
+  "The index of the single occurrence of `needle` in `haystack`, or a keyword
+  saying why there is not exactly one: :none or :ambiguous.
+
+  Literal scanning, never a regex. A model-supplied anchor is data, and the one
+  thing a maintenance primitive must never do is let that data become a
+  matching language — `.*` in an anchor would make the blast radius of a
+  'surgical' edit the whole file again."
+  [^String haystack ^String needle]
+  (let [i (.indexOf haystack needle)]
+    (cond
+      (neg? i) :none
+      (nat-int? (.indexOf haystack needle (inc i))) :ambiguous
+      :else i)))
+
+(defn- validate-replace-arguments!
+  "Lexical validation for the anchored form, before any filesystem access."
+  [base old-text new-text bounds]
+  (when-not (and (string? old-text) (string? new-text))
+    (fail! :invalid-arguments (message {:replace-args true})
+           {:old-type (str (type old-text)) :new-type (str (type new-text))}))
+  ;; An empty anchor matches at index 0 of every file, which is not an anchor.
+  (when (zero? (count old-text))
+    (fail! :invalid-arguments (message {:replace-args true}) {:old-text :empty}))
+  (when (> (count new-text) (:max-edit-chars bounds))
+    (fail! :too-large (message {:edit-large true})
+           {:limit (:max-edit-chars bounds)}))
+  (when-not (and (string? base) (re-matches edit-base-pattern base))
+    (fail! :invalid-arguments (message {:replace-args true})
+           {:base (pr-str base)})))
+
+(defn- replace-project-text
+  "The (project/edit path base old-text new-text) semantics: replace the ONE
+  exact occurrence of old-text and leave every other byte alone.
+
+  THE LOW-AMPLITUDE MUTATION. JS1 M4 attempt 1 had only the whole-file form,
+  so a model that wanted to change one arithmetic expression had to reproduce
+  an entire namespace verbatim; it could not, regenerated the file from its
+  priors instead, and silently deleted two live production functions
+  (attempt-1 §14). The amplitude of a mutation should match the amplitude of
+  the intent, and this is the form whose blast radius is the anchor.
+
+  It runs under the SAME capability as the whole-file form and reuses its
+  confinement, protected-path refusal, symlink refusal, digest anchor and
+  atomic publication unchanged. Every refusal throws BEFORE any write, so a
+  refused replacement leaves the tree byte-identical."
+  [root bounds rel base old-text new-text]
+  (let [components (lexical-components root rel false)
+        rel (relative-name components)]
+    (when (files/run-config? root (str root "/" rel))
+      (fail! :protected-path (message {:edit-protected true}) {:path rel}))
+    (validate-replace-arguments! base old-text new-text bounds)
+    (let [parent (descend root (butlast components))
+          abs (str parent "/" (last components))
+          kind (classify abs)]
+      (when (= :symlink kind)
+        (fail! :symlink (message {:symlink-path true}) {:path rel}))
+      ;; Anchored replacement is only ever a modification: there is nothing to
+      ;; anchor in a file that does not exist. Creating is the 3-arity job.
+      (when-not (= :file kind)
+        (fail! :missing (message {:edit-missing true}) {:path rel :kind kind}))
+      (let [ceiling (read-byte-ceiling (:max-read-chars bounds))
+            current-digest (file-digest abs ceiling)]
+        (when-not (= base current-digest)
+          (fail! :stale (message {:edit-stale true})
+                 {:path rel :current-digest current-digest}))
+        (let [current (read-text abs (:max-read-chars bounds))
+              at (occurrence-index current old-text)]
+          (case at
+            :none (fail! :anchor-missing (message {:replace-missing true})
+                         {:path rel})
+            :ambiguous (fail! :anchor-ambiguous
+                              (message {:replace-ambiguous true})
+                              {:path rel})
+            (let [new-content (str (subs current 0 at)
+                                   new-text
+                                   (subs current (+ at (count old-text))))]
+              ;; The SPLICED result carries the bound, not just the fragment:
+              ;; a small new-text pasted into a large file must still land
+              ;; inside the trusted write ceiling.
+              (when (> (count new-content) (:max-edit-chars bounds))
+                (fail! :too-large (message {:edit-large true})
+                       {:limit (:max-edit-chars bounds)}))
+              (let [content-bytes (.getBytes ^String new-content "UTF-8")
+                    perms (try (fs/posix-file-permissions abs)
+                               (catch Throwable _ nil))]
+                (replace-atomically! parent abs false perms content-bytes rel)
+                {:path rel :kind :file :bytes (alength content-bytes)
+                 :digest (str "sha256:" (bytes-digest content-bytes))}))))))))
+
 (defn- operation-builders [context world-observer hook]
   (let [root (:context/root context)
         bounds (:context/bounds context)
@@ -760,11 +859,25 @@
                                                      (:max-read-chars bounds)))}
                         {:path rel :kind kind})))))}
         edit-op
+        ;; ONE actuation capability, two shapes. The pinned bounded runtime's
+        ;; profile table is a CLOSED maximum (jolt.sandbox/profiles) and
+        ;; rejects both an unlisted capability id and a duplicate id, so the
+        ;; anchored form is an arity of this operation rather than a second
+        ;; one. That is the honest shape anyway: an anchored replacement is
+        ;; not new authority over the project, it is a narrower way to spend
+        ;; the authority project/edit already holds. Receipts record the full
+        ;; argument vector, so the two shapes stay distinguishable in evidence
+        ;; and replay matches each exactly.
         {:id :project/edit :name 'edit :effect :actuation
-         :fn (fn [rel base new-content]
-               (observe
-                :project/edit [rel base new-content]
-                #(edit-project-file root bounds rel base new-content)))}]
+         :fn (fn
+               ([rel base new-content]
+                (observe
+                 :project/edit [rel base new-content]
+                 #(edit-project-file root bounds rel base new-content)))
+               ([rel base old-text new-text]
+                (observe
+                 :project/edit [rel base old-text new-text]
+                 #(replace-project-text root bounds rel base old-text new-text))))}]
     [read-op list-op search-op stat-op edit-op]))
 
 (defn- make-instance [spec observer]
@@ -787,21 +900,53 @@
                   (filter effective semantic-operation-order))]
     (vec (concat top-level-tools ops))))
 
-(defn trusted-orientation [binding]
-  ;; The edit guidance is keyed on the CAPABILITY, not the profile name: a
-  ;; develop binding the controller narrowed down to read-only gets the read
-  ;; guidance, which is the authority it actually holds.
-  (let [develop? (contains? (set (get-in binding [:spec :context-spec
-                                                  :context/capabilities]))
-                            :project/edit)]
+(defn trusted-orientation
+  "The bounded lane's whole system prompt, derived from the binding's own
+  effective surface.
+
+  DERIVED, never hand-listed. The tool list, the operation list and the
+  guidance all come from `surface/of-binding`, so the orientation cannot
+  describe a surface the binding does not have — the failure mode attempt 1
+  hit from the other direction, where the per-turn context described tools the
+  binding never had (finding F-1).
+
+  It teaches four things, and attempt 1 showed each of them costs turns when
+  it is missing:
+
+  1. WHAT is callable — the only part attempt 1 already had.
+  2. HOW to call it. The bounded lane replaces the base system prompt
+     entirely, so nothing else ever tells the model the tool-call envelope.
+     Attempt 1 opened with one no-call and two parse errors before the repair
+     ladder taught it the fence by trial (finding F-2).
+  3. That project/* are ordinary Clojure calls INSIDE eval and never
+     top-level tool names. Attempt 1's agents tried `project/read`,
+     `project/stat` and `project/edit` as top-level tools five times.
+  4. WHICH mutation shape to reach for. The whole-file form is how attempt 1
+     destroyed two live functions; the anchored form is the default here."
+  [binding]
+  (let [surface (surface/of-binding binding)
+        develop? (contains? (:capabilities surface) :project/edit)
+        ;; The template is one file of conditionals, so the branches that do
+        ;; not fire still leave their surrounding whitespace behind. Sections
+        ;; are trimmed and their blank runs collapsed here rather than by
+        ;; contorting the prose, which stays editable without a rebuild.
+        section (fn [data] (-> (message data)
+                               (str/replace #"\n{3,}" "\n\n")
+                               str/trim))]
     (str "SYSTEM / TRUSTED SURFACE\n"
          "Callable top-level tools:\n"
-         (str/join "\n" (map #(str "- " %) top-level-tools))
-         "\nSemantic operations available only inside eval:\n"
-         (str/join "\n" (map #(str "- " %)
-                             (drop (count top-level-tools) (catalog binding))))
-         "\n\n" (message {:orientation-guidance true
-                          :orientation-develop develop?}))))
+         (str/join "\n" (map #(str "- " %) (:top-level surface)))
+         "\nSemantic operations, callable ONLY inside eval:\n"
+         (str/join "\n" (map #(str "- " %) (:operation-names surface)))
+         "\n\n" (section {:orientation-envelope true})
+         ;; The in-eval sentence names the operations this binding actually
+         ;; has, so a narrowed binding never advertises a wider set.
+         "\n\n" (section {:orientation-in-eval true
+                           :ops (str/join ", " (:operation-names surface))
+                           :example-op (or (first (:operation-names surface))
+                                           "project/read")})
+         "\n\n" (section (cond-> {:orientation-guidance true}
+                           develop? (assoc :orientation-develop true))))))
 
 (defn orientation-digest
   "The content coordinate of trusted-orientation bytes.  The durable binding
@@ -846,6 +991,28 @@
         instance (make-instance spec observer)]
     (binding-value work-id spec observer instance)))
 
+(defn live-context-id
+  "The process-local identity of this binding's CURRENT SCI context.
+
+  Observability only. It is deliberately not a replay coordinate and not part
+  of evaluator authority: reconstruction is validated by the ContextSpec,
+  RuntimeCoordinate and durable history, and a context id that changed every
+  restart would be a coordinate that can never match. It exists so the
+  lifecycle below is readable from durable evidence instead of from an
+  operator watching a live process (M4 attempt-1 finding F-6)."
+  [binding]
+  (some-> (:instance binding) deref :context-id))
+
+(defn- note-context!
+  "Journal one SCI context lifecycle fact. Never throws: a run whose evidence
+  cannot be written is still a run, and this is an observer."
+  [conn run-id phase data]
+  (when (and conn run-id)
+    (try
+      (journal/note! conn run-id :evaluator-context
+                     {:data (assoc data :phase phase)})
+      (catch Throwable _ nil))))
+
 (defn persist-binding!
   "Persist a minted binding as the run's exact reconstruction authority.
   Must be called before the first model turn; idempotent only for an identical
@@ -864,6 +1031,11 @@
          :runtime (get-in binding [:spec :runtime-coordinate])
          :orientation (:trusted-orientation binding)
          :orientation-digest (:orientation-digest binding)})
+  ;; ALLOCATED. The first context of this binding, in this process.
+  (note-context! conn run-id :allocated
+                 {:context-id (live-context-id binding)
+                  :instance-id (:instance/id binding)
+                  :binding-id (:binding/id binding)})
   binding)
 
 (defn describe [binding]
@@ -1086,8 +1258,25 @@
       (let [binding (binding-value work-id spec
                                    {:instance-id (:instance_id row)
                                     :world-observer nil}
-                                   nil orientation)]
-        (rebuild-internal! conn binding)))))
+                                   nil orientation)
+            ;; The context this process is retiring by having never had it:
+            ;; the previous process's context died with the process, and the
+            ;; last :allocated / :reconstructed event names it.
+            prior (:context-id (journal/last-context conn run-id))
+            rebuilt (rebuild-internal! conn binding)]
+        ;; RECONSTRUCTED. A fresh context, and the identity of the one it
+        ;; supersedes — which together make "retired by process death" and
+        ;; "fresh context allocated on reconstruction" readable facts rather
+        ;; than an operator's observation of a live process.
+        (note-context! conn run-id :reconstructed
+                       {:context-id (live-context-id rebuilt)
+                        :instance-id (:instance/id rebuilt)
+                        :binding-id (:binding/id rebuilt)
+                        :supersedes prior
+                        :replayed-evaluations
+                        (count (filter #(= :completed (:status %))
+                                       (store/history conn (:binding/id rebuilt))))})
+        rebuilt))))
 
 (defn rebuild! [conn binding]
   (verify-binding! binding)

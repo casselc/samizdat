@@ -108,6 +108,19 @@
      ;; the model reads; the reason keyword is what the journal keeps.
      :output (prompt/render "bounded-evaluator" {:ve-unavailable true})}))
 
+(defn run-closure
+  "Run the selected provider's CLOSURE verification — the project's whole
+  suite — under `root`. Same result shape as `run`. Controller-owned exactly
+  like the focused gate: the model chooses neither verifier, and its edits do
+  not shape this argv at all."
+  [root changed timeout-ms]
+  (case (selected)
+    :bwrap (bve/run-closure root changed timeout-ms)
+    :smolvm (smve/run-closure root changed timeout-ms)
+    {:green? false :timeout? false :unavailable? true
+     :reason :unknown-provider
+     :output (prompt/render "bounded-evaluator" {:ve-unavailable true})}))
+
 (defn coordinate
   "The selected provider's full-policy coordinate — the value the journal's
   ship-verify row carries as :verify-env."

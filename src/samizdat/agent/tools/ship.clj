@@ -493,17 +493,33 @@
                   (base/run-with-turn-lease-permit!
                    ctx
                    #(let [env-ok? (vprov/available?)
+                          timeout-ms (get-in ctx [:config :run
+                                                  :verify-timeout-ms])
                           result (when env-ok?
-                                   (vprov/run
-                                    (:root ctx) changed
-                                    (get-in ctx [:config :run
-                                                 :verify-timeout-ms])))]
-                      {:env-ok? env-ok? :result result
+                                   (vprov/run (:root ctx) changed timeout-ms))
+                          ;; PROGRESSIVE VERIFICATION. The focused gate is
+                          ;; the cheap one and it runs first, so RED stays
+                          ;; cheap and the branch iterates against it. Only a
+                          ;; focused GREEN buys the closure run — the whole
+                          ;; suite, which is what can see the collateral a
+                          ;; focused namespace cannot. Never the other order,
+                          ;; and never the closure suite after every failed
+                          ;; edit.
+                          closure (when (and env-ok?
+                                             (:green? result)
+                                             (not (:unavailable? result)))
+                                    (vprov/run-closure
+                                     (:root ctx) changed
+                                     (or (gates/threshold :closure-verify-timeout-ms)
+                                         timeout-ms)))]
+                      {:env-ok? env-ok? :result result :closure closure
                        :unavailable-reason
                        (cond
                          (not env-ok?) (vprov/unavailable-reason)
-                         (:unavailable? result) (:reason result :unknown))})))
+                         (:unavailable? result) (:reason result :unknown)
+                         (:unavailable? closure) (:reason closure :unknown))})))
         vresult (:result attempt)
+        cresult (:closure attempt)
         unavailable-reason (:unavailable-reason attempt)
         block (cond
                 (empty? changed)
@@ -523,24 +539,51 @@
                 ;; red / timeout / green clauses decide and its
                 ;; trust-on-unknown fallthrough is unreachable.
                 :else
-                (verify/verify-block {:verify-on? true :result vresult
-                                      :changed changed :require-test? true}))]
+                (or (verify/verify-block {:verify-on? true :result vresult
+                                          :changed changed :require-test? true})
+                    ;; Focused is green. Completion now turns on the closure
+                    ;; gate, whose RED is returned as evidence the branch can
+                    ;; act on exactly like a focused RED.
+                    (when (and cresult (not (:green? cresult)))
+                      (str (base/bounded-message {:done-closure-red true})
+                           "\n\n"
+                           (verify/tail-of cresult)))))]
     ;; The same record the ordinary ship gate keeps: a gate that was configured
     ;; on and did nothing must not read identically to one that ran green.
     ;; An environment that refused (unavailable) never counts as a run.
-    (let [ran? (boolean (and vresult (not (:unavailable? vresult))))]
+    (let [ran? (boolean (and vresult (not (:unavailable? vresult))))
+          closure-ran? (boolean (and cresult (not (:unavailable? cresult))))]
       (session/observe! (if ran?
                           [:verify (if (:green? vresult) :green :red)]
                           [:verify :skipped]))
+      ;; The closure gate is observed under its own key, so the session window
+      ;; and the gate tally can tell "focused green, closure red" from
+      ;; "focused red" — they are different failures and cost different things.
+      (when closure-ran?
+        (session/observe! [:closure-verify
+                           (if (:green? cresult) :green :red)]))
       (when ran? (session/observe! [:verify :ran]))
       (when (and (:conn ctx) (:run-id ctx))
         (journal/note! (:conn ctx) (:run-id ctx) :ship-verify
                        {:branch-id (:id branch) :turn (:turn ctx)
                         :data (if ran?
-                                (let [envelope (vprov/verify-envelope vresult)]
+                                (let [envelope (vprov/verify-envelope vresult)
+                                      cenv (when closure-ran?
+                                             (vprov/verify-envelope cresult))]
                                   (cond-> {:ran true
+                                           :stage :focused
                                            :green (:green? vresult) :timeout (:timeout? vresult)
                                            :blocked (some? block)
+                                           ;; BOTH gates in one row: whether
+                                           ;; the closure suite ran at all
+                                           ;; (only a focused green buys it)
+                                           ;; and what it said.
+                                           :closure-ran closure-ran?
+                                           :closure-green (when closure-ran?
+                                                            (:green? cresult))
+                                           :closure-timeout (when closure-ran?
+                                                              (:timeout? cresult))
+                                           :closure-envelope cenv
                                            ;; WHICH environment produced the verdict: the
                                            ;; selected provider's policy coordinate, not prose.
                                            :verify-env (vprov/coordinate)}

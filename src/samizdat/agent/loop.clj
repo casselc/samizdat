@@ -43,6 +43,7 @@
             [samizdat.agent.infer :as infer]
             [samizdat.agent.phases :as phases]
             [samizdat.agent.state :as state]
+            [samizdat.agent.surface :as surf]
             [samizdat.agent.storm :as storm]
              [samizdat.agent.tools :as tools]
              [samizdat.agent.skills :as skills]
@@ -175,6 +176,17 @@
                                        (assoc f :branches (str/join ", " (:branches f))))
                                      files)})))))
 
+(defn effective-surface
+  "The surface this branch may actually call.
+
+  Bounded: derived from the durable binding, so it narrows with the binding.
+  Ordinary: every dispatchable tool. One accessor, so a caller cannot reason
+  about the bounded case and forget the ordinary one."
+  [ctx]
+  (if-let [binding (tools/bounded-binding ctx)]
+    (surf/of-binding binding)
+    (surf/ordinary (tools/tool-names))))
+
 (defn- context-block
   "What the harness adds to the branch's view before its next turn: the
   failures most like what it just tried, and — when sharing is on — the
@@ -189,8 +201,19 @@
   distinct sharing. Whether sharing earns the beam its width stays a question
   the journal can answer, now directly. Returns {:block :branch}; the branch
   carries the :shared-served ids the dedup reads."
-  [conn run-id branch last-claim share?]
+  [conn run-id branch last-claim share? surface]
   (let [others #(remove (fn [e] (= (:branch_id e) (:id branch))) %)
+        ;; THE SURFACE FILTER. A block that speaks about a tool declares which
+        ;; tool, and a block whose tool this branch cannot call never reaches
+        ;; the model. JS1 M4 attempt 1 injected task-none.md — "create one with
+        ;; `task create` … or `task claim` an open one" — into a bounded branch
+        ;; whose whole catalog is eval/doc/complete/done, and two different
+        ;; models spent turns chasing a tool that does not exist (finding F-1).
+        ;; Structural rather than one conditional at the site that was caught:
+        ;; every block goes through `speaking`, so the next block someone adds
+        ;; is filtered by construction.
+        speaking (fn [needs render]
+                   (when (surf/satisfies-needs? surface needs) (render)))
         fhits (others (if (str/blank? last-claim)
                         (failures/recent conn run-id 5)
                         (failures/similar conn run-id last-claim 5)))
@@ -227,10 +250,12 @@
                                  ;; on claim (tools/tasks); this is the
                                  ;; reminder, and the end is where a model
                                  ;; attends most.
-                                 (if-let [t (:task branch)]
-                                   (prompt/render "task-current"
-                                     {:id (:id t) :title (:title t)})
-                                   (prompt/prompt "task-none"))
+                                 (speaking
+                                  ["task"]
+                                  #(if-let [t (:task branch)]
+                                     (prompt/render "task-current"
+                                       {:id (:id t) :title (:title t)})
+                                     (prompt/prompt "task-none")))
                                  ;; The run's settled state, first and complete:
                                  ;; what is established and — the half nothing
                                  ;; carried before — what is RULED OUT. Read
@@ -247,14 +272,18 @@
                                  ;; ids + previews only, relevance-ranked by the
                                  ;; branch's last-claim, recent when blank. nil
                                  ;; on an empty store, so keep identity drops it.
-                                 (knowledge/breadcrumb-index conn last-claim)
+                                 (speaking ["recall"]
+                                           #(knowledge/breadcrumb-index
+                                             conn last-claim))
                                  ;; Unread mail from other branches on this run,
                                  ;; a bounded preview; nil when the inbox is
                                  ;; empty. Surfacing does not consume — the
                                  ;; message tool's inbox action marks read.
-                                 (messages/render-inbox
-                                  conn run-id (:id branch)
-                                  (:inbox-lines (gates/threshold :context-budget)))
+                                 (speaking
+                                  ["message"]
+                                  #(messages/render-inbox
+                                    conn run-id (:id branch)
+                                    (:inbox-lines (gates/threshold :context-budget))))
                                  ;; And what the siblings DID, which the
                                  ;; mailbox cannot say: it carries what a
                                  ;; branch chose to announce, and a worker
@@ -893,9 +922,13 @@
       ;; the green cursor still points into a turn log the journal can
       ;; replay up to.
       (let [coverage (state/snapshot-covers? branch)
+            surface (effective-surface ctx)
             decision (arbiter/decide
                       {:branch branch
                        :max-turns max-turns
+                       ;; What this branch may actually call, so a gate cannot
+                       ;; steer it toward a tool outside its authority.
+                       :surface surface
                        ;; How wide the beam already is, so the reproduction
                        ;; rung knows whether the run can afford offspring.
                        :branch-count (or (:branch-count ctx) 1)
@@ -906,7 +939,8 @@
             {ctx-block :block branch :branch}
             (context-block conn run-id branch
                            (get-in parsed [:args :claim])
-                           (get-in ctx [:config :run :share-artifacts?]))
+                           (get-in ctx [:config :run :share-artifacts?])
+                           surface)
             body (str (truncate (:result result))
                       (when ctx-block (str "\n\n" ctx-block))
                       (when decision (str "\n\n---\n\n" (:message decision))))

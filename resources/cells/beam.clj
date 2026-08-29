@@ -577,7 +577,13 @@
         does not re-derive scope from the transcript."
    :effects [:db]
    :requires [:conn :max-turns :run-id]}
-  (fn [{:keys [conn run-id max-turns] :as ctx} {:keys [branches active] :as data}]
+  (fn [{:keys [conn run-id] :as ctx} {:keys [branches active] :as data}]
+    ;; The cap the scheduler ACTUALLY enforced, not the one captured into ctx
+    ;; when the run (or the resume) started. A controller-authorized extension
+    ;; raises the durable row mid-run, and round-max-turns already reads it —
+    ;; but this sentence did not, so a run extended 60 -> 120 ran to 120 and
+    ;; then told the model it had exhausted at 60 (M4 attempt-1 finding F-5).
+    ;; Budget AUTHORITY is unchanged; this is the number the branch is told.
     ;; A branch may have SHIPPED rounds ago while :stop-on-first-done? kept
     ;; the beam exploring. The cap expiring is not a failure then: the banked
     ;; answer ends the run, ranked by the same rubric :beam/complete uses.
@@ -585,7 +591,8 @@
     (let [winner (beam/select-done-branch ctx (filterv :final-answer branches))]
       (doseq [b active]
         (runs/close-branch! conn run-id (:id b) :exhausted
-                            (str "turn cap of " max-turns " reached")))
+                            (str "turn cap of " (beam/round-max-turns ctx data)
+                                 " reached")))
       (if winner
         (do (runs/finish-run! conn run-id :completed (:final-answer winner))
             (assoc data :status :completed :done-branch winner
@@ -596,7 +603,7 @@
                       {:branches branches
                        :failures (failures/recent conn run-id 10)
                        :gate-tally (journal/gate-tally conn run-id)
-                       :max-turns max-turns})]
+                       :max-turns (beam/round-max-turns ctx data)})]
           (doseq [r residuals]
             (journal/note! conn run-id :residual {:branch-id (:branch r) :data r}))
           (journal/note! conn run-id :residual-report {:data report})
