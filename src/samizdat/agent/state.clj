@@ -611,13 +611,23 @@
   defect that was in its own tests, and the reason it could not escape is that
   it never had to say WHERE it thought the defect was. Naming a file before
   exploring forces the question; re-naming a different file is how the answer
-  gets corrected."
+  gets corrected.
+
+  WHAT THE BRANCH HAS WRITTEN SURVIVES A RE-PLAN. `:repl-written` is a fact
+  about this branch's history, not about the current hypothesis, and clearing
+  it made re-planning a trap: run a3566c73 fixed three files, had its `done`
+  refused for an unrelated reason, re-planned to say what it had actually
+  done — and was then told it had never written the files it had just fixed,
+  because the re-plan wiped the ledger. It spent turns rewriting correct files
+  to satisfy a counter. Whether the diff is real is the ship gate's question
+  and it asks git; this ledger only answers whether the branch went where it
+  said it would go."
   [branch {:keys [files tests goal]}]
   (let [files (vec (distinct (map norm-path (remove nil? (concat files tests)))))]
     (assoc branch :repl-plan {:files files
                               :tests (vec (map norm-path (remove nil? tests)))
                               :goal (some-> goal str not-empty)}
-                  :repl-written #{})))
+                  :repl-written (or (:repl-written branch) #{}))))
 
 (defn plan
   "The branch's current declaration, or nil."

@@ -315,6 +315,22 @@
     (is (= ["test/a_test.clj"] (state/unwritten b))
         "the new plan's files are outstanding again")))
 
+(deftest a-re-plan-does-not-un-write-what-the-branch-already-wrote
+  ;; Run a3566c73, live. The branch fixed three files, had its `done` refused
+  ;; for an unrelated reason, re-planned to describe what it had actually
+  ;; done — and was then told it had never written the files it had just
+  ;; fixed, because declare-plan reset the ledger. It spent turns rewriting
+  ;; correct files to satisfy a counter, and `done` was refused twice.
+  ;;
+  ;; :repl-written is a fact about this branch's history, not about the
+  ;; current hypothesis. Whether the diff is real is the SHIP gate's question
+  ;; and it asks git; this only answers whether the branch went where it said.
+  (let [b (-> (state/declare-plan {} {:files ["src/a.clj"]})
+              (state/note-write "src/a.clj")
+              (state/declare-plan {:files ["src/a.clj" "test/a_test.clj"]}))]
+    (is (= ["test/a_test.clj"] (state/unwritten b))
+        "src/a.clj was written in this run and stays discharged across the re-plan")))
+
 ;; --- the plan is a better arming signal than the write history --------------
 ;; :no-edits armed on "this branch has written before", which is a heuristic
 ;; groping for "is it supposed to be writing by now". A branch that has never

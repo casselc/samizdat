@@ -87,6 +87,26 @@
     (is (= :allow (:effect (policy/decide {} "jolt -A:test -e \"(run-tests)\""))))
     (is (= :allow (:effect (policy/decide {} "jolt -M:test"))))
     (is (= :allow (:effect (policy/decide {} "jolt -A:test -e '(require x)'")))))
+  (testing "and so is the RUN alias, which is the same trust as the test one —
+            run a3566c73 was told to verify with `jolt -M:run` and spent three
+            turns being refused it, while `cargo run` and `go run` had been
+            allowed all along"
+    (is (= :allow (:effect (policy/decide {} "jolt -M:run"))))
+    (is (= :allow (:effect (policy/decide {} "jolt -M:run 2>&1")))))
+  (testing "a leading VAR=value assignment does not defeat an allow — it sets a
+            variable for the very command the rule reads, unlike an exec
+            wrapper which stands in front of a different one. Run a3566c73 was
+            told to verify with `RAYLIB_APP_AUTO_QUIT_MS=1500 jolt -M:run` and
+            asked four times before giving up"
+    (is (= :allow (:effect (policy/decide {} "RAYLIB_APP_AUTO_QUIT_MS=1500 jolt -M:run"))))
+    (is (= :allow (:effect (policy/decide {} "RAYLIB_APP_AUTO_QUIT_MS=1500 jolt -M:test"))))
+    (is (= :allow (:effect (policy/decide {} "FOO=1 BAR=2 ls -la"))))
+    (testing "and the wrappers that DO change what runs still do not ride it"
+      (is (not= :allow (:effect (policy/decide {} "sudo jolt -M:test"))))
+      (is (not= :allow (:effect (policy/decide {} "xargs jolt -M:test"))))
+      (is (not= :allow (:effect (policy/decide {} "timeout 5 jolt -M:test")))))
+    (testing "nor does an assignment prefix launder a command nothing allows"
+      (is (not= :allow (:effect (policy/decide {} "FOO=1 curl https://evil.test"))))))
   (testing "destructive system operations are hard-denied"
     (is (= :deny (:effect (policy/decide {} "rm -rf /"))))
     (is (= :deny (:effect (policy/decide {} "dd if=/dev/zero of=/dev/sda"))))
@@ -310,3 +330,24 @@
   (testing "reading the config stays allowed — a run may inspect its gates"
     (is (= :allow (:effect (policy/decide {} "cat .samizdat/config.edn"))))
     (is (= :allow (:effect (policy/decide {} "grep verify .samizdat/config.edn"))))))
+
+(deftest a-hijacking-assignment-is-an-exec-wrapper-in-different-syntax
+  ;; The line the assignment-stripping fix must not cross. PATH= was already
+  ;; pinned (dirge-8zem, allow-matches-raw-not-stripped above); the loader and
+  ;; interpreter variables are the same trick through a different door, and
+  ;; the GIT_* family makes git itself exec an arbitrary program.
+  (doseq [c ["PATH=/tmp/evil git status"
+             "LD_PRELOAD=/tmp/evil.so ls -la"
+             "DYLD_INSERT_LIBRARIES=/tmp/evil.dylib ls"
+             "GIT_EXTERNAL_DIFF=/tmp/evil git diff"
+             "GIT_SSH_COMMAND=/tmp/evil git fetch"
+             "PYTHONPATH=/tmp/evil pytest"
+             "NODE_OPTIONS=--require=/tmp/evil.js make"
+             "BASH_ENV=/tmp/evil make"
+             "CLASSPATH=/tmp/evil jolt -M:test"]]
+    (is (not= :allow (:effect (policy/decide {} c)))
+        (str "a hijacking assignment must not ride an allow: " c)))
+  (testing "an ordinary one still may, including alongside a hijacking name —
+            the walk stops at the first hijacker rather than skipping it"
+    (is (= :allow (:effect (policy/decide {} "FOO=1 ls -la"))))
+    (is (not= :allow (:effect (policy/decide {} "FOO=1 PATH=/tmp/evil ls -la"))))))
