@@ -104,7 +104,8 @@
   Lowest precedence: a project's .samizdat/cells override still loads after
   these and wins, and in a source checkout the dir scan reads the very same
   files, so a shipped cell edited in place is picked up from disk."
-  ["cells/beam.clj" "cells/board.clj" "cells/critic.clj" "cells/decompose.clj"
+  ["cells/beam.clj" "cells/board.clj" "cells/compaction.clj" "cells/critic.clj"
+   "cells/decompose.clj"
    "cells/feature.clj" "cells/loop.clj" "cells/probe.clj" "cells/repair.clj"
    "cells/oversight.clj"
    "cells/repl.clj"

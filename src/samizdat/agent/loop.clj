@@ -880,7 +880,13 @@
         ;; (karamazov-blt.12).
         max-turns (+ max-turns (or (:extended-turns branch) 0))]
     (if (:done? result)
-      (state/add-message branch "user" (truncate (:result result)) {:turn turn})
+      ;; :tool as well as :turn. Compaction's prune pass replaces an old tool
+      ;; result with one line keyed BY TOOL — a shell result's useful line is
+      ;; its command, a grep's is its match count, a read's is its size — and
+      ;; a message that does not say which tool produced it gets the generic
+      ;; preview instead, which is the one shape that carries nothing.
+      (state/add-message branch "user" (truncate (:result result))
+                         {:turn turn :tool tool})
       ;; Coverage answers whether the safe-state rung's fallback is honest:
       ;; the green cursor still points into a turn log the journal can
       ;; replay up to.

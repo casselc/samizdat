@@ -1270,6 +1270,105 @@
         reused across several edits without re-reading. Raising it past a
         screenful trades the wrong-line guard for convenience."}
 
+ :compaction
+ {:value
+  {;; THE BUDGET LADDER, as fractions of the model's context window. Ported
+   ;; from dirge's context_manager (itself a port of Reasonix's
+   ;; context-manager.ts). Fractions rather than character counts so one
+   ;; policy is right on an 8k local model and a 200k hosted one — the old
+   ;; :compaction-chars was a fixed size that could not be both.
+   ;;
+   ;; PROACTIVE. A fold at 0.75 happens while the branch is still working
+   ;; well; a fold at 0.98 happens after the model has lost the thread. The
+   ;; cheapest rung runs first and often makes the rest unnecessary.
+   :ladder {:aggressive-cap  0.60   ; tighten the per-result cap
+            :fold            0.75   ; fold older history into a summary
+            :aggressive-fold 0.78   ; the normal fold bought too little
+            :force           0.80   ; force a summary and end the turn
+            :turn-start      0.90}  ; fold before the first call of a turn
+
+   ;; Rough token estimate. Bytes over this, the same method the session
+   ;; meter uses, so the two cannot disagree about what they are measuring.
+   :chars-per-token 4
+
+   ;; Messages never folded. The HEAD is the system prompt and the opening
+   ;; statement of the problem — fold those and the branch is working from a
+   ;; summary of its own instructions. The TAIL is what is still in play.
+   :protect-head 2
+   :protect-tail 5
+   ;; The aggressive rung halves the tail it keeps.
+   :aggressive-tail 2
+
+   ;; Per-tool-result caps, in tokens. The model that CALLED the tool saw the
+   ;; whole result on its dispatch turn; later turns see head+tail with the
+   ;; dropped count, and can call again for the middle.
+   :result-cap {:normal 3000 :aggressive 1000}
+   ;; A result shorter than this is left alone: summarising it costs more
+   ;; than it saves and loses something readable at a glance.
+   :prune-min-chars 500
+   ;; When capping frees this fraction of the window, a NORMAL fold can be
+   ;; skipped — the snip already bought the headroom. Never applies to an
+   ;; aggressive tier: past that point the summary is the thing needed.
+   :snip-sufficient 0.10
+
+   ;; The summary's own size: a fraction of what is folded, floored so a
+   ;; small fold still carries its load-bearing facts, capped so a summary
+   ;; approaching the size of what it replaced is not called compaction.
+   :summary {:ratio 0.20 :floor 2000 :ceiling 12000}
+   ;; How many of the template's sections must carry a real body before the
+   ;; result is treated as a summary. The caller acts on that by DROPPING
+   ;; history, so this is the guard on destroying turns for a stub. Two, not
+   ;; fourteen: rejecting a usable summary forces prune-only folding, which
+   ;; walks the branch into the overflow the fold existed to prevent.
+   :min-summary-sections 2
+   ;; Section bodies that say nothing.
+   :empty-bodies #{"" "none" "n/a" "na" "-" "—" "unknown" "nothing" "todo" "tbd"}
+   ;; How much of a pruned result's text survives as a preview.
+   :preview-chars 80
+   ;; Which message roles hold tool results. In this harness a tool result
+   ;; comes back as a "user" turn, which is why capping and pruning key on it
+   ;; — a project whose loop shapes messages differently retunes this rather
+   ;; than editing a cell.
+   :result-roles #{"user"}
+   ;; What a clipped result says about its missing middle. Prose, and it has
+   ;; to name the way back: a truncation marker that does not is a dead end.
+   :clip-note "\n… [{{chars}} chars dropped — fetch_turn to reopen this turn in full] …\n"
+   ;; The one-line stand-in a pruned tool result becomes, keyed by tool. The
+   ;; useful line differs per tool, which is the whole reason this is a table
+   ;; and not one format string.
+   :prune-lines {"shell"      "[shell] ran `{{first-line}}` → {{lines}} lines, {{chars}} chars"
+                 "eval"       "[eval] {{lines}} lines, {{chars}} chars — {{preview}}"
+                 "read_file"  "[read_file] {{chars}} chars, {{lines}} lines"
+                 "grep"       "[grep] {{lines}} lines of matches, {{chars}} chars"
+                 "lsp"        "[lsp] {{lines}} lines"
+                 "write_file" "[write_file] wrote {{chars}} chars"
+                 "edit_file"  "[edit_file] patched {{chars}} chars"
+                 "patch"      "[patch] patched {{chars}} chars"
+                 "task"       "[task] {{preview}}"
+                 "recall"     "[recall] {{lines}} memories, {{chars}} chars"}
+   :prune-line-default "[{{tool}}] {{preview}} ({{chars}} chars)"
+
+   ;; What a fold leaves behind in the knowledge store. A folded region is
+   ;; not discarded — it is distilled into memories the breadcrumb index then
+   ;; surfaces on every later turn, one line each, expandable with `recall`.
+   ;; Without this a fold is lossy and the branch has only `fetch_turn`, which
+   ;; requires already knowing which turn to reopen.
+   ;; `episodic` — a specific thing that happened in this run, which is what
+   ;; a folded region is. Ranked below semantic and procedural in recall, and
+   ;; correctly so: the durable lesson is the supervisor's to record, not the
+   ;; fold's to claim.
+   :distil {:max-memories 5 :min-chars 40 :kind "episodic"}}
+  :kind :threshold :capability-tunable? true
+  :doc "WHEN A BRANCH COMPACTS, HOW HARD, AND WHAT IT KEEPS.
+
+        Every rung is a fraction of the model's context window, so the policy
+        travels across models. See samizdat.agent.compaction for what each
+        rung does and why the head and tail are protected.
+
+        The old single :compaction-chars threshold is still read by the
+        in-place digest path; this governs the LADDER, which decides whether
+        that path runs at all and whether a fold is needed on top of it."}
+
  :context-budget
  {:value {:tool-result-chars   4000
           :file-read-chars     60000

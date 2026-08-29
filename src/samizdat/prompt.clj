@@ -39,6 +39,8 @@
    "branch-cap"
    "branch-out"
    "cell-tool"
+   "compaction-marker"
+   "compaction-summary"
    "critic"
    "critic-system"
    "crossover"
