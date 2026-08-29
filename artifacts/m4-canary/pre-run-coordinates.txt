@@ -1,0 +1,12 @@
+=== controller ===
+64effe150269fdebfdd9ccb619cab89187494b75
+controller tracked-clean: 0 modified
+=== target ===
+64effe150269fdebfdd9ccb619cab89187494b75
+?? .samizdat/
+=== target file digests ===
+9dbc01d242d920365d88af0d0c4c1a21247ada54511693cec3939b28a785f705  samizdat-canary-target-m4/src/samizdat/util.clj
+6263ca9237ac3d2367c10f61a52ad6e1f17ff63bd08befa81107a0dbbc6b6f60  samizdat-canary-target-m4/test/samizdat/util_test.clj
+=== jolt/sci ===
+f8899905d98a0abdcc6b4ae61dfd5c8bdb9c7277
+32d62a5136ad3dc148588752f5bcc4cc30b14752

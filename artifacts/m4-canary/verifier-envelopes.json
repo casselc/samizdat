@@ -1,0 +1,134 @@
+[
+  {
+    "ran": true,
+    "green": false,
+    "timeout": false,
+    "blocked": true,
+    "verify-env": "js1-ve/v1:bab68fdf5a128ea0094ce345680d8eb0101792a0e703f8a29bfc28e4ad82a861",
+    "envelope": {
+      "version": 1,
+      "kind": "run",
+      "invocation-index": 1,
+      "attribution": {
+        "coordinate": "sha256:e3fd1b7d73e88ec4f88e482c61912524bd48acbbe6ed3cd319a4c4ca387fff2f",
+        "type": "bwrap-verification-env"
+      },
+      "input": {
+        "coordinate": "sha256:948461763a354a12cc077a279c89c2d3cfc0e572ab80dbba5f56ee9d43ae7847"
+      },
+      "status": "completed",
+      "exit": 1,
+      "stdout": {
+        "text": "",
+        "bytes": 0,
+        "truncated?": false
+      },
+      "stderr": {
+        "text": "Unhandled exception: EOF while reading (/workspace/src/samizdat/util.clj:88:1)\n  ex-data: {:line 88, :column 1, :file /workspace/src/samizdat/util.clj}\n  at /workspace/src/samizdat/util.clj:44:1\n  trace:\n    jolt.main/eval-expr-string (jolt-core/jolt/main.clj:189)\n    rdr-read-form\n    rdr-read-top\n    load-jolt-file*\n    ldr-load-body\n    loader-require\n    load-jolt-file*\n    ldr-load-body\n    loader-require\n",
+        "bytes": 414,
+        "truncated?": false
+      },
+      "duration-ms": 3286,
+      "disposition": "terminated"
+    }
+  },
+  {
+    "ran": true,
+    "green": false,
+    "timeout": false,
+    "blocked": true,
+    "verify-env": "js1-ve/v1:bab68fdf5a128ea0094ce345680d8eb0101792a0e703f8a29bfc28e4ad82a861",
+    "envelope": {
+      "version": 1,
+      "kind": "run",
+      "invocation-index": 2,
+      "attribution": {
+        "coordinate": "sha256:e3fd1b7d73e88ec4f88e482c61912524bd48acbbe6ed3cd319a4c4ca387fff2f",
+        "type": "bwrap-verification-env"
+      },
+      "input": {
+        "coordinate": "sha256:ece9fc187b7ee4f36ed2a08446e6375859b0fa86cf2d56cc1713229d06fa3880"
+      },
+      "status": "completed",
+      "exit": 1,
+      "stdout": {
+        "text": "",
+        "bytes": 0,
+        "truncated?": false
+      },
+      "stderr": {
+        "text": "Unhandled exception: java.lang.IllegalArgumentException: Don't know how to create ISeq from: java.lang.Character\n  ex-data: {:jolt/error {:type :analysis-error, :line 28, :column 1, :file /workspace/src/samizdat/util.clj}}\n  at /workspace/src/samizdat/util.clj:28:1\n",
+        "bytes": 266,
+        "truncated?": false
+      },
+      "duration-ms": 3287,
+      "disposition": "terminated"
+    }
+  },
+  {
+    "ran": true,
+    "green": false,
+    "timeout": false,
+    "blocked": true,
+    "verify-env": "js1-ve/v1:bab68fdf5a128ea0094ce345680d8eb0101792a0e703f8a29bfc28e4ad82a861",
+    "envelope": {
+      "version": 1,
+      "kind": "run",
+      "invocation-index": 3,
+      "attribution": {
+        "coordinate": "sha256:e3fd1b7d73e88ec4f88e482c61912524bd48acbbe6ed3cd319a4c4ca387fff2f",
+        "type": "bwrap-verification-env"
+      },
+      "input": {
+        "coordinate": "sha256:ece9fc187b7ee4f36ed2a08446e6375859b0fa86cf2d56cc1713229d06fa3880"
+      },
+      "status": "completed",
+      "exit": 1,
+      "stdout": {
+        "text": "",
+        "bytes": 0,
+        "truncated?": false
+      },
+      "stderr": {
+        "text": "Unhandled exception: java.lang.IllegalArgumentException: Don't know how to create ISeq from: java.lang.Character\n  ex-data: {:jolt/error {:type :analysis-error, :line 28, :column 1, :file /workspace/src/samizdat/util.clj}}\n  at /workspace/src/samizdat/util.clj:28:1\n",
+        "bytes": 266,
+        "truncated?": false
+      },
+      "duration-ms": 3297,
+      "disposition": "terminated"
+    }
+  },
+  {
+    "ran": true,
+    "green": false,
+    "timeout": false,
+    "blocked": true,
+    "verify-env": "js1-ve/v1:bab68fdf5a128ea0094ce345680d8eb0101792a0e703f8a29bfc28e4ad82a861",
+    "envelope": {
+      "version": 1,
+      "kind": "run",
+      "invocation-index": 4,
+      "attribution": {
+        "coordinate": "sha256:e3fd1b7d73e88ec4f88e482c61912524bd48acbbe6ed3cd319a4c4ca387fff2f",
+        "type": "bwrap-verification-env"
+      },
+      "input": {
+        "coordinate": "sha256:dcaf5e633df5114937043fc03e38e21fc04d33d8c32cfad274bf3ce5073b5940"
+      },
+      "status": "completed",
+      "exit": 1,
+      "stdout": {
+        "text": "",
+        "bytes": 0,
+        "truncated?": false
+      },
+      "stderr": {
+        "text": "Unhandled exception: java.lang.IllegalArgumentException: Don't know how to create ISeq from: java.lang.Character\n  ex-data: {:jolt/error {:type :analysis-error, :line 28, :column 1, :file /workspace/src/samizdat/util.clj}}\n  at /workspace/src/samizdat/util.clj:28:1\n",
+        "bytes": 266,
+        "truncated?": false
+      },
+      "duration-ms": 3298,
+      "disposition": "terminated"
+    }
+  }
+]

@@ -1,0 +1,137 @@
+diff --git a/src/samizdat/util.clj b/src/samizdat/util.clj
+index 804856e..e17e181 100644
+--- a/src/samizdat/util.clj
++++ b/src/samizdat/util.clj
+@@ -17,66 +17,40 @@
+ ;; SPDX-License-Identifier: GPL-3.0-or-later
+ 
+ (ns samizdat.util
+-  "Small pure helpers shared across the codebase.
+-
+-  The first code samizdat wrote about itself: truncate-middle was authored by
+-  the harness in a supervised self-modification run, then wired into the shell
+-  tool's output truncation."
++  "Miscellaneous utilities."
+   (:require [clojure.string :as str]))
+ 
+-(defn sh-quote
+-  "`s` as a single-quoted shell word, safe to interpolate into `sh -c`.
+-
+-  The POSIX escape for a quote inside a single-quoted string is `'\\''`:
+-  close, escaped quote, reopen. verify/run-verify spelled it `'\\\\''`, one
+-  backslash too many — that closes the quote, emits a literal backslash,
+-  opens and closes an empty string, and leaves the REST of the command
+-  inside an unterminated quote. A project root holding a `'` turned every
+-  verify run into a shell syntax error, and the branch was told its tests
+-  were red forever.
+-
+-  Here rather than in either caller because both the ship gate's verify and
+-  the shell tool have the same root to quote, and a second hand-rolled
+-  version is how the first one drifted."
+-  [s]
+-  (str "'" (str/replace (str s) "'" "'\\''") "'"))
+-
+-(defn generation-cache
+-  "Wrap `f` as a no-arg fn whose result is recomputed only when `gen-fn`
+-  reports a new generation. The seam between a reloadable resource and the
+-  things COMPILED from it.
+-
+-  The pattern this replaces: a top-level `(def gates (mapv compile-gate …))`
+-  reading a cache atom at namespace load. system/start! called reload! on
+-  every one of those caches, and the comment said long-lived sessions would
+-  pick up edits without a restart — but only the scalar readers did. The
+-  compiled gate table, the ship rungs, the forceable-tool schemas, the winner
+-  rubric, the stopword sets and the judge preamble were all frozen at first
+-  load, so exactly the parts the docstrings advertised as retunable-without-a-
+-  rebuild were the parts a reload could not touch.
+-
+-  A counter rather than a content hash: bumping is what `reload!` already
+-  means, and it costs nothing on the read path. Racing readers may compute
+-  `f` twice and the last writer wins — both results are derived from the same
+-  generation, so they agree."
+-  [gen-fn f]
+-  (let [cache (atom nil)]
+-    (fn []
+-      (let [g (gen-fn)
+-            c @cache]
+-        (if (and c (= g (:gen c)))
++(defmacro defn-memo
++  "Define a memoized function."
++  [name & body]
++  `(def ~name (memoize (fn ~@body))))
++
++(defn-memo memoize-by-generation
++  "Return a function that caches the result of `f` for generation `g`."
++  [f]
++  (let [cache (atom {:gen 0 :val nil})]
++    (fn [g]
++      (let [c @cache]
++        (if (= g (:gen c))
+           (:val c)
+           (:val (reset! cache {:gen g :val (f)})))))))
+ 
+ (defn truncate-middle
+-  "If `s` is longer than `max-len`, return it shortened to exactly `max-len`
+-  characters by keeping the head and tail with the literal string \" … \"
+-  in the middle; otherwise return `s` unchanged."
++  "If `s` is longer than `max-len`, return it shortened to at most `max-len`
++  characters by keeping the head and tail with the literal string " … "
++  in the middle; otherwise return `s` unchanged.  When `max-len` is too small
++  to hold the marker, return the first `max-len` characters instead.
+   [s max-len]
+-  (if (<= (count s) max-len)
+-    s
+-    (let [marker " … "
+-          marker-len (count marker)
+-          head-len (quot (- max-len marker-len) 2)
+-          tail-len (- max-len marker-len head-len)]
+-      (str (subs s 0 head-len) marker (subs s (- (count s) tail-len))))))
++  (let [n (count s)]
++    (if (<= n max-len)
++      s
++      (let [marker " … "
++            marker-len (count marker)
++            room (- max-len marker-len)]
++        (if (neg? room)
++          (subs s 0 (max 0 max-len))
++          (let [head-len (quot room 2)
++                tail-len (- room head-len)]
++            (str (subs s 0 head-len) marker (subs s (- n tail-len))))))))
++
++
+diff --git a/test/samizdat/util_test.clj b/test/samizdat/util_test.clj
+index fb07a5e..c9c417a 100644
+--- a/test/samizdat/util_test.clj
++++ b/test/samizdat/util_test.clj
+@@ -34,4 +34,30 @@
+ 
+   (testing "middle marker present"
+     (let [result (util/truncate-middle "abcdefghijklmnopqrstuvwxyz" 10)]
+-      (is (str/includes? result " … ")))))
++      (is (str/includes? result " … "))))
++
++  (testing "max-len smaller than marker returns a short prefix"
++    (is (= "" (util/truncate-middle "abcdefghijklmnopqrstuvwxyz" 0)))
++    (is (= "a" (util/truncate-middle "abcdefghijklmnopqrstuvwxyz" 1)))
++    (is (= "ab" (util/truncate-middle "abcdefghijklmnopqrstuvwxyz" 2))))
++
++  (testing "max-len equal to marker width includes the marker"
++    (is (= " … " (util/truncate-middle "abcdefghijklmnopqrstuvwxyz" 3))))
++
++  (testing "result never exceeds max-len for any non-negative bound"
++    (is (every? (fn [n] (<= (count (util/truncate-middle "abcdefghijklmnopqrstuvwxyz" n)) n))
++                (range 0 50)))))
++
++
++  (testing "max-len smaller than marker returns a short prefix"
++    (is (= "" (util/truncate-middle "abcdefghijklmnopqrstuvwxyz" 0)))
++    (is (= "a" (util/truncate-middle "abcdefghijklmnopqrstuvwxyz" 1)))
++    (is (= "ab" (util/truncate-middle "abcdefghijklmnopqrstuvwxyz" 2))))
++
++  (testing "max-len equal to marker width includes the marker"
++    (is (= " … " (util/truncate-middle "abcdefghijklmnopqrstuvwxyz" 3))))
++
++  (testing "result never exceeds max-len for any non-negative bound"
++    (is (every? (fn [n] (<= (count (util/truncate-middle "abcdefghijklmnopqrstuvwxyz" n)) n))
++                (range 0 50)))))
++

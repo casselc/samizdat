@@ -1,0 +1,215 @@
+;; JS1 M4 real self-hosting canary. This is a FAILURE record, not a retry
+;; authorization and not a runtime-coordinate change. Inert EDN; no secrets.
+{:m4/decision :fail
+ :m4/first-causal-failure-class :model-behavior
+ :m4/secondary-failure-classes [:provider :operator-environment :prompt]
+ :m4/record-date "2026-08-29"
+
+ :coordinates
+ {:m3-executable-oracle "b1d69867c1d02d34f9130309ae55c9baffc55c29"
+  :m3-evidence-oracle   "64effe150269fdebfdd9ccb619cab89187494b75"
+  :m4-code-under-test   "64effe150269fdebfdd9ccb619cab89187494b75"
+  :m3-upstream-base     "effcf7dbf439bd3baa2718bc3e780f2031ecae59"
+  :upstream-head-at-entry "effcf7dbf439bd3baa2718bc3e780f2031ecae59"
+  :upstream-moved? false
+  :forward-port-performed? false
+  :frozen-m2 "a7e857fbde5b5603477a6982c28275aae728e294"
+  :jolt      "f8899905d98a0abdcc6b4ae61dfd5c8bdb9c7277"
+  :jolt-base "4af2362176160f2ed0e366689d7232b1a38adfec"
+  :sci       "32d62a5136ad3dc148588752f5bcc4cc30b14752"
+  :sci-version "0.13.53"}
+
+ :pre-canary-gate
+ {:command "bin/js1-m3 test"
+  :exit 0
+  :focused  {:tests 49   :assertions 246  :failures 0 :errors 0}
+  :bounded  {:tests 25   :assertions 294  :failures 0 :errors 0}
+  :ordinary {:tests 1573 :assertions 6320 :failures 0 :errors 0}}
+
+ :controller
+ {:path "/home/chuck/opencode/src/samizdat-controller-m4"
+  :sha "64effe150269fdebfdd9ccb619cab89187494b75"
+  :tracked-modifications 0
+  :untracked 0
+  :unchanged? true}
+
+ :target
+ {:path "/home/chuck/opencode/src/samizdat-canary-target-m4"
+  :base "64effe150269fdebfdd9ccb619cab89187494b75"
+  :operator-placed [".samizdat/config.edn"]
+  :base-digests
+  {"src/samizdat/util.clj"       "sha256:9dbc01d242d920365d88af0d0c4c1a21247ada54511693cec3939b28a785f705"
+   "test/samizdat/util_test.clj" "sha256:6263ca9237ac3d2367c10f61a52ad6e1f17ff63bd08befa81107a0dbbc6b6f60"}
+  :final-digests
+  {"src/samizdat/util.clj"       "sha256:de4a4c9c4ba9a38c508ca89dd80114f85512f98198bbf3a7ed70b4ec1b7012cb"
+   "test/samizdat/util_test.clj" "sha256:8700c401f9bced72256f44340c74fa57d08743066ae5da2a2aff05bc181e4616"}
+  :final-digests-match-last-receipts? true
+  :unexplained-mutation? false
+  :protected-config-mutated? false}
+
+ :task
+ {:id :js1-m4-truncate-middle-totality
+  :original-diagnostic-reused? false
+  :why-not-reused "M3 closed durable evaluator recovery; that diagnostic is no longer unsolved at this coordinate."
+  :statement-file "m4-evidence/task.txt"}
+
+ :run
+ {:id "020296a8-a068-4559-83c1-e00a361b0c22"
+  :database "/home/chuck/opencode/src/m4-evidence/m4-canary.sqlite3"
+  :root "/home/chuck/opencode/src/samizdat-canary-target-m4"
+  :binding-id "bind:020296a8-a068-4559-83c1-e00a361b0c22"
+  :instance-id "inst:020296a8-a068-4559-83c1-e00a361b0c22"
+  :profile :agent/project-develop
+  :capabilities #{:project/read :project/list :project/search :project/stat :project/edit}
+  :timeout-ms 30000
+  :orientation-digest "sha256:75f9d4cfe5c1082a901d0d07640ea380f48441f530e811910ef742f48e1ef9d8"
+  :loop-manifest {:name "critic" :version 1 :chosen-by "selection" :iterating? true}
+  :beam-width 1
+  :started-at "2026-08-29T09:30:32.789Z"
+  :ended-at   "2026-08-29T10:37:10.633Z"
+  :terminal-status :failed
+  :branch-terminal {:id "B1" :status :exhausted}}
+
+ :verification-environment
+ {:selected :bwrap
+  :selection-source "SAMIZDAT_VERIFY_ENV (trusted controller env)"
+  :coordinate "js1-ve/v1:bab68fdf5a128ea0094ce345680d8eb0101792a0e703f8a29bfc28e4ad82a861"
+  :attribution "sha256:e3fd1b7d73e88ec4f88e482c61912524bd48acbbe6ed3cd319a4c4ca387fff2f"
+  :preflight {:ran-before-run? true :green? true :tests 1 :assertions 4}}
+
+ :provider
+ {:endpoint-kind :local-openai-compatible-router
+  :credentials-required? false
+  :epochs
+  [{:id "e1009cfa-2fa0-4294-bac0-bc1cd4501ab2" :turn 1  :provider :local  :model "openrouter.z-ai/glm-5.3"
+    :adapter "local"  :config-digest "1b035b576ff2077fafa200d214803cf51207311bdac9653545f55b6611a49fa0"
+    :closed-at "2026-08-29T10:05:05.942Z"}
+   {:id "568a8651-0cff-4461-9fb5-96ef81e3d4df" :turn 18 :provider :openai :model "openrouter.z-ai/glm-5.3"
+    :adapter "OpenAI" :config-digest "bfc5ace21d2a071fbb85946bb452d778b8fd9a5670589efdb5bae4fa670cdf23"
+    :closed-at "2026-08-29T10:22:49.762Z"}
+   {:id "10a11ced-58e6-4c61-979a-f9b0ff239418" :turn 24 :provider :openai :model "fireworks.kimi-k2p7-code"
+    :adapter "OpenAI" :config-digest "32ebab6c0b98f5638894df7eb1d455a340e4173db6881dec3873ff853eecb021"
+    :closed-at nil}]
+  :inference-invocations 122
+  :mixed-provider? true
+  :mixed-model? true
+  :endpoint-observed {:chat-calls 135 :status-200 129 :status-500 5 :other 1}}
+
+ :recovery
+ [{:cycle 1 :method :sigkill :interrupted-after-turn 17 :resumed-at-turn 18
+   :binding-identity-unchanged? true :context-spec-unchanged? true
+   :runtime-coordinate-unchanged? true :orientation-digest-unchanged? true
+   :fresh-sci-context? true
+   :replay-world-operations 0
+   :receipts-before 12 :receipts-after 12
+   :evals-before 9 :evals-after 9
+   :completions-before 9 :completions-after 9
+   :target-digests-unchanged? true :target-mtimes-unchanged? true
+   :durable-budget-before 60 :durable-budget-after 60
+   :work-continued-after-resume? true}
+  {:cycle 2 :method :sigkill :interrupted-after-turn 23 :resumed-at-turn 24
+   :binding-identity-unchanged? true :context-spec-unchanged? true
+   :runtime-coordinate-unchanged? true :orientation-digest-unchanged? true
+   :fresh-sci-context? true
+   :replay-world-operations 0
+   :model-switched? true :new-epoch "10a11ced-58e6-4c61-979a-f9b0ff239418"
+   :evaluator-authority-changed? false
+   :durable-budget-before 60 :durable-budget-after 60
+   :work-continued-after-resume? true}]
+ :recovery/limitation
+ "Both interruptions fell before the first committed project/edit, so the zero-actuation replay evidence covers observations (read, stat) only, never a replayed edit receipt."
+
+ :budget
+ {:initial 60
+  :extensions [{:request-id "m4-extend-1" :old 60 :new 90  :principal "m4-operator"}
+               {:request-id "m4-extend-2" :old 90 :new 120 :principal "m4-operator"}]
+  :final 120
+  :resume-ever-widened? false
+  :exhausted? true}
+
+ :interventions
+ {:harness-watch 7
+  :operator [{:id 6  :kind :message :applied-at-turn 24 :substance :anti-stagnation-and-sci-persistence}
+             {:id 9  :kind :review  :applied-at-turn 55 :substance :stop-exploring-call-done}
+             {:id 10 :kind :review  :applied-at-turn 89 :substance :edit-then-done-read-verifier}]
+  :hidden-authority-supplied? false
+  :task-manually-solved? false
+  :target-manually-edited? false}
+
+ :trajectory
+ {:turns 120
+  :by-tool {"eval" 97 "doc" 5 "complete" 4 "done" 4
+            "__no_call__" 1 "__parse_error__" 2 "__provider_error__" 2
+            "project/edit" 1 "project/read" 2 "project/stat" 1 "project_read" 1}
+  :by-category {:neutral 66 :failure 39 :mechanics 15}
+  :evaluations {:total 94 :completed 59 :failed 35}
+  :semantic-operations {:total 78 :project/read 54 :project/stat 13 :project/edit 11}
+  :ops-per-eval 0.83
+  :ops-per-model-turn 0.65
+  :multi-operation-evals 13
+  :persistent-helpers-defined 0
+  :repeated-observation-signatures
+  {"read src/samizdat/util.clj" 29
+   "read test/samizdat/util_test.clj" 23
+   "stat test/samizdat/util_test.clj" 8
+   "stat src/samizdat/util.clj" 5
+   "identical edit re-issued" 2}
+  :verifier-attempts 4
+  :verifier-red 4
+  :verifier-green 0
+  :turn-lease-timeouts 0
+  :provider-error-turns 2
+  :harness-storm-guards-fired [:repeat-suppression :oscillation-A-B-A-B]}
+
+ :verifications
+ [{:index 1 :green? false :exit 1 :input "sha256:948461763a354a12cc077a279c89c2d3cfc0e572ab80dbba5f56ee9d43ae7847"
+   :stderr-summary "EOF while reading /workspace/src/samizdat/util.clj:88:1"}
+  {:index 2 :green? false :exit 1 :input "sha256:ece9fc187b7ee4f36ed2a08446e6375859b0fa86cf2d56cc1713229d06fa3880"
+   :stderr-summary "Don't know how to create ISeq from: java.lang.Character (util.clj:28)"}
+  {:index 3 :green? false :exit 1 :input "sha256:ece9fc187b7ee4f36ed2a08446e6375859b0fa86cf2d56cc1713229d06fa3880"
+   :stderr-summary "Don't know how to create ISeq from: java.lang.Character (util.clj:28)"}
+  {:index 4 :green? false :exit 1 :input "sha256:dcaf5e633df5114937043fc03e38e21fc04d33d8c32cfad274bf3ce5073b5940"
+   :stderr-summary "Don't know how to create ISeq from: java.lang.Character (util.clj:28)"}]
+
+ :failure
+ {:summary
+  "The first committed edit was correct and one unbalanced paren short of green. After the first RED the agent rewrote src/samizdat/util.clj wholesale from memory, replacing real production functions (sh-quote, generation-cache) with invented ones, then spent the remaining turns failing to repair the syntax of its own invention."
+  :first-causal :model-behavior
+  :what-remained-correct
+  [:pre-canary-gate :run-creation :bounded-authority :turn-lease
+   :durable-journal-and-receipts :process-recovery :replay-zero-actuation
+   :budget-authority :inference-provenance :verification-environment
+   :controller-integrity :receipt-explained-target-diff]}
+
+ :findings
+ [{:id :f-1 :class :prompt
+   :summary "The bounded lane's per-turn context injects task-none.md, instructing the model to call `task create`/`task claim`, which are absent from the bounded catalog. Both models burned turns chasing it."}
+  {:id :f-2 :class :prompt
+   :summary "The bounded system prompt (trusted orientation + a manifest :prompt the factory manifests do not declare) never describes the tool-call envelope; the run opened with one no-call and two parse errors before the repair ladder taught it."}
+  {:id :f-3 :class :surface
+   :summary "Whole-file project/edit invites regeneration-from-memory on files larger than a model reliably reproduces. An anchored range/replace form, or refusal when a replacement drops a previously present top-level definition, would have made this a refusal instead of destruction."}
+  {:id :f-4 :class :verification
+   :summary "Focused verification runs only the changed test files' namespaces, so collateral deletion of unrelated public functions in a changed source namespace can pass unseen. This run was saved only because the rewrite was also syntactically invalid."}
+  {:id :f-5 :class :cosmetic
+   :summary "After a budget extension a resumed branch's retained exhaustion reason quotes the cap captured at resume time (60), not the durable cap actually enforced (120)."}
+  {:id :f-6 :class :evidence
+   :summary "evaluator/describe's :evaluator/live-context is neither journalled nor exposed by a read model, so pre/post-restart SCI context ids cannot be compared from durable evidence alone."}]
+
+ :out-of-scope-confirmed
+ {:project/run false :js2 false :shell false :multi-agent false
+  :new-thresholds-added false :prompt-redesign false :architecture-changed false}
+
+ :preserved
+ {:journal-db {:path "/home/chuck/opencode/src/m4-evidence/m4-canary.sqlite3"
+               :sha256 "fd67ab0a91a5ab177c48a6dc1ccd044135c8f0342d4c46d2babf171ac543230e"
+               :tracked? false
+               :why-untracked "the repository .gitignore excludes *.sqlite3; the convention was not overridden for evidence"}
+  :committed-supporting-records "artifacts/m4-canary/"
+  :controller-checkout "/home/chuck/opencode/src/samizdat-controller-m4"
+  :target-worktree "/home/chuck/opencode/src/samizdat-canary-target-m4"}
+
+ :nonclaims
+ ["This is not a statement about any one model's capability."
+  "This is not evidence of autonomous long-horizon reliability."
+  "This is not a JS2 readiness signal."
+  "No retry was performed inside this record; a retry after any code, prompt or policy change is a new canary with its own coordinates."]}
