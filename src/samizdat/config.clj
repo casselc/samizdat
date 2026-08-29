@@ -49,6 +49,87 @@
          (if (map? v) v {}))
        (catch Exception _ {})))
 
+;; --- the eval toggle --------------------------------------------------------
+
+(def eval-defaults
+  "Which image the REPL runs in, absent an operator saying otherwise.
+
+  `:project` RATHER THAN `:harness`, deliberately. The mode names an image:
+
+    :off      no REPL at all — the tools are withheld and the REPL-first
+              sections of the system prompt are suppressed with them.
+    :project  a `jolt nrepl-server` subprocess rooted at the PROJECT, under an
+              OS sandbox. What a role building a project should be talking to.
+    :harness  the live harness image, in-process. The supervisor's, and only
+              behind the mutation protocol.
+
+  Defaulting to `:harness` would have left karamazov-zrq open for everyone who
+  did not read a release note — a P0 whose escape was observed live is not
+  closed by making the fix opt-in. So the DANGEROUS mode is the one an operator
+  opts into, not the safe one.
+
+  `:sandbox :auto` resolves to the platform's backend and `:none` skips it.
+  `:none` is legitimate rather than a footgun: inside a container, or on a host
+  without a backend, the subprocess split alone still ends in-process access to
+  the harness and still fixes the classpath and cwd bugs. The OS layer hardens
+  that; it is not what makes it correct."
+  {:mode :project :sandbox :auto})
+
+(def ^:private eval-modes #{:off :project :harness})
+(def ^:private eval-sandboxes #{:auto :none})
+
+(defn eval-settings
+  "The `:eval` block of a project config, normalised to
+  `{:mode … :sandbox …}`.
+
+  PURE, and a total function of whatever the file happened to contain. It
+  follows `project-config`'s rule — a broken project file must never stop the
+  harness — with the direction that rule implies for a security control: an
+  unreadable setting falls back to the DEFAULT, never to the open image. A
+  string `\"project\"` is not the keyword `:project` and is not guessed at,
+  because guessing is how an operator who meant `:off` silently gets a REPL."
+  [cfg]
+  (let [m (:eval cfg)
+        m (if (map? m) m {})]
+    {:mode    (get eval-modes (:mode m) (:mode eval-defaults))
+     :sandbox (get eval-sandboxes (:sandbox m) (:sandbox eval-defaults))}))
+
+(defn eval-mode
+  "The eval mode for the project rooted at `root`. nil root — a test, a bare
+  REPL — gets the default."
+  [root]
+  (:mode (eval-settings (when root (project-config root)))))
+
+(def harness-image-roles
+  "The roles that keep the LIVE harness image under `:mode :project`.
+
+  Only the supervisor, because only the supervisor's job is the harness: it
+  reads the run's health and changes manifests, cells, prompts and policy, and
+  a project image rooted at somebody else's repo cannot see any of that. Its
+  kernel-source writes are what the mutation protocol is for.
+
+  Not in roles.edn. A run that could add itself to this set by editing
+  userspace would be granting itself the harness image, which is the escape
+  this whole bead is about. A role nobody has heard of gets `:project` — the
+  safe direction, and the one that makes adding a role harmless."
+  #{:supervisor "supervisor"})
+
+(defn eval-image
+  "Which image `role` evaluates in under `mode`: `:off`, `:project` or
+  `:harness`.
+
+  `:mode :project` is a posture for the RUN, not a single answer for every
+  role — the supervisor stays in the harness image inside it. Resolving this
+  in one pure function keeps the prompt and the router from disagreeing: the
+  prompt telling a supervisor it is in a separate project image, while its
+  evals actually land in the harness, is the same false claim this bead is
+  otherwise about removing."
+  [mode role]
+  (case mode
+    :off :off
+    :harness :harness
+    (if (contains? harness-image-roles role) :harness :project)))
+
 (def ^:private providers
   {;; /beta rather than /v1, for prefix completion. A gate that names one tool
    ;; steers by ending the request mid-fence rather than by asking, which

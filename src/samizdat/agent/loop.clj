@@ -97,12 +97,27 @@
   target, and both previously rendered as if every run worked on samizdat with
   nothing beside it."
   [role]
-  (let [root (userspace/project-root)]
+  (let [root (userspace/project-root)
+        ;; WHICH IMAGE, or none. The prompt's opening sentence and its whole
+        ;; REPL-first section are claims about where `eval` runs, and both were
+        ;; unconditional. `repl.clj`'s docstring records what that costs when
+        ;; the claim is false — the prompt promising a workflow the harness
+        ;; cannot deliver. Under :project the model is in a SEPARATE image
+        ;; rooted at the project, not "the same image the harness runs in", so
+        ;; :project needs the rewording as much as :off needs the suppression.
+        eval-mode (config/eval-mode root)
+        ;; PER ROLE, not per run: `:project` is a posture, and the supervisor
+        ;; keeps the harness image inside it. Telling a supervisor it is in a
+        ;; separate project image while its evals land in the harness would be
+        ;; the same false claim this is meant to remove.
+        image (config/eval-image eval-mode role)]
     (roles/scope-catalogue
      (prompt/render-str (or (prompt/layer :system) "")
        {:templates ""
         :skills (skills/render-catalog)
         :self-hosting (userspace/self-hosting?)
+        :repl (not= :off image)
+        :harness-image (= :harness image)
         ;; From the project's own config file rather than the merged run
         ;; config, which prompt assembly is not handed. Same file, same key —
         ;; `.samizdat/config.edn` is the only place these are ever set, and it
@@ -111,7 +126,7 @@
                                (get-in (config/project-config root)
                                        [:run :reference-paths])
                                root))})
-     role)))
+     role eval-mode)))
 
 (defn system-prompt
   "The whole system prompt, unscoped — every tool the harness has.

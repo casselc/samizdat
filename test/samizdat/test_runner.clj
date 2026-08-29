@@ -96,6 +96,7 @@
             [samizdat.config-test]
             [samizdat.files-test]
             [samizdat.edit-test]
+            [samizdat.eval-mode-test]
             [samizdat.grep-test]
             [samizdat.hashline-test]
             [samizdat.control-test]
@@ -105,6 +106,7 @@
             [samizdat.cells-test]
             [samizdat.mutation-test]
             [samizdat.ratelimit-test]
+            [samizdat.repl-confinement-test]
             [samizdat.repl-guard-test]
             [samizdat.repl-test]
             [samizdat.roles-test]
@@ -228,6 +230,7 @@
     samizdat.config-test
     samizdat.files-test
     samizdat.edit-test
+    samizdat.eval-mode-test
     samizdat.grep-test
     samizdat.hashline-test
     samizdat.control-test
@@ -237,6 +240,7 @@
     samizdat.cells-test
     samizdat.mutation-test
     samizdat.ratelimit-test
+    samizdat.repl-confinement-test
     samizdat.repl-guard-test
     samizdat.repl-test
     samizdat.roles-test
