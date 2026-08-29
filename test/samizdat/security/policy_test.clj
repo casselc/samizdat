@@ -68,6 +68,49 @@
 
 ;; --- the decision (dirge engine/policies.rs) --------------------------------
 
+(deftest a-human-grant-is-honoured-inside-a-compound-too
+  ;; A GRANT THAT ONLY WORKS ALONE IS HALF-INERT, and the half that fails is
+  ;; the shape agents actually use. The segment check consulted base-rules and
+  ;; never the session grants, so a granted command was allowed on its own and
+  ;; refused as part of `cd X && granted-thing` — with a message reading
+  ;; "`magick` is not on the allow list" moments after a human put it there.
+  ;;
+  ;; Live, run 69880d84: the operator granted `magick **` to unblock a render
+  ;; gate; the branch reissued the ordinary `cd <project> && magick shot.png
+  ;; ...` and was refused anyway, twice, and went back to a python script it
+  ;; also could not run.
+  ;;
+  ;; The rule the compound path already states is the one that settles it: if
+  ;; every statement matched an allow, every command the shell will run has
+  ;; been allowed. A grant IS an allow — a human's.
+  (let [session {:grants ["python3 **"]}]
+    (is (= :allow (:effect (policy/decide session "python3 foo.py")))
+        "granted, alone")
+    (is (= :allow (:effect (policy/decide session "cd /tmp && python3 foo.py")))
+        "and granted as a statement of an otherwise-allowed compound")
+    (is (= :allow (:effect (policy/decide session "cd /tmp && python3 a.py | head -5")))
+        "including alongside base-rule statements")
+    (testing "an UNgranted statement still downgrades the whole compound"
+      (is (= :ask (:effect (policy/decide session "cd /tmp && python3 a.py && sips -g x b.png")))))
+    (testing "and a hard deny still wins over a grant, as it does everywhere"
+      (is (= :deny (:effect (policy/decide session "python3 a.py; rm -rf /")))))))
+
+(deftest an-image-can-be-inspected-without-a-human
+  ;; A GRAPHICAL PROJECT NEEDS TO LOOK AT ITS OWN OUTPUT. Run 69880d84
+  ;; rendered a frame to shot.png, then had no way to find out whether
+  ;; anything was in it: magick was refused at turns 135, 136 and 140, and a
+  ;; process exiting 0 is not evidence that anything was drawn.
+  ;;
+  ;; The model cannot see an image. A histogram is the only evidence available
+  ;; to it that a frame is not blank, which makes this the difference between
+  ;; a render gate it can answer and one it can only report as unverifiable.
+  (is (= :allow (:effect (policy/decide {} "magick shot.png -format %c histogram:info:-"))))
+  (is (= :allow (:effect (policy/decide {} "identify shot.png"))))
+  (is (= :allow (:effect (policy/decide {} "magick shot.png -resize 128x80! -colors 8 -format %c histogram:info:-")))
+      "with the flags a real histogram call carries, bangs and percent signs included")
+  (testing "and a hard deny still wins over anything trying to ride the allow"
+    (is (= :deny (:effect (policy/decide {} "magick shot.png -format %c info:- ; rm -rf /"))))))
+
 (deftest base-rule-decisions
   (testing "read-only inspection is allowed"
     (is (= :allow (:effect (policy/decide {} "ls -la"))))

@@ -299,6 +299,20 @@
    ;; ordinary way to read part of a file.
    ["sed **" :allow] ["awk **" :allow]
    ["find **" :allow] ["file **" :allow] ["stat **" :allow] ["env" :allow]
+   ;; `magick` reads an image and reports on it — a histogram, the dimensions,
+   ;; the mean colour. It sits with the read-only inspectors because that is
+   ;; what a graphical project needs it for: run 69880d84 rendered a frame to
+   ;; shot.png, had no way to find out whether anything was IN it, and burned
+   ;; four turns being refused (135, 136, 140, and again after a grant). The
+   ;; model cannot see an image, so a histogram is the only evidence available
+   ;; to it that a frame is not blank — and "the process exited 0" is not
+   ;; evidence that anything was drawn.
+   ;;
+   ;; ImageMagick can also WRITE, and this allows that. Same trade already
+   ;; made for sed/awk/mv/cp above: the agent has an unrestricted write_file,
+   ;; so refusing the write half protects nothing and costs a turn every time
+   ;; a run reaches for the ordinary way to look at a picture.
+   ["magick **" :allow] ["identify **" :allow]
    ["date **" :allow] ["whoami" :allow] ["hostname" :allow]
    ;; benign shell builtins
    ["export *" :allow] ["set *" :allow] ["unset *" :allow]
@@ -447,9 +461,22 @@
         ;; the two paths reading the same statement differently is how
         ;; `jolt -M:test | tail` was allowed while
         ;; `RAYLIB_APP_AUTO_QUIT_MS=1500 jolt -M:test | tail` was not.
+        ;; GRANTS COUNT HERE TOO. The rule this path already states is that if
+        ;; every statement matched an allow, every command the shell will run
+        ;; has been allowed — and a grant IS an allow, a human's. Reading only
+        ;; base-rules made a grant work alone and fail inside `cd X && granted`,
+        ;; which is the shape agents actually use: run 69880d84 was granted
+        ;; `magick **` to unblock a render gate and was still refused, told
+        ;; "`magick` is not on the allow list" moments after a human put it
+        ;; there. A deny still wins above; this only widens the allow side.
+        granted? (fn [cands] (some (fn [p] (some #(matches? p %) cands))
+                                   (:grants session)))
         segment-effects (when decomposable?
-                          (map #(last-match base-rules
-                                             (distinct [% (assignments-stripped %)]))
+                          (map (fn [seg]
+                                 (let [cands (distinct [seg (assignments-stripped seg)])]
+                                   (if (granted? cands)
+                                     :allow
+                                     (last-match base-rules cands))))
                                segments))
         compound-allow? (and decomposable?
                              (not deny-hit)
