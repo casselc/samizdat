@@ -16,7 +16,8 @@
             [samizdat.agent.gates :as gates]
             [samizdat.cells :as cells]
             [samizdat.manifests :as manifests]
-            [mycelium.cell :as cell]))
+            [mycelium.cell :as cell]
+            [samizdat.config :as config]))
 
 (def ^:private ladder
   {:aggressive-cap 0.60 :fold 0.75 :aggressive-fold 0.78 :force 0.80 :turn-start 0.90})
@@ -294,3 +295,14 @@
                      {} {:branch {:messages msgs}})
                     [:branch :messages])]
     (is (= msgs out))))
+
+(deftest the-ladder-has-a-window-to-measure-against
+  ;; IT WAS BUILT INERT. Every rung is a fraction of the model's context
+  ;; window and nothing in the config set one, so `measure` routed :none on
+  ;; every turn and no fold could ever happen — the whole ladder ran and did
+  ;; nothing, which is the shape of every bug this project keeps finding.
+  (doseq [p [:glm :deepseek :openai :local :ollama]]
+    (let [w (:context-window (get config/providers-for-test p))]
+      (is (and w (pos? w)) (str "provider " p " must declare a context window"))))
+  (testing "and it reaches the :llm config the loop hands to compaction"
+    (is (pos? (:context-window (:llm (config/load-config {:llm {:provider :glm}})))))))

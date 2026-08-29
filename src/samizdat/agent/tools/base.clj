@@ -37,6 +37,7 @@
             ;; :when forms name samizdat.agent.state fully qualified.
             [samizdat.agent.roles :as roles]
             [samizdat.agent.state :as state]
+            [samizdat.agent.suggest :as suggest]
             [samizdat.prompt :as prompt]))
 
 (defmulti run-tool
@@ -260,10 +261,16 @@
   ;; exists to handle a bad call was itself the crash. The dispatch seam turns
   ;; a throw into a :mechanics result now (RFC-008), which would have masked
   ;; this rather than fixed it.
-  (fail (update-in branch [:mechanics :unknown-tools] (fnil inc 0))
-        (str "No tool named `" tool-name "`. Available: "
-             (str/join ", " (sort (remove #{:default} (keys (methods run-tool)))))
-             ".")))
+  (let [known (sort (remove keyword? (keys (methods run-tool))))
+        ;; A NEAREST NAME first, when the miss is a typo. The list of every
+        ;; tool is the fallback answer, not the useful one: it is 36 names the
+        ;; model has already been shown, and reading it back is a turn spent
+        ;; re-reading its own prompt. `read_fil` wants one word.
+        near (suggest/closest tool-name known)]
+    (fail (update-in branch [:mechanics :unknown-tools] (fnil inc 0))
+          (str "No tool named `" tool-name "`."
+               (when near (str " Did you mean `" near "`?"))
+               " Available: " (str/join ", " known) "."))))
 
 (defn tool-names []
   (sort (remove keyword? (keys (methods run-tool)))))

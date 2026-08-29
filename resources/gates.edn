@@ -1270,6 +1270,46 @@
         reused across several edits without re-reading. Raising it past a
         screenful trades the wrong-line guard for convenience."}
 
+ :thinking-budget
+ {:value {:factor 2 :floor 8192 :fallback 65536 :chars-per-token 4
+          :off-value "none"}
+  :kind :threshold :capability-tunable? true
+  :doc "THE RUNAWAY-REASONING BREAKER (dirge thinking_budget.rs).
+
+        The cap is DERIVED: factor x whatever the turn was granted, floored.
+        A flat constant is what dirge shipped first and it was wrong by
+        inspection — a high-effort turn was granted a large budget by the
+        request and cut off below it by the breaker, the harness truncating
+        reasoning it had just asked for. Traces of tens of thousands of tokens
+        are ordinary on a hard turn; that is the feature working.
+
+        fallback applies when the grant is unknown, and is deliberately the
+        most permissive value rather than a guess at a typical one: a missed
+        runaway costs a turn, a truncated good turn costs the work in it.
+
+        off-value is what :reasoning-effort becomes once the breaker fires —
+        for the rest of the TASK, because a model that just spent a whole
+        budget deliberating will spend the next one the same way."}
+
+ :tool-retry
+ {:value {:max-attempts 3 :base-backoff-ms 250}
+  :kind :threshold :capability-tunable? true
+  :doc "RETRYING A TRANSIENTLY-FAILED TOOL CALL, where re-running it cannot
+        duplicate an effect (dirge tool_retry.rs).
+
+        max-attempts 3 means the original plus two retries. Small on purpose:
+        this sits INSIDE the branch's turn, and a read still failing on its
+        third try is reporting a real condition rather than a blip.
+
+        base-backoff-ms doubles per attempt — 250 then 500. A beat, not a
+        rate-limit backoff: the condition it waits out is a language server
+        still indexing, and a minute-long pause mid-turn is indistinguishable
+        from a hang.
+
+        WHICH tools may be retried is wordlists.edn :retry-safe-tools, and it
+        is a positive allowlist. The error class says retrying could work; the
+        tool says retrying is allowed to be tried; both must hold."}
+
  :compaction
  {:value
   {;; THE BUDGET LADDER, as fractions of the model's context window. Ported

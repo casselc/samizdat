@@ -243,6 +243,35 @@
  #{"you " "your " "you'll" "you can" "you should" "you may" "you might"
    "let me know"}
 
+ :tool-error-classes
+ ;; What a failed tool result SAYS, mapped to what the branch should do about
+ ;; it (samizdat.agent.toolerr, ported from dirge tool_error_class.rs). The
+ ;; phrases are what this harness's own tools emit; a project whose tools speak
+ ;; differently retunes the classification here rather than in code.
+ ;;
+ ;; Order matters at the use site: fatal before transient before missing-info,
+ ;; because a permission refusal often also mentions a path.
+ {:fatal        #{"permission denied" "read-only file system" "operation not permitted"
+                  "no space left" "too many open files"}
+  :transient    #{"timed out" "timeout" "connection reset" "connection refused"
+                  "temporarily unavailable" "resource busy" "broken pipe"
+                  "try again"}
+  :missing-info #{"no such file" "does not exist" "no file " "not found"
+                  "no matches for" "unable to resolve symbol"
+                  "old_text not found" "outside the project root"}}
+
+ :retry-safe-tools
+ ;; The tools re-running cannot duplicate an effect: pure reads. A POSITIVE
+ ;; allowlist, so a new tool is non-retryable until somebody argues otherwise
+ ;; — the safe answer is the one that should have to be argued against.
+ ;;
+ ;; `eval` and `shell` are deliberately absent even though many of their uses
+ ;; are reads: a timed-out shell may have run to completion, and nothing in the
+ ;; result can say which. That is the whole reason the gate is on the TOOL and
+ ;; not on the error.
+ #{"read_file" "grep" "lsp" "doc" "complete" "manual" "recall"
+   "fetch_turn" "fetch_artifact" "cells" "introspect"}
+
  :skill-roots
  ;; Project-relative directories a skill may live in, EARLIEST WINS. Two
  ;; shapes are read from each: `<root>/<name>.md` (samizdat's flat form) and

@@ -58,7 +58,19 @@
    ;; not a trade: nothing else about the run changes. The adapter checks the
    ;; URL anyway and simply does not prefill against /v1, so overriding
    ;; HARNESS_BASE_URL back is safe.
-   :deepseek {:base-url "https://api.deepseek.com/beta"
+   :deepseek {;; The model's context window, which the compaction ladder reads:
+              ;; every rung is a FRACTION of this, so without it the whole
+              ;; ladder is inert and folds never happen. Per provider because
+              ;; it is a property of the model, and overridable with
+              ;; HARNESS_CONTEXT_WINDOW because a table cannot keep up with
+              ;; what endpoints serve.
+              ;;
+              ;; A wrong value is not a correctness bug, it moves WHEN folding
+              ;; starts: too small folds early and spends summarizer calls,
+              ;; too large folds late and risks an overflow the ladder existed
+              ;; to prevent.
+              :context-window 128000
+              :base-url "https://api.deepseek.com/beta"
               :key-env  "DEEPSEEK_API_KEY"
               ;; deepseek-v4-flash is the development and test model: cheap
               ;; enough to run the beam repeatedly. deepseek-v4-pro is the
@@ -69,22 +81,29 @@
    ;; drives GLM through in practice, tuned for agentic coding traffic. Same
    ;; OpenAI-compatible chat-completions surface, so the openai-family adapter
    ;; handles it unchanged.
-   :glm      {:base-url "https://open.bigmodel.cn/api/coding/paas/v4"
+   :glm      {:context-window 128000
+              :base-url "https://open.bigmodel.cn/api/coding/paas/v4"
               :key-env  "ZHIPU_API_KEY"
               :model    "glm-5.3"
               ;; GLM benefits from a low temperature on coding tasks (dirge
               ;; pins 0.2); the loop leaves it unset for other providers.
               :temperature 0.2}
-   :openai   {:base-url "https://api.openai.com/v1"
+   :openai   {:context-window 128000
+              :base-url "https://api.openai.com/v1"
               :key-env  "OPENAI_API_KEY"
               :model    "gpt-4o"}
    ;; A local llama-server / vLLM / LM Studio OpenAI-compatible endpoint.
-   :local    {:base-url "http://127.0.0.1:8080/v1"
+   :local    {;; A local endpoint is launched with whatever -c it was given, so
+              ;; the conservative value is right until HARNESS_CONTEXT_WINDOW
+              ;; or the llama.cpp probe says otherwise.
+              :context-window 32768
+              :base-url "http://127.0.0.1:8080/v1"
               :key-env  nil
               :model    "local-model"}
    ;; Ollama's NATIVE api, so no /v1 suffix. See llm/adapter/ollama.clj for
    ;; why the native surface rather than Ollama's OpenAI-compatible one.
-   :ollama   {:base-url "http://127.0.0.1:11434"
+   :ollama   {:context-window 32768
+              :base-url "http://127.0.0.1:11434"
               :key-env  nil
               :model    "qwen3"}})
 
@@ -152,6 +171,11 @@
                   ;; takes reasoning_effort per run and overrides this.
                   :reasoning-effort (env "HARNESS_REASONING_EFFORT")
                   :max-tokens  (or (env-long "HARNESS_MAX_TOKENS") 16384)
+                  ;; What the compaction ladder measures pressure against. Its
+                  ;; rungs are fractions of this; absent, samizdat.agent.compaction
+                  ;; routes :none and no fold ever happens.
+                  :context-window (or (env-long "HARNESS_CONTEXT_WINDOW")
+                                      (:context-window defaults))
                   ;; A provider default (GLM pins 0.2 for coding) wins over the
                   ;; family default of 0.7; HARNESS_TEMPERATURE overrides both.
                   :temperature (or (some-> (env "HARNESS_TEMPERATURE") parse-double)

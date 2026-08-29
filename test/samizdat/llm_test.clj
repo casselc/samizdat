@@ -568,11 +568,19 @@
     ;; live call here. Treating that as a steering problem would be wrong: the
     ;; fix is more tokens.
     (is (= {:no-fence false :truncated true :parse-error false
-            :auto-repaired false :multiple-fences false}
+            :auto-repaired false :scavenged false :multiple-fences false}
            (fence/signals {:finish-reason "length"} nil)))
     (is (= {:no-fence true :truncated false :parse-error false
-            :auto-repaired false :multiple-fences false}
-           (fence/signals {:finish-reason "stop"} nil)))))
+            :auto-repaired false :scavenged false :multiple-fences false}
+           (fence/signals {:finish-reason "stop"} nil))))
+  (testing ":scavenged is its OWN signal, not folded into :auto-repaired — a
+            repair fixed text the model got slightly wrong, this recovered a
+            call it put where the parser does not look, and a run full of the
+            second wants the PROMPT changed rather than the parser loosened"
+    (let [p (fence/parse-tool-call
+             "<think>```tool-call\n{\"name\":\"done\",\"args\":{\"answer\":\"x\"}}\n```</think>")]
+      (is (:scavenged (fence/signals {:finish-reason "stop"} p)))
+      (is (not (:auto-repaired (fence/signals {:finish-reason "stop"} p)))))))
 
 ;; --- messages ---------------------------------------------------------------
 

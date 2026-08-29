@@ -47,6 +47,7 @@
             [samizdat.agent.roles :as roles]
             [samizdat.agent.state :as state]
             [samizdat.agent.storm :as storm]
+            [samizdat.agent.thinking :as thinking]
             [samizdat.agent.tools :as tools]
             [samizdat.agent.skills :as skills]
             [samizdat.llm.message :as message]
@@ -300,7 +301,17 @@
   the response hit the token cap before emitting a tool call, and a provider
   failure returned as {:ok false :error} rather than thrown."
   [ctx branch]
-  ((infer/complete-fn ctx) (infer/of-branch branch)))
+  ;; The branch's own reasoning effort, not the run's. Once the runaway
+  ;; breaker has fired on this branch, thinking is off for the rest of its
+  ;; task — read HERE at request time rather than written into the run config,
+  ;; because the config belongs to the run and this decision belongs to one
+  ;; branch (samizdat.agent.thinking).
+  (let [off (:off-value (gates/threshold :thinking-budget))
+        ctx (update ctx :llm-config
+                    (fn [c]
+                      (assoc c :reasoning-effort
+                             (thinking/effort-for branch (:reasoning-effort c) off))))]
+    ((infer/complete-fn ctx) (infer/of-branch branch))))
 
 (defn- settle-predictions!
   "Close out any prediction whose window has passed or whose expectation the
@@ -458,7 +469,22 @@
   ;; emit a tool call, it emits another digest.
   (let [imitation? (and (message/unloaded? said)
                         (not (:truncated signals)))
+        ;; RUNAWAY REASONING, which is a different failure from a budget that
+        ;; was merely too small and wants the opposite advice: more tokens
+        ;; will not help a model that deliberates without converging, and the
+        ;; harness has watched this happen without being able to stop it
+        ;; (:provider-empty-replies). Both signals required — cut off at the
+        ;; limit AND a trace past its own derived budget.
+        tb (gates/threshold :thinking-budget)
+        runaway? (thinking/runaway?
+                  {:truncated? (:truncated signals)
+                   :parsed parsed
+                   :reasoning (:reasoning response)}
+                  (thinking/derived-cap (:thinking-grant response) tb)
+                  (:chars-per-token tb))
         msg (cond
+              runaway?
+              (prompt/prompt "thinking-runaway")
               (:truncated signals)
               (str "[harness] Your response hit the token limit before you"
                    " emitted a tool call. Think less and call a tool.")
@@ -491,6 +517,7 @@
                            :usage (:usage response)})
     (-> branch
         (state/record-outcome {:category :mechanics :progress? false})
+        (cond-> runaway? thinking/recovery)
         (state/add-message "user" msg {:turn turn})
         ;; And make the next request end mid-fence, so prose is not an
         ;; available reply. Telling the model to emit a fence is the

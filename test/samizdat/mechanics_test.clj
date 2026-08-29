@@ -31,10 +31,12 @@
             [samizdat.agent.gates :as gates]
             [samizdat.agent.loop :as aloop]
             [samizdat.agent.state :as state]
+            [samizdat.agent.tools :as tools]
             [samizdat.agent.tools.base :as base]
             [samizdat.agent.telemetry :as telemetry]
             [cells.board :as board]
             [samizdat.agent.supervisor :as supervisor]
+            [samizdat.llm.fence :as fence]
             [samizdat.llm.message :as message]
             [samizdat.store.journal :as journal]))
 
@@ -678,3 +680,61 @@
     (doseq [g [:progress-stalled :no-edits :studying]]
       (is (< mine (:priority (by g)))
           (str "suspect-the-test must outrank " g)))))
+
+;; --- a call the model put inside its reasoning ------------------------------
+
+(deftest a-call-emitted-inside-the-reasoning-is-recovered
+  ;; strip-think drops reasoning before parsing, and correctly: after a
+  ;; prefilled opener the thinking lands INSIDE the fence and its stray quotes
+  ;; corrupt the JSON. But a reasoning model sometimes puts the CALL in there
+  ;; and emits nothing outside, and stripping then destroys the only call the
+  ;; turn produced.
+  ;;
+  ;; Measured across runs a3566c73 and f2014821 before the fix: 10 no-call
+  ;; turns whose text contained a fence, parse_error empty and lengths well
+  ;; under the token cap — so neither a parse failure nor a truncation. Run
+  ;; f2014821 turn 2 is this shape exactly.
+  (let [in-think (str "```tool-call\n<think>I need to emit exactly one call.\n"
+                      "```tool-call\n{\"name\":\"read_file\",\"args\":{\"path\":\"a.clj\"}}\n```\n"
+                      "</think>\nThe flagged failure is turn 53's eval.")
+        got (fence/parse-tool-call in-think)]
+    (is (= "read_file" (:name got)))
+    (is (:scavenged? got) "marked, so a run full of these is visible")))
+
+(deftest a-reply-cut-off-mid-thought-still-yields-its-call
+  ;; The reply most likely to have spent its budget reasoning is the one whose
+  ;; </think> never arrived.
+  (let [got (fence/parse-tool-call
+             "<think>I should read it\n```tool-call\n{\"name\":\"grep\",\"args\":{\"pattern\":\"x\"}}\n```")]
+    (is (= "grep" (:name got)))
+    (is (:scavenged? got))))
+
+(deftest scavenging-is-a-fallback-and-changes-nothing-that-worked
+  ;; It runs ONLY where the normal parse found nothing, so every input it sees
+  ;; is one the harness was about to refuse with "No ```tool-call block".
+  (testing "an ordinary call is parsed by the normal path, unmarked"
+    (let [got (fence/parse-tool-call
+               "<think>reasoning</think>\n```tool-call\n{\"name\":\"grep\",\"args\":{\"pattern\":\"x\"}}\n```")]
+      (is (= "grep" (:name got)))
+      (is (not (:scavenged? got)))))
+  (testing "a reply that reasoned and called nothing is still a no-call"
+    (is (nil? (fence/parse-tool-call "<think>just thinking</think>\nI am done."))))
+  (testing "and the signal names it, so a run full of these points at the
+            PROMPT rather than at loosening the parser further"
+    (let [got (fence/parse-tool-call
+               "<think>```tool-call\n{\"name\":\"done\",\"args\":{\"answer\":\"x\"}}\n```</think>")]
+      (is (:scavenged (fence/signals {:finish-reason "stop"} got))))))
+
+(deftest a-mistyped-tool-name-gets-the-nearest-one
+  ;; The list of every tool is the fallback answer, not the useful one: 36
+  ;; names the model has already been shown, so reading it back is a turn
+  ;; spent re-reading its own prompt.
+  (let [refusal (fn [t] (str (:result (tools/run-tool {:branch {:id "B1"}
+                                                       :tool-name t :args {}}))))]
+    (is (str/includes? (refusal "read_fil") "Did you mean `read_file`?"))
+    (is (str/includes? (refusal "wrtie_file") "Did you mean `write_file`?")
+        "a transposition is the commonest slip and must cost one edit, not two")
+    (is (not (str/includes? (refusal "totally_made_up") "Did you mean"))
+        "a name that is not a typo of anything gets no guess")
+    (is (str/includes? (refusal "totally_made_up") "Available:")
+        "and still gets the full list to choose from")))
