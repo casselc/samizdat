@@ -24,12 +24,16 @@
 
   LOGGED, always. The first version swallowed silently, and a stream whose
   failures are invisible cannot be told apart from one that never started —
-  which is exactly the confusion it caused the first time it ran."
+  which is exactly the confusion it caused the first time it ran.
+
+  `fallback` is a value, or a FUNCTION of the exception when the failure
+  itself belongs in the data map — a log line tells the operator, and the
+  record has to tell the next pass."
   [what f fallback]
   (try (f)
        (catch Throwable e
          (log/warn "oversight" what "failed:" (ex-message e))
-         fallback)))
+         (if (fn? fallback) (fallback e) fallback))))
 
 (defn- clip
   "First `n` characters, safely. Collapsing whitespace shortens the string, so
@@ -115,12 +119,18 @@
 (cell/defcell :oversight/reason
   {:doc "One turn of the supervisor ROLE, in the stream's OWN branch.
 
-        The branch id is stable for the whole run (`S0`), not minted per pass,
+        The branch id is stable for the whole run (`SUP`), not minted per pass,
         so the supervisor accumulates a memory of what it already noticed and
         already tried. `:feature/supervise` opens `S<revision>` — a new context
         every time — which is why the supervisor there re-derives the same
         diagnosis on every look and can never say 'I changed that last time and
-        it did not help'."
+        it did not help'.
+
+        `SUP` and not `S0`, which is what this used to open and what
+        `:feature/supervise` opens on revision zero. Two writers on one branch
+        id: run 498450e1's S0 holds 26 turn rows numbered up to 14, the stream
+        and the stage overwriting each other's turn numbers, and a record that
+        cannot say which supervisor said what is a record of neither."
    :effects [:net :db]
    :requires [:conn :run-id :config]}
   (fn [{:keys [conn run-id] :as ctx} data]
@@ -136,7 +146,7 @@
                                   :catalog (safely :catalog #(wf/render-catalog conn) "")})
              ;; ONE branch for the run, carried by the stream. Opened once;
              ;; re-opening an existing id is a no-op that returns the row.
-             bid "S0"
+             bid "SUP"
              _ (runs/open-branch! conn run-id {:branch-id bid})
              ;; The stream's memory arrives in DATA, not ctx: ctx is the
              ;; run-scoped resources every driver provides, and the carry is
@@ -153,8 +163,16 @@
                                    {:branch b :turn 1})]
          (assoc data
                 :oversight/answer (get-in out [:branch :final-answer])
+                ;; How the pass ENDED, kept beside what it said. A pass that
+                ;; ran out of turns has no answer and neither does one that
+                ;; crashed; without this the record shows the same
+                ;; `notes: null` for both, which is what made run b2ffb2ad's
+                ;; four blank passes take a live run to explain
+                ;; (karamazov-r5a).
+                :oversight/verdict (:verdict out)
                 :oversight/branch (:branch out))))
-     data)))
+     (fn [e] (assoc data :oversight/verdict :error
+                    :oversight/answer (str "the pass failed: " (ex-message e)))))))
 
 ;; --- apply ------------------------------------------------------------------
 
@@ -165,8 +183,12 @@
         the mutation protocol to tune the harness — so by the time control
         reaches here the acting has already happened. What is left is the
         record, which is not a formality: a decision that appears nowhere is
-        indistinguishable from a pass that never ran, and the next pass reads
-        this to know what it already tried."
+        indistinguishable from a pass that never ran.
+
+        The NEXT PASS does not read this — it inherits the branch's messages,
+        which carry more than a clipped note ever could. Its readers are the
+        operator and `:feature/supervise`, which quotes the stream's last
+        conclusion rather than deriving a second one of its own."
    :effects [:db]
    :requires [:conn :run-id]}
   (fn [{:keys [conn run-id]} data]
@@ -175,6 +197,10 @@
        (journal/note! conn run-id :oversight
                       {:data {:idle (:oversight/idle data)
                               :unmet (:oversight/unmet data)
+                              ;; A blank note means one of several things and
+                              ;; the verdict is which: `:done` said nothing,
+                              ;; `:exhausted` ran out of turns, `:error` threw.
+                              :verdict (some-> (:oversight/verdict data) name)
                               :notes (some-> (:oversight/answer data)
                                              (clip (gates/threshold :oversight-note-chars)))}})
        data)

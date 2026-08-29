@@ -105,11 +105,17 @@ flowchart LR
     toolcall --> plan
     plan --> redact
 
-    files[file tools: read_file, write_file, edit_file, patch, grep]
+    files[file tools: write_file, edit_file, patch]
     root[Project root confinement]
     toolcall --> files
     files --> root
     root --> redact
+
+    reads[read tools: read_file, grep]
+    readroots[Project root + declared reference roots]
+    toolcall --> reads
+    reads --> readroots
+    readroots --> redact
 ```
 
 The `eval` node and its three edges were absent from this graph until this RFC
@@ -124,6 +130,23 @@ confinement every file tool enforces. Both fixed in the 2026-08 audit
 (karamazov-blt.27, blt.28): it spawns through `scrub` and its paths go
 through `resolve-under-root`; its replies were already inside the envelope
 redaction.
+
+**Reads and writes no longer share one boundary** (karamazov-1an). Writes keep
+`resolve-under-root` unchanged: one root, canonicalized, fails closed. Reads go
+through `resolve-for-read`, which admits the project root plus the READ-ONLY
+reference roots the project declared in `.samizdat/config.edn`
+(`:run :reference-paths`) — the operator's file, which the agent may not
+rewrite, so the agent cannot widen its own read surface. Each declared root is
+still canonicalized and a read outside all of them is still refused.
+
+Splitting them makes the boundary WEAKER on paper and stronger in practice,
+which is why it is written down here. The confinement it replaces did not
+prevent the reads: run bd56a286's brief named a language reference and ~95
+worked examples as required reading, both siblings of the root; `read_file`
+refused them and the model read every one through `shell`, which spawns a
+process. Forcing the narrow, paged, bounded tool to fail so the broad one gets
+used protects nothing and costs the audit trail. `shell` remains the wider
+capability and is unchanged by this.
 
 Reading the load-bearing solid edges:
 

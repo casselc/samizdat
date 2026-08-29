@@ -296,3 +296,105 @@
                                          {:path ".samizdat/skills/mine.md"
                                           :content "# a project skill"}))))))
       (finally (fs/delete-tree root)))))
+
+;; --- declared reference paths (karamazov-1an) --------------------------------
+;;
+;; THE INVERSION this fixes, from run bd56a286: the brief named a language
+;; reference and ~95 worked examples, both siblings of the project root.
+;; read_file refused every one of them, and the model read them all with
+;; `shell` instead — so the confinement protected nothing and moved the read
+;; from the narrow tool to the one that spawns a process.
+
+(defn- ref-ctx [root refs tool args]
+  (assoc (ctx root tool args) :config {:run {:reference-paths refs}}))
+
+(deftest an-absolute-reference-path-belongs-to-itself
+  ;; The same mistake that made `eval` unable to load fps-game's own FFI
+  ;; dependency for eight runs (karamazov-9uc): File(parent, child) glues an
+  ;; absolute child onto its parent instead of replacing it.
+  (let [lib (str "/tmp/samizdat-ref-lib-" (random-uuid))]
+    (fs/create-dirs lib)
+    (try
+      (let [roots (files/reference-roots [lib] "/tmp")]
+        (is (some #{(str (fs/canonicalize lib))} roots)
+            "declared absolute, used absolute")
+        (is (not-any? #(str/includes? % "/tmp/tmp/") roots)))
+      (finally (fs/delete-tree lib)))))
+
+(deftest reads-reach-a-declared-reference-path-and-writes-do-not
+  (let [root (str "/tmp/samizdat-files-" (random-uuid))
+        examples (str "/tmp/samizdat-examples-" (random-uuid))]
+    (fs/create-dirs root)
+    (fs/create-dirs examples)
+    (spit (str examples "/camera.clj") "(ns camera) ;; how the pros do it\n")
+    (try
+      (testing "with nothing declared, the read is refused as it always was"
+        (let [r (files/read-file (ctx root "read_file"
+                                      {:path (str examples "/camera.clj")}))]
+          (is (= :mechanics (:category r)))
+          (is (str/includes? (:result r) "outside the project root"))))
+      (testing "declared, the same read goes through the narrow tool"
+        (let [r (files/read-file (ref-ctx root [examples] "read_file"
+                                          {:path (str examples "/camera.clj")}))]
+          (is (= :neutral (:category r)))
+          (is (str/includes? (:result r) "how the pros do it"))))
+      (testing "a path outside every declared root is still refused, and the
+                refusal names the roots that would have worked — a boundary the
+                model cannot see the shape of can only be probed by failing"
+        (let [r (files/read-file (ref-ctx root [examples] "read_file"
+                                          {:path "/etc/hosts"}))]
+          (is (= :mechanics (:category r)))
+          (is (str/includes? (:result r) examples))))
+      (testing "WRITES are unchanged: reference material is read-only, and the
+                write path keeps the one confinement primitive it always had"
+        (let [r (files/write-file (ref-ctx root [examples] "write_file"
+                                           {:path (str examples "/mine.clj")
+                                            :content "(ns mine)"}))]
+          (is (= :mechanics (:category r)))
+          (is (not (fs/exists? (str examples "/mine.clj")))))
+        (let [r (files/edit-file (ref-ctx root [examples] "edit_file"
+                                          {:path (str examples "/camera.clj")
+                                           :old_text "pros" :new_text "amateurs"}))]
+          (is (= :mechanics (:category r)))
+          (is (str/includes? (slurp (str examples "/camera.clj")) "pros"))))
+      (finally (fs/delete-tree root) (fs/delete-tree examples)))))
+
+(deftest grep-sweeps-a-reference-tree-only-when-asked-for-it
+  ;; Ninety examples swept by default would drown every ordinary search, so a
+  ;; reference root is searched only when an ABSOLUTE :paths entry names it.
+  (let [root (str "/tmp/samizdat-files-" (random-uuid))
+        examples (str "/tmp/samizdat-examples-" (random-uuid))]
+    (fs/create-dirs (str root "/src"))
+    (fs/create-dirs examples)
+    (spit (str root "/src/main.clj") "(defn draw-cube [])\n")
+    (spit (str examples "/camera.clj") "(defn draw-cube [])\n")
+    (try
+      (let [refs (files/reference-roots [examples] root)]
+        (testing "an unscoped search answers the project alone"
+          (let [hits (files/grep-project root "draw-cube" {:refs refs})]
+            (is (= ["src/main.clj"] (map :path hits)))))
+        (testing "an absolute scope naming the reference root searches it, and
+                  the hit comes back as an absolute path read_file takes"
+          (let [hits (files/grep-project root "draw-cube"
+                                         {:paths [examples] :refs refs})]
+            (is (= 1 (count hits)))
+            (is (str/includes? (:path (first hits)) "camera.clj"))
+            (is (= :neutral (:category (files/read-file
+                                        (ref-ctx root [examples] "read_file"
+                                                 {:path (:path (first hits))})))))))
+        (testing "an absolute scope under no declared root sweeps nothing"
+          (is (empty? (files/grep-project root "draw-cube"
+                                          {:paths ["/etc"] :refs refs})))))
+      (finally (fs/delete-tree root) (fs/delete-tree examples)))))
+
+(deftest a-declared-path-that-is-not-there-is-dropped
+  ;; The system prompt names these to the model. Advertising a directory that
+  ;; does not exist buys a wasted turn and a refusal that reads as a harness
+  ;; fault, which is how every silent-failure bug in this project has looked.
+  (let [real (str "/tmp/samizdat-ref-real-" (random-uuid))]
+    (fs/create-dirs real)
+    (try
+      (let [roots (files/reference-roots [real "/no/such/reference/tree"] "/tmp")]
+        (is (= 1 (count roots)))
+        (is (str/includes? (first roots) "samizdat-ref-real")))
+      (finally (fs/delete-tree real)))))

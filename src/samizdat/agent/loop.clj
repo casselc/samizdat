@@ -39,8 +39,10 @@
             [clojure.string :as str]
             [clojure.tools.logging :as log]
             [samizdat.agent.arbiter :as arbiter]
+            [samizdat.agent.files :as files]
             [samizdat.agent.gates :as gates]
             [samizdat.agent.infer :as infer]
+            [samizdat.config :as config]
             [samizdat.agent.phases :as phases]
             [samizdat.agent.roles :as roles]
             [samizdat.agent.state :as state]
@@ -56,7 +58,8 @@
             [samizdat.store.journal :as journal]
             [samizdat.store.knowledge :as knowledge]
             [samizdat.store.messages :as messages]
-            [samizdat.store.runs :as runs]))
+            [samizdat.store.runs :as runs]
+            [samizdat.userspace :as userspace]))
 
 (defn max-result-chars
   "How much of one tool result the branch is shown, from gates.edn
@@ -85,13 +88,29 @@
   project can replace the shipped prompt outright or suppress it entirely.
   First-present-wins: a level replaces, never concatenates. A suppressed base
   is legitimate — a workflow's own :prompt then IS the instruction set — so
-  this renders empty rather than falling back to the shipped file."
+  this renders empty rather than falling back to the shipped file.
+
+  SCOPED TO THE PROJECT as well as to the role. `self-hosting` gates the
+  sections about this harness's own architecture, and `reference-paths` names
+  the read-only trees this project declared — both facts about the run's
+  target, and both previously rendered as if every run worked on samizdat with
+  nothing beside it."
   [role]
-  (roles/scope-catalogue
-   (prompt/render-str (or (prompt/layer :system) "")
-     {:templates ""
-      :skills (skills/render-catalog)})
-   role))
+  (let [root (userspace/project-root)]
+    (roles/scope-catalogue
+     (prompt/render-str (or (prompt/layer :system) "")
+       {:templates ""
+        :skills (skills/render-catalog)
+        :self-hosting (userspace/self-hosting?)
+        ;; From the project's own config file rather than the merged run
+        ;; config, which prompt assembly is not handed. Same file, same key —
+        ;; `.samizdat/config.edn` is the only place these are ever set, and it
+        ;; is the operator's rather than the agent's.
+        :reference-paths (seq (files/reference-roots
+                               (get-in (config/project-config root)
+                                       [:run :reference-paths])
+                               root))})
+     role)))
 
 (defn system-prompt
   "The whole system prompt, unscoped — every tool the harness has.

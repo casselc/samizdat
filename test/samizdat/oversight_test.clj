@@ -9,7 +9,9 @@
   hurt the run it watches. What that pass DOES is a cell, because the harness's
   own policy about when to think and what to think about has to be something
   the agent can rewrite at runtime."
-  (:require [clojure.test :refer [deftest testing is]]
+  (:require [clojure.data.json :as json]
+            [clojure.string :as str]
+            [clojure.test :refer [deftest testing is]]
             [samizdat.agent.gates :as gates]
             [samizdat.cells :as cells]
             [mycelium.cell :as cell]
@@ -210,3 +212,63 @@
             "reason fell into its guard — check the log for 'oversight :reason failed'")
         (is (some? (:oversight/branch out))
             "the branch must come back out, or the stream has no memory")))))
+
+(deftest a-blank-pass-says-why-it-was-blank
+  ;; karamazov-r5a. Run b2ffb2ad journalled four passes, every one with
+  ;; notes:null, and the record could not say whether the supervisor had
+  ;; concluded nothing, run out of turns, or crashed. Three very different
+  ;; things, one blank field. The verdict is what separates them.
+  (cells/load-cells!)
+  (let [conn (db/open! ":memory:")
+        rid (runs/start-run! conn {:problem "p"})
+        ctx {:conn conn :run-id rid :config {}}
+        note (fn [] (json/read-str
+                     (str (:data (last (db/fetch conn
+                                                 ["SELECT data FROM events
+                                                    WHERE run_id = ? AND kind = 'oversight'
+                                                    ORDER BY id" rid]))))
+                     :key-fn keyword))]
+    (testing "a pass that concluded records both its verdict and its words"
+      ((:handler (cell/get-cell! :oversight/apply))
+       ctx {:oversight/idle 9 :oversight/unmet 2 :oversight/verdict :done
+            :oversight/answer "the classpath is wrong"})
+      (is (= "done" (:verdict (note))))
+      (is (str/includes? (str (:notes (note))) "classpath")))
+    (testing "a pass that ran out of turns says so instead of going blank"
+      ((:handler (cell/get-cell! :oversight/apply))
+       ctx {:oversight/idle 21 :oversight/unmet 5 :oversight/verdict :exhausted})
+      (is (= "exhausted" (:verdict (note))))
+      (is (nil? (:notes (note)))))))
+
+(deftest a-reasoning-pass-that-throws-lands-in-the-record
+  ;; The guard keeps the stream alive; it must not also keep the failure
+  ;; secret. A silent guard is how an arity bug survived a whole run looking
+  ;; like a merely quiet supervisor.
+  (cells/load-cells!)
+  (let [conn (db/open! ":memory:")
+        rid (runs/start-run! conn {:problem "p"})
+        ctx {:conn conn :run-id rid :config {}}]
+    (with-redefs [myc/run-compiled (fn [& _] (throw (ex-info "provider exploded" {})))]
+      (let [out ((:handler (cell/get-cell! :oversight/reason))
+                 ctx {:oversight/idle 30 :oversight/unmet 2
+                      :oversight/turns [] :oversight/firings []})]
+        (is (= :error (:oversight/verdict out)))
+        (is (str/includes? (str (:oversight/answer out)) "provider exploded"))))))
+
+(deftest the-stream-and-the-stage-do-not-share-a-branch-id
+  ;; Run 498450e1: branch S0 held 26 turn rows numbered up to 14. The stream
+  ;; opened S0 and :feature/supervise opens S<revision>, which is S0 on the
+  ;; first round — two supervisors with separate contexts writing one branch,
+  ;; overwriting each other's turn numbers. A record that cannot say which
+  ;; supervisor said what is a record of neither (karamazov-poe).
+  (cells/load-cells!)
+  (let [conn (db/open! ":memory:")
+        rid (runs/start-run! conn {:problem "p"})
+        ctx {:conn conn :run-id rid :config {}}]
+    (with-redefs [myc/run-compiled (fn [_ _ data]
+                                     {:branch (assoc (:branch data) :final-answer "ok")})]
+      (let [out ((:handler (cell/get-cell! :oversight/reason))
+                 ctx {:oversight/idle 30 :oversight/unmet 2
+                      :oversight/turns [] :oversight/firings []})]
+        (is (= "SUP" (get-in out [:oversight/branch :id])))
+        (is (not= "S0" (get-in out [:oversight/branch :id])))))))

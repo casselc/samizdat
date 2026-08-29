@@ -59,7 +59,10 @@
     (let [pattern (str (base/arg ctx :pattern))
           offset (or (some-> (base/arg ctx :offset) str parse-long) 0)
           hits (try (files/grep-project (or root ".") pattern
-                                        {:paths (base/arg ctx :paths)})
+                                        {:paths (base/arg ctx :paths)
+                                         ;; So "grep the examples" is one call
+                                         ;; rather than a shell loop.
+                                         :refs (files/ctx-reference-roots ctx)})
                     (catch Throwable e [::error (ex-message e)]))]
       (cond
         (and (vector? hits) (= ::error (first hits)))

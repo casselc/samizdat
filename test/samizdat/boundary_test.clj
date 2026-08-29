@@ -141,6 +141,10 @@
   {"eval"        {:reach :in-process     :also "tools/repl scrubbed wrapper"}
    "shell"       {:reach :spawns-process :also "policy/run-shell: scrub-env before spawn"}
 
+   ;; The two READ tools. Wider than the write tools by one deliberate step:
+   ;; resolve-for-read admits the project root plus the reference roots the
+   ;; project declared in .samizdat/config.edn, which the agent may not write
+   ;; (karamazov-1an). Still canonicalized, still refused outside all of them.
    "read_file"   {:reach :host-bytes}
    "grep"        {:reach :host-bytes}
    "lsp"         {:reach :host-bytes}

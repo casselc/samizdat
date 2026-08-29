@@ -26,8 +26,13 @@
 
   Ordinary edit tools, deliberately not shell redirection: an agent that has to
   write files through `cat > f <<EOF` fights the tool surface, and the point of
-  the dogfood is to see it change code, not wrestle heredocs."
+  the dogfood is to see it change code, not wrestle heredocs.
+
+  READS AND WRITES NO LONGER SHARE ONE BOUNDARY. Writes stay confined to the
+  root exactly as they were; reads may also resolve under the READ-ONLY
+  reference roots a project declares. See `reference-roots`."
   (:require [samizdat.agent.gates :as gates]
+            [clojure.java.io :as io]
             [clojure.string :as str]
             [jolt.fs :as fs]
             [samizdat.agent.source :as source]
@@ -100,6 +105,74 @@
     (when (or (= target root*) (str/starts-with? target (str root* "/")))
       target)))
 
+(defn- absolute? [p] (.isAbsolute (io/file (str p))))
+
+(defn- under?
+  "Whether the absolute path `p` is `dir` or sits inside it. String prefix at a
+  segment boundary, so `/a/bc` is not inside `/a/b`."
+  [dir p]
+  (or (= p dir) (str/starts-with? p (str dir "/"))))
+
+(defn reference-roots
+  "The READ-ONLY roots this project declared beside its own, canonicalized.
+
+  Root confinement fails closed and shares one primitive with writes, which is
+  right for writes and was an INVERSION for reads: a brief naming a language
+  reference and ninety worked examples next to the project got them refused by
+  `read_file` — the narrow, paged, bounded tool — and the model read every one
+  of them through `shell` instead, which spawns a process. Forcing the safe
+  tool to fail so the powerful one gets used protects nothing. It also
+  silently handicaps a weaker model, which takes the refusal at face value and
+  builds the whole thing having never read an example.
+
+  So reads get a wider set of roots and writes keep the narrow one. Each entry
+  is still canonicalized and reads are still refused anywhere outside a
+  declared root; what changed is how many roots there are, not whether there
+  is a boundary.
+
+  An ABSOLUTE declared path belongs to itself. `java.io.File(parent, child)`
+  concatenates an absolute child onto its parent, which is how the REPL's
+  classpath spent eight runs pointing at `/…/project//Users/…/lib/src`
+  (karamazov-9uc); the same mistake here would refuse exactly the paths the
+  project declared."
+  [declared root]
+  (into []
+        (comp (map str)
+              (remove str/blank?)
+              (map (fn [p]
+                     (str (fs/canonicalize
+                           (if (absolute? p) p (fs/path (or root ".") p))))))
+              ;; A path that is not there is dropped rather than carried. It
+              ;; would resolve nothing anyway, and the system prompt names
+              ;; these to the model — advertising a directory that does not
+              ;; exist buys a wasted turn and a refusal the model cannot make
+              ;; sense of.
+              (filter #(.exists (io/file %)))
+              (distinct))
+        (cond (nil? declared) []
+              (coll? declared) declared
+              :else [declared])))
+
+(defn ctx-reference-roots
+  "The reference roots for a tool call, from the run config's
+  `:run :reference-paths`.
+
+  The project's own `.samizdat/config.edn` rather than gates.edn: that file is
+  the operator's and the agent may not rewrite it (`run-config?`), which is the
+  right owner for a decision about what the run may read outside its tree."
+  [{:keys [config root]}]
+  (reference-roots (get-in config [:run :reference-paths]) root))
+
+(defn resolve-for-read
+  "Resolve `path` for READING — under the project root, or under any of `refs`.
+  Returns the resolved absolute path, or nil when it is under none of them.
+
+  The read counterpart of `resolve-under-root`, which stays the WRITE
+  primitive and is unchanged."
+  [root refs path]
+  (or (resolve-under-root root path)
+      (some #(resolve-under-root % path) refs)))
+
 (def run-config-path
   "The project-local run config, relative to the root — the file that defines
   :run :verify-cmd and :require-test?, i.e. the ship gates this run is judged
@@ -160,8 +233,9 @@
   reader in `eval` — ten turns of a forty-turn budget to read one file it had
   been told to start from. A truncation marker has to end with the call that
   continues it, or it is a dead end the model can only walk into again."
-  [{:keys [branch root args]}]
-  (let [path (str (:path args))
+  [{:keys [branch root args] :as ctx}]
+  (let [refs (ctx-reference-roots ctx)
+        path (str (:path args))
         offset (or (some-> (:offset args) str parse-long) 0)
         limit (some-> (:limit args) str parse-long)
         anchors? (boolean (or (:anchors args) (get args "anchors")))]
@@ -170,7 +244,7 @@
       (miss branch (msg {:needs-path true :tool "read_file"}))
 
       :else
-      (if-let [abs (resolve-under-root (or root ".") path)]
+      (if-let [abs (resolve-for-read (or root ".") refs path)]
         (if (fs/exists? abs)
           (let [content (slurp abs)
                 {:keys [text from next total]}
@@ -195,7 +269,11 @@
                                             :shown next :total total}))))
              :category :neutral :progress? false :branch branch})
           (miss branch (msg {:no-file true :path path})))
-        (miss branch (msg {:outside-root true :path path :verb "read"}))))))
+        ;; The refusal NAMES the roots that would have worked. A boundary the
+        ;; model cannot see the shape of is one it can only probe by failing,
+        ;; and probing costs a turn each time.
+        (miss branch (msg {:outside-root true :path path :verb "read"
+                           :refs (when (seq refs) (str/join ", " refs))}))))))
 
 (defn patch-file
   "Apply anchored `edits` to a file under the root, as ONE atomic batch.
@@ -279,23 +357,48 @@
   `:paths` scopes the sweep to one or more path prefixes. Without it a wide
   pattern answers the whole project, which is a lot of noise to push through a
   result cap — the search that finds too much should be narrowable rather than
-  silently cut."
+  silently cut.
+
+  `:refs` are the declared reference roots (`reference-roots`). They are swept
+  ONLY when an absolute `:paths` entry names one — a reference tree is usually
+  far larger than the project, and sweeping ninety examples by default would
+  drown every ordinary search. Their hits come back as ABSOLUTE paths, which
+  is what `read_file` then takes to open one."
   ([root pattern] (grep-project root pattern nil))
-  ([root pattern {:keys [paths]}]
+  ([root pattern {:keys [paths refs]}]
    (let [root* (str (fs/canonicalize (or root ".")))
          re (re-pattern pattern)
          scopes (remove str/blank? (map str (cond (nil? paths) []
                                                   (coll? paths) paths
                                                   :else [paths])))
-         files (mapcat #(fs/glob root* (str "{*." % ",**/*." % "}")) clojure-exts)]
-     (mapcat (fn [p]
-               (let [rel (str (fs/relativize root* (fs/canonicalize (str p))))]
-                 (when (in-scope? scopes rel)
-                   (keep-indexed (fn [i line]
-                                   (when (re-find re line)
-                                     {:path rel :line (inc i) :text line}))
-                                 (str/split (slurp (str p)) #"\n" -1)))))
-             files))))
+         ;; Only an absolute scope can select a reference root; a relative one
+         ;; is a project path and belongs to the sweep below it. Canonicalized,
+         ;; because the roots are: on a Mac /tmp is a symlink to /private/tmp,
+         ;; so comparing a raw scope against a canonical root matches nothing
+         ;; and the sweep silently returns empty.
+         abs-scopes (map #(str (fs/canonicalize %)) (filter absolute? scopes))
+         ;; [file-to-read reported-path] pairs. The project's files are
+         ;; reported relative to the root, as they always were; a reference
+         ;; file has no meaningful relative name, so it reports itself.
+         project (for [ext clojure-exts
+                       p (fs/glob root* (str "{*." ext ",**/*." ext "}"))
+                       :let [rel (str (fs/relativize root* (fs/canonicalize (str p))))]
+                       :when (in-scope? scopes rel)]
+                   [(str p) rel])
+         referenced (for [r refs
+                          :let [selected (filter #(under? r %) abs-scopes)]
+                          :when (seq selected)
+                          ext clojure-exts
+                          p (fs/glob r (str "{*." ext ",**/*." ext "}"))
+                          :let [abs (str (fs/canonicalize (str p)))]
+                          :when (some #(under? % abs) selected)]
+                      [abs abs])]
+     (mapcat (fn [[file reported]]
+               (keep-indexed (fn [i line]
+                               (when (re-find re line)
+                                 {:path reported :line (inc i) :text line}))
+                             (str/split (slurp file) #"\n" -1)))
+             (concat project referenced)))))
 
 (defn grep-page
   "The window of `hits` from `offset`, at most `limit` of them, as

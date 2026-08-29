@@ -360,13 +360,22 @@
                                                (tail (str (:out r) "\n" (:err r)) 25)))))))))
 
 (cell/defcell :feature/supervise
-  {:doc "The supervisor: the harness's introspection. It runs a supervisor ROLE
-        loop (supervisor.edn) over a run-health digest — it diagnoses what is
-        suboptimal and decides. Two levers: a within-run directive (CONTINUE /
-        REVISE / STOP, read by :feature/route) and, through its own tools, tuning
-        the harness's manifests/prompts/cells for future runs (the mutation
-        protocol validates those). Not a fixed rule — a reasoning agent. Fails
-        SAFE to :continue so it can never wedge the loop."
+  {:doc "The ROUTING supervisor: one look at the round, one decision about what
+        the outer loop does next — CONTINUE / REVISE / STOP, plus the SWITCH
+        and EXTEND levers. A pipeline decision, which is why it stays a
+        pipeline node.
+
+        IT NO LONGER OWNS DIAGNOSIS. The supervision STREAM
+        (manifests/oversight.edn) watches the whole run continuously on its
+        own branch and tunes the harness through the mutation protocol; this
+        stage sees one round, at one moment, and a second supervisor deriving
+        its own diagnosis from a different context reaches a different
+        conclusion about the same run and neither knows about the other
+        (karamazov-poe). So the stream's last conclusion is QUOTED into this
+        stage's brief, and this stage is asked to route rather than to
+        re-diagnose.
+
+        Fails SAFE to :continue so it can never wedge the loop."
    :effects [:net :db]
    :requires [:config :conn :run-id]}
   (fn [{:keys [conn run-id config] :as ctx} {:keys [results] :as data}]
@@ -407,9 +416,24 @@
               mark (str "supervisor:" run-id)
               live (session/render mark)
               _ (session/mark! mark)
-              prob (str "Introspect on this run and decide whether the loop needs "
-                        "an adjustment. If a problem is systemic, tune "
-                        "the harness.\n\n"
+              ;; The stream's last word, so the two supervisors on this run
+              ;; agree or disagree in the open rather than in parallel.
+              stream (journal/last-note conn run-id :oversight)
+              prob (str "Decide what the outer loop does next with this round: "
+                        "CONTINUE, REVISE, or STOP, and whether to SWITCH the "
+                        "implement strategy or EXTEND the turn budget.\n\n"
+                        (if (and stream (seq (str (:notes stream))))
+                          (str "## What the supervision stream already concluded\n"
+                               "A supervisor has been watching this run continuously on its own "
+                               "branch, with the whole run in view rather than one round. Its "
+                               "latest conclusion:\n\n> "
+                               (str/replace (str (:notes stream)) #"\n" "\n> ")
+                               "\n\nStart from that. If you disagree, say what you saw that it "
+                               "did not — do not re-derive the same diagnosis from scratch, and "
+                               "do not tune the harness here: that is the stream's job and it "
+                               "has more context to do it with.\n\n")
+                          (str "No supervision-stream conclusion is on record for this run yet. "
+                               "Route on what the digest below shows.\n\n"))
                         ;; Claim a crash only when one happened. The
                         ;; unconditional "a STAGE CRASHED signal is a harness
                         ;; bug — diagnose it" sentence sent a supervisor with a
