@@ -264,6 +264,16 @@
   budget anchor.  A separate trusted-controller extension act may raise that
   row atomically and reopen exhausted branches before resume is requested.
 
+  THE EXPOSED-RUN/NO-BRANCH WINDOW is closed here.  `run!` creates the run
+  row (and, for a bounded run, persists the EvaluatorBinding) BEFORE any
+  branch exists — on-start can even have answered the HTTP request already —
+  so a process that dies in that window leaves a resumable-looking run with
+  zero branch rows, and a resume of it reached the scheduler with an empty
+  beam, which exhausted immediately and failed the run without ever taking a
+  turn.  A zero-branch resume now opens the run's initial branch set exactly
+  as the start path would have (width from the runs row; a bounded run's
+  orientation from the reconstructed binding), and starts at turn 1.
+
   Pending interventions are already in their table; the existing
   pending-directives drain picks them up at the first resumed boundary — this
   function does not reimplement that path.
@@ -276,81 +286,89 @@
                            (:status run) ")")
                       {:run-id run-id :status (:status run)})))
     (let [max-turns (:max_turns run)
-           width (:beam_width run)
-           root (or (get-in config [:run :root]) (System/getProperty "user.dir"))
-           durable-binding (evaluator-store/binding-for-run conn run-id)
-           loop-nm (workflow/active-loop-name config)
-           {turn-wf :compiled iterating? :iterating?}
-           (workflow/compile-turn-loop conn loop-nm)
-           _ (when (and durable-binding (not iterating?))
-               (throw (ex-info "A bounded evaluator requires an iterating turn workflow"
-                               {:samizdat.evaluator/error :bounded-noniterating-workflow
-                                :workflow loop-nm})))
-           _ (when (and durable-binding (> width 1))
-              (throw (ex-info
-                      "A durable bounded EvaluatorBinding cannot resume across multiple branches"
-                      {:samizdat.evaluator/error :multi-branch-not-supported
-                       :beam-width width})))
-          bounded (when durable-binding
-                    (let [reconstruct! (or
-                                        (try (requiring-resolve
-                                              'samizdat.evaluator/reconstruct!)
-                                             (catch Throwable _ nil))
-                                        (throw (ex-info
-                                                "Pinned bounded evaluator runtime is unavailable on resume"
-                                                {:samizdat.evaluator/error
-                                                 :runtime-unavailable})))]
-                      (reconstruct! conn run-id root)))
-          ;; Revalidate/reconstruct before changing the run row. A mismatch or
-          ;; pending history leaves the interrupted record untouched.
-          _ (runs/mark-running! conn run-id)
-          turn-rows (journal/turns conn run-id)
-          turns (group-by :branch_id turn-rows)
-          artifacts (group-by :branch_id (journal/artifacts conn run-id))
-          firings (group-by :branch_id (journal/gate-firings conn run-id))
-          ;; Same three keys run! sets. A resumed run works on the same tree
-          ;; and needs the same file root; the eval session is genuinely new,
-          ;; because the old process's namespace died with it and nothing in
-          ;; the journal can rebuild an in-image binding.
-           ctx {:conn conn :run-id run-id :config config :problem (:problem run)
-               :llm-adapter llm-adapter :llm-config llm-config
-               :max-turns max-turns :beam? (> width 1) :beam-width width
-               :root root
-               :turn-workflow turn-wf
-               :iterating-loop? iterating?
-               ;; Baselined at the RESUME, so a critic reviewing the resumed
-               ;; run sees what the resumption changed. What the dead process
-               ;; changed is already committed to the tree it starts from.
-               :git-baseline (gitdiff/baseline root)
-                :repl-session (when-not bounded (repl/new-session))
-                :evaluator/profile (when bounded
-                                     (get-in bounded [:spec :context-spec
-                                                      :context/profile]))
-                :evaluator/binding bounded
-               :abort abort}
-          ;; :verify-cmd rides on the policy so the rebuilt window skips
-          ;; verify calls exactly the way the live path never notes them.
-          storm-pol (assoc (gates/storm-policy)
-                           :verify-cmd (get-in config [:run :verify-cmd]))
-          branches (mapv (fn [row]
-                           (let [b (rebuild-branch run row turns artifacts
-                                                    firings max-turns storm-pol
-                                                    (:trusted-orientation bounded))
-                                 ;; The task claim survives the crash on its
-                                 ;; ROW; without restoring it here the branch
-                                 ;; came back reading "No task claimed", could
-                                 ;; claim a second task, and left the old one
-                                 ;; in_progress and attributed to it forever
-                                 ;; (karamazov-blt.21). The pinned statement
-                                 ;; is re-appended through the same renderer
-                                 ;; the claim used.
-                                 held (tasks/held-by conn run-id (:id b))]
-                             (cond-> b
-                               held (assoc :task {:id (:id held)
-                                                  :title (:title held)})
-                               held (task-tool/task-statement held))))
-                         (runs/branches conn run-id))
-          ;; The anchor: rounds completed are the max turn in the journal, so
-          ;; the loop continues one past it. max-turns is the ORIGINAL budget.
-          start-turn (inc (reduce max 0 (map :turn turn-rows)))]
-      (beam/run-rounds ctx branches start-turn))))
+            width (:beam_width run)
+            root (or (get-in config [:run :root]) (System/getProperty "user.dir"))
+            durable-binding (evaluator-store/binding-for-run conn run-id)
+            loop-nm (workflow/active-loop-name config)
+            {turn-wf :compiled iterating? :iterating?}
+            (workflow/compile-turn-loop conn loop-nm)
+            _ (when (and durable-binding (not iterating?))
+                (throw (ex-info "A bounded evaluator requires an iterating turn workflow"
+                                {:samizdat.evaluator/error :bounded-noniterating-workflow
+                                 :workflow loop-nm})))
+            _ (when (and durable-binding (> width 1))
+               (throw (ex-info
+                       "A durable bounded EvaluatorBinding cannot resume across multiple branches"
+                       {:samizdat.evaluator/error :multi-branch-not-supported
+                        :beam-width width})))
+           bounded (when durable-binding
+                     (let [reconstruct! (or
+                                         (try (requiring-resolve
+                                               'samizdat.evaluator/reconstruct!)
+                                              (catch Throwable _ nil))
+                                         (throw (ex-info
+                                                 "Pinned bounded evaluator runtime is unavailable on resume"
+                                                 {:samizdat.evaluator/error
+                                                  :runtime-unavailable})))]
+                       (reconstruct! conn run-id root)))
+           ;; Revalidate/reconstruct before changing the run row. A mismatch or
+           ;; pending history leaves the interrupted record untouched.
+           _ (runs/mark-running! conn run-id)
+           turn-rows (journal/turns conn run-id)
+           turns (group-by :branch_id turn-rows)
+           artifacts (group-by :branch_id (journal/artifacts conn run-id))
+           firings (group-by :branch_id (journal/gate-firings conn run-id))
+           ;; Same three keys run! sets. A resumed run works on the same tree
+           ;; and needs the same file root; the eval session is genuinely new,
+           ;; because the old process's namespace died with it and nothing in
+           ;; the journal can rebuild an in-image binding.
+            ctx {:conn conn :run-id run-id :config config :problem (:problem run)
+                :llm-adapter llm-adapter :llm-config llm-config
+                :max-turns max-turns :beam? (> width 1) :beam-width width
+                :root root
+                :turn-workflow turn-wf
+                :iterating-loop? iterating?
+                ;; Baselined at the RESUME, so a critic reviewing the resumed
+                ;; run sees what the resumption changed. What the dead process
+                ;; changed is already committed to the tree it starts from.
+                :git-baseline (gitdiff/baseline root)
+                 :repl-session (when-not bounded (repl/new-session))
+                 :evaluator/profile (when bounded
+                                      (get-in bounded [:spec :context-spec
+                                                       :context/profile]))
+                 :evaluator/binding bounded
+                 :abort abort}
+           ;; :verify-cmd rides on the policy so the rebuilt window skips
+           ;; verify calls exactly the way the live path never notes them.
+           storm-pol (assoc (gates/storm-policy)
+                            :verify-cmd (get-in config [:run :verify-cmd]))
+           branch-rows (runs/branches conn run-id)
+           branches (if (seq branch-rows)
+                      (mapv (fn [row]
+                              (let [b (rebuild-branch run row turns artifacts
+                                                       firings max-turns storm-pol
+                                                       (:trusted-orientation bounded))
+                                    ;; The task claim survives the crash on its
+                                    ;; ROW; without restoring it here the branch
+                                    ;; came back reading "No task claimed", could
+                                    ;; claim a second task, and left the old one
+                                    ;; in_progress and attributed to it forever
+                                    ;; (karamazov-blt.21). The pinned statement
+                                    ;; is re-appended through the same renderer
+                                    ;; the claim used.
+                                    held (tasks/held-by conn run-id (:id b))]
+                                (cond-> b
+                                  held (assoc :task {:id (:id held)
+                                                     :title (:title held)})
+                                  held (task-tool/task-statement held))))
+                            branch-rows)
+                      ;; Zero branch rows: the run was exposed before its first
+                      ;; branch existed.  Open the initial set now — through the
+                      ;; same open-branch! the start path used — so the beam has
+                      ;; somebody to advance instead of exhausting on an empty
+                      ;; branch set at turn 1.
+                      (beam/open-initial-branches! ctx width))
+           ;; The anchor: rounds completed are the max turn in the journal, so
+           ;; the loop continues one past it. max-turns is the ORIGINAL budget.
+           start-turn (inc (reduce max 0 (map :turn turn-rows)))]
+       (beam/run-rounds ctx branches start-turn))))

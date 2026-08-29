@@ -1100,13 +1100,15 @@
 
   opts:
     :token — a caller-held Jolt interrupt token (a later TurnLease's). It may
-             only NARROW the evaluation: the spec's :context/timeout-ms
-             ceiling still applies on a private per-evaluation token, and the
-             caller's token is never fired by the spec's timer.
-    :inference-epoch-id — the InferenceEpoch of the model call whose tool
-             dispatch produced this evaluation. Recorded on the eval row and
-             on every intent/outcome receipt, closing the causal chain from
-             provider invocation to semantic operation."
+              only NARROW the evaluation: the spec's :context/timeout-ms
+              ceiling still applies on a private per-evaluation token, and the
+              caller's token is never fired by the spec's timer.
+    :inference-epoch-id — the reusable InferenceEpoch of the model call whose
+              tool dispatch produced this evaluation.
+    :inference-invocation-id — the per-call InferenceInvocation of that same
+              model call.  Both are recorded on the eval row and on every
+              intent/outcome receipt, closing the causal chain from the exact
+              provider invocation to each semantic operation."
   ([conn binding source] (evaluate-recorded! conn binding source nil))
   ([conn binding source opts]
    (verify-binding! binding)
@@ -1118,8 +1120,12 @@
      (try
        (let [instance @(:instance binding)
              epoch-id (:inference-epoch-id opts)
-             eval-id (store/begin! conn (assoc (identity-map binding) :source source
-                                               :inference-epoch-id epoch-id))
+             invocation-id (:inference-invocation-id opts)
+             eval-id (store/begin! conn (assoc (identity-map binding)
+                                               :source source
+                                               :inference-epoch-id epoch-id
+                                               :inference-invocation-id
+                                               invocation-id))
              hook (:hook instance)
              effect-permit! (or (:effect-permit! opts) (fn [f] (f)))]
          (reset! hook
@@ -1129,14 +1135,17 @@
                    ;; bounded read/edit runs outside the lease monitor; once
                    ;; initiated it is not retroactively unauthorized.
                    (let [seqn (effect-permit!
-                               #(store/intent! conn eval-id op args epoch-id))]
+                               #(store/intent! conn eval-id op args epoch-id
+                                               invocation-id))]
                      (try
                        (let [value (sandbox/inert (run))]
-                         (store/outcome! conn eval-id seqn {:result value} epoch-id)
+                         (store/outcome! conn eval-id seqn {:result value}
+                                         epoch-id invocation-id)
                          value)
                        (catch Throwable e
-                         (store/outcome! conn eval-id seqn {:error (ex-message e)}
-                                         epoch-id)
+                         (store/outcome! conn eval-id seqn
+                                         {:error (ex-message e)}
+                                         epoch-id invocation-id)
                          (throw e))))))
          (try
            (let [value (evaluate-guarded! (:state instance) source

@@ -319,29 +319,39 @@
   The epoch is the run's still-open one whenever the safe realization —
   provider, model, adapter and the nonsecret config digest — is unchanged, so
   unchanged calls share one durable epoch; a realization change (a provider
-  switch on resume) closes the open epoch and begins a new one, and the call's
-  returned :inference-epoch-id is what its turn rows, eval rows and receipts
-  reference."
+  switch on resume) closes the open epoch and begins a new one.  Beneath the
+  epoch, ONE InferenceInvocation is minted for THIS call: the exact per-call
+  identity its turn rows, eval rows and receipts reference.  Calls share an
+  epoch; they never share an invocation."
   ([ctx branch]
    (call-model ctx branch (or (:current-turn branch) 0)))
   ([ctx branch turn]
    (let [binding (tools/bounded-binding ctx)
-         epoch (when (and (:conn ctx) (:run-id ctx))
-                 (inference-store/ensure!
-                  (:conn ctx)
-                  {:id (str (random-uuid))
-                   :run-id (:run-id ctx) :branch-id (:id branch) :turn turn
-                   :provider (get-in ctx [:llm-config :provider])
-                   :model (get-in ctx [:llm-config :model])
-                   :adapter (adapter-coordinate (:llm-adapter ctx))
-                   :config-digest (inference-realization-digest
-                                   (:llm-config ctx))
-                   :binding-id (:binding/id binding)
-                   :spec-id (get-in binding [:spec :spec/coordinate])
-                   :runtime (get-in binding [:spec :runtime-coordinate])}))
-         epoch-id (some-> epoch :id str)
-         call ((infer/complete-fn ctx) (infer/of-branch branch))]
-     (cond-> call epoch-id (assoc :inference-epoch-id epoch-id)))))
+          epoch (when (and (:conn ctx) (:run-id ctx))
+                  (inference-store/ensure!
+                   (:conn ctx)
+                   {:id (str (random-uuid))
+                    :run-id (:run-id ctx) :branch-id (:id branch) :turn turn
+                    :provider (get-in ctx [:llm-config :provider])
+                    :model (get-in ctx [:llm-config :model])
+                    :adapter (adapter-coordinate (:llm-adapter ctx))
+                    :config-digest (inference-realization-digest
+                                    (:llm-config ctx))
+                    :binding-id (:binding/id binding)
+                    :spec-id (get-in binding [:spec :spec/coordinate])
+                    :runtime (get-in binding [:spec :runtime-coordinate])}))
+          invocation (when epoch
+                       (inference-store/invoke!
+                        (:conn ctx)
+                        {:id (str (random-uuid)) :epoch-id (:id epoch)
+                         :run-id (:run-id ctx) :branch-id (:id branch)
+                         :turn turn}))
+          epoch-id (some-> epoch :id str)
+          invocation-id (some-> invocation :id str)
+          call ((infer/complete-fn ctx) (infer/of-branch branch))]
+      (cond-> call
+        epoch-id (assoc :inference-epoch-id epoch-id)
+        invocation-id (assoc :inference-invocation-id invocation-id)))))
 
 (defn- settle-predictions!
   "Close out any prediction whose window has passed or whose expectation the
@@ -417,13 +427,18 @@
   ([{:keys [conn run-id]} branch turn error reason]
    (provider-error-step {:conn conn :run-id run-id} branch turn error reason nil))
   ([{:keys [conn run-id]} branch turn error reason inference-epoch-id]
+   (provider-error-step {:conn conn :run-id run-id} branch turn error reason
+                        {:inference-epoch-id inference-epoch-id}))
+  ([{:keys [conn run-id]} branch turn error reason
+    {:keys [inference-epoch-id inference-invocation-id]}]
    (session/observe! [:provider (or reason :call-failed)])
    (log/warn "branch" (:id branch) "turn" turn "model call failed:" error)
    (journal/record-turn! conn run-id
                          {:branch-id (:id branch) :turn turn
                           :tool-name "__provider_error__" :result error
                            :category "neutral"
-                           :inference-epoch-id inference-epoch-id})
+                           :inference-epoch-id inference-epoch-id
+                           :inference-invocation-id inference-invocation-id})
    (if (= :context-overflow reason)
      ;; The prompt outgrew the window. 'Try again' is exactly wrong here —
      ;; the failure is upstream of the model seeing anything, the next
@@ -461,7 +476,8 @@
   "No usable call. Say exactly what was wrong; a bare \"try again\" produces
   another identical attempt."
   [{:keys [conn run-id]} branch turn {:keys [parsed signals said response
-                                             inference-epoch-id]}]
+                                             inference-epoch-id
+                                             inference-invocation-id]}]
   ;; A reply that is nothing but a copy of the harness's own compaction
   ;; marker. On a long branch almost every message is an [unloaded] digest
   ;; standing in for a past turn, and a model reading its own history that
@@ -498,10 +514,11 @@
                            :auto-repaired (:auto-repaired? parsed)
                            :assistant-text said
                            :reasoning-text (:reasoning response)
-                           ;; A turn that produced no usable call still cost
-                           ;; tokens, and those are the ones worth counting.
-                            :usage (:usage response)
-                            :inference-epoch-id inference-epoch-id})
+                            ;; A turn that produced no usable call still cost
+                            ;; tokens, and those are the ones worth counting.
+                             :usage (:usage response)
+                             :inference-epoch-id inference-epoch-id
+                             :inference-invocation-id inference-invocation-id})
     (-> branch
         (state/record-outcome {:category :mechanics :progress? false})
         (state/add-message "user" msg {:turn turn})
@@ -734,7 +751,8 @@
   into the shared pool when it qualifies), any failure, any thesis. Side
   effects only; returns nil."
   [{:keys [conn run-id] :as ctx} branch turn {:keys [parsed result tool said response signals
-                                                     inference-epoch-id]}]
+                                                      inference-epoch-id
+                                                      inference-invocation-id]}]
   (observe-turn! tool result (or signals
                                  ;; A turn that never reached a tool still has
                                  ;; something to say: the parse flags are how
@@ -750,10 +768,11 @@
                          :category (name (:category result))
                          :policy-refusal? (:policy-refusal? result)
                          :auto-repaired (:auto-repaired? parsed)
-                         :assistant-text said
-                         :reasoning-text (:reasoning response)
-                          :usage (:usage response)
-                          :inference-epoch-id inference-epoch-id})
+                          :assistant-text said
+                          :reasoning-text (:reasoning response)
+                           :usage (:usage response)
+                           :inference-epoch-id inference-epoch-id
+                           :inference-invocation-id inference-invocation-id})
   (when-let [a (:artifact result)]
     (journal/record-artifact! conn run-id
                               (assoc a :branch-id (:id branch) :turn turn))

@@ -42,9 +42,12 @@
           receipt-columns (set (map (comp keyword :name)
                                     (db/fetch c ["PRAGMA table_info(evaluator_receipts)"])))
           epoch-columns (set (map (comp keyword :name)
-                                  (db/fetch c ["PRAGMA table_info(inference_epochs)"])))]
+                                  (db/fetch c ["PRAGMA table_info(inference_epochs)"])))
+          invocation-columns (set (map (comp keyword :name)
+                                       (db/fetch c
+                                         ["PRAGMA table_info(inference_invocations)"])))]
       (is (every? tables ["evaluator_bindings" "inference_epochs"
-                          "budget_extensions"]))
+                          "inference_invocations" "budget_extensions"]))
       (is (contains? run-columns :terminal_reason))
       (is (contains? turn-columns :inference_epoch_id))
       ;; v25 M3 closure records: the durable binding's exact trusted-orientation
@@ -57,7 +60,13 @@
       (is (contains? epoch-columns :adapter))
       (is (contains? epoch-columns :config_digest))
       (is (contains? epoch-columns :closed_at))
-      (is (= 25 (:user_version (db/fetch-one c ["PRAGMA user_version"])))))))
+      ;; v26 final closure: the per-call InferenceInvocation, referenced by
+      ;; turns, eval rows and receipts.
+      (is (contains? invocation-columns :epoch_id))
+      (is (contains? turn-columns :inference_invocation_id))
+      (is (contains? eval-columns :inference_invocation_id))
+      (is (contains? receipt-columns :inference_invocation_id))
+      (is (= 26 (:user_version (db/fetch-one c ["PRAGMA user_version"])))))))
 
 (defn- budget-fixture [c]
   (let [rid (runs/start-run! c {:problem "p" :max-turns 5 :beam-width 1})]
@@ -138,23 +147,34 @@
           ctx {:conn c :run-id rid
                :llm-config {:provider :stub :model "fixed-model"}}
           call (with-redefs [infer/complete-fn
-                             (fn [_]
-                               (fn [_]
-                                 (reset! observed (inference/for-run c rid))
-                                 {:ok true :response {:content "answer"}}))]
-                 (turn/call-model ctx branch 7))
-          epoch-id (:inference-epoch-id call)]
-      (is (= 1 (count @observed))
+                              (fn [_]
+                                (fn [_]
+                                  (reset! observed [(inference/for-run c rid)
+                                                    (inference/invocations-for-run
+                                                     c rid)])
+                                  {:ok true :response {:content "answer"}}))]
+                  (turn/call-model ctx branch 7))
+          epoch-id (:inference-epoch-id call)
+          invocation-id (:inference-invocation-id call)]
+      (is (= 1 (count (first @observed)))
           "the epoch exists before the provider seam is invoked")
-      (is (= 7 (:turn (first @observed))))
-      (is (= "stub" (:provider (first @observed))))
-      (is (= "fixed-model" (:model (first @observed))))
+      (is (= 7 (:turn (ffirst @observed))))
+      (is (= "stub" (:provider (ffirst @observed))))
+      (is (= "fixed-model" (:model (ffirst @observed))))
+      ;; One PER-CALL invocation exists before the seam fires, under the
+      ;; reusable epoch — the call's exact identity, not its realization's.
+      (is (= 1 (count (second @observed))))
+      (is (= epoch-id (:epoch_id (first (second @observed)))))
+      (is (= invocation-id (:id (first (second @observed)))))
       (journal/record-turn! c rid
                             {:branch-id "B1" :turn 7 :tool-name "done"
                              :args {} :result "ok" :category :neutral
-                             :inference-epoch-id epoch-id})
+                             :inference-epoch-id epoch-id
+                             :inference-invocation-id invocation-id})
       (is (= epoch-id (:inference_epoch_id
-                        (first (journal/turns c rid))))))))
+                        (first (journal/turns c rid)))))
+      (is (= invocation-id (:inference_invocation_id
+                            (first (journal/turns c rid))))))))
 
 (deftest unchanged-epochs-are-reused-and-a-provider-switch-closes-the-old-one
   (with-db [c]
@@ -168,12 +188,28 @@
       (let [one (call {:provider :stub :model "m"} 1)
             two (call {:provider :stub :model "m"} 2)
             switched (call {:provider :other :model "m"} 3)
-            epochs (inference/for-run c rid)]
+            epochs (inference/for-run c rid)
+            invocations (inference/invocations-for-run c rid)]
         (is (= (:inference-epoch-id one) (:inference-epoch-id two)))
         (is (not= (:inference-epoch-id two) (:inference-epoch-id switched)))
         (is (= 2 (count epochs)))
         (is (some? (:closed_at (first epochs))))
-        (is (nil? (:closed_at (second epochs))))))))
+        (is (nil? (:closed_at (second epochs))))
+        ;; The epoch is the REUSABLE realization; the invocation is PER CALL:
+        ;; three calls, the unchanged two sharing one epoch, the switched call
+        ;; under the successor epoch, and three distinct invocations.
+        (is (= 3 (count invocations)))
+        (is (= [(:inference-epoch-id one)
+                (:inference-epoch-id one)
+                (:inference-epoch-id switched)]
+               (mapv :epoch_id invocations))
+            "unchanged calls share one epoch; the switch names its successor")
+        (is (= 3 (count (distinct (map :id invocations))))
+            "no two calls share an invocation")
+        (is (= [(:inference-invocation-id one)
+                (:inference-invocation-id two)
+                (:inference-invocation-id switched)]
+               (mapv :id invocations)))))))
 
 (deftest epoch-flows-through-tool-dispatch-evaluation-and-receipts
   (with-db [c]
@@ -183,18 +219,26 @@
                                      :branch-id "B1" :turn 1 :provider :stub
                                      :model "m" :binding-id "bind:dispatch"
                                      :spec-id "spec:dispatch" :runtime "runtime"})
+          invocation (inference/invoke! c {:id "invocation:dispatch"
+                                           :epoch-id (:id epoch)
+                                           :run-id rid :branch-id "B1"
+                                           :turn 1})
           binding {:binding/id "bind:dispatch"}
           evaluate! (fn [conn binding source opts]
                       (let [eval-id (evaluator-store/begin!
-                                     conn {:spec-id "spec:dispatch" :instance-id "inst:dispatch"
-                                           :binding-id (:binding/id binding) :context-spec "ctx"
-                                           :runtime "runtime" :source source
-                                           :inference-epoch-id (:inference-epoch-id opts)})
+                                      conn {:spec-id "spec:dispatch" :instance-id "inst:dispatch"
+                                            :binding-id (:binding/id binding) :context-spec "ctx"
+                                            :runtime "runtime" :source source
+                                            :inference-epoch-id (:inference-epoch-id opts)
+                                            :inference-invocation-id
+                                            (:inference-invocation-id opts)})
                             seqn ((:effect-permit! opts)
                                   #(evaluator-store/intent! conn eval-id :project/read
-                                                            ["x"] (:inference-epoch-id opts)))]
+                                                            ["x"] (:inference-epoch-id opts)
+                                                            (:inference-invocation-id opts)))]
                         (evaluator-store/outcome! conn eval-id seqn {:result "x"}
-                                                (:inference-epoch-id opts))
+                                                  (:inference-epoch-id opts)
+                                                  (:inference-invocation-id opts))
                         (evaluator-store/complete! conn eval-id :completed {:value "x"})
                         {:value "x"}))]
       (with-redefs-fn {#'repl-tools/evaluator-var
@@ -204,11 +248,15 @@
                                    :turn-lease (base/mint-turn-lease rid "B1" 1)
                                    :evaluator/binding binding :tool-name "eval"
                                    :inference-epoch-id (:id epoch)
+                                   :inference-invocation-id (:id invocation)
                                    :args {:code "(project/read \"x\")"}})
                 eval-row (first (evaluator-store/history c "bind:dispatch"))]
             (is (= :neutral (:category r)))
             (is (= (:id epoch) (:inference_epoch_id eval-row)))
+            (is (= (:id invocation) (:inference_invocation_id eval-row)))
             (is (= (:id epoch) (get-in eval-row [:receipts 0 :inference-epoch-id])))
+            (is (= (:id invocation)
+                   (get-in eval-row [:receipts 0 :inference-invocation-id])))
             (is (= :project/read (get-in eval-row [:receipts 0 :op])))))))))
 
 (deftest a-human-extend-directive-uses-the-controller-transaction
@@ -267,6 +315,9 @@
        c {:id "epoch:evidence" :run-id rid :branch-id "B1" :turn 1
           :provider :stub :model "m" :binding-id "bind:evidence"
           :spec-id "spec:evidence" :runtime "runtime:evidence"})
+      (inference/invoke!
+       c {:id "invocation:evidence" :epoch-id "epoch:evidence"
+          :run-id rid :branch-id "B1" :turn 1})
       (let [before (db/fetch-one c ["SELECT COUNT(*) AS n FROM evaluator_evals"])
             evidence (evaluator-store/evidence-for-run c rid)
             after (db/fetch-one c ["SELECT COUNT(*) AS n FROM evaluator_evals"])]
@@ -278,5 +329,113 @@
         (is (= 0 (get-in evidence [:evaluations :total])))
         (is (= ["epoch:evidence"]
                (mapv :id (:inference-epochs evidence))))
+        (is (= ["invocation:evidence"]
+               (mapv :id (:inference-invocations evidence))))
         (is (= evidence (:evaluator (api-runs/get-run c rid)))
             "the run API exposes the same read-only durable projection")))))
+
+(deftest telemetry-derives-exact-operations-per-invocation-and-model-turn
+  (with-db [c]
+    ;; Two model calls (two invocations) share one epoch; each dispatches one
+    ;; evaluation.  The projection must attribute each committed operation to
+    ;; its exact invocation and that invocation's model turn — derived from
+    ;; durable rows, read-only.
+    (let [rid (runs/start-run! c {:problem "p" :max-turns 3 :beam-width 1})
+          context {:context/profile :agent/project-read
+                   :context/capabilities [:project/read]
+                   :context/timeout-ms 30
+                   :context/root "/tmp"
+                   :context/coordinate "ctx"}]
+      (evaluator-store/register-binding!
+       c {:binding-id "bind:telemetry" :run-id rid :work-id "work:telemetry"
+          :instance-id "inst:telemetry" :spec-id "spec:telemetry"
+          :context-spec context :runtime "runtime:telemetry"
+          :orientation "SYSTEM / TRUSTED SURFACE\n- eval\n"
+          :orientation-digest "sha256:telemetry"})
+      (let [epoch (inference/begin!
+                   c {:id "epoch:telemetry" :run-id rid :branch-id "B1"
+                      :turn 1 :provider :stub :model "m"
+                      :binding-id "bind:telemetry" :spec-id "spec:telemetry"
+                      :runtime "runtime:telemetry"})
+            invocations [(inference/invoke!
+                          c {:id "invocation:t1" :epoch-id (:id epoch)
+                             :run-id rid :branch-id "B1" :turn 1})
+                         (inference/invoke!
+                          c {:id "invocation:t2" :epoch-id (:id epoch)
+                             :run-id rid :branch-id "B1" :turn 2})]
+            commit (fn [inv op path]
+                     (let [eval-id (evaluator-store/begin!
+                                    c {:spec-id "spec:telemetry"
+                                       :instance-id "inst:telemetry"
+                                       :binding-id "bind:telemetry"
+                                       :context-spec "ctx"
+                                       :runtime "runtime:telemetry"
+                                       :source "(read)"
+                                       :inference-epoch-id (:id epoch)
+                                       :inference-invocation-id (:id inv)})
+                           seqn (evaluator-store/intent!
+                                 c eval-id op [path] (:id epoch) (:id inv))]
+                       (evaluator-store/outcome! c eval-id seqn
+                                                 {:result path} (:id epoch)
+                                                 (:id inv))
+                       (evaluator-store/complete! c eval-id :completed
+                                                  {:value path})))]
+        (commit (first invocations) :project/read "a")
+        (commit (second invocations) :project/read "b")
+        (let [evidence (evaluator-store/evidence-for-run c rid)
+              per-invocation (get-in evidence [:operations :per-invocation])
+              per-model-turn (get-in evidence [:operations :per-model-turn])
+              receipts (mapcat identity
+                               (get-in evidence [:operations :receipts]))]
+          ;; One reusable epoch, two exact per-call invocations.
+          (is (= 1 (count (:inference-epochs evidence))))
+          (is (= 2 (count (:inference-invocations evidence))))
+          (is (every? #(= (:id epoch) (:epoch_id %))
+                      (:inference-invocations evidence)))
+          ;; Every receipt names its exact invocation.
+          (is (= ["invocation:t1" "invocation:t2"]
+                 (sort (map :inference-invocation-id receipts))))
+          ;; Exact operations per invocation, and through the invocation to
+          ;; its model turn.
+          (is (= [{:invocation-id "invocation:t1" :epoch-id (:id epoch)
+                   :branch-id "B1" :turn 1 :operations [:project/read]}
+                  {:invocation-id "invocation:t2" :epoch-id (:id epoch)
+                   :branch-id "B1" :turn 2 :operations [:project/read]}]
+                 per-invocation))
+          (is (= [{:branch-id "B1" :turn 1 :operations [:project/read]}
+                  {:branch-id "B1" :turn 2 :operations [:project/read]}]
+                 per-model-turn)))))))
+
+(deftest a-zero-branch-exposed-run-resumes-through-the-production-path
+  ;; The exposed-run/no-branch crash window: `run!` creates the run row (and
+  ;; for a bounded run persists the binding) BEFORE any branch exists, so a
+  ;; process death in that window leaves a resumable run with zero branches —
+  ;; and a resume of it reached the scheduler with an empty beam, which
+  ;; exhausted at turn 1 and failed the run without ever taking a turn.
+  ;; Closing the window: the resume path opens the run's initial branch set
+  ;; exactly as the start path would have, and hands the scheduler somebody to
+  ;; advance.
+  (with-db [c]
+    (let [rid (runs/start-run! c {:problem "exposed zero-turn run"
+                                  :max-turns 3 :beam-width 2})]
+      (is (resume/resumable? c rid))
+      (is (empty? (runs/branches c rid)) "the crash window is what it claims")
+      (with-redefs [beam/run-rounds (fn [ctx branches start-turn]
+                                      {:status :continued :run-id (:run-id ctx)
+                                       :branches branches :start-turn start-turn})]
+        (let [r (resume/resume! {:conn c :config {} :llm-adapter :a
+                                 :llm-config {} :run-id rid})]
+          (is (= rid (:run-id r)))
+          (is (= 1 (:start-turn r)) "a zero-turn run resumes at turn 1")
+          (is (= ["B1" "B2"] (mapv :id (:branches r)))
+              "the initial width-many branch set was opened by the resume")
+          (is (= ["B1" "B2"] (mapv :id (runs/branches c rid)))
+              "and it is durable: the branch rows exist now")
+          (is (some #(str/includes? (str (:content %))
+                                    "exposed zero-turn run")
+                    (:messages (first (:branches r))))
+              "the reopened branch opens on the run's problem"))
+        (testing "re-resuming a still-zero-turn run is idempotent at the row level"
+          (let [r2 (resume/resume! {:conn c :config {} :llm-adapter :a
+                                    :llm-config {} :run-id rid})]
+            (is (= ["B1" "B2"] (mapv :id (runs/branches c rid))))))))))

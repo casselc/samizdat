@@ -689,7 +689,29 @@
    "ALTER TABLE inference_epochs ADD COLUMN config_digest TEXT NOT NULL DEFAULT ''"
    "ALTER TABLE inference_epochs ADD COLUMN closed_at TEXT"])
 
+(def ^:private v26
+  ;; Final M3 closure: the REUSABLE InferenceEpoch is separated from the
+  ;; PER-CALL InferenceInvocation.  An epoch spans every provider call whose
+  ;; safe realization is unchanged; an invocation is exactly one provider call
+  ;; under that epoch.  Turns, evaluator eval rows, and intent/outcome receipts
+  ;; reference the invocation (and through it the epoch), so every durable
+  ;; effect names the exact provider call that produced it — not just the
+  ;; realization that call shared with its neighbours.
+  ["CREATE TABLE IF NOT EXISTS inference_invocations (
+      id          TEXT PRIMARY KEY,
+      epoch_id    TEXT NOT NULL REFERENCES inference_epochs(id),
+      run_id      TEXT NOT NULL REFERENCES runs(id),
+      branch_id   TEXT NOT NULL,
+      turn        INTEGER NOT NULL,
+      created_at  TEXT NOT NULL
+    )"
+   "CREATE INDEX IF NOT EXISTS idx_inference_invocations_run
+      ON inference_invocations(run_id, epoch_id, turn)"
+   "ALTER TABLE turns ADD COLUMN inference_invocation_id TEXT"
+   "ALTER TABLE evaluator_evals ADD COLUMN inference_invocation_id TEXT"
+   "ALTER TABLE evaluator_receipts ADD COLUMN inference_invocation_id TEXT"])
+
 (def migrations
   "Ordered. Index 0 is migration 1; PRAGMA user_version holds the count applied."
   [v1 v2 v3 v4 v5 v6 v7 v8 v9 v10 v11 v12 v13 v14 v15 v16 v17 v18 v19 v20
-   v21 v22 v23 v24 v25])
+   v21 v22 v23 v24 v25 v26])

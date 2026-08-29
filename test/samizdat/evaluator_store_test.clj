@@ -13,12 +13,13 @@
    :context-spec "context" :runtime "runtime"})
 
 (defn- m3-fixture
-  "Open a real run, register a durable (M3) evaluator binding under it, and
-  mint one InferenceEpoch, returning [binding-id epoch-id].  The run exists
-  because both the binding and the epoch carry a run_id that REFERENCES runs(id).
-  The epoch's durable identity matches the eval identity (spec \"spec\", runtime
-  \"runtime\") so a valid chain hands it straight through."
-  [conn binding-id epoch-id]
+  "Open a real run, register a durable (M3) evaluator binding under it, mint
+  one InferenceEpoch and one per-call InferenceInvocation beneath it, and
+  return [binding-id epoch-id invocation-id].  The run exists because the
+  binding, the epoch and the invocation all carry a run_id that REFERENCES
+  runs(id).  The epoch's durable identity matches the eval identity (spec
+  \"spec\", runtime \"runtime\") so a valid chain hands it straight through."
+  [conn binding-id epoch-id invocation-id]
   (let [rid (runs/start-run! conn {:problem "p" :max-turns 3})]
     (evaluator/register-binding!
      conn {:binding-id binding-id :run-id rid :work-id (subs binding-id 5)
@@ -29,7 +30,10 @@
      conn {:id epoch-id :run-id rid :branch-id "B1" :turn 1
            :provider :stub :model "m" :binding-id binding-id
            :spec-id "spec" :runtime "runtime"})
-    [binding-id epoch-id]))
+    (inference/invoke!
+     conn {:id invocation-id :epoch-id epoch-id :run-id rid
+           :branch-id "B1" :turn 1})
+    [binding-id epoch-id invocation-id]))
 
 (defn- epoch-error [thunk]
   (:samizdat.evaluator/error
@@ -119,22 +123,28 @@
       (finally (db/close conn)))))
 
 (deftest epoch-causal-chain-accepts-a-valid-chain
-  ;; The exact M3 shape: the dispatch epoch rides the eval row and both receipt
-  ;; rows, and every link resolves to the one binding/run.  The folded receipts
-  ;; surface the epoch end to end.
+  ;; The exact M3 shape: the dispatch epoch AND the per-call invocation ride
+  ;; the eval row and both receipt rows, and every link resolves to the one
+  ;; binding/run.  The folded receipts surface both identities end to end.
   (let [conn (db/open! ":memory:")]
     (try
-      (let [[binding-id epoch-id]
-            (m3-fixture conn "bind:valid" "epoch:valid")
+      (let [[binding-id epoch-id invocation-id]
+            (m3-fixture conn "bind:valid" "epoch:valid" "invocation:valid")
             ev (assoc eval-identity :binding-id binding-id)
             eval-id (evaluator/begin! conn (assoc ev :source "x"
-                                                   :inference-epoch-id epoch-id))
-            seqn (evaluator/intent! conn eval-id :project/read ["x"] epoch-id)]
-        (evaluator/outcome! conn eval-id seqn {:result "x"} epoch-id)
+                                                   :inference-epoch-id epoch-id
+                                                   :inference-invocation-id
+                                                   invocation-id))
+            seqn (evaluator/intent! conn eval-id :project/read ["x"] epoch-id
+                                    invocation-id)]
+        (evaluator/outcome! conn eval-id seqn {:result "x"} epoch-id
+                            invocation-id)
         (evaluator/complete! conn eval-id :completed {:value "x"})
         (let [row (evaluator/load-eval conn eval-id)]
           (is (= epoch-id (:inference_epoch_id row)))
+          (is (= invocation-id (:inference_invocation_id row)))
           (is (= [epoch-id] (mapv :inference-epoch-id (:receipts row))))
+          (is (= [invocation-id] (mapv :inference-invocation-id (:receipts row))))
           (is (= :project/read (get-in row [:receipts 0 :op])))))
       (finally (db/close conn)))))
 
@@ -144,7 +154,8 @@
   ;; never records nil.
   (let [conn (db/open! ":memory:")]
     (try
-      (let [[binding-id _] (m3-fixture conn "bind:nil" "epoch:nil")
+      (let [[binding-id _ _] (m3-fixture conn "bind:nil" "epoch:nil"
+                                         "invocation:nil")
             ev (assoc eval-identity :binding-id binding-id)]
         (is (= :missing-epoch
                (epoch-error #(evaluator/begin! conn (assoc ev :source "x"))))))
@@ -155,8 +166,9 @@
   ;; coordinate, refused before a row is written.
   (let [conn (db/open! ":memory:")]
     (try
-      (let [[binding-id _] (m3-fixture conn "bind:foreign" "epoch:foreign")
-            _ (m3-fixture conn "bind:other" "epoch:other")
+      (let [[binding-id _ _] (m3-fixture conn "bind:foreign" "epoch:foreign"
+                                         "invocation:foreign")
+            _ (m3-fixture conn "bind:other" "epoch:other" "invocation:other")
             ev (assoc eval-identity :binding-id binding-id)]
         (testing "an epoch from another binding/run"
           (is (= :foreign-epoch
@@ -171,40 +183,150 @@
       (finally (db/close conn)))))
 
 (deftest epoch-causal-chain-refuses-divergence-on-intent-and-outcome
-  ;; Once an eval row fixes the epoch, the intent and the outcome must repeat
-  ;; it exactly — a divergent or nil epoch on either is a caller-spoofed break
-  ;; in the chain and fails closed.
+  ;; Once an eval row fixes the epoch and the invocation, the intent and the
+  ;; outcome must repeat BOTH exactly — a divergent or nil identity on either
+  ;; is a caller-spoofed break in the chain and fails closed.
   (let [conn (db/open! ":memory:")]
     (try
-      (let [[binding-id epoch-id]
-            (m3-fixture conn "bind:mismatch" "epoch:mismatch")
-            _ (m3-fixture conn "bind:mismatch2" "epoch:mismatch2")
+      (let [[binding-id epoch-id invocation-id]
+            (m3-fixture conn "bind:mismatch" "epoch:mismatch"
+                        "invocation:mismatch")
+            _ (m3-fixture conn "bind:mismatch2" "epoch:mismatch2"
+                          "invocation:mismatch2")
             ev (assoc eval-identity :binding-id binding-id)
             eval-id (evaluator/begin! conn (assoc ev :source "x"
-                                                   :inference-epoch-id epoch-id))]
+                                                   :inference-epoch-id epoch-id
+                                                   :inference-invocation-id
+                                                   invocation-id))]
         (testing "intent with a foreign epoch"
           (is (= :epoch-divergence
                  (epoch-error #(evaluator/intent! conn eval-id :project/read
-                                                  ["x"] "epoch:mismatch2")))))
+                                                  ["x"] "epoch:mismatch2"
+                                                  invocation-id)))))
         (testing "intent with a nil epoch"
           (is (= :epoch-divergence
                  (epoch-error #(evaluator/intent! conn eval-id :project/read
-                                                  ["x"] nil)))))
-        (let [seqn (evaluator/intent! conn eval-id :project/read ["x"] epoch-id)]
+                                                  ["x"] nil nil)))))
+        (testing "intent with a foreign invocation"
+          (is (= :invocation-divergence
+                 (epoch-error #(evaluator/intent! conn eval-id :project/read
+                                                  ["x"] epoch-id
+                                                  "invocation:mismatch2")))))
+        (testing "intent with a nil invocation"
+          (is (= :invocation-divergence
+                 (epoch-error #(evaluator/intent! conn eval-id :project/read
+                                                  ["x"] epoch-id nil)))))
+        (let [seqn (evaluator/intent! conn eval-id :project/read ["x"] epoch-id
+                                    invocation-id)]
           (testing "outcome with a foreign epoch"
             (is (= :epoch-divergence
                    (epoch-error #(evaluator/outcome! conn eval-id seqn
-                                                    {:result "x"} "epoch:mismatch2")))))
+                                                    {:result "x"}
+                                                    "epoch:mismatch2"
+                                                    invocation-id)))))
           (testing "outcome with a nil epoch"
             (is (= :epoch-divergence
                    (epoch-error #(evaluator/outcome! conn eval-id seqn
-                                                    {:result "x"} nil)))))))
+                                                    {:result "x"} nil nil)))))
+          (testing "outcome with a foreign invocation"
+            (is (= :invocation-divergence
+                   (epoch-error #(evaluator/outcome! conn eval-id seqn
+                                                    {:result "x"} epoch-id
+                                                    "invocation:mismatch2")))))
+          (testing "outcome with a nil invocation"
+            (is (= :invocation-divergence
+                   (epoch-error #(evaluator/outcome! conn eval-id seqn
+                                                    {:result "x"} epoch-id
+                                                    nil)))))))
+      (finally (db/close conn)))))
+
+(deftest invocation-causal-chain-refuses-broken-invocation-links
+  ;; The invocation half of the v26 chain, fail-closed at begin!: under a
+  ;; durable binding the per-call invocation is required, and a non-nil one
+  ;; must resolve, name EXACTLY the epoch the caller recorded, and belong to
+  ;; the binding's own run — before any row is written.
+  (let [conn (db/open! ":memory:")]
+    (try
+      (let [[binding-id epoch-id invocation-id]
+            (m3-fixture conn "bind:inv" "epoch:inv" "invocation:inv")
+            rid (:run_id (evaluator/binding-by-id conn binding-id))
+            ev (assoc eval-identity :binding-id binding-id)]
+        (testing "a durable binding whose dispatch omitted the invocation"
+          (is (= :missing-invocation
+                 (epoch-error #(evaluator/begin!
+                                conn (assoc ev :source "x"
+                                            :inference-epoch-id epoch-id))))))
+        (testing "an invocation that does not exist at all"
+          (is (= :unknown-invocation
+                 (epoch-error #(evaluator/begin!
+                                conn (assoc ev :source "x"
+                                            :inference-epoch-id epoch-id
+                                            :inference-invocation-id
+                                            "invocation:ghost"))))))
+        (testing "an invocation minted under a DIFFERENT epoch of the same run"
+          ;; A second epoch in the same run, then an invocation beneath it:
+          ;; the invocation is real and the run matches, but its epoch is not
+          ;; the epoch the caller recorded — the two identities disagree.
+          (inference/begin!
+           conn {:id "epoch:inv-other" :run-id rid :branch-id "B1" :turn 2
+                 :provider :stub :model "m" :binding-id binding-id
+                 :spec-id "spec" :runtime "runtime"})
+          (inference/invoke!
+           conn {:id "invocation:inv-other" :epoch-id "epoch:inv-other"
+                 :run-id rid :branch-id "B1" :turn 2})
+          (is (= :invocation-epoch-divergence
+                 (epoch-error #(evaluator/begin!
+                                conn (assoc ev :source "x"
+                                            :inference-epoch-id epoch-id
+                                            :inference-invocation-id
+                                            "invocation:inv-other")))))
+          (testing "and the invocation's own epoch cannot substitute either"
+            (is (= :invocation-epoch-divergence
+                   (epoch-error #(evaluator/begin!
+                                  conn (assoc ev :source "x"
+                                              :inference-epoch-id
+                                              "epoch:inv-other"
+                                              :inference-invocation-id
+                                              invocation-id)))))))
+        (testing "an invocation belonging to a different run"
+          ;; The invocation names THIS epoch (so the epoch check passes) but
+          ;; carries another run's run-id — a fabricated cross-run link, minted
+          ;; through the same verbatim test seam the real path uses.
+          (let [rid2 (runs/start-run! conn {:problem "p2" :max-turns 3})]
+            (inference/invoke!
+             conn {:id "invocation:foreign" :epoch-id epoch-id
+                   :run-id rid2 :branch-id "B1" :turn 1})
+            (is (= :foreign-invocation
+                   (epoch-error #(evaluator/begin!
+                                  conn (assoc ev :source "x"
+                                              :inference-epoch-id epoch-id
+                                              :inference-invocation-id
+                                              "invocation:foreign")))))))
+        (testing "no eval row was written through any of the refusals"
+          (is (empty? (evaluator/history conn binding-id)))))
+      (finally (db/close conn)))))
+
+(deftest an-invocation-cannot-reference-a-fabricated-epoch
+  ;; invoke! fails closed when its epoch does not exist: an invocation may
+  ;; never name a realization the run has no durable record of.
+  (let [conn (db/open! ":memory:")]
+    (try
+      (let [rid (runs/start-run! conn {:problem "p" :max-turns 3})]
+        (is (= :unknown-epoch
+               (:samizdat.inference/error
+                (ex-data (try (inference/invoke!
+                               conn {:id "invocation:orphan"
+                                     :epoch-id "epoch:ghost"
+                                     :run-id rid :branch-id "B1" :turn 1})
+                              nil (catch Throwable e e))))))
+        (is (nil? (inference/get-invocation conn "invocation:orphan"))))
       (finally (db/close conn)))))
 
 (deftest pre-m3-raw-seams-still-record-nil-epochs
   ;; Compatibility: a binding with no durable row (the pre-M3 raw store seam)
-  ;; records nil epochs exactly as before — begin!/intent!/outcome! 3-arity —
-  ;; so historical rows and replay keep loading.
+  ;; records nil epochs and nil invocations exactly as before —
+  ;; begin!/intent!/outcome! 3-arity — so historical rows and replay keep
+  ;; loading.
   (let [conn (db/open! ":memory:")]
     (try
       (let [eval-id (evaluator/begin! conn (assoc eval-identity :source "x"))
@@ -212,5 +334,7 @@
         (evaluator/outcome! conn eval-id seqn {:result "x"})
         (is (= [{:seq 0 :op :project/read :args ["x"] :phase :done :result "x"}]
                (:receipts (evaluator/load-eval conn eval-id))))
-        (is (nil? (:inference_epoch_id (evaluator/load-eval conn eval-id)))))
+        (is (nil? (:inference_epoch_id (evaluator/load-eval conn eval-id))))
+        (is (nil? (:inference_invocation_id
+                   (evaluator/load-eval conn eval-id)))))
       (finally (db/close conn)))))

@@ -165,6 +165,18 @@
                   :inherited (some? (:forked-at b))}))))
       b)))
 
+(defn open-initial-branches!
+  "Open the run's INITIAL branch set: width-many B1..Bn, no parent, born at
+  turn 0 — exactly what `run!` creates between run creation and the first
+  round.  Public because resume owns the same window from the other side: a
+  run whose process died before its first branch existed (the exposed-run/
+  no-branch crash window — run row and bounded binding durable, zero branches)
+  is resumable only if this runs again.  Idempotent at the row level:
+  `runs/open-branch!` is INSERT OR IGNORE, so a re-resume rejoins rather than
+  collides."
+  [ctx width]
+  (mapv #(open-branch! ctx (str "B" (inc %)) nil nil 0) (range width)))
+
 (defn ensure-scored
   "Fresh critic scores for every active branch, at most one sub-LLM call per
   branch per :critic-every window. A scoring that fails leaves the previous
@@ -1010,7 +1022,7 @@
     (when (not= width requested-width)
       (log/info "loop" loop-nm "is a whole-run workflow; beam width forced to 1"
                 "(asked for" (str requested-width ")")))
-    (let [initial (mapv #(open-branch! ctx (str "B" (inc %)) nil nil 0) (range width))
+    (let [initial (open-initial-branches! ctx width)
           result (try (run-rounds ctx initial 1)
                       (catch Throwable e
                         ;; A crash is an outcome too: a workflow that crashes

@@ -327,24 +327,36 @@
               binding (bind! root run-id {})]
           (persist! conn run-id binding)
           ;; A durable binding is an M3 run: every evaluation under it must
-          ;; carry the InferenceEpoch of the model call that dispatched it.  The
-          ;; epoch resolves to this exact binding/spec/runtime, so one epoch
-          ;; serves both evaluations (reconstruct! restores the same identity).
+          ;; carry the InferenceEpoch AND the per-call InferenceInvocation of
+          ;; the model call that dispatched it.  The epoch resolves to this
+          ;; exact binding/spec/runtime, so one epoch serves both evaluations
+          ;; (reconstruct! restores the same identity); each evaluation names
+          ;; its own invocation, one per dispatched call.
           (let [epoch-id "epoch:durable-binding"
                 _ (inference/begin!
                    conn {:id epoch-id :run-id (str run-id) :branch-id "B1" :turn 1
                          :provider :stub :model "m"
                          :binding-id (:binding/id binding)
                          :spec-id (get-in binding [:spec :spec/coordinate])
-                         :runtime (get-in binding [:spec :runtime-coordinate])})]
+                         :runtime (get-in binding [:spec :runtime-coordinate])})
+                invocation-id (fn [n]
+                                (:id (inference/invoke!
+                                      conn {:id (str "invocation:durable-" n)
+                                            :epoch-id epoch-id
+                                            :run-id (str run-id)
+                                            :branch-id "B1" :turn n})))]
             (is (= 41 (:value (evaluate! conn binding
                                         "(do (def durable-x 41) durable-x)"
-                                        {:inference-epoch-id epoch-id}))))
+                                        {:inference-epoch-id epoch-id
+                                         :inference-invocation-id
+                                         (invocation-id 1)}))))
             (let [rebuilt (reconstruct! conn run-id root)]
               (is (= (:binding/id binding) (:binding/id rebuilt)))
               (is (= (:instance/id binding) (:instance/id rebuilt)))
               (is (= 42 (:value (evaluate! conn rebuilt "(inc durable-x)"
-                                           {:inference-epoch-id epoch-id}))))
+                                           {:inference-epoch-id epoch-id
+                                            :inference-invocation-id
+                                            (invocation-id 2)}))))
               (is (= (:context/coordinate
                       (get-in binding [:spec :context-spec]))
                      (:context/coordinate

@@ -163,23 +163,71 @@
                            :run-id run-id}))))
       epoch)))
 
+(defn- verify-eval-invocation!
+  "Fail closed on a broken eval→InferenceInvocation causal link.
+
+  Under a durable (M3 live dispatch) binding an invocation is REQUIRED: every
+  evaluation names the exact provider call that dispatched it, and that call
+  is an InferenceInvocation — one row per call — not merely the reusable epoch
+  the call shared with its neighbours.
+
+  A non-nil invocation must resolve, belong to the binding's durable run when
+  the binding has one, and name EXACTLY the epoch the caller also recorded —
+  so the per-call identity and the realization identity cannot disagree.  The
+  epoch itself is validated by verify-eval-epoch!; this only owns the
+  invocation half of the chain."
+  [conn invocation-id {:keys [binding-id]} epoch-id required?]
+  (when (and (nil? invocation-id) required?)
+    (throw (ex-info "M3 evaluation needs its dispatch inference invocation"
+                    {:samizdat.evaluator/error :missing-invocation
+                     :binding-id binding-id})))
+  (when invocation-id
+    (let [invocation (inference/get-invocation conn invocation-id)]
+      (when-not invocation
+        (throw (ex-info "Evaluation references an unknown inference invocation"
+                        {:samizdat.evaluator/error :unknown-invocation
+                         :inference-invocation-id invocation-id})))
+      (when (and epoch-id (not= (str epoch-id) (:epoch_id invocation)))
+        (throw (ex-info "Evaluation invocation belongs to a different epoch"
+                        {:samizdat.evaluator/error :invocation-epoch-divergence
+                         :inference-invocation-id invocation-id
+                         :invocation-epoch-id (:epoch_id invocation)
+                         :inference-epoch-id epoch-id})))
+      (when-let [run-id (registered-binding-run-id conn binding-id)]
+        (when-not (= run-id (:run_id invocation))
+          (throw (ex-info "Evaluation invocation belongs to a different run"
+                          {:samizdat.evaluator/error :foreign-invocation
+                           :inference-invocation-id invocation-id
+                           :invocation-run-id (:run_id invocation)
+                           :run-id run-id}))))
+      invocation)))
+
 (defn begin!
-  "Open one evaluation under its binding.  `inference-epoch-id`, when present,
-  is the InferenceEpoch of the model call whose tool dispatch produced this
-  evaluation — the causal link from provider invocation to eval row."
+  "Open one evaluation under its binding.  `inference-epoch-id` and
+  `inference-invocation-id`, when present, are the reusable InferenceEpoch and
+  the per-call InferenceInvocation of the model call whose tool dispatch
+  produced this evaluation — the causal link from provider invocation to eval
+  row."
   ([conn {:keys [spec-id instance-id binding-id context-spec runtime source
-                 inference-epoch-id]}]
+                 inference-epoch-id inference-invocation-id]}]
    (doseq [[k v] {:spec-id spec-id :instance-id instance-id
                   :binding-id binding-id :context-spec context-spec
                   :runtime runtime :source source}]
      (when (str/blank? (str v))
        (throw (ex-info (str "Evaluator evaluation needs " (name k)) {k v}))))
    ;; The eval row is the head of the causal chain: under a durable (M3)
-   ;; binding its epoch is required, and any non-nil epoch must resolve to this
-   ;; exact binding/run/spec/runtime before a row is written.
-   (verify-eval-epoch! conn inference-epoch-id
-                       {:binding-id binding-id :spec-id spec-id :runtime runtime}
-                       (some? (registered-binding-run-id conn binding-id)))
+   ;; binding its epoch and invocation are required, any non-nil epoch must
+   ;; resolve to this exact binding/run/spec/runtime, and any non-nil
+   ;; invocation must resolve to this run and name exactly that epoch before a
+   ;; row is written.
+   (let [durable-run (registered-binding-run-id conn binding-id)]
+     (verify-eval-epoch! conn inference-epoch-id
+                         {:binding-id binding-id :spec-id spec-id
+                          :runtime runtime}
+                         (some? durable-run))
+     (verify-eval-invocation! conn inference-invocation-id
+                              {:binding-id binding-id}
+                              inference-epoch-id (some? durable-run)))
    (db/with-writer
      (let [n (:next (db/fetch-one conn
                                   ["SELECT COALESCE(MAX(binding_seq) + 1, 0) AS next
@@ -189,81 +237,105 @@
                     ["INSERT INTO evaluator_evals
                         (spec_id, instance_id, binding_id, binding_seq,
                          context_spec, runtime, source, inference_epoch_id,
-                         created_at)
-                      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)"
+                         inference_invocation_id, created_at)
+                      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
                      spec-id instance-id binding-id n context-spec runtime
-                     source inference-epoch-id (db/now)]))
-      ;; last_insert_rowid() is CONNECTION-GLOBAL, so this retrieval MUST stay
-      ;; inside the same db writer critical section as the INSERT above: hoisted
-      ;; out, any interleaved writer on the shared conn would hand back its row.
-      ;; Pinned by begin-last-insert-id-stays-inside-the-writer-section.
-      (db/last-insert-id conn))))
-
+                     source inference-epoch-id inference-invocation-id
+                     (db/now)]))
+     ;; last_insert_rowid() is CONNECTION-GLOBAL, so this retrieval MUST stay
+     ;; inside the same db writer critical section as the INSERT above: hoisted
+     ;; out, any interleaved writer on the shared conn would hand back its row.
+     ;; Pinned by begin-last-insert-id-stays-inside-the-writer-section.
+     (db/last-insert-id conn))))
 (defn intent!
   ([conn eval-id op args]
    (intent! conn eval-id op args nil))
   ([conn eval-id op args inference-epoch-id]
+   (intent! conn eval-id op args inference-epoch-id nil))
+  ([conn eval-id op args inference-epoch-id inference-invocation-id]
    (db/with-writer
      (open-eval! conn eval-id)
-     (let [eval-epoch (:inference_epoch_id
-                       (db/fetch-one conn
-                                     ["SELECT inference_epoch_id FROM evaluator_evals
-                                        WHERE id = ?" eval-id]))]
-       ;; The intent's epoch must be exactly the eval's: a caller cannot write a
-       ;; divergent (or nil) epoch onto the middle of an established chain.
+     (let [eval-row (db/fetch-one conn
+                                  ["SELECT inference_epoch_id,
+                                          inference_invocation_id
+                                     FROM evaluator_evals WHERE id = ?"
+                                   eval-id])
+           eval-epoch (:inference_epoch_id eval-row)
+           eval-invocation (:inference_invocation_id eval-row)]
+       ;; The intent's epoch and invocation must be exactly the eval's: a
+       ;; caller cannot write a divergent (or nil) identity onto the middle of
+       ;; an established chain.
        (when-not (= eval-epoch inference-epoch-id)
          (throw (ex-info "Intent epoch diverges from its evaluation's epoch"
                          {:samizdat.evaluator/error :epoch-divergence
                           :eval-id eval-id :eval-epoch eval-epoch
                           :intent-epoch inference-epoch-id})))
+       (when-not (= eval-invocation inference-invocation-id)
+         (throw (ex-info "Intent invocation diverges from its evaluation's invocation"
+                         {:samizdat.evaluator/error :invocation-divergence
+                          :eval-id eval-id
+                          :eval-invocation eval-invocation
+                          :intent-invocation inference-invocation-id})))
        (let [n (:next (db/fetch-one conn
                                     ["SELECT COALESCE(MAX(seq) + 1, 0) AS next
                                        FROM evaluator_receipts
-                                      WHERE eval_id = ? AND phase = 'intent'" eval-id]))]
+                                      WHERE eval_id = ? AND phase = 'intent'"
+                                     eval-id]))]
          (db/execute! conn
                       ["INSERT INTO evaluator_receipts
                           (eval_id, seq, phase, op, args, inference_epoch_id,
-                           created_at)
-                        VALUES (?, ?, 'intent', ?, ?, ?, ?)"
+                           inference_invocation_id, created_at)
+                        VALUES (?, ?, 'intent', ?, ?, ?, ?, ?)"
                        eval-id n (encode op) (encode (vec args))
-                       inference-epoch-id (db/now)])
+                       inference-epoch-id inference-invocation-id (db/now)])
          n)))))
 
 (defn outcome!
   ([conn eval-id seqn outcome]
    (outcome! conn eval-id seqn outcome nil))
   ([conn eval-id seqn outcome inference-epoch-id]
+   (outcome! conn eval-id seqn outcome inference-epoch-id nil))
+  ([conn eval-id seqn outcome inference-epoch-id inference-invocation-id]
    (when (= (contains? outcome :result) (contains? outcome :error))
      (throw (ex-info "Evaluator outcome is exactly one of result or error"
                      {:eval-id eval-id :seq seqn})))
    (db/with-writer
      (open-eval! conn eval-id)
      (let [intent (db/fetch-one conn
-                                ["SELECT op, inference_epoch_id
+                                ["SELECT op, inference_epoch_id,
+                                        inference_invocation_id
                                    FROM evaluator_receipts
-                                   WHERE eval_id = ? AND seq = ? AND phase = 'intent'"
+                                  WHERE eval_id = ? AND seq = ?
+                                    AND phase = 'intent'"
                                  eval-id seqn])]
        (when-not intent
          (throw (ex-info "Evaluator outcome has no preceding intent"
                          {:eval-id eval-id :seq seqn})))
-       ;; The outcome's epoch must be exactly the intent's (and therefore the
-       ;; eval's): a caller cannot write a divergent epoch onto the tail of an
-       ;; established chain.
+       ;; The outcome's epoch and invocation must be exactly the intent's (and
+       ;; therefore the eval's): a caller cannot write a divergent identity
+       ;; onto the tail of an established chain.
        (when-not (= (:inference_epoch_id intent) inference-epoch-id)
          (throw (ex-info "Outcome epoch diverges from its intent's epoch"
                          {:samizdat.evaluator/error :epoch-divergence
                           :eval-id eval-id :seq seqn
                           :intent-epoch (:inference_epoch_id intent)
                           :outcome-epoch inference-epoch-id})))
+       (when-not (= (:inference_invocation_id intent) inference-invocation-id)
+         (throw (ex-info "Outcome invocation diverges from its intent's invocation"
+                         {:samizdat.evaluator/error :invocation-divergence
+                          :eval-id eval-id :seq seqn
+                          :intent-invocation (:inference_invocation_id intent)
+                          :outcome-invocation inference-invocation-id})))
        (db/execute! conn
                     ["INSERT INTO evaluator_receipts
                         (eval_id, seq, phase, op, result, error,
-                         inference_epoch_id, created_at)
-                      VALUES (?, ?, 'outcome', ?, ?, ?, ?, ?)"
+                         inference_epoch_id, inference_invocation_id,
+                         created_at)
+                      VALUES (?, ?, 'outcome', ?, ?, ?, ?, ?, ?)"
                      eval-id seqn (:op intent)
                      (when (contains? outcome :result) (encode (:result outcome)))
                      (when (contains? outcome :error) (str (:error outcome)))
-                     inference-epoch-id (db/now)])))
+                     inference-epoch-id inference-invocation-id (db/now)])))
    seqn))
 
 (defn unsettled [conn eval-id]
@@ -301,6 +373,8 @@
              :phase (if outcome (if (:error outcome) :error :done) :intent)}
       (:inference_epoch_id intent) (assoc :inference-epoch-id
                                            (:inference_epoch_id intent))
+      (:inference_invocation_id intent)
+      (assoc :inference-invocation-id (:inference_invocation_id intent))
       (and outcome (:result outcome)) (assoc :result (decode (:result outcome)))
       (and outcome (:error outcome)) (assoc :error (:error outcome)))))
 
@@ -335,10 +409,11 @@
   "Read-only evaluator/inference evidence for telemetry and APIs.
 
   This function never allocates SCI, replays source, or invokes a semantic
-  operation.  It is a projection of durable binding, completion, receipt and
-  InferenceEpoch rows only — including each receipt's exact operation/argument
-  signature and epoch linkage, which is what the read-only bounded telemetry
-  is computed from."
+  operation.  It is a projection of durable binding, completion, receipt,
+  InferenceEpoch and InferenceInvocation rows only — including each receipt's
+  exact operation/argument signature and epoch/invocation linkage, and the
+  exact operations derived per invocation and per model turn, which is what
+  the read-only bounded telemetry is computed from."
   [conn run-id]
   (when-let [binding (binding-for-run conn run-id)]
     (let [binding-id (:binding_id binding)
@@ -350,17 +425,56 @@
                               FROM inference_epochs WHERE run_id = ?
                               ORDER BY rowid"
                             (str run-id)])
+          invocations (db/fetch conn
+                                ["SELECT id, epoch_id, branch_id, turn,
+                                         created_at
+                                    FROM inference_invocations WHERE run_id = ?
+                                   ORDER BY rowid"
+                                 (str run-id)])
           statuses (frequencies (map :status evals))
           completed (filter #(= :completed (:status %)) evals)
           ;; The exact causal signature of every committed operation: op, args,
-          ;; and the epoch of the model call that dispatched it.  Counts stay
+          ;; the epoch of the model call that dispatched it, and the exact
+          ;; invocation (one per provider call) that carried it.  Counts stay
           ;; :order-only beside this for compatibility.
           receipts (mapv (fn [row]
                            (mapv #(select-keys % [:op :args :phase
-                                                  :inference-epoch-id])
+                                                  :inference-epoch-id
+                                                  :inference-invocation-id])
                                   (:receipts row)))
                          completed)
-          ops (mapv (fn [row-ops] (mapv :op row-ops)) receipts)]
+          ops (mapv (fn [row-ops] (mapv :op row-ops)) receipts)
+          ;; Telemetry per EXACT call: every operation receipt joined to the
+          ;; invocation that dispatched it, and through the invocation's
+          ;; branch/turn to the model turn it belongs to.  A nil invocation on
+          ;; a receipt (a pre-v26 row) lands nowhere rather than under a
+          ;; fabricated call.
+          receipt-invocations (distinct
+                               (keep :inference-invocation-id
+                                     (mapcat identity receipts)))
+          per-invocation (fn [inv]
+                           {:invocation-id (:id inv)
+                            :epoch-id (:epoch_id inv)
+                            :branch-id (:branch_id inv)
+                            :turn (:turn inv)
+                            :operations (vec
+                                         (for [row-ops receipts
+                                               r row-ops
+                                               :when (= (:id inv)
+                                                        (:inference-invocation-id
+                                                         r))]
+                                           (:op r)))})
+          invocation-ids (set (map :id invocations))
+          known (filter invocation-ids receipt-invocations)
+          per-invocation-rows (mapv (fn [id]
+                                     (per-invocation
+                                      (first (filter #(= id (:id %))
+                                                     invocations))))
+                                   known)
+          per-model-turn (mapv (fn [{:keys [branch-id turn operations]}]
+                                 {:branch-id branch-id :turn turn
+                                  :operations operations})
+                               per-invocation-rows)]
       {:binding {:binding-id binding-id
                  :instance-id (:instance_id binding)
                  :spec-id (:spec_id binding)
@@ -379,5 +493,8 @@
        :operations {:per-evaluation (mapv count ops)
                     :multi-operation (count (filter #(< 1 (count %)) ops))
                     :order ops
-                    :receipts receipts}
-       :inference-epochs epochs})))
+                    :receipts receipts
+                    :per-invocation per-invocation-rows
+                    :per-model-turn per-model-turn}
+       :inference-epochs epochs
+       :inference-invocations invocations})))

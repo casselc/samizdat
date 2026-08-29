@@ -74,11 +74,13 @@
     (try
       (let [r (evaluate! (:conn ctx) binding code
                          {:token (base/turn-lease-token (:turn-lease ctx))
-                          ;; The epoch of the model call whose dispatch this
-                          ;; IS: the eval row and every receipt carry it, so
-                          ;; the causal chain from provider invocation to
-                          ;; semantic operation is durable end to end.
+                          ;; The epoch and the exact per-call invocation of
+                          ;; the model call whose dispatch this IS: the eval
+                          ;; row and every receipt carry both, so the causal
+                          ;; chain from provider invocation to semantic
+                          ;; operation is durable end to end.
                           :inference-epoch-id (:inference-epoch-id ctx)
+                          :inference-invocation-id (:inference-invocation-id ctx)
                           :effect-permit!
                           (fn [initiate]
                             (base/with-turn-lease-permit! ctx initiate))})]
