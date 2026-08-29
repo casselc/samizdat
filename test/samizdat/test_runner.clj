@@ -64,7 +64,9 @@
             [mycelium.validate-warn-test]
             [mycelium.validation-test]
             [mycelium.workflow-test]
-            [samizdat.agent-test]
+             [samizdat.agent-test]
+             [samizdat.agent-turn-lease-test]
+             [samizdat.m3-controller-test]
             [samizdat.base-test]
             [samizdat.boundary-test]
             [samizdat.collab-test]
@@ -190,7 +192,9 @@
     samizdat.trajectory-test
     samizdat.store-test
     samizdat.llm-test
-    samizdat.agent-test
+     samizdat.agent-test
+     samizdat.agent-turn-lease-test
+     samizdat.m3-controller-test
     samizdat.base-test
     samizdat.boundary-test
     samizdat.collab-test

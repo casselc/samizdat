@@ -482,14 +482,29 @@
   [{:keys [branch] :as ctx}]
   (let [answer (some-> (base/arg ctx :answer) str str/trim not-empty)
         changed (edited-paths (:conn ctx) (base/bounded-binding ctx))
-        env-ok? (vprov/available?)
         argv (vprov/focused-argv changed)
-        vresult (when (and env-ok? argv)
-                  (vprov/run (:root ctx) changed
-                             (get-in ctx [:config :run :verify-timeout-ms])))
-        unavailable-reason (cond
-                             (not env-ok?) (vprov/unavailable-reason)
-                             (:unavailable? vresult) (:reason vresult :unknown))
+        ;; Permit issuance is the whole verification attempt's semantic launch
+        ;; point, including the selected environment's capability probe. A
+        ;; revocation that wins during the preceding durable receipt read
+        ;; launches no host process; an attempt already permitted remains
+        ;; controller-owned work and is followed through to its green/red
+        ;; result. Nothing is probed for a hollow/no-test completion.
+        attempt (when argv
+                  (base/run-with-turn-lease-permit!
+                   ctx
+                   #(let [env-ok? (vprov/available?)
+                          result (when env-ok?
+                                   (vprov/run
+                                    (:root ctx) changed
+                                    (get-in ctx [:config :run
+                                                 :verify-timeout-ms])))]
+                      {:env-ok? env-ok? :result result
+                       :unavailable-reason
+                       (cond
+                         (not env-ok?) (vprov/unavailable-reason)
+                         (:unavailable? result) (:reason result :unknown))})))
+        vresult (:result attempt)
+        unavailable-reason (:unavailable-reason attempt)
         block (cond
                 (empty? changed)
                 (base/bounded-message {:done-nothing-changed true})

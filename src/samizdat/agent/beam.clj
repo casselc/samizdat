@@ -70,6 +70,7 @@
             [samizdat.agent.loop :as branch-loop]
             [samizdat.agent.select :as select]
             [samizdat.agent.state :as state]
+            [samizdat.agent.tools.base :as base]
             [samizdat.prompt :as prompt]
             [samizdat.session :as session]
             [samizdat.watch :as watch]
@@ -116,7 +117,7 @@
   `gates.edn :fork-inherit` owns the decision, so switching a run back to
   fresh-tape forks — or forking from an older turn — is a data edit and not a
   rebuild. See `state/fork-branch` for what is and is not inherited."
-  [{:keys [problem]} parent id thesis turn]
+  [{:keys [problem] :as ctx} parent id thesis turn]
   (let [{:keys [inherit? depth]} (gates/threshold :fork-inherit)]
     (if (and parent inherit?)
       (state/fork-branch parent {:id id :depth depth :turn turn
@@ -124,7 +125,9 @@
       (cond-> (state/new-branch
                {:id id :parent-id (:id parent) :problem problem
                 :created-at-turn turn
-                :messages (branch-loop/initial-messages problem)})
+                 :messages (branch-loop/initial-messages
+                            problem nil
+                            (:trusted-orientation (base/bounded-binding ctx)))})
         thesis (assoc :thesis thesis)))))
 
 (defn- open-branch!
@@ -134,10 +137,11 @@
         ;; conversation it inherits stays true — it can call what it can read
         ;; itself defining — while anything either defines afterwards stays
         ;; its own. dispose-branch-engines! closes it when the branch ends.
-        b (assoc (seed-branch ctx parent id thesis turn)
-                 :repl-session (if parent
-                                 (repl/fork-session (:repl-session parent))
-                                 (repl/new-session)))]
+         b (cond-> (seed-branch ctx parent id thesis turn)
+             (not (base/bounded? ctx))
+             (assoc :repl-session (if parent
+                                    (repl/fork-session (:repl-session parent))
+                                    (repl/new-session))))]
     (runs/open-branch! conn run-id {:branch-id id :parent-id parent-id
                                     :created-at-turn turn})
     (if thesis
@@ -263,7 +267,11 @@
   A function rather than a ctx read, because `extend` has to be able to move
   it and ctx is immutable for the life of the run."
   [ctx data]
-  (or (:max-turns data) (:max-turns ctx)))
+  (max (long (or (:max-turns data) 0))
+       (long (or (:max-turns ctx) 0))
+       (long (or (when (and (:conn ctx) (:run-id ctx))
+                   (:max_turns (runs/get-run (:conn ctx) (:run-id ctx))))
+                 0))))
 
 (defn await-resume!
   "Block while the run is paused, returning as soon as it resumes or aborts.
@@ -441,19 +449,13 @@
                                 bs))))))
 
          "extend"
-         ;; Raise the turn cap for the rest of the run. Carried in the round's
-         ;; data map rather than written to the run row: the cap is what THIS
-         ;; scheduler loop compares against, a resume re-reads its budget from
-         ;; the control API anyway, and a row that disagreed with the live
-         ;; value would be the worse of the two to have.
-         (let [payload (directive-payload d)
-               by (or (:turns payload) (:by payload) (:max_turns payload))
-               n (when (number? by) (long by))]
-           (if-not (and n (pos? n))
-             (do (rejected conn run-id d turn {:extend-no-turns true})
-                 acc)
-             (do (interventions/resolve! conn run-id (:id d) :applied nil turn)
-                 (update acc :max-turns (fnil + 0) n))))
+         ;; Queue data is model/human-visible steer, not budget authority. The
+         ;; trusted controller route performs the atomic cap/audit/reopen act.
+         (do (interventions/resolve!
+              conn run-id (:id d) :rejected
+              (prompt/render "controller-safety" {:queued-extension true})
+              turn)
+             acc)
 
          ("pause" "resume")
          ;; Run-level and last-writer-wins: two pauses are one pause, and a
@@ -534,18 +536,13 @@
   was asked to do. Those runs stop by the abort flag, which is the stop path
   that never depended on cooperation anyway."
   [ctx branches turn]
-  (let [deadline (when (get ctx :iterating-loop? true)
+  (let [iterating? (get ctx :iterating-loop? true)
+        deadline (when iterating?
                    (or (:turn-deadline-ms ctx) (turn-deadline-ms)))
-        ;; {branch-id future} of turns that blew their deadline and are STILL
-        ;; executing. A forfeited turn's thread cannot be interrupted (and
-        ;; killing it mid-journal-write would be worse), but it shares the
-        ;; branch's eval session and journals under its id — so advancing the
-        ;; same branch again while it runs interleaved two turns of one branch
-        ;; and made the journal diverge from the live state
-        ;; (karamazov-blt.18). The branch forfeits again instead, until the
-        ;; dangling call completes; the wait is bounded by the provider socket
-        ;; timeout and the tool timeouts inside the turn.
-        in-flight (:in-flight ctx)
+        ;; Mechanism grace: enough for Jolt interruption/Thread interruption to
+        ;; unwind, bounded so an uncooperative worker cannot stall shutdown.
+        cancel-grace (long (or (:turn-cancel-grace-ms ctx)
+                               (gates/threshold :turn-cancel-grace-ms)))
         forfeit (fn [b]
                   (-> b
                       (state/add-message
@@ -553,40 +550,65 @@
                        (str "[harness] " (prompt/render "turn-deadline"
                                            {:seconds (quot (or deadline 0) 1000)})))
                       (update :timeouts (fnil inc 0))))
-        pending (mapv (fn [b]
-                        (let [dangling (when in-flight (get @in-flight (:id b)))]
-                          (cond
-                            (and dangling (not (realized? dangling)))
-                            [b ::still-dangling]
-
-                            :else
-                            (do (when dangling (swap! in-flight dissoc (:id b)))
-                                [b (future
-                                     (try
-                                       (advance-branch ctx b turn)
-                                       (catch Throwable e
-                                         (log/warn "branch" (:id b) "died on turn" turn
-                                                   ":" (ex-message e))
-                                         (assoc b :status :abandoned
-                                                :inactive-reason
-                                                (str "branch error: " (ex-message e))))))]))))
-                      branches)]
-    (mapv (fn [[b fut]]
-            (if (= ::still-dangling fut)
-              (do (log/warn "branch" (:id b) "still executing a forfeited turn;"
-                            "skipping turn" turn "to keep its turns serial")
-                  (forfeit b))
-              (let [r (if deadline (deref fut deadline ::timeout) @fut)]
-                (if (= ::timeout r)
-                  (do (log/warn "branch" (:id b) "exceeded the turn deadline on turn" turn)
-                      ;; Not a verification failure: the branch did not get an
-                      ;; answer to be wrong about. It loses the turn and is told
-                      ;; so; the dangling call is REMEMBERED so the next round
-                      ;; does not run beside it.
-                      (when in-flight (swap! in-flight assoc (:id b) fut))
-                      (forfeit b))
-                  r))))
-          pending)))
+        pending (mapv
+                 (fn [b]
+                   (let [lease (base/mint-turn-lease (:run-id ctx) (:id b) turn)
+                         quiesced (promise)
+                         worker-ctx (assoc ctx :turn-lease lease)
+                         fut (future
+                               (try
+                                 (try
+                                   (advance-branch worker-ctx b turn)
+                                   (catch Throwable e
+                                     (log/warn "branch" (:id b) "died on turn" turn
+                                               ":" (ex-message e))
+                                     (assoc b :status :abandoned
+                                            :inactive-reason
+                                            (str "branch error: " (ex-message e)))))
+                                 (finally (deliver quiesced true))))]
+                     [b lease quiesced fut]))
+                 branches)
+        advanced
+        (mapv
+         (fn [[b lease quiesced fut]]
+           (let [r (if deadline (deref fut deadline ::timeout) @fut)]
+             (if (= ::timeout r)
+               (do
+                 (log/warn "branch" (:id b) "exceeded the turn deadline on turn" turn)
+                 ;; Linearization is load-bearing: stale authority first,
+                 ;; cooperative token and worker interruption second.
+                 (base/revoke-turn-lease! lease :deadline)
+                 (try (base/interrupt-turn-lease! lease) (catch Throwable _ nil))
+                 (future-cancel fut)
+                 (if (= ::unquiesced
+                        (deref quiesced cancel-grace ::unquiesced))
+                   (assoc b :status :abandoned
+                          :turn-cancellation-fault? true
+                           :inactive-reason
+                           (prompt/render "turn-cancellation-fault"
+                                          {:turn turn :grace-ms cancel-grace}))
+                   ;; The timed-out result is ignored even if it arrived during
+                   ;; grace. Confirmed quiescence permits a fresh next lease.
+                   (forfeit b)))
+               (do
+                 (base/revoke-turn-lease! lease :turn-completed)
+                 r))))
+         pending)
+        faults (filterv :turn-cancellation-fault? advanced)]
+    (when (seq faults)
+      ;; No back edge and therefore no next-turn lease.  The row refusal is
+      ;; retained; the event keeps the detailed audit while its tail exists.
+      (when (and (:conn ctx) (:run-id ctx))
+        (journal/note! (:conn ctx) (:run-id ctx) :turn-cancellation-fault
+                       {:turn turn
+                        :data {:branches (mapv :id faults)
+                               :grace-ms cancel-grace}})
+        (runs/finish-run-cancellation-fault! (:conn ctx) (:run-id ctx)))
+      (throw (ex-info "turn worker did not quiesce after authority revocation"
+                      {:samizdat.turn-lease/error :unquiesced
+                       :run-id (:run-id ctx) :turn turn
+                       :branches (mapv :id faults)})))
+    advanced))
 
 (defn dispose-branch-engines!
   "Release one branch's external sessions.
@@ -861,7 +883,11 @@
         ;; whole job rather than explore five lines of one, so the beam is
         ;; width 1 there regardless of what was asked for.
         requested-width (or beam-width (get-in config [:run :beam-width]) 5)
-        width (if iterating? requested-width 1)
+         bounded-request? (some? (get-in config [:run :bounded :profile]))
+         ;; One durable SCI binding has one sequential history. Bounded mode
+         ;; therefore uses this scheduler's deadline/TurnLease machinery at
+         ;; width one even when the ordinary configured beam is wider.
+         width (if (or bounded-request? (not iterating?)) 1 requested-width)
         ;; Seeding forces sharing on for this run regardless of the config
         ;; flag: seeds enter through the shared log's context blocks, and
         ;; seeds nobody reads would be dead rows.
@@ -893,7 +919,10 @@
         ;; branch takes a turn. The system prompt's whole first section is
         ;; REPL-first against the project under work, and without this that
         ;; instruction is unreachable the moment :run :root is not the harness.
-        _ (repl/ensure-project-roots! root)
+         _ (when-not bounded-request? (repl/ensure-project-roots! root))
+         ;; Mint and durably persist before on-start and before the first branch
+         ;; exists, so even a zero-turn crash has exact reconstruction data.
+         bounded (workflow/bounded-binding conn root run-id config)
         ctx {:conn conn :run-id run-id :config config :problem problem
              :llm-adapter llm-adapter :llm-config llm-config
              :max-turns max-turns :beam? (> width 1) :beam-width width
@@ -909,12 +938,12 @@
              ;; One eval namespace per RUN: defs the agent makes with `eval`
              ;; persist across its turns and die with the run. run-rounds
              ;; closes it in the same finally that disposes the sessions.
-             :repl-session (repl/new-session)
-             ;; {branch-id future} of forfeited turns still executing, so
-             ;; advance-all never runs a branch beside its own dangling turn
-             ;; (karamazov-blt.18).
-             :in-flight (atom {})
-             :abort abort}]
+              :repl-session (when-not bounded (repl/new-session))
+              :evaluator/profile (when bounded
+                                   (get-in bounded [:spec :context-spec
+                                                    :context/profile]))
+              :evaluator/binding bounded
+              :abort abort}]
     ;; Before the branches, not after. api.control/start-run! blocks until this
     ;; fires, so this line is how long POST /v1/runs takes — and open-branch!
     ;; spawns a Prolog session per branch, so putting it after made the endpoint

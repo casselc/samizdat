@@ -773,11 +773,12 @@
 
 (deftest bounded-done-is-terminal-only-on-a-green-controller-verification
   (let [bounded-ctx {:conn :fake
-                     :branch (state/new-branch {:id "B1" :problem "p"})
-                     :tool-name "done" :turn 3 :args {:answer "shipped"}
-                     :root "/tmp/bounded-root" :config {:run {}}
-                     :evaluator/profile :agent/project-develop
-                     :evaluator/binding {:binding/id "bind:test"}}
+                      :branch (state/new-branch {:id "B1" :problem "p"})
+                      :tool-name "done" :turn 3 :args {:answer "shipped"}
+                      :root "/tmp/bounded-root" :config {:run {}}
+                      :evaluator/profile :agent/project-develop
+                      :evaluator/binding {:binding/id "bind:test"}
+                      :turn-lease (tools-base/mint-turn-lease nil "B1" 3)}
         ;; The receipt shape store/history returns, restricted to the edit ops
         ;; edited-paths reads. The crafted first path passes test-file? but not
         ;; the namespace whitelist.

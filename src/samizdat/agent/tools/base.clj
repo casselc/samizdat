@@ -23,7 +23,8 @@
   per-phase refusal the branch loop consults before dispatch. Tool groups
   require this namespace; nothing here requires a group back."
   (:require [clojure.string :as str]
-            [jolt.fs :as fs]
+             [jolt.fs :as fs]
+            [jolt.host :as host]
             [samizdat.agent.files :as files]
             ;; gates and storm are not used by name here: the phases.edn
             ;; refusal :when forms reference them fully qualified, and the
@@ -40,6 +41,94 @@
 
 (def bounded-tool-vocabulary #{"eval" "doc" "complete" "done"})
 
+(declare bounded? fail)
+
+;; --- controller-owned per-turn authority -----------------------------------
+
+(defrecord TurnLease [id run-id branch-id turn state interrupt-token])
+
+(defn mint-turn-lease
+  "Mint authority for exactly one scheduled run/branch/turn coordinate.  The
+  state atom's monitor serializes revocation with semantic-operation permits."
+  [run-id branch-id turn]
+  (->TurnLease (str (random-uuid)) (str run-id) (str branch-id) (long turn)
+               (atom {:status :active :permits-issued 0})
+               (host/make-interrupt)))
+
+(defn turn-lease? [x] (instance? TurnLease x))
+
+(defn turn-lease-status [lease]
+  (if (turn-lease? lease) (:status @(:state lease)) :invalid))
+
+(defn active-turn-lease? [lease]
+  (= :active (turn-lease-status lease)))
+
+(defn turn-lease-authorizes? [lease ctx]
+  (and (active-turn-lease? lease)
+       (= (:run-id lease) (str (:run-id ctx)))
+       (= (:branch-id lease) (str (get-in ctx [:branch :id])))
+       (= (:turn lease) (long (:turn ctx)))))
+
+(defn revoke-turn-lease!
+  "Linearize active -> revoked under the same monitor used for permits.  The
+  first revoker owns the terminal reason; later revocations are no-ops."
+  [lease reason]
+  (when (turn-lease? lease)
+    (let [state (:state lease)]
+      (locking state
+        (when (= :active (:status @state))
+          (swap! state assoc :status :revoked :reason reason)
+          true)))))
+
+(defn interrupt-turn-lease! [lease]
+  (when (and (turn-lease? lease) (:interrupt-token lease))
+    (host/interrupt! (:interrupt-token lease))))
+
+(defn turn-lease-token [lease]
+  (when (turn-lease? lease) (:interrupt-token lease)))
+
+(defn with-turn-lease-permit!
+  "Linearize a semantic operation's short initiation against revocation.
+
+  `initiate` runs while the lease-state monitor is held and must contain only
+  the launch boundary (for evaluator operations, the durable intent append),
+  never the long operation itself.  No lease preserves legacy direct-call
+  behavior except that a bounded context must always carry one."
+  [ctx initiate]
+  (let [lease (:turn-lease ctx)]
+    (cond
+      (nil? lease)
+      (if (bounded? ctx)
+        (throw (ex-info "Turn authority is absent; refusing model effect"
+                        {:samizdat.turn-lease/error :stale
+                         :lease/status :invalid}))
+        (initiate))
+
+      (not (turn-lease? lease))
+      (throw (ex-info "Turn authority is invalid; refusing model effect"
+                      {:samizdat.turn-lease/error :stale
+                       :lease/status :invalid}))
+
+      :else
+      (let [state (:state lease)]
+        (locking state
+          (when-not (and (= :active (:status @state))
+                         (= (:run-id lease) (str (:run-id ctx)))
+                         (= (:branch-id lease) (str (get-in ctx [:branch :id])))
+                         (= (:turn lease) (long (:turn ctx))))
+            (throw (ex-info "Turn authority expired; refusing stale model effect"
+                            {:samizdat.turn-lease/error :stale
+                             :lease/status (:status @state)})))
+          (swap! state update :permits-issued (fnil inc 0))
+          (initiate))))))
+
+(defn run-with-turn-lease-permit!
+  "Issue a short launch permit, then run a long synchronous effect outside the
+  lease monitor."
+  [ctx effect]
+  (with-turn-lease-permit! ctx (constantly true))
+  (effect))
+
 (defn bounded-binding [ctx]
   (let [binding (:evaluator/binding ctx)]
     (cond
@@ -53,6 +142,17 @@
   in-process eval."
   [ctx]
   (boolean (or (bounded-binding ctx) (:evaluator/profile ctx))))
+
+(defn turn-lease-refusal
+  "A stale/missing authority result at the shared model-tool boundary, or nil.
+  Legacy non-bounded direct callers without a lease remain unchanged."
+  [{:keys [branch turn-lease] :as ctx}]
+  (when (or (and (bounded? ctx) (nil? turn-lease))
+            (and (some? turn-lease)
+                 (not (turn-lease-authorizes? turn-lease ctx))))
+    (fail branch (prompt/render "bounded-evaluator" {:stale-turn true})
+          :stale-lease? true
+          :lease-status (turn-lease-status turn-lease))))
 
 (defn bounded-message [data]
   (prompt/render "bounded-evaluator" data))

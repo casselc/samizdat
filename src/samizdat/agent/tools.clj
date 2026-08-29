@@ -143,8 +143,10 @@
   3. The model-bound strings are redacted. See the note above the delay."
   [{:keys [branch tool-name] :as ctx}]
   (let [known (known-values-for ctx)
+        stale (base/turn-lease-refusal ctx)
         outcome (try
-                   {:ok (if (and (base/bounded? ctx) (= "done" tool-name))
+                   {:ok (or stale
+                            (if (and (base/bounded? ctx) (= "done" tool-name))
                           ;; The bounded lane's done is a ControlEvent the
                           ;; CONTROLLER settles (M2), never the model's own
                           ;; say-so: ship/bounded-done derives the pinned
@@ -159,13 +161,18 @@
                           ;; substrate refuses outright. The ordinary `done`
                           ;; method — and its `sh -c` verify — is unreachable
                           ;; in this lane.
-                          (ship/bounded-done ctx)
-                          (base/run-tool ctx))}
+                              (ship/bounded-done ctx)
+                              (base/run-tool ctx)))}
                   (catch Throwable e {:threw e}))]
     (if-let [e (:threw outcome)]
       (do (log/warn "tool" tool-name "threw:" (ex-message e))
           (redact-result
-           (base/malformed branch (str "`" tool-name "` failed: " (ex-message e)))
+           (if (= :stale (:samizdat.turn-lease/error (ex-data e)))
+             (or (base/turn-lease-refusal ctx)
+                 (base/fail branch (base/bounded-message {:stale-turn true})
+                            :stale-lease? true))
+             (base/malformed branch
+                             (str "`" tool-name "` failed: " (ex-message e))))
            known))
       (let [r (:ok outcome)]
         (if-let [fault (envelope-fault r)]
@@ -187,6 +194,8 @@
 (def missing base/missing)
 (def unavailable base/unavailable)
 (def phase-refusal base/phase-refusal)
+(def turn-lease-refusal base/turn-lease-refusal)
+(def bounded-binding base/bounded-binding)
 (def tool-names base/tool-names)
 (def answer-tokens ship/answer-tokens)
 (def uncovered-tokens ship/uncovered-tokens)

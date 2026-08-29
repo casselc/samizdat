@@ -29,6 +29,60 @@
 (defn- decode [x]
   (when x (edn/read-string x)))
 
+(declare binding-for-run)
+
+(defn register-binding!
+  "Persist the complete controller-minted EvaluatorBinding before its run takes
+  a first model turn.  Idempotent only for the exact same record; reusing a run
+  or binding id with different authority is a closed failure, never an upsert."
+  [conn {:keys [binding-id run-id work-id instance-id spec-id context-spec runtime]
+         :as record}]
+  (doseq [[k v] {:binding-id binding-id :run-id run-id :work-id work-id
+                 :instance-id instance-id :spec-id spec-id
+                 :context-spec context-spec :runtime runtime}]
+    (when (or (nil? v) (and (string? v) (str/blank? v)))
+      (throw (ex-info (str "Evaluator binding needs " (name k)) {k v}))))
+  (let [stored {:binding_id (str binding-id) :run_id (str run-id)
+                :work_id (str work-id) :instance_id (str instance-id)
+                :spec_id (str spec-id) :context_spec (encode context-spec)
+                :runtime (str runtime)}]
+    (db/with-writer
+      (if-let [row (or (db/fetch-one conn
+                                     ["SELECT * FROM evaluator_bindings WHERE binding_id = ?"
+                                      (str binding-id)])
+                       (db/fetch-one conn
+                                     ["SELECT * FROM evaluator_bindings WHERE run_id = ?"
+                                      (str run-id)]))]
+        (when-not (= stored (select-keys row (keys stored)))
+          (throw (ex-info "Durable evaluator binding identity conflict"
+                          {:samizdat.evaluator/error :binding-conflict
+                           :requested (dissoc record :context-spec)
+                           :stored (select-keys row [:binding_id :run_id :work_id
+                                                     :instance_id :spec_id :runtime])})))
+        (db/execute! conn
+                     ["INSERT INTO evaluator_bindings
+                         (binding_id, run_id, work_id, instance_id, spec_id,
+                          context_spec, runtime, created_at)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
+                      (:binding_id stored) (:run_id stored) (:work_id stored)
+                      (:instance_id stored) (:spec_id stored)
+                      (:context_spec stored) (:runtime stored) (db/now)])))
+    (binding-for-run conn run-id)))
+
+(defn binding-for-run
+  "The durable binding record for a run, with ContextSpec parsed as inert EDN."
+  [conn run-id]
+  (when-let [row (db/fetch-one conn
+                               ["SELECT * FROM evaluator_bindings WHERE run_id = ?"
+                                (str run-id)])]
+    (update row :context_spec decode)))
+
+(defn binding-by-id [conn binding-id]
+  (when-let [row (db/fetch-one conn
+                               ["SELECT * FROM evaluator_bindings WHERE binding_id = ?"
+                                (str binding-id)])]
+    (update row :context_spec decode)))
+
 (defn- open-eval! [conn eval-id]
   (let [row (db/fetch-one conn ["SELECT * FROM evaluator_evals WHERE id = ?" eval-id])]
     (when-not row
@@ -161,4 +215,39 @@
             ["SELECT e.* FROM evaluator_evals e
                WHERE NOT EXISTS
                  (SELECT 1 FROM evaluator_completions c WHERE c.eval_id = e.id)
-               ORDER BY e.id"]))
+                ORDER BY e.id"]))
+
+(defn evidence-for-run
+  "Read-only evaluator/inference evidence for telemetry and APIs.
+
+  This function never allocates SCI, replays source, or invokes a semantic
+  operation.  It is a projection of durable binding, completion, receipt and
+  InferenceEpoch rows only."
+  [conn run-id]
+  (when-let [binding (binding-for-run conn run-id)]
+    (let [binding-id (:binding_id binding)
+          evals (history conn binding-id)
+          epochs (db/fetch conn
+                           ["SELECT id, branch_id, turn, provider, model,
+                                    binding_id, spec_id, runtime, created_at
+                              FROM inference_epochs WHERE run_id = ?
+                              ORDER BY created_at, id"
+                            (str run-id)])
+          statuses (frequencies (map :status evals))
+          ops (mapv (fn [row] (mapv :op (:receipts row)))
+                    (filter #(= :completed (:status %)) evals))]
+      {:binding {:binding-id binding-id
+                 :instance-id (:instance_id binding)
+                 :spec-id (:spec_id binding)
+                 :runtime (:runtime binding)
+                 :profile (get-in binding [:context_spec :context/profile])
+                 :capabilities (get-in binding [:context_spec :context/capabilities])
+                 :timeout-ms (get-in binding [:context_spec :context/timeout-ms])}
+       :evaluations {:total (count evals)
+                     :completed (get statuses :completed 0)
+                     :failed (get statuses :failed 0)
+                     :pending (get statuses :pending 0)}
+       :operations {:per-evaluation (mapv count ops)
+                    :multi-operation (count (filter #(< 1 (count %)) ops))
+                    :order ops}
+       :inference-epochs epochs})))

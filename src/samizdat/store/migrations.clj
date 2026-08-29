@@ -601,6 +601,69 @@
    "CREATE UNIQUE INDEX IF NOT EXISTS idx_evaluator_completions_once
       ON evaluator_completions(eval_id)"])
 
+(def ^:private v21
+  ;; The controller-minted EvaluatorBinding, durable before the first model
+  ;; turn.  Evaluation rows alone are not enough to reconstruct a binding that
+  ;; has taken no eval turn yet, and deriving authority from current defaults on
+  ;; resume would silently widen or otherwise change an old run.  context_spec
+  ;; is the complete canonical inert ContextSpec, including root, effective
+  ;; capabilities, bounds, timeout and its self-coordinate.
+  ["CREATE TABLE IF NOT EXISTS evaluator_bindings (
+      binding_id  TEXT PRIMARY KEY,
+      run_id      TEXT NOT NULL UNIQUE REFERENCES runs(id),
+      work_id     TEXT NOT NULL,
+      instance_id TEXT NOT NULL,
+      spec_id     TEXT NOT NULL,
+      context_spec TEXT NOT NULL,
+      runtime     TEXT NOT NULL,
+      created_at  TEXT NOT NULL
+    )"])
+
+(def ^:private v22
+  ;; Every provider invocation is an InferenceEpoch.  The row is provenance,
+  ;; not a scheduling knob: provider/model and the bounded evaluator identity
+  ;; (when present) are fixed before the call, while turns reference the epoch
+  ;; they eventually journal.  Probes may have epochs without turn rows.
+  ["CREATE TABLE IF NOT EXISTS inference_epochs (
+      id          TEXT PRIMARY KEY,
+      run_id      TEXT NOT NULL REFERENCES runs(id),
+      branch_id   TEXT NOT NULL,
+      turn        INTEGER NOT NULL,
+      provider    TEXT NOT NULL DEFAULT '',
+      model       TEXT NOT NULL DEFAULT '',
+      binding_id  TEXT,
+      spec_id     TEXT,
+      runtime     TEXT,
+      created_at  TEXT NOT NULL
+    )"
+   "CREATE INDEX IF NOT EXISTS idx_inference_epochs_run
+      ON inference_epochs(run_id, branch_id, turn)"
+   "ALTER TABLE turns ADD COLUMN inference_epoch_id TEXT"])
+
+(def ^:private v23
+  ;; An extension is one retained, idempotent controller act.  This table is
+  ;; intentionally outside the prunable event tail: the run cap must never
+  ;; outlive the audit that explains who raised it and why.
+  ["CREATE TABLE IF NOT EXISTS budget_extensions (
+      id            INTEGER PRIMARY KEY AUTOINCREMENT,
+      run_id        TEXT NOT NULL REFERENCES runs(id),
+      request_id    TEXT NOT NULL,
+      principal     TEXT NOT NULL,
+      old_max_turns INTEGER NOT NULL,
+      new_max_turns INTEGER NOT NULL,
+      reason        TEXT NOT NULL,
+      created_at    TEXT NOT NULL
+    )"
+   "CREATE UNIQUE INDEX IF NOT EXISTS idx_budget_extensions_request
+      ON budget_extensions(request_id)"])
+
+(def ^:private v24
+  ;; Retained fail-closed terminality for an unquiesced turn worker.  Events are
+  ;; a prunable tail and therefore cannot be the fact that prevents resume from
+  ;; minting fresh authority while stale work may still exist.
+  ["ALTER TABLE runs ADD COLUMN terminal_reason TEXT"])
+
 (def migrations
   "Ordered. Index 0 is migration 1; PRAGMA user_version holds the count applied."
-  [v1 v2 v3 v4 v5 v6 v7 v8 v9 v10 v11 v12 v13 v14 v15 v16 v17 v18 v19 v20])
+  [v1 v2 v3 v4 v5 v6 v7 v8 v9 v10 v11 v12 v13 v14 v15 v16 v17 v18 v19 v20
+   v21 v22 v23 v24])

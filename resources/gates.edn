@@ -519,7 +519,13 @@
         the branch's whole job.
 
         HARNESS_TURN_DEADLINE_MS still overrides, for an operator who needs it
-        for one run without editing the project's policy."}
+         for one run without editing the project's policy."}
+
+ :turn-cancel-grace-ms
+ {:value 1000 :kind :cost-ceiling :capability-tunable? false
+  :doc "How long the scheduler waits after revoking and interrupting a timed-out
+        turn worker before declaring a fail-closed cancellation fault. A fresh
+        turn authority is minted only after the old worker confirms quiescence."}
 
  :crossover
  {:value {:statuses #{"confirmed"} :limit 8}

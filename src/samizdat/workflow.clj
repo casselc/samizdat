@@ -233,23 +233,34 @@
   sets per profile, so a model cannot widen its own authority through config;
   a wider or unknown profile request fails closed here, before any binding or
   run exists. Dynamic resolution keeps SCI absent from ordinary startup."
-  [root run-id config]
-  (when-let [requested (get-in config [:run :bounded :profile])]
-    (let [profile (cond (keyword? requested) requested
-                        (string? requested) (keyword requested))
-          capabilities (get bounded-profile-capabilities profile)]
-      (when-not capabilities
-        (throw (ex-info "Unsupported bounded profile; expected :agent/project-read or :agent/project-develop"
-                        {:samizdat.evaluator/error :unsupported-profile
-                         :requested requested})))
-      (let [bind! (or (try (requiring-resolve 'samizdat.evaluator/bind!)
-                           (catch Throwable _ nil))
-                      (throw (ex-info "Pinned bounded evaluator runtime is unavailable"
-                                      {:samizdat.evaluator/error :runtime-unavailable})))]
-        (bind! root run-id
-               {:profile profile
-                :requested capabilities
-                :controller-authorized capabilities})))))
+  ([root run-id config] (bounded-binding nil root run-id config))
+  ([conn root run-id config]
+   (when-let [requested (get-in config [:run :bounded :profile])]
+     (let [profile (cond (keyword? requested) requested
+                         (string? requested) (keyword requested))
+           capabilities (get bounded-profile-capabilities profile)]
+       (when-not capabilities
+         (throw (ex-info "Unsupported bounded profile; expected :agent/project-read or :agent/project-develop"
+                         {:samizdat.evaluator/error :unsupported-profile
+                          :requested requested})))
+       (let [bind! (or (try (requiring-resolve 'samizdat.evaluator/bind!)
+                            (catch Throwable _ nil))
+                       (throw (ex-info "Pinned bounded evaluator runtime is unavailable"
+                                       {:samizdat.evaluator/error :runtime-unavailable})))
+             binding (bind! root run-id
+                            {:profile profile
+                             :requested capabilities
+                             :controller-authorized capabilities})]
+         (when conn
+           (let [persist! (or (try (requiring-resolve
+                                    'samizdat.evaluator/persist-binding!)
+                                   (catch Throwable _ nil))
+                              (throw (ex-info
+                                      "Bounded evaluator persistence is unavailable"
+                                      {:samizdat.evaluator/error
+                                       :runtime-unavailable})))]
+             (persist! conn run-id binding)))
+         binding)))))
 
 (defn run-turn
   "Advance one branch by one turn, through the manifest.
@@ -289,8 +300,14 @@
 (defn run!
   "Run one branch to completion under the stored loop definition.
   Returns {:status :answer :branch :run-id (:residual)}."
-  [{:keys [conn config llm-adapter llm-config problem max-turns]}]
-  (let [max-turns (or max-turns (get-in config [:run :max-turns]) 40)
+  [{:keys [conn config llm-adapter llm-config problem max-turns] :as opts}]
+  (if (get-in config [:run :bounded :profile])
+    ;; Bounded turns must pass through the scheduler that owns TurnLease
+    ;; mint/revoke/deadline semantics. Dynamic resolution avoids a static cycle:
+    ;; beam requires workflow to compile manifests.
+    (do (require 'samizdat.agent.beam)
+        ((resolve 'samizdat.agent.beam/run!) (assoc opts :beam-width 1)))
+    (let [max-turns (or max-turns (get-in config [:run :max-turns]) 40)
         loop-nm (active-loop-name config)
         {:keys [version compiled definition]} (load-loop! conn loop-nm)
         run-id (runs/start-run! conn {:problem problem
@@ -302,7 +319,7 @@
         ;; The project root the file tools are confined to, and the shell tool
         ;; runs in. Configurable so a run can target another checkout.
         root (or (get-in config [:run :root]) (System/getProperty "user.dir"))
-        bounded (bounded-binding root run-id config)
+        bounded (bounded-binding conn root run-id config)
         branch (state/new-branch
                 {:id "B1" :problem problem
                  :messages (branch-loop/initial-messages
@@ -399,4 +416,4 @@
         ;; (provenance CR1-6): one namespace per run, never removed, was
         ;; unbounded growth on a serve process.
         (when-let [session (:repl-session ctx)]
-          (repl/close-session session)))))))
+          (repl/close-session session))))))))

@@ -185,11 +185,12 @@ is permissiveness, which is why every reprieve is a loan with a clock.
   applied by `await-resume!` itself, since the beam parks there upstream of
   the directives cell (blt.9); the per-turn drain leaves scheduler kinds
   pending for the beam instead of eating them mid-round (blt.10); a human
-  `cull` closes the row and stays in the record (blt.11); `extend` rides the
-  branch (`:extended-turns`), persists to the runs row, and reaches the turn
-  slice's cap (blt.12).
+  `cull` closes the row and stays in the record (blt.11). M3 supersedes queued
+  `extend`: the queue carries no budget authority, so both drains reject it;
+  the trusted controller's atomic audited extension updates the durable runs
+  row, which the round cap refreshes.
 
-Two invariants the audit added to the table's spirit: a forfeited turn's
-still-running thread is never run beside (`advance-all`'s `:in-flight`
-quarantine, blt.18), and the cull cell counts only ACTIVE branches as
-survivors and never re-judges an inactive one (blt.17).
+Two invariants the audit added to the table's spirit: a deadline revokes and
+interrupts the turn, and no fresh authority is minted until the worker confirms
+quiescence (an unquiesced worker terminally fails the run); the cull cell counts
+only ACTIVE branches as survivors and never re-judges an inactive one (blt.17).

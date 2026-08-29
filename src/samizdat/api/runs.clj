@@ -31,6 +31,7 @@
             [samizdat.agent.gates :as gates]
             [samizdat.store.db :as db]
             [samizdat.store.interventions :as interventions]
+            [samizdat.store.evaluator :as evaluator]
             [samizdat.store.journal :as journal]
             [samizdat.store.runs :as runs]))
 
@@ -99,6 +100,9 @@
        :artifacts (mapv #(update % :witness parse-json)
                         (journal/artifacts conn run-id))
        :gates (journal/gate-tally conn run-id)
+       ;; Durable read model only: no SCI allocation/replay and no semantic
+       ;; project operation can be triggered by observing this evidence.
+       :evaluator (evaluator/evidence-for-run conn run-id)
        :interventions (interventions/history conn run-id)})))
 
 (defn journal-tail

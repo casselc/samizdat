@@ -90,6 +90,24 @@
       (journal/note! conn run-id :run-finished {:data {:status status}}))
     n))
 
+(defn finish-run-cancellation-fault!
+  "Terminally fail a running run whose deadline worker did not quiesce.  The
+  retained reason is what makes resume refusal survive event-tail pruning."
+  [conn run-id]
+  (let [n (db/with-writer
+            (db/execute! conn
+                         ["UPDATE runs
+                             SET status = 'failed', ended_at = ?,
+                                 terminal_reason = 'turn-cancellation-fault'
+                           WHERE id = ? AND status = 'running'"
+                          (db/now) run-id])
+            (db/change-count conn))]
+    (when (pos? n)
+      (journal/note! conn run-id :run-finished
+                     {:data {:status :failed
+                             :reason :turn-cancellation-fault}}))
+    n))
+
 (defn reconcile-orphans!
   "Mark every run still claiming to be running as interrupted. Returns how many.
 
@@ -232,15 +250,13 @@
                      {:branch-id branch-id :data {:status status :reason reason}}))
     n))
 
-(defn extend-budget!
-  "Raise a run's max_turns. Only ever called with an explicitly requested
-  value: the resume path keeps the original budget unless one is passed, so
-  a crash cannot re-grant turns — extension is a human act, journaled as one."
-  [conn run-id max-turns]
-  (db/with-writer
-    (db/execute! conn ["UPDATE runs SET max_turns = ? WHERE id = ?"
-                       max-turns run-id]))
-  (journal/note! conn run-id :budget-extended {:data {:max-turns max-turns}}))
+(defn extension-audit [conn request-id]
+  (db/fetch-one conn ["SELECT * FROM budget_extensions WHERE request_id = ?"
+                      (str request-id)]))
+
+(defn budget-extensions [conn run-id]
+  (db/fetch conn ["SELECT * FROM budget_extensions WHERE run_id = ?
+                    ORDER BY id" (str run-id)]))
 
 (defn reopen-branch!
   "An exhausted branch back to active — the budget-extension path. Branches
@@ -252,6 +268,45 @@
                         WHERE run_id = ? AND id = ? AND status = 'exhausted'"
                        run-id branch-id]))
   (journal/note! conn run-id :branch-reopened {:branch-id branch-id}))
+
+(defn extend-budget!
+  "Atomic storage half of a trusted budget extension.  The security controller
+  owns authorization, idempotency policy, monotonicity and ceilings; this
+  transaction retains the request id, guards the cap observed by the caller,
+  raises it, reopens only exhausted branches, and journals the act together."
+  ([conn {:keys [run-id request-id principal old-max new-max reason]}]
+   (db/with-transaction conn
+     (db/execute! conn
+                  ["INSERT INTO budget_extensions
+                      (run_id, request_id, principal, old_max_turns,
+                       new_max_turns, reason, created_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)"
+                   run-id request-id principal old-max new-max reason (db/now)])
+     (db/execute! conn
+                  ["UPDATE runs SET max_turns = ?
+                      WHERE id = ? AND max_turns = ?
+                        AND status NOT IN ('completed','aborted')
+                        AND terminal_reason IS NULL"
+                   new-max run-id old-max])
+     (when (zero? (db/change-count conn))
+       (throw (ex-info "Budget extension lost its guarded run row"
+                       {:budget/error :stale :run-id run-id
+                        :expected-old old-max})))
+     (let [exhausted (mapv :id
+                           (db/fetch conn
+                                     ["SELECT id FROM branches
+                                         WHERE run_id = ? AND status = 'exhausted'"
+                                      run-id]))]
+       (doseq [branch-id exhausted]
+         (reopen-branch! conn run-id branch-id))
+       (journal/note! conn run-id :budget-extended
+                      {:data {:old old-max :new new-max
+                              :request-id request-id :principal principal}})
+       {:run-id run-id :request-id request-id :principal principal
+        :old-max old-max :new-max new-max :reopened exhausted})))
+  ([_conn _run-id _max-turns]
+   (throw (ex-info "Direct budget writes are forbidden; use samizdat.security.controller/extend-budget!"
+                   {:budget/error :unauthorized-write}))))
 
 (defn set-thesis!
   "The branch's current structural plan. Overwriting is allowed — committing to

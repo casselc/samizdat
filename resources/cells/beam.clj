@@ -344,18 +344,16 @@
         landed mid-turn would rewrite state under a branch that had already
         read it.
 
-        Three of the eight kinds are about the RUN rather than a branch, and
-        this is where they land in the data map: `:paused?` (the next round
-        waits at :beam/round-open, so turns in flight finish), and
-        `:max-turns` (an `extend` raises the cap the round-open exhaustion
-        check reads). Both persist across the back edge because :beam/tick
-        drops only the per-round products."
+        Pause/resume is about the RUN rather than a branch and lands here as
+        `:paused?`; the next round waits at :beam/round-open, so work already
+        in flight finishes. Budget extension is rejected here because only the
+        trusted controller route can perform its audited durable transaction."
    :effects [:db]
    :requires []}
   (fn [ctx {:keys [active turn] :as data}]
     (let [{:keys [conn run-id]} ctx
           pending (interventions/pending conn run-id)
-          {:keys [branches max-turns paused?]}
+          {:keys [branches paused?]}
           (beam/drain-directives! ctx active pending turn)
           ;; A branch the human just culled is inactive NOW, and this cell is
           ;; the only one that knows: it never enters :advanced, so the
@@ -368,21 +366,11 @@
           still-active (filterv state/active? branches)
           marked (into {} (map (juxt :id identity)) branches)]
       (beam/record-inactive! ctx now-inactive)
-      (let [data' (cond-> (assoc data
-                                 :active still-active
-                                 :branches (mapv #(get marked (:id %) %)
-                                                 (:branches data)))
-                    (some? paused?) (assoc :paused-by-directive? paused?)
-                    max-turns (update :max-turns
-                                      (fnil + (beam/round-max-turns ctx data))
-                                      max-turns))]
-        ;; An extension is a fact about the RUN, so it survives a crash: the
-        ;; row is what a resume reads its budget from, and the drain's old
-        ;; comment ("a resume re-reads its budget from the control API
-        ;; anyway") was simply false (karamazov-blt.12).
-        (when max-turns
-          (runs/extend-budget! conn run-id (:max-turns data')))
-        data'))))
+      (cond-> (assoc data
+                     :active still-active
+                     :branches (mapv #(get marked (:id %) %)
+                                     (:branches data)))
+        (some? paused?) (assoc :paused-by-directive? paused?)))))
 
 (cell/defcell :beam/advance
   {:doc "One turn for every active branch, concurrently, each under a hard
@@ -391,11 +379,9 @@
    :effects [:net :db :fs :proc]
    :requires [:live-branches]}
   (fn [ctx {:keys [active branches turn] :as data}]
-    ;; The turn slice and its gates read (:max-turns ctx); an `extend` lives
-    ;; in the round's data map. Without this, every turn past the ORIGINAL
-    ;; cap routed :exhausted -> :memory/distil — one LLM reflection per
-    ;; branch per extended round — while the beam kept scheduling
-    ;; (karamazov-blt.12).
+    ;; The turn slice and its gates read (:max-turns ctx); round-max-turns
+    ;; refreshes that value from the durable run row after a trusted controller
+    ;; extension.
     (let [advanced (beam/advance-all (assoc ctx
                                             :branch-count (count branches)
                                             :max-turns (beam/round-max-turns ctx data))

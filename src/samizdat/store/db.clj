@@ -95,6 +95,22 @@
 ;; an access that mutates.
 (defmacro with-writer [& body] `(with-conn ~@body))
 
+(defmacro with-transaction
+  "Run DML as one BEGIN IMMEDIATE transaction on the shared connection.
+  The connection monitor is held through commit/rollback; nested store calls
+  are safe because the monitor is reentrant.  Transactions themselves must not
+  be nested."
+  [conn & body]
+  `(with-conn
+     (jdbc/execute! ~conn "BEGIN IMMEDIATE")
+     (try
+       (let [ret# (do ~@body)]
+         (jdbc/execute! ~conn "COMMIT")
+         ret#)
+       (catch Throwable t#
+         (try (jdbc/execute! ~conn "ROLLBACK") (catch Throwable _# nil))
+         (throw t#)))))
+
 (defn fetch
   "A serialized read. Everything that reads the shared connection goes through
   here rather than calling jdbc directly."

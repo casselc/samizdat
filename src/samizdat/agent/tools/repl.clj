@@ -72,7 +72,11 @@
 (defn- bounded-eval [ctx binding code]
   (if-let [evaluate! (evaluator-var "evaluate-recorded!")]
     (try
-      (let [r (evaluate! (:conn ctx) binding code)]
+      (let [r (evaluate! (:conn ctx) binding code
+                         {:token (base/turn-lease-token (:turn-lease ctx))
+                          :effect-permit!
+                          (fn [initiate]
+                            (base/with-turn-lease-permit! ctx initiate))})]
         {:ok true :value (pr-str (:value r))})
       (catch Throwable e
         {:ok false :error (or (ex-message e) (str e))}))

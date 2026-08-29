@@ -803,6 +803,22 @@
          "\n\n" (message {:orientation-guidance true
                           :orientation-develop develop?}))))
 
+(declare verify-binding!)
+
+(defn- binding-value
+  [work-id spec observer instance]
+  (let [instance-id (:instance-id observer)
+        binding {:samizdat.evaluator/kind :binding
+                 :binding/id (str "bind:" work-id)
+                 :work-id (str work-id)
+                 :instance/id instance-id
+                 :spec spec
+                 :instance (atom instance)
+                 :owner (atom nil)
+                 :poisoned (atom false)
+                 :world-observer (:world-observer observer)}]
+    (assoc binding :trusted-orientation (trusted-orientation binding))))
+
 (defn bind!
   "Create one controller-minted EvaluatorBinding. The profile comes from the
   controller via opts (:agent/project-read by default); requested and
@@ -812,17 +828,24 @@
         spec (evaluator-spec context)
         instance-id (str "inst:" work-id)
         observer {:instance-id instance-id :world-observer (:world-observer opts)}
-        instance (make-instance spec observer)
-        binding {:samizdat.evaluator/kind :binding
-                 :binding/id (str "bind:" work-id)
-                 :work-id (str work-id)
-                 :instance/id instance-id
-                 :spec spec
-                 :instance (atom instance)
-                 :owner (atom nil)
-                 :poisoned (atom false)
-                 :world-observer (:world-observer opts)}]
-    (assoc binding :trusted-orientation (trusted-orientation binding))))
+        instance (make-instance spec observer)]
+    (binding-value work-id spec observer instance)))
+
+(defn persist-binding!
+  "Persist a minted binding as the run's exact reconstruction authority.
+  Must be called before the first model turn; idempotent only for an identical
+  binding/run pair."
+  [conn run-id binding]
+  (verify-binding! binding)
+  (store/register-binding!
+   conn {:binding-id (:binding/id binding)
+         :run-id (str run-id)
+         :work-id (:work-id binding)
+         :instance-id (:instance/id binding)
+         :spec-id (get-in binding [:spec :spec/coordinate])
+         :context-spec (get-in binding [:spec :context-spec])
+         :runtime (get-in binding [:spec :runtime-coordinate])})
+  binding)
 
 (defn describe [binding]
   (let [instance @(:instance binding)]
@@ -832,7 +855,7 @@
      :evaluator/context-spec (get-in binding [:spec :context-spec :context/coordinate])
      :evaluator/runtime (get-in binding [:spec :runtime-coordinate])
      :evaluator/timeout-ms (get-in binding [:spec :context-spec :context/timeout-ms])
-     :evaluator/live-context (:context-id instance)
+      :evaluator/live-context (:context-id instance)
      :evaluator/capabilities (get-in binding [:spec :context-spec :context/capabilities])}))
 
 (defn- verify-binding! [binding]
@@ -979,6 +1002,56 @@
       (reset! (:poisoned binding) false)
       binding)))
 
+(defn reconstruct!
+  "Revalidate and reconstruct one run's durable EvaluatorBinding.
+
+  Current defaults and requested config are deliberately not consulted.  The
+  complete persisted ContextSpec is checked for its own canonical coordinate,
+  exact trusted root, current RuntimeCoordinate, deterministic spec/binding/
+  instance identities, and then the whole durable history is replayed into one
+  newly allocated SCI context.  History validation happens before allocation;
+  replay consumes receipts and performs zero real world operations."
+  [conn run-id root]
+  (let [row (or (store/binding-for-run conn run-id)
+                (fail! :binding-missing
+                       (message {:binding-missing true})
+                       {:run-id run-id}))
+        context (:context_spec row)
+        expected-context-coordinate
+        (sandbox/canonical-coordinate (dissoc context :context/coordinate))
+        current-root (canonical-root root)]
+    (when-not (= (:context/coordinate context) expected-context-coordinate)
+       (fail! :context-coordinate-mismatch
+              (message {:context-coordinate-mismatch true})
+             {:run-id run-id}))
+    (when-not (= current-root (:context/root context))
+       (fail! :root-mismatch
+              (message {:root-mismatch true})
+             {:durable (:context/root context) :current current-root}))
+    (let [runtime (runtime-coordinate)]
+      (when-not (= runtime (:runtime row))
+        (fail! :runtime-mismatch
+               "Bounded evaluator runtime differs from durable history"
+               {:durable (:runtime row) :current runtime})))
+    (let [spec (evaluator-spec context)
+          work-id (:work_id row)
+          expected {:binding_id (str "bind:" work-id)
+                    :instance_id (str "inst:" work-id)
+                    :spec_id (:spec/coordinate spec)}
+          actual (select-keys row (keys expected))]
+      (when-not (= expected actual)
+        (fail! :binding-identity-mismatch
+               "Reconstructed evaluator identity differs from durable binding"
+               {:expected expected :actual actual}))
+      ;; A shell with no SCI context. rebuild-internal! validates all history
+      ;; coordinates/pending states first, then allocates exactly one fresh
+      ;; context and replays every committed evaluation into it.
+      (let [binding (binding-value work-id spec
+                                   {:instance-id (:instance_id row)
+                                    :world-observer nil}
+                                   nil)]
+        (rebuild-internal! conn binding)))))
+
 (defn rebuild! [conn binding]
   (verify-binding! binding)
   (rebuild-internal! conn binding))
@@ -1004,10 +1077,16 @@
      (try
        (let [instance @(:instance binding)
              eval-id (store/begin! conn (assoc (identity-map binding) :source source))
-             hook (:hook instance)]
-         (reset! hook
-                 (fn [op args run]
-                   (let [seqn (store/intent! conn eval-id op args)]
+              hook (:hook instance)
+              effect-permit! (or (:effect-permit! opts) (fn [f] (f)))]
+          (reset! hook
+                  (fn [op args run]
+                    ;; The durable intent append is the semantic operation's
+                    ;; initiation/TurnLease linearization point.  The ensuing
+                    ;; bounded read/edit runs outside the lease monitor; once
+                    ;; initiated it is not retroactively unauthorized.
+                    (let [seqn (effect-permit!
+                                #(store/intent! conn eval-id op args))]
                      (try
                        (let [value (sandbox/inert (run))]
                          (store/outcome! conn eval-id seqn {:result value})

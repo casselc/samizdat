@@ -53,6 +53,7 @@
             [samizdat.store.failures :as failures]
             [samizdat.store.interventions :as interventions]
             [samizdat.store.journal :as journal]
+            [samizdat.store.inference :as inference-store]
             [samizdat.store.knowledge :as knowledge]
             [samizdat.store.messages :as messages]
             [samizdat.store.runs :as runs]))
@@ -275,8 +276,23 @@
   the beam call. Same behaviour as before: one retry at a doubled budget when
   the response hit the token cap before emitting a tool call, and a provider
   failure returned as {:ok false :error} rather than thrown."
-  [ctx branch]
-  ((infer/complete-fn ctx) (infer/of-branch branch)))
+  ([ctx branch]
+   (call-model ctx branch (or (:current-turn branch) 0)))
+  ([ctx branch turn]
+   (let [binding (tools/bounded-binding ctx)
+         epoch-id (when (and (:conn ctx) (:run-id ctx)) (str (random-uuid)))
+         _ (when epoch-id
+             (inference-store/begin!
+              (:conn ctx)
+              {:id epoch-id :run-id (:run-id ctx) :branch-id (:id branch)
+               :turn turn
+               :provider (get-in ctx [:llm-config :provider])
+               :model (get-in ctx [:llm-config :model])
+               :binding-id (:binding/id binding)
+               :spec-id (get-in binding [:spec :spec/coordinate])
+               :runtime (get-in binding [:spec :runtime-coordinate])}))
+         call ((infer/complete-fn ctx) (infer/of-branch branch))]
+     (cond-> call epoch-id (assoc :inference-epoch-id epoch-id)))))
 
 (defn- settle-predictions!
   "Close out any prediction whose window has passed or whose expectation the
@@ -350,12 +366,15 @@
   that `the provider failed` gives it nothing to act on."
   ([ctx branch turn error] (provider-error-step ctx branch turn error nil))
   ([{:keys [conn run-id]} branch turn error reason]
+   (provider-error-step {:conn conn :run-id run-id} branch turn error reason nil))
+  ([{:keys [conn run-id]} branch turn error reason inference-epoch-id]
    (session/observe! [:provider (or reason :call-failed)])
    (log/warn "branch" (:id branch) "turn" turn "model call failed:" error)
    (journal/record-turn! conn run-id
                          {:branch-id (:id branch) :turn turn
                           :tool-name "__provider_error__" :result error
-                          :category "neutral"})
+                           :category "neutral"
+                           :inference-epoch-id inference-epoch-id})
    (if (= :context-overflow reason)
      ;; The prompt outgrew the window. 'Try again' is exactly wrong here —
      ;; the failure is upstream of the model seeing anything, the next
@@ -392,7 +411,8 @@
 (defn no-call-step
   "No usable call. Say exactly what was wrong; a bare \"try again\" produces
   another identical attempt."
-  [{:keys [conn run-id]} branch turn {:keys [parsed signals said response]}]
+  [{:keys [conn run-id]} branch turn {:keys [parsed signals said response
+                                             inference-epoch-id]}]
   ;; A reply that is nothing but a copy of the harness's own compaction
   ;; marker. On a long branch almost every message is an [unloaded] digest
   ;; standing in for a past turn, and a model reading its own history that
@@ -431,7 +451,8 @@
                            :reasoning-text (:reasoning response)
                            ;; A turn that produced no usable call still cost
                            ;; tokens, and those are the ones worth counting.
-                           :usage (:usage response)})
+                            :usage (:usage response)
+                            :inference-epoch-id inference-epoch-id})
     (-> branch
         (state/record-outcome {:category :mechanics :progress? false})
         (state/add-message "user" msg {:turn turn})
@@ -558,12 +579,14 @@
         ;; Phase policy is consulted before dispatch: a refused call never
         ;; reaches a tool, and the refusal is journalled like any other turn
         ;; (vf-b25, vf-eaw). One place owns the refusals — tools/phase-refusal.
-        refusal (tools/phase-refusal
-                 (assoc ctx :branch branch :turn turn
-                        :tool-name tool :args (:args parsed)))
+        tool-ctx (assoc ctx :branch branch :turn turn
+                        :tool-name tool :args (:args parsed))
+        ;; Authority before policy: a stale done/edit is a stale effect, not a
+        ;; phase refusal. tools/run-tool repeats this fence for direct callers.
+        refusal (or (tools/turn-lease-refusal tool-ctx)
+                    (tools/phase-refusal tool-ctx))
         result (or refusal
-                   (tools/run-tool (assoc ctx :branch branch :turn turn
-                                          :tool-name tool :args (:args parsed))))
+                    (tools/run-tool tool-ctx))
         storm-policy (gates/storm-policy)
         branch (-> (:branch result)
                     ;; The tool and the claim ride along so the branch can
@@ -661,7 +684,8 @@
   "The durable record of the turn: the turn row, any artifact (and its entry
   into the shared pool when it qualifies), any failure, any thesis. Side
   effects only; returns nil."
-  [{:keys [conn run-id] :as ctx} branch turn {:keys [parsed result tool said response signals]}]
+  [{:keys [conn run-id] :as ctx} branch turn {:keys [parsed result tool said response signals
+                                                     inference-epoch-id]}]
   (observe-turn! tool result (or signals
                                  ;; A turn that never reached a tool still has
                                  ;; something to say: the parse flags are how
@@ -679,7 +703,8 @@
                          :auto-repaired (:auto-repaired? parsed)
                          :assistant-text said
                          :reasoning-text (:reasoning response)
-                         :usage (:usage response)})
+                          :usage (:usage response)
+                          :inference-epoch-id inference-epoch-id})
   (when-let [a (:artifact result)]
     (journal/record-artifact! conn run-id
                               (assoc a :branch-id (:id branch) :turn turn))
@@ -698,15 +723,6 @@
     (runs/set-thesis! conn run-id (:id branch) t))
   nil)
 
-(defn- directive-turns
-  "How many turns an `extend` asks for, from its JSON payload, or nil."
-  [d]
-  (let [payload (or (try (json/read-str (str (:payload d)) :key-fn keyword)
-                         (catch Throwable _ nil))
-                    {})
-        by (or (:turns payload) (:by payload) (:max_turns payload))]
-    (when (and (number? by) (pos? by)) (long by))))
-
 (defn- drain-directives!
   "Apply the human directives waiting at this branch's boundary.
 
@@ -724,10 +740,9 @@
 
   On a SINGLE-BRANCH run there is no beam drain, so everything lands here:
   `message`/`review` become the :pending-directive the arbiter puts at
-  priority zero, `extend` raises the branch's cap and persists the run row
-  (karamazov-blt.12 — the old arm assumed control/extend! had run, which is
-  REPL-only, and left the row pending forever), and the scheduler-only kinds
-  are rejected with a reason rather than accepted silently.
+  priority zero. `extend` is rejected because queued steer carries no budget
+  authority; scheduler-only kinds are likewise rejected with a reason rather
+  than accepted silently.
 
   Shares the interventions queue with the HTTP control surface, so a REPL
   steer and a UI steer are the same event."
@@ -755,19 +770,12 @@
 
            "extend"
            (if beam?
-             b ;; run-level: the beam drain applies and persists it
-             (if-let [n (directive-turns d)]
-               (let [b' (update b :extended-turns (fnil + 0) n)]
-                 (interventions/resolve! conn run-id (:id d) :applied nil turn)
-                 ;; The row is what a crash-resume reads its budget from.
-                 (runs/extend-budget! conn run-id
-                                      (+ (:max-turns ctx) (:extended-turns b')))
-                 b')
-               (do (interventions/resolve! conn run-id (:id d) :rejected
-                                           (prompt/render "directive-rejected"
-                                                          {:extend-no-turns true})
-                                           turn)
-                   b)))
+             b ;; scheduler drain rejects it with the trusted-route guidance
+              (do (interventions/resolve! conn run-id (:id d) :rejected
+                                          (prompt/render "controller-safety"
+                                                         {:queued-extension true})
+                                         turn)
+                 b))
 
            (if beam?
              b ;; scheduler kinds: the beam drain owns them

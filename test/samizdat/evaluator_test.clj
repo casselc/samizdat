@@ -23,6 +23,7 @@
             [samizdat.agent.loop :as turn]
             [samizdat.agent.state :as state]
             [samizdat.agent.tools :as tools]
+            [samizdat.agent.tools.base :as base]
             [samizdat.security.policy :as policy]
             [samizdat.store.db :as db]
             [samizdat.store.evaluator :as store]
@@ -37,12 +38,14 @@
     {:bind! (requiring-resolve 'samizdat.evaluator/bind!)
      :describe (requiring-resolve 'samizdat.evaluator/describe)
      :evaluate! (requiring-resolve 'samizdat.evaluator/evaluate-recorded!)
+      :persist! (requiring-resolve 'samizdat.evaluator/persist-binding!)
+      :reconstruct! (requiring-resolve 'samizdat.evaluator/reconstruct!)
      :rebuild! (requiring-resolve 'samizdat.evaluator/rebuild!)
      :complete (requiring-resolve 'samizdat.evaluator/complete)
      :doc (requiring-resolve 'samizdat.evaluator/doc)
      :leverage (requiring-resolve 'samizdat.evaluator/leverage)
      :context-spec (requiring-resolve 'samizdat.evaluator/context-spec)
-     :default-timeout (requiring-resolve 'samizdat.evaluator/default-timeout-ms)}))
+      :default-timeout (requiring-resolve 'samizdat.evaluator/default-timeout-ms)}))
 
 (defmacro with-root [[root conn] & body]
   `(let [~root (str (fs/create-temp-dir {:prefix "samizdat-m1-"}))
@@ -314,6 +317,25 @@
 (defn- tool-call [name args]
   (str "```tool-call\n" (json/write-str {:name name :args args}) "\n```"))
 
+(deftest durable-binding-reconstructs-from-recorded-context-and-history
+  (when bounded?
+    (let [{:keys [bind! persist! reconstruct! evaluate!]} (evaluator-api)]
+      (with-root [root conn]
+        (let [run-id (runs/start-run! conn {:problem "durable binding"
+                                            :max-turns 3})
+              binding (bind! root run-id {})]
+          (persist! conn run-id binding)
+          (is (= 41 (:value (evaluate! conn binding
+                                      "(do (def durable-x 41) durable-x)"))))
+          (let [rebuilt (reconstruct! conn run-id root)]
+            (is (= (:binding/id binding) (:binding/id rebuilt)))
+            (is (= (:instance/id binding) (:instance/id rebuilt)))
+            (is (= 42 (:value (evaluate! conn rebuilt "(inc durable-x)"))))
+            (is (= (:context/coordinate
+                    (get-in binding [:spec :context-spec]))
+                   (:context/coordinate
+                    (get-in rebuilt [:spec :context-spec]))))))))))
+
 (deftest no-network-current-turn-smoke
   (when bounded?
     (let [{:keys [bind!]} (evaluator-api)]
@@ -337,7 +359,10 @@
                         (fake-complete
                          (tool-call "eval"
                                     {:code "(->> (project/search \"defn\" {:path \"src/samizdat\"}) (map :path) distinct vec)"}))]
-            (let [after (workflow/run-turn ctx branch 1)]
+            (let [after (workflow/run-turn
+                         (assoc ctx :turn-lease
+                                (base/mint-turn-lease run-id "B1" 1))
+                         branch 1)]
               (is (some #(str/includes? (:content %) "src/samizdat/a.clj")
                         (:messages after)))
               (is (= "eval" (:tool_name (last (journal/turns conn run-id)))))
@@ -345,12 +370,17 @@
                      (mapv :op (:receipts (first (store/history conn (:binding/id binding)))))))))
           (with-redefs [infer/complete-fn (fake-complete (tool-call "shell" {:command "touch pwned"}))
                         policy/run-shell (fn [& _] (swap! shell-runs inc))]
-            (let [after (workflow/run-turn ctx branch 2)]
+            (let [after (workflow/run-turn
+                         (assoc ctx :turn-lease
+                                (base/mint-turn-lease run-id "B1" 2))
+                         branch 2)]
               (is (some #(str/includes? (:content %) "outside this bounded context")
                         (:messages after)))
               (is (zero? @shell-runs))
               (is (not (fs/exists? (str root "/pwned")))))
           (let [done (tools/run-tool (assoc ctx :branch branch :turn 3
+                                             :turn-lease (base/mint-turn-lease
+                                                          run-id "B1" 3)
                                              :tool-name "done" :args {}))]
             (is (= :done (:control-event done)))
             (is (not (:done? done))

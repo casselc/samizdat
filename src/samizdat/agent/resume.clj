@@ -111,6 +111,7 @@
             [samizdat.agent.tools.tasks :as task-tool]
             [samizdat.repl :as repl]
             [samizdat.store.journal :as journal]
+            [samizdat.store.evaluator :as evaluator-store]
             [samizdat.store.runs :as runs]
             [samizdat.store.tasks :as tasks]
             [samizdat.workflow :as workflow]))
@@ -134,14 +135,14 @@
 (defn- messages-from-turns
   "The message history a continuing model needs: what it said, and what the
   harness answered, over the system prompt and the problem."
-  [problem turns]
+  [problem turns trusted-orientation]
   (reduce (fn [msgs t]
             (cond-> msgs
               (seq (:assistant_text t))
               (conj {:role "assistant" :content (:assistant_text t)})
               (seq (:result t))
               (conj {:role "user" :content (:result t)})))
-          (branch-loop/initial-messages problem)
+          (branch-loop/initial-messages problem nil trusted-orientation)
           turns))
 
 (defn- rebuild-branch
@@ -149,7 +150,7 @@
 
   The green snapshot is not journalled, so a resumed branch always starts
   the safe-state rule from its 'otherwise' arm."
-  [run branch-row turns artifacts firings max-turns storm-pol]
+  [run branch-row turns artifacts firings max-turns storm-pol trusted-orientation]
   (let [branch-id (:id branch-row)
         ;; The branch's OWN problem where it has one — a decompose unit's
         ;; contract, a team worker's sub-task — else the run's. Rebuilding
@@ -170,7 +171,8 @@
                                     :problem problem
                                     :created-at-turn (:created_at_turn branch-row)
                                     :messages (messages-from-turns problem
-                                                                   branch-turns)})
+                                                                  branch-turns
+                                                                  trusted-orientation)})
                  (assoc :status (keyword (:status branch-row))
                         :inactive-reason (:inactive_reason branch-row)
                         :thesis (parse-json (:thesis branch-row))
@@ -250,43 +252,51 @@
   exhausted process that never got to tear down — is resumable."
   [conn run-id]
   (when-let [r (runs/get-run conn run-id)]
-    (not (contains? #{"completed" "aborted"} (:status r)))))
+    (and (not (contains? #{"completed" "aborted"} (:status r)))
+         (nil? (:terminal_reason r)))))
 
 (defn resume!
   "Rebuild a run's branches from the journal and continue the beam's round
   loop at the round after the last recorded turn, under the run's ORIGINAL
   max-turns.
 
-  `:max-turns` is the one exception to the anchor rule, and it is explicit:
-  when passed AND larger than the recorded budget, the runs row is raised to
-  it and branches closed as `exhausted` reopen — they closed because the
-  budget ran out, not for cause, so more budget un-closes them. Culled,
-  abandoned, and done branches stay closed. The extension is journaled
-  (budget-extended, branch-reopened) and the rows are updated BEFORE the
-  branches are read back, so a crash mid-extension replays correctly. A
-  crash still cannot re-grant budget; only a caller asking for more can.
+  Resume never writes or widens max_turns.  The runs row is the absolute
+  budget anchor.  A separate trusted-controller extension act may raise that
+  row atomically and reopen exhausted branches before resume is requested.
 
   Pending interventions are already in their table; the existing
   pending-directives drain picks them up at the first resumed boundary — this
   function does not reimplement that path.
 
   Returns the beam/run-rounds result. Throws when the run is not resumable."
-  [{:keys [conn config llm-adapter llm-config run-id abort max-turns]}]
+  [{:keys [conn config llm-adapter llm-config run-id abort]}]
   (let [run (runs/get-run conn run-id)]
     (when-not (resumable? conn run-id)
       (throw (ex-info (str "run " run-id " is not resumable (status "
                            (:status run) ")")
                       {:run-id run-id :status (:status run)})))
-    ;; The row said 'interrupted' (or 'failed'); it is about to be running
-    ;; again, and stalled? only watches runs whose status says so.
-    (runs/mark-running! conn run-id)
-    (when (and max-turns (> max-turns (:max_turns run)))
-      (runs/extend-budget! conn run-id max-turns)
-      (doseq [b (runs/branches conn run-id)
-              :when (= "exhausted" (:status b))]
-        (runs/reopen-branch! conn run-id (:id b))))
-    (let [max-turns (max (or max-turns 0) (:max_turns run))
+    (let [max-turns (:max_turns run)
           width (:beam_width run)
+          root (or (get-in config [:run :root]) (System/getProperty "user.dir"))
+          durable-binding (evaluator-store/binding-for-run conn run-id)
+          _ (when (and durable-binding (> width 1))
+              (throw (ex-info
+                      "A durable bounded EvaluatorBinding cannot resume across multiple branches"
+                      {:samizdat.evaluator/error :multi-branch-not-supported
+                       :beam-width width})))
+          bounded (when durable-binding
+                    (let [reconstruct! (or
+                                        (try (requiring-resolve
+                                              'samizdat.evaluator/reconstruct!)
+                                             (catch Throwable _ nil))
+                                        (throw (ex-info
+                                                "Pinned bounded evaluator runtime is unavailable on resume"
+                                                {:samizdat.evaluator/error
+                                                 :runtime-unavailable})))]
+                      (reconstruct! conn run-id root)))
+          ;; Revalidate/reconstruct before changing the run row. A mismatch or
+          ;; pending history leaves the interrupted record untouched.
+          _ (runs/mark-running! conn run-id)
           turn-rows (journal/turns conn run-id)
           turns (group-by :branch_id turn-rows)
           artifacts (group-by :branch_id (journal/artifacts conn run-id))
@@ -295,7 +305,6 @@
           ;; and needs the same file root; the eval session is genuinely new,
           ;; because the old process's namespace died with it and nothing in
           ;; the journal can rebuild an in-image binding.
-          root (or (get-in config [:run :root]) (System/getProperty "user.dir"))
           ;; The same compiled per-turn manifest run! drives, recompiled here:
           ;; a resume enters run-rounds directly, so without this it would
           ;; silently fall back to the bare composition and finish a critic or
@@ -313,7 +322,11 @@
                ;; run sees what the resumption changed. What the dead process
                ;; changed is already committed to the tree it starts from.
                :git-baseline (gitdiff/baseline root)
-               :repl-session (repl/new-session)
+                :repl-session (when-not bounded (repl/new-session))
+                :evaluator/profile (when bounded
+                                     (get-in bounded [:spec :context-spec
+                                                      :context/profile]))
+                :evaluator/binding bounded
                :abort abort}
           ;; :verify-cmd rides on the policy so the rebuilt window skips
           ;; verify calls exactly the way the live path never notes them.
@@ -321,7 +334,8 @@
                            :verify-cmd (get-in config [:run :verify-cmd]))
           branches (mapv (fn [row]
                            (let [b (rebuild-branch run row turns artifacts
-                                                   firings max-turns storm-pol)
+                                                    firings max-turns storm-pol
+                                                    (:trusted-orientation bounded))
                                  ;; The task claim survives the crash on its
                                  ;; ROW; without restoring it here the branch
                                  ;; came back reading "No task claimed", could
