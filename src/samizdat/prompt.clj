@@ -61,6 +61,7 @@
    "clojure-syntax"
    "file-tool"
    "grep-tool"
+   "image-down"
    "fork-thesis"
    "judge"
    "judge-exemptions"

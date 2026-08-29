@@ -114,6 +114,7 @@
             [samizdat.websearch-test]
             [samizdat.toolerr-test]
             [samizdat.tape-test]
+            [samizdat.image-test]
             [samizdat.infer-test]
             [samizdat.fork-test]
             [samizdat.probe-test]
@@ -249,6 +250,7 @@
     samizdat.websearch-test
     samizdat.toolerr-test
     samizdat.tape-test
+    samizdat.image-test
     samizdat.infer-test
     samizdat.fork-test
     samizdat.probe-test
