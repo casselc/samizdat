@@ -143,6 +143,38 @@
         dirge's reason: a nudge that can repeat forever becomes the thing the
         model is responding to instead of the work."}
 
+ :same-failure-turns
+ {:value 4 :kind :threshold :capability-tunable? true
+  :doc "How many times a branch may run the code and get back the SAME failure,
+        without having changed the code in between, before the suspect-the-test
+        steer fires.
+
+        Four, not one: a genuinely broken implementation also fails repeatedly,
+        and telling a model to doubt a correct test is strictly worse than
+        silence. Four identical failures across an unchanged implementation is
+        no longer a branch converging — it is a branch confirming.
+
+        Run bd56a286 would have tripped it around turn 160 and did not, and
+        spent the 238 turns to 390 reading the file the bug was not in."}
+
+ :same-failure-chars
+ {:value 400 :kind :budget :capability-tunable? true
+  :doc "How much of the repeated failure the steer quotes back. Enough for the
+        assertion and its message, which is the pair the branch has to compare;
+        a whole suite's output would bury the one line that matters."}
+
+ :max-suspect-test-nudges
+ {:value 2 :kind :re-fire-guard :capability-tunable? true
+  :doc "How often suspect-the-test may re-fire in one episode — and an episode
+        ends when the branch writes a file, which is what clears the gate's own
+        precondition (see gates/fired-count).
+
+        Two rather than three: this steer hands over a hypothesis, and a
+        hypothesis repeated becomes an instruction. If the branch has checked
+        its tests twice and still believes them, it is not going to be talked
+        out of them by a third telling, and the honest next move is the
+        implementation."}
+
  :studying-turns
  {:value 10 :kind :threshold :capability-tunable? true
   :doc "Consecutive inspection-only turns (read/grep/eval/…), after the branch
@@ -1557,6 +1589,12 @@
   :settle-called
   {:orienting        #{"plan" "write_file" "edit_file" "patch"}
    :no-edits         #{"write_file" "edit_file" "patch"}
+   ;; A WRITE, not another test run. The steer asked the branch to form a
+   ;; hypothesis about where the defect is; editing the test it doubted and
+   ;; editing the implementation it now believes is wrong are both that
+   ;; hypothesis acted on, and either one ends the window. Running the suite
+   ;; again is the thing it was already doing.
+   :suspect-the-test #{"write_file" "edit_file" "patch"}
    :milestone        #{"done"}
    :branch-out       #{"branch_theses"}
    :repopulate       #{"branch_theses"}
@@ -1569,7 +1607,10 @@
    :turn-budget      #{"done" "give_up"}
    :wind-down        #{"done"}
    :last-call        #{"done" "give_up"}
-   :reflection       #{"introspect" "reload_cells" "cells"}
+   ;; :reflection's vocabulary went with its gate (karamazov-634): 69 firings
+   ;; and 0 met across two models, five task shapes and two harness
+   ;; generations. A prediction vocabulary for a gate that no longer exists
+   ;; reads as a gate somebody forgot to wire up.
    :studying         #{"write_file" "edit_file" "shell" "reload_cells"
                        "done" "give_up"}}}
 
@@ -2002,6 +2043,56 @@
                         (str "\n\nYou are working on: " g)))
    :prediction "the branch declares a plan or writes a file"
    :window 3}
+
+  {:gate :suspect-the-test
+   ;; ABOVE :progress-stalled, :no-edits and :studying — all three of which
+   ;; hold on this branch, and all three of which the branch can answer.
+   ;; Lower number wins, and the ladder's own principle is the one :no-edits
+   ;; states: more specific is the more actionable steer when both are true.
+   ;; This is the narrowest precondition in that whole band — same failure,
+   ;; unchanged implementation, N times — so it takes the boundary's one slot.
+   :priority 9.9
+   :budget :max-suspect-test-nudges
+   :doc "LOOKING IN THE WRONG PLACE. The branch has run the code
+         :same-failure-turns times since it last changed the code and got the
+         same failure every time.
+
+         Every other gate here measures whether the branch is DOING something.
+         This one measures whether it is looking in the right PLACE, and it is
+         the only one that hands over a HYPOTHESIS rather than a demand.
+
+         Run bd56a286 is why it exists: 238 turns cycling read-implementation,
+         run-tests, read-implementation, while the ten failures it was chasing
+         were in its own tests — two assertions inverted against their own
+         descriptions and a bare float equality. Its single edit in that span
+         went to the implementation, the one place the bug was not. :no-edits
+         said write a file (which file? the code is correct) and :studying said
+         commit and test (it tested thirteen times). Both were answerable; this
+         is not (karamazov-70b).
+
+         THE SAME failure, not merely repeated ones: a branch working through
+         different errors is making progress, and telling it to doubt a correct
+         test would be strictly worse than silence."
+   :when (and (state/active? branch)
+              (supervisor/repeating-one-failure? (tool-vocab :file-write)
+                                                 (tool-vocab :verification)
+                                                 (:turns branch)
+                                                 (threshold :same-failure-turns)))
+   ;; The steer QUOTES what the branch is staring at. A gate that describes a
+   ;; failure the branch can already see spends its turn saying less than the
+   ;; branch knows; one that quotes it points at a specific line. Rendered
+   ;; here rather than through :message-file because this template takes
+   ;; variables of its own, and the shared render context is a fixed six keys.
+   :message-form (sp/render-str
+                  (prompt "suspect-the-test")
+                  {:count (threshold :same-failure-turns)
+                   :failure (supervisor/unchanged-failure
+                             (tool-vocab :file-write)
+                             (tool-vocab :verification)
+                             (:turns branch)
+                             (threshold :same-failure-chars))})
+   :prediction "the branch edits a file — the test it doubted, or the implementation it now believes is wrong"
+   :window 4}
 
   {:gate :no-edits
    :priority 10.5

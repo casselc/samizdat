@@ -38,8 +38,10 @@
   picks the approach it will then spend its whole budget on.
 
   The budget is checked FIRST and binds unconditionally — including against a
-  signal. A bound a signal can lift is not a bound, and every pass here is a
-  model call."
+  signal. A bound a signal can lift is not a bound.
+
+  What the budget counts is passes that SPENT something, not passes that
+  happened; see `pass!`."
   [{:keys [last-at passes]} {:keys [now every-ms budget signal?]}]
   (and (or (nil? budget) (< (or passes 0) budget))
        (or (nil? last-at)
@@ -49,21 +51,44 @@
 (defn pass!
   "Run one pass, and never let it out.
 
-  The pass receives the value the previous pass returned under `:carry`, and
-  whatever it returns becomes the next pass's carry — the stream's memory.
+  The pass receives the value the previous pass returned under `:carry`. What
+  it returns is either a bare value — which becomes the next carry, and counts
+  against the budget — or `{:carry v :spent? bool}`, which lets a pass say it
+  cost nothing.
 
-  A throwing pass still spends its budget. An observer whose failures are free
-  retries a broken pass until the run ends, which is the shape of every busy
-  loop that ever pretended to be a watchdog. Returns nil always: the caller is
-  a thread, and there is nothing for it to inspect."
+  WHY A PASS MAY BE FREE. The budget bounds MODEL CALLS; that is the whole
+  reason a supervisor is budgeted at all. A pass that looked at the run and
+  decided it was healthy made no model call, and counting it burned the
+  allowance during exactly the stretch where nothing was wrong. Live, run
+  a3566c73: twelve quiet heartbeats through a healthy first half exhausted a
+  budget of twelve, and when the branch later livelocked with five unmet gates
+  — against a floor of two — there was nothing left to spend (karamazov-808).
+
+  A THROWING PASS STILL SPENDS. An observer whose failures are free retries a
+  broken pass until the run ends, which is the shape of every busy loop that
+  ever pretended to be a watchdog. So does a pass that reports nothing: an
+  unreported pass is assumed expensive, because guessing the other way is how
+  a bound stops binding.
+
+  `:looks` counts every pass, spent or not, so `status` can tell a stream that
+  is watching and content from one that is not running. Returns nil always:
+  the caller is a thread and has nothing to inspect."
   [ctx state pass-fn]
-  (swap! state update :passes (fnil inc 0))
   (try
-    (let [out (pass-fn (assoc ctx :carry (:carry @state)))]
-      (swap! state assoc :carry out))
+    (let [out (pass-fn (assoc ctx :carry (:carry @state)))
+          reported? (and (map? out) (contains? out :spent?))
+          spent? (if reported? (boolean (:spent? out)) true)
+          carry (if reported? (:carry out) out)]
+      (swap! state (fn [s]
+                     (cond-> (assoc s :carry carry)
+                       true    (update :looks (fnil inc 0))
+                       spent?  (update :passes (fnil inc 0))))))
     (catch Throwable e
       ;; Logged, not rethrown, and not retried faster. This thread exists to
       ;; help; the one thing it must never do is become the reason a run ends.
+      (swap! state (fn [s] (-> s
+                               (update :looks (fnil inc 0))
+                               (update :passes (fnil inc 0)))))
       (log/warn "oversight pass failed:" (ex-message e))))
   nil)
 

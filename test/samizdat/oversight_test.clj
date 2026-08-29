@@ -272,3 +272,56 @@
                       :oversight/turns [] :oversight/firings []})]
         (is (= "SUP" (get-in out [:oversight/branch :id])))
         (is (not= "S0" (get-in out [:oversight/branch :id])))))))
+
+;; --- what the budget actually counts (karamazov-808) ------------------------
+
+(deftest a-quiet-pass-is-free-and-a-reasoning-one-is-not
+  ;; Run a3566c73, live. The stream went silent exactly when the run needed
+  ;; it: twelve quiet heartbeats through a healthy first half exhausted a
+  ;; budget of twelve, and when the branch later livelocked with five unmet
+  ;; gates — against a floor of two — nothing was left to spend.
+  ;;
+  ;; The budget bounds MODEL CALLS. worth-a-look? is cheap and pure precisely
+  ;; so most passes make none, so counting those passes turned the mechanism
+  ;; that makes the stream affordable into the one that silences it.
+  (let [st (atom {:passes 0})]
+    (dotimes [_ 5] (ov/pass! {} st (fn [_] {:carry :b :spent? false})))
+    (is (= 0 (:passes @st)) "five quiet looks cost nothing")
+    (is (= 5 (:looks @st)) "but they are still counted, so a watching stream
+                            can be told apart from a dead one")
+    (ov/pass! {} st (fn [_] {:carry :b :spent? true}))
+    (is (= 1 (:passes @st)) "the pass that called a model spends")))
+
+(deftest an-unreported-or-throwing-pass-is-assumed-expensive
+  (testing "a bare return value spends, as it always did — guessing the other
+            way is how a bound stops binding"
+    (let [st (atom {:passes 0})]
+      (ov/pass! {} st (fn [_] :some-carry))
+      (is (= 1 (:passes @st)))
+      (is (= :some-carry (:carry @st)))))
+  (testing "and a throw still spends: an observer that fails for free retries
+            a broken pass until the run ends"
+    (let [st (atom {:passes 0})]
+      (ov/pass! {} st (fn [_] (throw (ex-info "boom" {}))))
+      (ov/pass! {} st (fn [_] (throw (ex-info "boom" {}))))
+      (is (= 2 (:passes @st))))))
+
+(deftest a-quiet-pass-does-not-erase-the-streams-memory
+  ;; The other half of the same wiring bug. The beam's pass fn returned
+  ;; (:oversight/branch out) as the carry, and a quiet pass produces no
+  ;; branch — so every healthy look wiped the supervisor's accumulated context
+  ;; and the next reasoning pass read the run cold. Carrying context across
+  ;; passes is the entire reason this is a stream and not a node.
+  (let [st (atom {:passes 0})
+        remembered (fn [pass-ctx] {:carry (or nil (:carry pass-ctx)) :spent? false})]
+    (ov/pass! {} st (fn [_] {:carry :the-branch :spent? true}))
+    (is (= :the-branch (:carry @st)))
+    (dotimes [_ 3] (ov/pass! {} st remembered))
+    (is (= :the-branch (:carry @st))
+        "three quiet passes later the supervisor still knows what it concluded")))
+
+(deftest the-budget-gates-on-spent-passes-only
+  (is (ov/due? {:last-at 0 :passes 0 :looks 99} {:now 999 :every-ms 1 :budget 3})
+      "ninety-nine free looks do not exhaust a budget of three")
+  (is (not (ov/due? {:last-at 0 :passes 3 :looks 3} {:now 999 :every-ms 1 :budget 3}))
+      "three spent passes do"))

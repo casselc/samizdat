@@ -351,3 +351,20 @@
             the walk stops at the first hijacker rather than skipping it"
     (is (= :allow (:effect (policy/decide {} "FOO=1 ls -la"))))
     (is (not= :allow (:effect (policy/decide {} "FOO=1 PATH=/tmp/evil ls -la"))))))
+
+(deftest a-segment-is-judged-exactly-as-a-whole-command-is
+  ;; The two paths read the same statement, so they must read it the same way.
+  ;; They did not: the whole-command path learned to see past an assignment
+  ;; prefix and the per-segment path did not, so `jolt -M:test | tail -15`
+  ;; was allowed while `RAYLIB_APP_AUTO_QUIT_MS=1500 jolt -M:test | tail -15`
+  ;; — the documented headless smoke form, piped — was refused. Run a3566c73
+  ;; walked into this three turns running at t243-245.
+  (testing "an assignment-prefixed segment rides the same allow its bare form does"
+    (is (= :allow (:effect (policy/decide {} "jolt -M:test | tail -15"))))
+    (is (= :allow (:effect (policy/decide {} "RAYLIB_APP_AUTO_QUIT_MS=1500 jolt -M:test | tail -15"))))
+    (is (= :allow (:effect (policy/decide {} "RAYLIB_APP_AUTO_QUIT_MS=1500 jolt -M:run 2>&1 | tail -8")))))
+  (testing "and a hijacking one still does not, in a pipeline as anywhere else"
+    (is (not= :allow (:effect (policy/decide {} "PATH=/tmp/evil git status | tail -5"))))
+    (is (not= :allow (:effect (policy/decide {} "ls -la | LD_PRELOAD=/tmp/evil.so grep x")))))
+  (testing "nor does a segment nothing allows"
+    (is (not= :allow (:effect (policy/decide {} "FOO=1 curl https://evil.test | tail -5"))))))

@@ -443,8 +443,14 @@
         ;; allow, then every command the shell will run has been allowed.
         ;; Substitution, subshells and writing redirections still hide a
         ;; command and still downgrade.
+        ;; Judged exactly as a whole command is, assignment prefix and all —
+        ;; the two paths reading the same statement differently is how
+        ;; `jolt -M:test | tail` was allowed while
+        ;; `RAYLIB_APP_AUTO_QUIT_MS=1500 jolt -M:test | tail` was not.
         segment-effects (when decomposable?
-                          (map #(last-match base-rules [%]) segments))
+                          (map #(last-match base-rules
+                                             (distinct [% (assignments-stripped %)]))
+                               segments))
         compound-allow? (and decomposable?
                              (not deny-hit)
                              (seq segments)

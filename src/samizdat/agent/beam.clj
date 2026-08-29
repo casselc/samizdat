@@ -743,9 +743,16 @@
        (fn [pass-ctx]
          (let [out (myc/run-compiled (workflow/compiled-manifest "oversight")
                                      pass-ctx {:oversight/carry (:carry pass-ctx)})]
-           ;; The carry: the supervisor's branch, so the next pass continues
-           ;; the same conversation rather than starting one.
-           (:oversight/branch out)))))))
+           {;; The carry: the supervisor's branch, so the next pass continues
+            ;; the same conversation rather than starting one. A QUIET pass
+            ;; produces no branch, and returning its nil wiped the carry — so
+            ;; a healthy stretch erased the supervisor's memory of the run and
+            ;; the next reasoning pass started cold, which is the one thing
+            ;; the stream exists to avoid.
+            :carry (or (:oversight/branch out) (:carry pass-ctx))
+            ;; And a quiet pass made no model call, so it must not spend the
+            ;; budget that exists to bound model calls (karamazov-808).
+            :spent? (boolean (:oversight/worth-a-look? out))}))))))
 
 (defn run-rounds
   "Drive the beam's scheduler manifest from round `start-turn`.

@@ -103,6 +103,7 @@
    "storm-force"
    "storm-oscillation"
    "stuck"
+   "suspect-the-test"
    "system"
    "task-busy"
    "task-claimed"

@@ -606,3 +606,75 @@
     (is (nil? (base/arg {:args {}} :timeout-ms))))
   (testing "an ordinary single-word arg is unaffected"
     (is (= "x" (base/arg {:args {:code "x"}} :code)))))
+
+;; --- karamazov-70b: looking in the wrong place ------------------------------
+;;
+;; Every other gate measures whether the branch is DOING something. Run
+;; bd56a286 was doing plenty: 238 turns of read-implementation, run-tests,
+;; read-implementation, while the ten failures it chased were in its own tests.
+;; :no-edits said write a file — which file? the code is correct. :studying
+;; said commit and test — it tested thirteen times. Both were answerable.
+
+(defn- verify-turn [n err]
+  {:turn n :tool "shell" :category :failure :error err})
+
+(def ^:private writes #{"write_file" "edit_file" "patch"})
+(def ^:private verifiers #{"eval" "shell"})
+
+(deftest the-same-failure-against-unchanged-code-is-the-signal
+  (let [same (mapv #(verify-turn % "FAIL circle-free? expected false got true") (range 1 5))]
+    (is (supervisor/repeating-one-failure? writes verifiers same 4)
+        "four runs, same failure, no edit between them")
+    (is (not (supervisor/repeating-one-failure? writes verifiers (butlast same) 4))
+        "three is under the floor — a branch converging still fails a few times")))
+
+(deftest a-branch-working-through-different-failures-is-making-progress
+  ;; The distinction the whole gate rests on. Telling a model to doubt a
+  ;; correct test would be strictly worse than silence, so repeated failure is
+  ;; not enough — it has to be the SAME failure.
+  (let [varied [(verify-turn 1 "FAIL arity") (verify-turn 2 "FAIL nil pointer")
+                (verify-turn 3 "FAIL wrong key") (verify-turn 4 "FAIL off by one")]]
+    (is (not (supervisor/repeating-one-failure? writes verifiers varied 4)))))
+
+(deftest an-edit-ends-the-window
+  ;; The implementation changed, so the next failure is evidence about new
+  ;; code. Whatever the branch was staring at before is a different question.
+  (let [turns (concat (mapv #(verify-turn % "FAIL same") (range 1 5))
+                      [{:turn 5 :tool "edit_file" :category :success}]
+                      [(verify-turn 6 "FAIL same")])]
+    (is (not (supervisor/repeating-one-failure? writes verifiers turns 4))
+        "one write resets the window to a single failure")))
+
+(deftest reading-and-grepping-do-not-count-as-running-the-code
+  ;; The branch must have RUN the thing. A branch that reads four times has a
+  ;; different problem and :studying already speaks to it.
+  (let [reads (mapv (fn [n] {:turn n :tool "read_file" :category :failure
+                             :error "FAIL same"})
+                    (range 1 5))]
+    (is (not (supervisor/repeating-one-failure? writes verifiers reads 4)))))
+
+(deftest the-steer-quotes-what-the-branch-is-staring-at
+  ;; A gate that describes a failure the branch can already see says less than
+  ;; the branch knows. Quoting it points at a line.
+  (let [turns (mapv #(verify-turn % "level_test.clj:14\n  expected: (false? ...)\n  actual: true")
+                    (range 1 5))
+        q (supervisor/unchanged-failure writes verifiers turns 400)]
+    (is (str/includes? q "level_test.clj:14"))
+    (is (not (str/includes? q "\n")) "whitespace collapsed so it renders inline")
+    (is (= 10 (count (supervisor/unchanged-failure writes verifiers turns 10)))
+        "and clipped to the budget"))
+  (is (nil? (supervisor/unchanged-failure writes verifiers [] 400))
+      "no failure to quote is nil, not a throw"))
+
+(deftest the-gate-outranks-the-three-that-would-otherwise-answer
+  ;; :progress-stalled, :no-edits and :studying all hold on this branch, the
+  ;; boundary allows one steer, and all three of them are answerable — "write
+  ;; a file" invites "which file? the code is correct". LOWER priority wins,
+  ;; and the ladder's own principle (see :no-edits' doc) is that the more
+  ;; specific gate takes the slot when both are true. This is the narrowest
+  ;; precondition in the band.
+  (let [by (fn [n] (first (filter #(= n (:gate %)) (gates/gates))))
+        mine (:priority (by :suspect-the-test))]
+    (doseq [g [:progress-stalled :no-edits :studying]]
+      (is (< mine (:priority (by g)))
+          (str "suspect-the-test must outrank " g)))))
