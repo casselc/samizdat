@@ -7,7 +7,6 @@
 
 (def mycelium-compatibility-id
   "Semantic compatibility id for the provider-neutral graph and execution
-  seams. This is deliberately not a source revision: the seam is new in the
-  uncommitted first slice, so naming an older commit would publish false
-  provenance. Consumers bind to this v1 data/arity contract."
-  "samizdat-mycelium-graph-v1")
+  seams. This exact source revision introduced the reviewed v1 data and arity
+  contract; consumers fail closed when their selected revision differs."
+  "dd13b4b933d3db80a319d2c7b27af4ee6767fca5")

@@ -1,8 +1,7 @@
 {:schema 1
  :library {:id yogthos/samizdat
-           ;; Semantic contract id. No commit before this slice contains these
-           ;; join points, so an older source SHA would be false provenance.
-           :version "samizdat-mycelium-graph-v1"}
+           ;; Exact reviewed source revision that introduced these join points.
+           :version "dd13b4b933d3db80a319d2c7b27af4ee6767fca5"}
  :aspects
  [{:id :mycelium.workflow/lifecycle
    :match {:entry mycelium.execution/workflow-event!
