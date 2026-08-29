@@ -3,9 +3,11 @@
 ## Coordinates and load boundary
 
 - Samizdat branch: `js1-m3-current-effcf7d`
-- M3 base: `2ef127c` (`feat: forward-port M2 bounded execution`)
+- M3 entry port: `2ef127c` (`feat: forward-port M2 bounded execution`)
 - Upstream at the base: `effcf7d`
-- Bounded Jolt source: `4af2362176160f2ed0e366689d7232b1a38adfec`
+- Frozen M2 closure: `a7e857f`
+- Jolt M1 runtime base: `4af2362176160f2ed0e366689d7232b1a38adfec`
+- M2/M3 bounded Jolt checkout: `f8899905d98a0abdcc6b4ae61dfd5c8bdb9c7277`
 - SCI: `32d62a5136ad3dc148588752f5bcc4cc30b14752` / `0.13.53`
 - New schema: migrations `v21` through `v25`, after the M2 evaluator at `v20`
 
@@ -21,7 +23,7 @@ Using `/usr/local/bin/scheme` and the pinned Jolt executable:
 
 ```text
 ordinary suite (jolt -M:test):
-  1564 tests, 6216 assertions, 0 failures, 0 errors
+  1569 tests, 6228 assertions, 0 failures, 0 errors
 
 bounded evaluator lane (SAMIZDAT_BOUNDED_TEST=1, pinned local SCI):
   25 tests, 294 assertions, 0 failures, 0 errors
@@ -30,12 +32,11 @@ focused M3 authority, provenance, and TurnLease lane:
   47 tests, 217 assertions, 0 failures, 0 errors
 ```
 
-`git diff --check` is clean. The runs used the pinned
+The pre-freeze working-tree record above is superseded by the immutable final
+closure below. The runs used the pinned
 `../jolt-m2-verify-closure` checkout because sibling `../jolt` cannot resolve
 `jolt.publish`; `bin/js1-m3` pins and checks that usable checkout, SCI, Chez,
-and a clean Samizdat tree before it emits exact evidence. The implementation
-worktree is intentionally uncommitted, so the exact gate refuses to label these
-working-tree runs as immutable evidence. No commit or push was made.
+and a clean Samizdat tree before it emits exact evidence.
 
 ## Durable evaluator recovery
 
@@ -142,3 +143,21 @@ environment, provider fairness, forceful thread termination, Jolt runtime or
 ABI changes, JS2, or an upstream rebase. Simulation policy remains outside the
 core; these changes expose only authority, interruption, durable event, and
 read-model seams.
+
+## Final M3 Closure
+
+- M3 code under test: `be54c2e45ebab966ff07cfc3405b804f53128bde`
+- M3 evidence commit: recorded by the commit containing this section.
+- M3 upstream base: `effcf7dbf439bd3baa2718bc3e780f2031ecae59`
+- Frozen M2 closure: `a7e857f`; bounded Jolt checkout: `f8899905d98a0abdcc6b4ae61dfd5c8bdb9c7277`; Jolt base: `4af2362176160f2ed0e366689d7232b1a38adfec`; SCI: `32d62a5136ad3dc148588752f5bcc4cc30b14752` / `0.13.53`.
+
+`bin/js1-m3 test` ran from a tracked-clean checkout at the code-under-test
+commit: focused authority/provenance/lease **47 tests / 217 assertions**,
+bounded evaluator **25 / 294**, and ordinary suite **1569 / 6228**, all with
+zero failures/errors. It pins the bounded Jolt checkout and SCI before running.
+
+M3 PASS: exact orientation recovery, zero-world replay, causal
+epoch→turn→eval→receipt records, TurnLease stale-effect refusal and trusted
+done follow-through, audited idempotent human/controller budget extension,
+bounded-workflow refusal outside the lease-compatible mode, and read-only REPL
+evidence projection are green. STOP FOR REVIEW.
