@@ -201,7 +201,9 @@
   distinct sharing. Whether sharing earns the beam its width stays a question
   the journal can answer, now directly. Returns {:block :branch}; the branch
   carries the :shared-served ids the dedup reads."
-  [conn run-id branch last-claim share? surface]
+  ([conn run-id branch last-claim share?]
+   (context-block conn run-id branch last-claim share? nil))
+  ([conn run-id branch last-claim share? surface]
   (let [others #(remove (fn [e] (= (:branch_id e) (:id branch))) %)
         ;; THE SURFACE FILTER. A block that speaks about a tool declares which
         ;; tool, and a block whose tool this branch cannot call never reaches
@@ -213,7 +215,9 @@
         ;; every block goes through `speaking`, so the next block someone adds
         ;; is filtered by construction.
         speaking (fn [needs render]
-                   (when (surf/satisfies-needs? surface needs) (render)))
+                   (when (or (nil? surface)
+                             (surf/satisfies-needs? surface needs))
+                     (render)))
         fhits (others (if (str/blank? last-claim)
                         (failures/recent conn run-id 5)
                         (failures/similar conn run-id last-claim 5)))
@@ -295,7 +299,7 @@
                                  (failures/render fhits)
                                  (artifacts/render ahits)])]
       {:block (when (seq blocks) (str/join "\n\n" blocks))
-       :branch (update branch :shared-served (fnil into #{}) (map :id fresh))})))
+       :branch (update branch :shared-served (fnil into #{}) (map :id fresh))}))))
 
 ;; --- one turn ---------------------------------------------------------------
 

@@ -123,50 +123,10 @@
                    (assoc ctx :surface (surface/ordinary ordinary-tool-universe)))
                   (mapv :gate)))))))
 
-;; ═══════════════════════════════════════════════════════════════════════════
-;; C and D. The trusted orientation teaches the envelope and the in-eval rule.
-;; ═══════════════════════════════════════════════════════════════════════════
 
-(defn orientation
-  "The bounded system prompt, rendered the way the run renders it. Resolved
-  dynamically so this namespace stays loadable without SCI on the classpath;
-  the bounded lane's own test namespace exercises it with a live binding too."
-  [binding]
-  ((requiring-resolve 'samizdat.evaluator/trusted-orientation) binding))
-
-(deftest trusted-orientation-describes-exactly-the-real-surface
-  (let [b develop-binding
-        s (surface/of-binding b)
-        text (orientation b)]
-    (testing "every top-level bounded tool is documented"
-      (doseq [t (:top-level s)]
-        (is (str/includes? text t) (str "orientation omits " t))))
-
-    (testing "no unavailable top-level tool is documented"
-      (is (empty? (surface/unavailable-mentions s ordinary-tool-universe text))
-          "the trusted orientation must not name a tool the binding lacks"))
-
-    (testing "the tool-call envelope is documented"
-      (is (str/includes? text "```tool-call"))
-      (is (str/includes? text "\"name\""))
-      (is (str/includes? text "\"args\"")))
-
-    (testing "semantic operations are marked as inside-eval, not top-level"
-      (is (re-find #"(?i)only inside eval" text))
-      (is (str/includes? text "RIGHT:"))
-      (is (str/includes? text "WRONG:"))
-      (doseq [op (:operation-names s)]
-        (is (str/includes? text op) (str "orientation omits " op))))
-
-    (testing "the anchored mutation is the advertised default"
-      (is (str/includes? text "old-text"))
-      (is (str/includes? text "new-text")))))
-
-(deftest orientation-narrows-with-the-binding
-  (let [text (orientation read-binding)]
-    (is (not (str/includes? text "project/edit"))
-        "a read-only binding must not be told about a mutation it cannot make")
-    (is (str/includes? text "project/read"))))
+;; C and D — the trusted orientation's own assertions — live in
+;; samizdat.evaluator-test, because rendering it requires the pinned bounded
+;; runtime and this namespace must stay loadable with no SCI on the classpath.
 
 ;; ═══════════════════════════════════════════════════════════════════════════
 ;; K. Repeated unchanged observation, derived from receipts.

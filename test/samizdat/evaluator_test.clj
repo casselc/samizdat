@@ -29,6 +29,8 @@
             [samizdat.store.evaluator :as store]
             [samizdat.store.inference :as inference]
             [samizdat.store.journal :as journal]
+            [samizdat.agent.surface :as surface]
+            [samizdat.agent.tools :as tools]
             [samizdat.store.runs :as runs]
             [samizdat.workflow :as workflow]))
 
@@ -1677,3 +1679,52 @@
             (is (= (digest-of "one") (:digest made)))
             (is (= (digest-of "two") (:digest whole)))
             (is (= "two" (file-text (str root "/fresh.md"))))))))))
+
+
+;; ─── M4 attempt 2, gate items C and D: the trusted orientation ─────────────
+
+(deftest trusted-orientation-describes-exactly-the-real-surface
+  (when bounded?
+    (let [{:keys [bind!]} (evaluator-api)
+          orientation (requiring-resolve 'samizdat.evaluator/trusted-orientation)
+          universe (vec (tools/tool-names))]
+      (with-root [root conn]
+        (seed-project! root)
+        (let [b (bind! root "orientation" {:profile :agent/project-develop})
+              s (surface/of-binding b)
+              text (orientation b)]
+          (testing "every top-level bounded tool is documented"
+            (doseq [t (:top-level s)]
+              (is (str/includes? text t) (str "orientation omits " t))))
+
+          (testing "no unavailable top-level tool is documented"
+            (is (empty? (surface/unavailable-mentions s universe text))
+                "the trusted orientation must not name a tool the binding lacks"))
+
+          (testing "the tool-call envelope is documented"
+            (is (str/includes? text "```tool-call"))
+            (is (str/includes? text "\"name\""))
+            (is (str/includes? text "\"args\"")))
+
+          (testing "semantic operations are marked inside-eval, not top-level"
+            (is (re-find #"(?i)only inside eval" text))
+            (is (str/includes? text "RIGHT:"))
+            (is (str/includes? text "WRONG:"))
+            (doseq [op (:operation-names s)]
+              (is (str/includes? text op) (str "orientation omits " op))))
+
+          (testing "the anchored mutation is the advertised default"
+            (is (str/includes? text "old-text"))
+            (is (str/includes? text "new-text"))))))))
+
+(deftest trusted-orientation-narrows-with-the-binding
+  (when bounded?
+    (let [{:keys [bind!]} (evaluator-api)
+          orientation (requiring-resolve 'samizdat.evaluator/trusted-orientation)]
+      (with-root [root conn]
+        (seed-project! root)
+        (let [text (orientation (bind! root "orientation-read"
+                                       {:profile :agent/project-read}))]
+          (is (not (str/includes? text "project/edit"))
+              "a read-only binding must not be told about a mutation it lacks")
+          (is (str/includes? text "project/read")))))))
