@@ -279,6 +279,31 @@
                   tunes: widening it weakens the redirection downgrade, which
                   is a security control (see the secrets.clj note)."}}
 
+   "src/samizdat/repl/guard.clj"
+   {:vocabulary {"(^|/)(src|vendor)/"
+                 "Which trees ARE the kernel, for the guard that refuses a
+                  supervisor's eval from patching them (karamazov-zrq.9). The
+                  same reason this whole namespace is in src/ and not in
+                  gates.edn, stated in its own docstring: a guard the guarded
+                  thing can edit is not a guard. resources/ is deliberately
+                  absent from the pattern, which is what keeps the supervisor's
+                  actual editing surface open."
+                 "samizdat"
+                 "How the guard recognises a HARNESS namespace in a
+                  `(require … :reload)` — the hot-load half of the same
+                  escape. Same reasoning; a run that could edit this could
+                  rename its way past it."}}
+
+   "src/samizdat/repl/route.clj"
+   {:vocabulary {"posix_spawn|Operation not permitted|Permission denied|EPERM"
+                 "What the KERNEL says when the sandbox refuses. Protocol
+                  strings from the OS, like the LSP header below — not a
+                  vocabulary anyone tunes, and widening it would only make
+                  ordinary failures read as policy refusals."
+                 "posix_spawn|process|sh\\b|exec"
+                 "Which half of the refusal message to show — the exec advice
+                  or the path advice. Same OS strings, same reasoning."}}
+
    "src/samizdat/lsp/client.clj"
    {:threshold {5000 "LSP request timeout."
                 20000 "LSP read timeout."}

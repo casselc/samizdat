@@ -76,6 +76,7 @@
             [samizdat.lexicon :as lexicon]
             [samizdat.agent.oversight :as oversight]
             [samizdat.repl :as repl]
+            [samizdat.repl.route :as route]
             [samizdat.store.artifacts :as artifacts]
             [samizdat.store.failures :as failures]
             [samizdat.store.interventions :as interventions]
@@ -874,7 +875,13 @@
         (when repl-session
           (try (repl/close-session repl-session)
                (catch Throwable e
-                 (log/warn "closing the run's eval session failed:" (ex-message e)))))))))
+                 (log/warn "closing the run's eval session failed:" (ex-message e)))))
+        ;; And the project image, which is a PROCESS rather than a namespace:
+        ;; closing the session leaves it running, holding a port and a sandbox
+        ;; for the life of the harness.
+        (try (route/release! (:root ctx))
+             (catch Throwable e
+               (log/warn "stopping the project image failed:" (ex-message e))))))))
 
 (defn run!
   "Run a beam to completion.

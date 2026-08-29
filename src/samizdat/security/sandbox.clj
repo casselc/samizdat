@@ -143,6 +143,13 @@
     ""
     ";; read denies"
     (rule "deny file-read*" deny-read)
+    ;; RE-ALLOWED AFTER THE DENIES, because SBPL is last-match-wins and a
+    ;; denied region may CONTAIN the project — a run whose root sits inside a
+    ;; denied tree would otherwise be unable to read its own files. This is the
+    ;; same allow-beats-deny shape sandbox-runtime documents for reads, and it
+    ;; is what makes it safe to deny a whole directory without first proving
+    ;; the project is not under it.
+    (rule "allow file-read*" (cons project-root scratch-paths))
     ""
     ";; exec"
     "(deny process-exec*)"

@@ -292,11 +292,23 @@
    ["which **" :allow] ["type **" :allow] ["cat **" :allow] ["head **" :allow]
    ["tail **" :allow] ["wc **" :allow] ["sort **" :allow] ["uniq **" :allow]
    ["cut **" :allow] ["diff **" :allow] ["grep **" :allow] ["rg **" :allow]
-   ;; sed and awk sit with the other text tools rather than with the mutators:
-   ;; `sed -i` does write, but so do `mv`, `cp`, `touch` and `chmod` below it,
-   ;; and the agent already has an unrestricted `write_file`. Refusing them
-   ;; protected nothing and cost a turn every time a run reached for the most
-   ;; ordinary way to read part of a file.
+   ;; sed and awk sit with the other text tools rather than with the mutators
+   ;; because refusing them cost a turn every time a run reached for the most
+   ;; ordinary way to read part of a file, and `sed -n` is a read.
+   ;;
+   ;; THE JUSTIFICATION THAT USED TO BE HERE WAS FALSE, and it is worth saying
+   ;; so rather than replacing it quietly. It read "the agent already has an
+   ;; unrestricted write_file", which was never true: write_file is confined to
+   ;; the project root (files/resolve-under-root), and eval — the other thing
+   ;; that could once write anywhere — is confined too now (karamazov-zrq). An
+   ;; argument of the form "this is open anyway" outlived the two things that
+   ;; made it true, which is exactly how a hole survives a review.
+   ;;
+   ;; What is actually true: `sed -i` here CAN write outside the project root,
+   ;; and nothing above catches it unless the path is in protected-paths. That
+   ;; is a real gap, accepted for the read case's sake and written down instead
+   ;; of dressed up. Narrowing it means splitting the read and write forms of
+   ;; these heads, which the classifier cannot do today.
    ["sed **" :allow] ["awk **" :allow]
    ["find **" :allow] ["file **" :allow] ["stat **" :allow] ["env" :allow]
    ;; `magick` reads an image and reports on it — a histogram, the dimensions,
@@ -308,10 +320,11 @@
    ;; to it that a frame is not blank — and "the process exited 0" is not
    ;; evidence that anything was drawn.
    ;;
-   ;; ImageMagick can also WRITE, and this allows that. Same trade already
-   ;; made for sed/awk/mv/cp above: the agent has an unrestricted write_file,
-   ;; so refusing the write half protects nothing and costs a turn every time
-   ;; a run reaches for the ordinary way to look at a picture.
+   ;; ImageMagick can also WRITE, and this allows that — the same accepted gap
+   ;; as sed/awk above, and on the same terms: it is allowed for the read case,
+   ;; the write half is not separately gated, and that is a cost rather than a
+   ;; non-issue. It is NOT justified by write_file being unrestricted, which it
+   ;; never was.
    ["magick **" :allow] ["identify **" :allow]
    ["date **" :allow] ["whoami" :allow] ["hostname" :allow]
    ;; benign shell builtins

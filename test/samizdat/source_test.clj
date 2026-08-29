@@ -153,8 +153,15 @@
 ;; --- the eval path, which is why this namespace exists ------------------------
 
 (deftest eval-repairs-and-diagnoses-like-every-other-path
+  ;; :role :supervisor keeps this in the HARNESS image, which is what these
+  ;; assertions are about — the syntax gate runs before routing either way, but
+  ;; a project-image eval would spawn a subprocess for what is a unit test of
+  ;; string repair. Since karamazov-zrq the eval tool's image depends on the
+  ;; ctx's role, and a ctx carrying neither role nor root is now refused
+  ;; outright rather than confined to nothing.
   (let [run (fn [code]
               (base/run-tool {:branch {:id "B1"} :tool-name "eval"
+                              :role :supervisor
                               :args {:code code}}))]
     (testing "a dropped trailing closer is repaired and the form runs"
       (let [r (run "(+ 1 2")]
@@ -204,7 +211,11 @@
   ;; nil but NOT on "", so an exception with a blank message produced a
   ;; completely empty diagnosis. An unactionable message is the failure mode
   ;; this whole area has been about.
+  ;; :role :supervisor so this actually EVALUATES. Without it the ctx carries
+  ;; no root, the router refuses, and the assertion below passes on the
+  ;; refusal's text instead of on the blank-message diagnosis it is about.
   (let [r (base/run-tool {:branch {:id "B1"} :tool-name "eval"
+                          :role :supervisor
                           :args {:code "(throw (ex-info \"\" {}))"}})]
     (is (= :failure (:category r)))
     (is (re-find #"\S" (str/replace (:result r) #"(?i)eval error:" ""))

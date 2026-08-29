@@ -100,6 +100,11 @@
   [root]
   (:mode (eval-settings (when root (project-config root)))))
 
+(defn eval-sandbox
+  "The sandbox backend setting for the project at `root` (`:auto` or `:none`)."
+  [root]
+  (:sandbox (eval-settings (when root (project-config root)))))
+
 (def harness-image-roles
   "The roles that keep the LIVE harness image under `:mode :project`.
 

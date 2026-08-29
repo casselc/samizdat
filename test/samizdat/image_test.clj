@@ -28,6 +28,7 @@
             [clojure.test :refer [deftest testing is]]
             [jolt.fs :as fs]
             [samizdat.repl.image :as image]
+            [samizdat.repl.route :as route]
             [samizdat.security.sandbox :as sandbox]))
 
 ;; --- pure -------------------------------------------------------------------
@@ -63,8 +64,12 @@
         escape (str home "/SAMIZDAT-IMAGE-TEST-ESCAPE.txt")
         im (image/start! {:root root
                           :backend (sandbox/backend-for :auto (System/getProperty "os.name"))
-                          :sandbox-spec {:deny-read [(str home "/.ssh") "/etc"]
-                                         :exec-roots ["/opt/homebrew" "/usr/bin"]}})]
+                          :sandbox-spec {:deny-read [(str home "/.ssh") "/etc"
+                                                    (str (fs/cwd))]
+                                         ;; The runtime's own directory. /usr/bin
+                                         ;; here would allow /usr/bin/env and
+                                         ;; friends — see route/sandbox-spec.
+                                         :exec-roots (route/runtime-exec-roots)}})]
     (try
       (is (some? im) "the image did not come up at all")
       (when im
@@ -109,7 +114,8 @@
   (let [root (project!)
         im (image/start! {:root root
                           :backend (sandbox/backend-for :auto (System/getProperty "os.name"))
-                          :sandbox-spec {:deny-read [] :exec-roots ["/opt/homebrew" "/usr/bin"]}})]
+                          :sandbox-spec {:deny-read []
+                                         :exec-roots (route/runtime-exec-roots)}})]
     (is (some? im))
     (when im
       (is (image/alive? im))
@@ -124,3 +130,44 @@
   ;; start! returns nil on failure and callers tear down in a finally, so this
   ;; is the common path on a bad profile — it must not mask the real error.
   (is (nil? (image/stop! nil))))
+
+;; --- one connection per eval ------------------------------------------------
+
+(deftest concurrent-evals-do-not-read-each-others-replies
+  ;; The image is shared by every branch and the beam runs branches in
+  ;; PARALLEL. With one transport for the image they interleaved: send is
+  ;; locked internally but recv is not, and both readers share the transport's
+  ;; buffer atom, so a branch could drain the reply meant for another. Two
+  ;; competing branches reading each other's results is the exact thing branch
+  ;; isolation exists to prevent.
+  (let [root (project!)
+        im (image/start! {:root root
+                          :backend (sandbox/backend-for :auto (System/getProperty "os.name"))
+                          :sandbox-spec {:deny-read []
+                                         :exec-roots (route/runtime-exec-roots)}})]
+    (try
+      (is (some? im))
+      (when im
+        (let [rs (mapv deref
+                       (doall (for [i (range 8)]
+                                (future [i (:value (image/eval-in im (str "(do (Thread/sleep 40) (* " i " 100))")))]))))]
+          (is (every? (fn [[i v]] (= (str (* i 100)) v)) rs)
+              (str "a concurrent eval read another's reply: " (pr-str rs)))))
+      (finally (image/stop! im)))))
+
+(deftest an-abandoned-eval-does-not-poison-the-next-one
+  ;; route/eval-for bounds an eval by abandoning the future blocked in recv.
+  ;; With a shared transport, closing the socket under it freed the fd for
+  ;; reuse and the abandoned reader ate the NEXT image's replies — measured:
+  ;; after one timeout every later eval timed out too and the image never came
+  ;; back. Per-eval connections make the abandoned one nobody else's problem.
+  (let [root (project!)
+        ctx {:root root :role :implementor}]
+    (try
+      (is (= "3" (:value (route/eval-for ctx "(+ 1 2)" nil 25000))))
+      (let [t (route/eval-for ctx "(loop [] (recur))" nil 3000)]
+        (is (:timeout? t))
+        (is (= "timeout" (:error-type t))))
+      (is (= "42" (:value (route/eval-for ctx "(+ 40 2)" nil 25000)))
+          "the image never recovered from a timed-out eval")
+      (finally (route/release! root)))))

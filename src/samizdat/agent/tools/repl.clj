@@ -42,6 +42,7 @@
             [samizdat.agent.tools.base :as base]
             [samizdat.prompt :as prompt]
             [samizdat.repl :as repl]
+            [samizdat.repl.route :as route]
             [samizdat.security.secrets :as secrets]))
 
 (defn- scrubbed
@@ -60,7 +61,11 @@
   (let [timeout (some-> (base/arg ctx :timeout-ms) str str/trim not-empty parse-long)
         session (or (:repl-session branch) repl-session)
         prefix (if note (str "[harness] " note "\n") "")
-        r (repl/eval-code code session timeout)]
+        ;; WHICH IMAGE, decided per role by the operator's config. Everything
+        ;; below is unchanged: route/eval-for answers in the same shape
+        ;; repl/eval-code always did, so the redaction boundary, the syntax
+        ;; gate and the timeout flag all still apply exactly as they did.
+        r (route/eval-for ctx code session timeout)]
     (if (:ok r)
       (base/ok branch (scrubbed (str prefix "=> " (:value r)
                                      (when (seq (:out r)) (str "\n" (:out r))))))
@@ -125,7 +130,7 @@
 (defmethod base/run-tool "doc" [{:keys [branch] :as ctx}]
   (if-let [m (base/missing ctx :symbol)]
     (base/malformed branch m)
-    (let [d (repl/doc-sym (str (base/arg ctx :symbol)))]
+    (let [d (route/doc-for ctx (str (base/arg ctx :symbol)))]
       (if (:not-found d)
         (base/malformed branch (str "No var " (base/arg ctx :symbol) " is loaded."))
         (base/ok branch (str (:name d) "\n" (pr-str (:arglists d)) "\n\n" (:doc d)))))))
@@ -133,7 +138,7 @@
 (defmethod base/run-tool "complete" [{:keys [branch] :as ctx}]
   (if-let [m (base/missing ctx :prefix)]
     (base/malformed branch m)
-    (let [ms (repl/complete (str (base/arg ctx :prefix)))]
+    (let [ms (route/complete-for ctx (str (base/arg ctx :prefix)))]
       (base/ok branch (if (seq ms)
                    (str/join "\n" (take 50 ms))
                    (str "No symbols match " (base/arg ctx :prefix) "."))))))

@@ -138,7 +138,13 @@
 
   Every one of these is covered by the dispatch seam's redaction. The two
   above `:host-bytes` need MORE than that, and name what supplies it."
-  {"eval"        {:reach :in-process     :also "tools/repl scrubbed wrapper"}
+  {;; BOTH, and which one depends on the role (karamazov-zrq). The supervisor
+   ;; still evaluates in the harness image; every other role gets a sandboxed
+   ;; `jolt nrepl-server` subprocess rooted at the project. The subprocess half
+   ;; is why :env matters here — image/start! scrubs before spawning, because
+   ;; the rule above says output redaction alone is not enough for a tool that
+   ;; spawns.
+   "eval"        {:reach :in-process     :also "tools/repl scrubbed wrapper; repl.image/start! scrub-env before spawn (project image)"}
    "shell"       {:reach :spawns-process :also "policy/run-shell: scrub-env before spawn"}
 
    ;; The two READ tools. Wider than the write tools by one deliberate step:

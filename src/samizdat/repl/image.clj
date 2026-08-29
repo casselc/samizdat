@@ -51,7 +51,8 @@
             [nrepl.transport :as transport]
             [samizdat.agent.gates :as gates]
             [samizdat.prompt :as prompt]
-            [samizdat.security.sandbox :as sandbox]))
+            [samizdat.security.sandbox :as sandbox]
+            [samizdat.security.secrets :as secrets]))
 
 (defn connect-timeout-ms
   "How long to wait for the image's nREPL port to answer. gates.edn
@@ -110,13 +111,28 @@
                           :project-root root
                           :scratch-paths [scratch])))
     (let [argv (spawn-argv backend profile port)
-          proc (process/process argv {:dir (str root)})]
+          ;; THE CHILD SEES ONLY A SCRUBBED ENVIRONMENT, the same one the shell
+          ;; tool's subprocess gets. boundary-test's security map records the
+          ;; rule this is obeying: a tool whose reach is :spawns-process "must
+          ;; not RECEIVE secrets in the first place — output redaction is not
+          ;; enough on its own". eval used to be :in-process for every role and
+          ;; so was covered by the redaction wrapper alone; for every role but
+          ;; the supervisor it now spawns, and inheriting the harness's
+          ;; environment would have handed the model every provider key inside
+          ;; a process that can also write files into the project.
+          proc (process/process argv {:dir (str root)
+                                      :env (secrets/scrub-env
+                                            (into {} (System/getenv)))})]
       (if (await-port! port (connect-timeout-ms))
         (do (log/info "project image up on" port "rooted at" root
                       (if (= :none backend) "(unsandboxed)" (str "under " (name backend))))
             {:proc proc :port port :root (str root) :backend backend
              :profile profile :scratch scratch
-             :transport (transport/connect "127.0.0.1" port)})
+             ;; Namespaces already created in this image. See eval-in.
+             ;; No shared transport: eval-in connects per call, because a
+             ;; shared one crossed concurrent branches' replies and let a
+             ;; timed-out eval poison every later one.
+             :sessions (atom #{})})
         (do (log/error "project image did not come up on" port
                        "— profile at" profile)
             (try (process/destroy-tree proc) (catch Exception _ nil))
@@ -150,9 +166,11 @@
   to actually die, drop the profile. Idempotent and never throws — teardown
   runs on paths that are already failing, and a teardown that throws loses the
   original error."
-  [{:keys [proc transport profile scratch] :as image}]
+  [{:keys [proc profile scratch] :as image}]
   (when image
-    (try (some-> transport transport/close) (catch Exception _ nil))
+    ;; The process first. Connections are per-eval and owned by their caller;
+    ;; killing the image EOFs any that are still open, including one an
+    ;; abandoned timeout future is blocked on.
     (try (some-> proc process/destroy-tree) (catch Exception _ nil))
     (when (and proc (not (reaped? proc)))
       ;; Say so rather than leaking quietly. A survivor holds a port and a
@@ -184,20 +202,66 @@
             (update :err #(str/join "" %)))
         (recur acc)))))
 
+(defn- ensure-session!
+  "Make `ns-sym` exist in the image, once, with clojure.core referred into it.
+
+  BRANCH ISOLATION IS OURS TO KEEP, not nREPL's. jolt's nREPL hands out
+  distinct session ids from `clone`, but they share one evaluation namespace —
+  measured: a def made under one session was readable from the other. Branches
+  are competing approaches and a def one makes after a fork must not appear in
+  the other (`repl/fork-session` exists for exactly that), so isolation here is
+  a namespace per session, which the eval op's `ns` key does honour."
+  [{:keys [transport sessions]} ns-sym]
+  (when (and ns-sym sessions (not (contains? @sessions ns-sym)))
+    (transport/send transport
+                    {"op" "eval"
+                     "code" (str "(do (create-ns '" ns-sym ")"
+                                 " (binding [*ns* (the-ns '" ns-sym ")] (refer-clojure))"
+                                 " :ok)")})
+    (loop [] (when-not (some #{"done"} (get (transport/recv transport) "status")) (recur)))
+    (swap! sessions conj ns-sym)))
+
 (defn eval-in
-  "Evaluate `code` in the image. Same result shape as `samizdat.repl/eval-code`
-  so the caller cannot tell which image answered except by asking."
-  [{:keys [transport]} code]
-  (try
-    (transport/send transport {"op" "eval" "code" (str code)})
-    (let [{:keys [value out err]} (collect transport)]
-      (if (str/blank? err)
-        {:ok true :value value :out out}
-        {:ok false :error err :out out}))
-    (catch Exception e
-      {:ok false
-       :error (prompt/render "image-down" {:detail (ex-message e)})
-       :error-type "image-down"})))
+  "Evaluate `code` in the image, in `session`'s namespace when one is given.
+  Same result shape as `samizdat.repl/eval-code` so the caller cannot tell
+  which image answered except by asking.
+
+  ONE CONNECTION PER EVAL, and both reasons it has to be are bugs that a
+  shared one actually produced:
+
+  - CONCURRENT BRANCHES CROSSED WIRES. The beam runs branches in parallel and
+    they share an image, so two `send`/`recv` pairs interleaved on one socket
+    and each could drain the other's reply. Competing branches reading each
+    other's results is the precise thing branch isolation exists to prevent.
+  - A TIMED-OUT EVAL POISONED THE NEXT ONE. `route/eval-for` bounds an eval by
+    abandoning the future that is blocked in `recv`; closing the shared socket
+    under it freed the fd for reuse, and the abandoned reader then ate the
+    replies meant for the new image. Measured: after one timeout, every later
+    eval timed out too, and the image never recovered.
+
+  Namespace state lives in the IMAGE, not the connection — isolation is the
+  `ns` key, not an nREPL session — so a fresh socket per call costs a loopback
+  connect and no semantics."
+  ([im code] (eval-in im code nil))
+  ([{:keys [port] :as im} code session]
+   (let [t (try (transport/connect "127.0.0.1" port) (catch Exception _ nil))]
+     (if-not t
+       {:ok false :error-type "image-down"
+        :error (prompt/render "image-down" {:detail "the connection was refused"})}
+       (try
+         (ensure-session! (assoc im :transport t) session)
+         (transport/send t (cond-> {"op" "eval" "code" (str code)}
+                             session (assoc "ns" (str session))))
+         (let [{:keys [value out err]} (collect t)]
+           (if (str/blank? err)
+             {:ok true :value value :out out}
+             {:ok false :error err :out out}))
+         (catch Exception e
+           {:ok false
+            :error (prompt/render "image-down" {:detail (ex-message e)})
+            :error-type "image-down"})
+         (finally
+           (try (transport/close t) (catch Exception _ nil))))))))
 
 (defn alive?
   [{:keys [proc]}]

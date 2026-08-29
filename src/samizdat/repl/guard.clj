@@ -84,6 +84,52 @@
   (boolean (some #(and (symbol? %) (contains? terminators %))
                  (executed-subforms form))))
 
+(def kernel-writers
+  "Calls that put bytes on disk. Paired with a `src/` path below, this is a
+  kernel-source write."
+  '#{spit clojure.java.io/copy io/copy write-lines fs/write-lines
+     jolt.fs/spit fs/spit})
+
+(def ^:private kernel-path-re
+  "A string argument naming harness SOURCE rather than userspace.
+
+  `src/` and `vendor/` only. resources/ is deliberately absent: cells,
+  manifests and prompts ARE the supervisor's editing surface, and refusing
+  those would refuse the whole point of the role."
+  #"(^|/)(src|vendor)/")
+
+(defn kernel-write?
+  "Whether `form` writes to harness source, or hot-loads a harness namespace
+  back into the running image.
+
+  THE SUPERVISOR IS THE ONE ROLE STILL IN THE LIVE IMAGE (karamazov-zrq), so
+  it is the one role that can still do what run a3ba69bb's S2 branch did: spit
+  a patched `src/` file and `(require … :reload)` it, putting model-written
+  kernel code into the running harness with no checkpoint, no validate, no
+  soak, no userspace version, and nothing for rollback to see.
+
+  A STATIC READ, and the same admission `terminating-form?` makes about
+  itself: it catches the reach, not a determined adversary, who has `resolve`
+  and a hundred other routes. What it buys is that the ordinary move — the one
+  actually observed — stops being available by accident, and the supported
+  route is named instead."
+  [form]
+  (let [executed (executed-subforms form)
+        calls (filter list? executed)
+        writes-src? (some (fn [x]
+                            (and (seq x)
+                                 (symbol? (first x))
+                                 (contains? kernel-writers (first x))
+                                 (some #(and (string? %) (re-find kernel-path-re %)) x)))
+                          calls)
+        reloads-harness? (some (fn [x]
+                                 (and (seq x)
+                                      (= 'require (first x))
+                                      (some #{:reload :reload-all} x)
+                                      (some #(re-find #"samizdat" (str %)) x)))
+                               calls)]
+    (boolean (or writes-src? reloads-harness?))))
+
 (defn entry-point-call?
   "Whether `form` calls a `-main`.
 
