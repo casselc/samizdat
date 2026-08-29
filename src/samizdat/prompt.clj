@@ -49,6 +49,7 @@
    "directive-refused"
    "directive-rejected"
    "emergency-review"
+   "eval-calls-main"
    "eval-error"
    "eval-terminates-process"
    "eval-syntax"

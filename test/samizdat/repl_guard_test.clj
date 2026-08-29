@@ -23,11 +23,50 @@
     (is (guard/terminating-form? (forms "(.halt (Runtime/getRuntime) 0)"))))
   (testing "nesting does not hide it: the walk is over the read form as data"
     (is (guard/terminating-form? (forms "(do (println :a) (when true (System/exit 2)))")))
-    (is (guard/terminating-form? (forms "(defn boom [] (System/exit 0))"))))
+    (is (guard/terminating-form? (forms "(let [n 0] (System/exit n))"))))
   (testing "a later form is refused even though an earlier one is fine — the
             forms share a process, so form 1 having run does not make form 2's
             exit survivable"
     (is (guard/terminating-form? (forms "(+ 1 2)\n(System/exit 0)")))))
+
+(deftest defining-a-thing-that-exits-is-not-exiting
+  ;; NOT ACADEMIC. Every Clojure test runner ends (System/exit 0); this
+  ;; project's deps.edn requires the agent to write one; and the eval tool's
+  ;; whole pitch is to iterate on a form before writing it to a file. A guard
+  ;; that refuses the work it exists to protect gets worked around, and then
+  ;; protects nothing.
+  (is (not (guard/terminating-form? (forms "(defn -main [& args] (System/exit 0))"))))
+  (is (not (guard/terminating-form? (forms "(defn -main [] (when bad (System/exit 1)) (System/exit 0))"))))
+  (is (not (guard/terminating-form? (forms "(fn [] (System/exit 0))"))))
+  (testing "but the same call outside a definition body still runs, and is
+            still refused"
+    (is (guard/terminating-form? (forms "(do (println :a) (System/exit 2))")))))
+
+(deftest calling-a-main-is-refused-and-writing-one-is-not
+  ;; THE ROUTE THE SYMBOL CHECK CANNOT SEE. The exit is inside the callee, one
+  ;; file away, in code the agent wrote itself minutes earlier — and the
+  ;; harness's own eval guidance invites requiring and exercising the project's
+  ;; namespaces, which walks it straight in.
+  (is (guard/entry-point-call? (forms "(flight.test-runner/-main)")))
+  (is (guard/entry-point-call? (forms "(do (require 'flight.main) (flight.main/-main))")))
+  (is (= ["flight.main/-main"] (guard/main-calls (forms "(flight.main/-main \"a\")")))
+      "named as written, so the refusal points at the one it reached for")
+  (testing "HEAD POSITION ONLY — that is the difference between calling one and
+            writing one, and writing one is required of this project"
+    (is (not (guard/entry-point-call? (forms "(defn -main [] 1)"))))
+    (is (not (guard/entry-point-call? (forms "(defn -main [& args] (System/exit 0))")))))
+  (testing "and the alternative it names actually works"
+    (is (not (guard/entry-point-call?
+              (forms "(clojure.test/run-tests 'flight.mechanics-test)"))))))
+
+(deftest the-main-refusal-names-both-things-that-do-work
+  (let [r (repl/eval-code "(flight.test-runner/-main)")]
+    (is (false? (:ok r)))
+    (is (re-find #"flight\.test-runner/-main" (str (:error r))))
+    (is (re-find #"jolt -M:test" (str (:error r)))
+        "the child-process route, where an exit code is the point")
+    (is (re-find #"run-tests" (str (:error r)))
+        "and the in-eval route, skipping the runner that wraps them")))
 
 (deftest ordinary-evals-are-untouched
   ;; The guard costs the agent nothing on the work it actually does. System is

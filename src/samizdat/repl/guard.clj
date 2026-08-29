@@ -48,26 +48,86 @@
   '#{System/exit java.lang.System/exit Runtime/getRuntime java.lang.Runtime/getRuntime
      .halt .exit})
 
+(def ^:private definition-heads
+  "Forms whose body does not run when the form is evaluated."
+  '#{defn defn- fn fn* defmacro definline})
+
+(defn- executed-subforms
+  "`form`'s subforms, minus the bodies of definitions.
+
+  DEFINING A THING THAT EXITS IS NOT EXITING, and the difference is not
+  academic here: every Clojure test runner ends `(System/exit 0)`, this
+  project's deps.edn requires the agent to write one, and the eval tool's whole
+  pitch is to iterate on a form before writing it to a file. A guard that
+  refuses `(defn -main [] (System/exit 0))` refuses the work it exists to
+  protect, and a guard that fires on legitimate work gets worked around."
+  [form]
+  (tree-seq (fn [x]
+              (and (coll? x)
+                   (not (and (seq? x)
+                             (symbol? (first x))
+                             (definition-heads (symbol (name (first x))))))))
+            seq
+            form))
+
 (defn terminating-form?
-  "Whether `form` contains a call that would end the process.
+  "Whether evaluating `form` would end the process.
 
   Walks the READ form as data, so it sees through nesting, threading macros and
-  quoting alike. `.exit`/`.halt` are matched as bare symbols: a false positive
-  costs the agent one refused eval and a message telling it exactly what to do,
-  and a false negative costs the run."
+  quoting alike — but not into definition bodies, which do not run. What is
+  left is what this eval actually executes.
+
+  `.exit`/`.halt` are matched as bare symbols: a false positive costs the agent
+  one refused eval and a message telling it exactly what to do, and a false
+  negative costs the run."
   [form]
-  (boolean (some #(contains? terminators %)
-                 (filter symbol? (tree-seq coll? seq form)))))
+  (boolean (some #(and (symbol? %) (contains? terminators %))
+                 (executed-subforms form))))
+
+(defn entry-point-call?
+  "Whether `form` calls a `-main`.
+
+  THE ROUTE THE SYMBOL CHECK CANNOT SEE, and the harness's own guidance walks
+  the model straight into it: the eval tool invites requiring and exercising
+  the project's namespaces, and a project's test runner conventionally ends
+  `(System/exit 0)`. `(flight.test-runner/-main)` contains no terminator to
+  find — the exit is inside the callee, one file away, in code the agent wrote
+  itself minutes earlier.
+
+  `-main` BY NAME, because the name is the convention that means `process entry
+  point` and process entry points end processes. A `-main` that does not exit
+  is refused too, and that costs one eval and a message naming the two things
+  that do work.
+
+  IN HEAD POSITION ONLY, which is the difference between calling one and
+  writing one. `(defn -main [] …)` must stay allowed: the eval tool's whole
+  pitch is to iterate on a form before writing it to a file, and this project's
+  deps.edn REQUIRES the agent to define a `-main`. Refusing that would refuse
+  the recommended workflow — a guard that fires on the work it is meant to
+  protect gets worked around, and then protects nothing."
+  [form]
+  (boolean (some #(and (seq? %) (symbol? (first %)) (= "-main" (name (first %))))
+                 (tree-seq coll? seq form))))
 
 (defn offending
   "The terminator symbols in `form`, sorted, for the refusal to name them."
   [form]
-  (->> (tree-seq coll? seq form)
+  (->> (executed-subforms form)
        (filter symbol?)
        (filter terminators)
        distinct
        sort
        (map str)))
+
+(defn main-calls
+  "The `-main` symbols CALLED in `form`, qualified as written, for the refusal
+  to name the one the agent actually reached for."
+  [form]
+  (->> (tree-seq coll? seq form)
+       (filter #(and (seq? %) (symbol? (first %)) (= "-main" (name (first %)))))
+       (map (comp str first))
+       distinct
+       sort))
 
 (defn exit-note
   "What to record when the process ends, as DATA rather than a sentence.

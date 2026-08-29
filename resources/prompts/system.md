@@ -111,6 +111,14 @@ eval({code, timeout_ms?})
     require and exercise the project's own namespaces here too.
     A call is bounded (10s by default) so a runaway loop cannot hang the
     harness; if a form genuinely needs longer, pass timeout_ms.
+    LIVE means you share this process. The timeout covers a slow form, not a
+    form that ends the process: calling a `-main`, or anything that reaches
+    `System/exit`, kills the harness mid-run and takes every other branch with
+    it. A project's test runner almost always exits at the end, which is right
+    for a subprocess and fatal here. Run the project's suite with the shell
+    (`jolt -M:test`) — that is a child process and its exit code is the point.
+    In eval, call the test namespaces directly (`(clojure.test/run-tests
+    'flight.mechanics-test)`) rather than the runner that wraps them.
 doc({symbol})
     The arglists and docstring of a var, e.g. doc({symbol: "samizdat.lisp/balance"}).
 complete({prefix})

@@ -246,6 +246,15 @@
                                                     {:calls (str/join " and "
                                                                       (guard/offending forms))})
                                                    {:samizdat/refused :process-exit})))
+                                 ;; And the route the symbol check cannot see:
+                                 ;; the exit is inside the callee, one file
+                                 ;; away, in code the agent wrote itself.
+                                 (when (guard/entry-point-call? forms)
+                                   (throw (ex-info (prompt/render
+                                                    "eval-calls-main"
+                                                    {:call (str/join " and "
+                                                                     (guard/main-calls forms))})
+                                                   {:samizdat/refused :entry-point})))
                                  (reduce (fn [_ form] (eval form)) nil forms)))]
                    {:ok true :value (pr-str value) :out (str out)})
                  (catch Throwable e
