@@ -1,7 +1,7 @@
 (ns mycelium.middleware
   "Ring middleware and handlers for bridging HTTP requests to Mycelium workflows."
   (:require [malli.core :as m]
-            [maestro.core :as fsm]))
+            [mycelium.execution :as execution]))
 
 (defn html-response
   "Standard HTML response from workflow result. Extracts :html key."
@@ -45,15 +45,15 @@
 
 (defn- run-compiled
   "Runs a pre-compiled workflow. Inlined to avoid cyclic dependency on mycelium.core."
-  [{:keys [compiled-fsm input-schema-raw input-schema-compiled]} resources initial-data]
+  [{:keys [input-schema-raw input-schema-compiled] :as compiled}
+   resources initial-data]
   (if-let [input-error (when input-schema-compiled
                          (when-let [explanation (m/explain input-schema-compiled initial-data)]
                            {:schema input-schema-raw
                             :errors (:errors explanation)
                             :data   initial-data}))]
     {:mycelium/input-error input-error}
-    (let [result (fsm/run compiled-fsm resources {:data initial-data})]
-      (if (future? result) @result result))))
+    (execution/run-sync compiled resources {:data initial-data} :ring)))
 
 (defn workflow-handler
   "Creates a Ring handler from a pre-compiled workflow.
