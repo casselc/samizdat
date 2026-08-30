@@ -66,6 +66,7 @@
              [samizdat.agent.surface :as surface]
              [samizdat.prompt :as prompt]
              [samizdat.security.no-replace :as no-replace]
+             [samizdat.security.project-execution-provider :as pep]
              [samizdat.store.evaluator :as store]
              [samizdat.store.journal :as journal]))
 
@@ -880,22 +881,6 @@ ONE EVAL CAN DO THE WHOLE LOOP: inspect state, run the toolchain, read the struc
                 {:path rel :kind :file :bytes (alength content-bytes)
                  :digest (str "sha256:" (bytes-digest content-bytes))}))))))))
 
-(defn- execution-provider
-  "The selected project execution provider's Var, resolved dynamically.
-
-  Dynamic for the same reason the whole bounded lane is: this namespace loads
-  only where SCI is on the classpath, and the execution provider pulls in the
-  machine substrate. A binding without :project/run never touches it, and a
-  binding with it that cannot load it fails closed at the call — never by
-  falling through to anything that runs on the host."
-  [name]
-  (or (try (requiring-resolve
-            (symbol "samizdat.security.project-execution-provider" name))
-           (catch Throwable _ nil))
-      (fail! :execution-provider-unavailable
-             (message {:run-provider-unavailable true})
-             {:provider/fn name})))
-
 (defn- run-project-command
   "The (project/run argv options) semantics, run inside the operation's
   intent/outcome recording.
@@ -910,11 +895,20 @@ ONE EVAL CAN DO THE WHOLE LOOP: inspect state, run the toolchain, read the struc
   This function deliberately contains no policy: no argv inspection, no
   executable list, no path rule, no bound. Every one of those belongs to the
   execution environment, and a copy of one here would be a second place for
-  the boundary to be wrong."
+  the boundary to be wrong.
+
+  The provider is a STATIC require, not a runtime resolution. It was the
+  latter, on the reasoning that keeps SCI off the ordinary classpath — but
+  this namespace already loads only in the bounded lane (it requires
+  jolt.sandbox), so the provider is no more optional here than the sandbox
+  is, and resolving it lazily bought nothing. What it cost was found by the
+  convergence smoke: the resolution ran on a branch worker thread, failed
+  there for reasons a swallowed exception could not report, and the model was
+  told its execution provider was unavailable in a process where it was
+  perfectly available. A dependency that must be present is better missing at
+  load than missing at the one call that needed it."
   [root argv options]
-  (let [validate! (execution-provider "validate-request")
-        run! (execution-provider "run")]
-    (run! root (validate! argv options))))
+  (pep/run root (pep/validate-request argv options)))
 
 (defn- operation-builders [context world-observer hook]
   (let [root (:context/root context)
