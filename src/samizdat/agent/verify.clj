@@ -61,31 +61,52 @@
         (when (and ns (re-matches (re-pattern (:ns-whitelist-regex c)) ns))
           ns)))))
 
+(defn focused-expr
+  "The -e expression that runs ONLY `nses` and exits non-zero on any failure
+  or error (jolt's bare -e does not exit non-zero on a failed assertion, so
+  the expression sets the code itself). Every namespace in it came through
+  ns-from-test-path's whitelist, so the expression genuinely has no single
+  quotes of its own (provenance R3-1).
+
+  Public because BOTH verification lanes derive from it — the ordinary lane
+  embeds it in the sh -c command (focused-cmd), the bounded lane appends it
+  to the sandboxed verifier's pinned argv (security.verification-env/
+  focused-argv) — so one derivation guarantees the two lanes verify the same
+  namespaces for the same changed files."
+  [nses]
+  (let [quoted (str/join " " (map #(str "(quote " % ")") nses))]
+    (str "(require (quote clojure.test) " quoted ")"
+         "(let [s (clojure.test/run-tests " quoted ")]"
+         "(clojure.core/println s)"
+         "(clojure.core/flush)"
+         "(java.lang.System/exit (if (clojure.core/pos? (+ (:fail s) (:error s))) 1 0)))")))
+
 (defn focused-cmd
   "A test command that runs ONLY the test namespaces among `changed`, with an
-  exit code that reflects pass/fail (jolt's bare -e does not exit non-zero on a
-  failed assertion, so the expression sets the code itself). nil when no test
-  namespace changed — the caller then falls back to the configured :verify-cmd.
-  The command shape is project data (:cmd-prefix)."
+  exit code that reflects pass/fail. nil when no test namespace changed — the
+  caller then falls back to the configured :verify-cmd. The command shape is
+  project data (:cmd-prefix)."
   [changed]
   (let [nses (->> changed (filter test-file?) (keep ns-from-test-path) distinct vec)]
     (when (seq nses)
-      (let [quoted (str/join " " (map #(str "(quote " % ")") nses))
-            expr (str "(require (quote clojure.test) " quoted ")"
-                      "(let [s (clojure.test/run-tests " quoted ")]"
-                      "(clojure.core/println s)"
-                      "(clojure.core/flush)"
-                      "(java.lang.System/exit (if (clojure.core/pos? (+ (:fail s) (:error s))) 1 0)))")]
-        ;; single-quote the whole -e expression for sh -c; every namespace in
-        ;; it came through ns-from-test-path's whitelist, so the expression
-        ;; genuinely has no single quotes of its own (provenance R3-1).
-        (str (:cmd-prefix (conventions)) expr "'")))))
+      ;; single-quote the whole -e expression for sh -c; every namespace in
+      ;; it came through ns-from-test-path's whitelist, so the expression
+      ;; genuinely has no single quotes of its own (provenance R3-1).
+      (str (:cmd-prefix (conventions)) (focused-expr nses) "'"))))
 
 (defn- tail
   "The last n non-blank lines of s — enough of a failure to act on without
   dragging the whole test log into the branch's context."
   [s n]
   (->> (str/split-lines (str s)) (remove str/blank?) (take-last n) (str/join "\n")))
+
+(defn tail-of
+  "The actionable tail of a verifier result's output, at the same context
+  budget the focused red rung uses. Public because the bounded lane's closure
+  gate renders its own red with the same shape."
+  [result]
+  (tail (:output result)
+        (:test-output-lines (gates/threshold :context-budget))))
 
 (defn verify-block
   "The pure ship decision. Returns nil when `done` may ship, or a block message
@@ -150,7 +171,12 @@
 
   Trust boundary (docs/RFCS/RFC-003-security-model.md): the child runs with the SCRUBBED process
   environment — never the parent's, which holds provider keys — and its output
-  is model-bound, so it passes the redaction boundary before it is returned."
+  is model-bound, so it passes the redaction boundary before it is returned.
+
+  The ORDINARY lane's runner, unchanged. The bounded lane no longer spawns
+  directly at all: its `done` verification runs inside the controller-owned
+  sandbox (samizdat.security.verification-env), which composes the verifier
+  argv from its own pinned authority over the same focused-expr derivation."
   [root cmd timeout-ms]
   (try
     (let [r (proc/run {:timeout-ms (or timeout-ms (gates/threshold :verify-timeout-ms))

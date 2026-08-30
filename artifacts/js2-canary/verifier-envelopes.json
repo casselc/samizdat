@@ -1,0 +1,97 @@
+{
+ "ship-verify": {
+  "ran": true,
+  "stage": "focused",
+  "green": true,
+  "timeout": false,
+  "blocked": false,
+  "closure-ran": true,
+  "closure-green": true,
+  "closure-timeout": false,
+  "closure-envelope": {
+   "version": 1,
+   "kind": "run",
+   "invocation-index": 2,
+   "attribution": {
+    "coordinate": "sha256:e3fd1b7d73e88ec4f88e482c61912524bd48acbbe6ed3cd319a4c4ca387fff2f",
+    "type": "bwrap-verification-env"
+   },
+   "input": {
+    "coordinate": "sha256:c5a35391029bb0c2abb3bf67eb58edec4ab358bb849234c91eae2f61dc794e2c"
+   },
+   "status": "completed",
+   "exit": 0,
+   "stdout": {
+    "text": "  [base-test] model-facing sentences still in src/: 140 across 36 files\n[gui.api] poller callback failed: boom\n\nRan 1630 tests. 6451 assertions passed, 0 failures, 0 errors.\n\n{:type :summary, :test 1630, :pass 6451, :fail 0, :error 0}\n",
+    "bytes": 235,
+    "truncated?": false
+   },
+   "stderr": {
+    "text": "WARN samizdat.agent.tools - tool done threw: Turn authority expired; refusing stale model effect\nWARN samizdat.agent.beam - branch B1 exceeded the turn deadline on turn 1\nWARN samizdat.agent.beam - branch B1 died on turn 1 : sleep interrupted\nINFO samizdat.agent.beam - distilled 1 finding(s) and 0 verdict(s) into memory\nWARN samizdat.agent.beam - branch B1 exceeded the turn deadline on turn 1\nINFO samizdat.security.controller - budget extension 63b27c84-296f-465c-aea4-2dd2a44ca7aa 5 -> 12 request raise-1\nINFO samizdat.security.controller - budget extension 053496d3-b905-4944-b364-c5738a49eebe 5 -> 9 request http-raise-1\nINFO samizdat.security.controller - budget extension b642f1f9-a32f-4bfb-95ac-c5102c37ae53 5 -> 12 request intervention-1\nERROR samizdat.agent.tools - tool boundary-test-bare-string returned a String instead of a result map\nERROR samizdat.agent.tools - tool boundary-test-no-branch returned a result map with no :branch, so the turn had no branch to carry forward\nWARN samizdat.agent.tools - tool boundary-test-throws threw: the tool exploded\nINFO samizdat.watch - watch: raised :provider-empty-replies - the provider keeps returning replies with neither content nor reasoning \u2014 the model is spending its whole output budget thinking and never reaching a tool call. The fix is MORE TOKENS or reasoning turned off for this endpoint, not more steering: raise :context-budget, or set :thinking? false if this is a local llama.cpp endpoint\nINFO samizdat.watch - watch: raised :provider-empty-replies - the provider keeps returning replies with neither content nor reasoning \u2014 the model is spending its whole output budget thinking and never reaching a tool call. The fix is MORE TOKENS or reasoning turned off for this endpoint, not more steering: raise :context-budget, or set :thinking? false if this is a local llama.cpp endpoint\nINFO samizdat.watch - watch: raised :calls-not-parsing - a large share of turns produce no usable tool call\nINFO samizdat.watch - watch: raised :replies-truncated - replies are hitting the token cap before emitting a call. The fix is MORE TOKENS, not more steering: the model never got far enough to call anything\nINFO samizdat.watch - watch: raised :shipping-unverified - the ship gate is being asked and cannot answer \u2014 work is shipping without its tests having been run\nINFO samizdat.watch - watch: raised :provider-empty-replies - the provider keeps returning replies with neither content nor reasoning \u2014 the model is spending its whole output budget thinking and never reaching a tool call. The fix is MORE TOKENS or reasoning turned off for this endpoint, not more steering: raise :context-budget, or set :thinking? false if this is a local llama.cpp endpoint\nINFO samizdat.watch - watch: raised :provider-empty-replies - the provider keeps returning replies with neither content nor reasoning \u2014 the model is spending its whole output budget thinking and never reaching a tool call. The fix is MORE TOKENS or reasoning turned off for this endpoint, not more steering: raise :context-budget, or set :thinking? false if this is a local llama.cpp endpoint\nWARN samizdat.store.knowledge - knowledge/recall fell back to LIKE: fts5: syntax error\nINFO samizdat.repl - eval can now reach /workspace/dev\nINFO samizdat.agent.beam - loop team is a whole-run workflow; beam width forced to 1 (asked for 5)\nINFO samizdat.agent.beam - distilled 1 finding(s) and 0 verdict(s) into memory\nWARN samizdat.agent.loop - branch B1 turn 1 model call failed: socket reset\nINFO samizdat.userspace - userspace manifest worker saved as version 2\nINFO samizdat.userspace - userspace manifest authored-child saved as version 1\nINFO samizdat.watch - watch: raised :tool-failing - `done` fails more often than it works\nINFO samizdat.watch - watch: raised :tool-failing - `done` fails more often than it works\nINFO samizdat.watch - watch: raised :tool-failing - `done` fails more often than it works\nINFO samizdat.watch - watch: raised :tool-failing - `done` fails more often than it works\nINFO samizdat.api.control - grant python3 * recorded for run 5dac6a8f-ad30-4c59-8552-a3af9a1d11ce\nINFO samizdat.system - samizdat up on port 0 provider :local model local-model db :memory:\nWARN samizdat.agent.beam - branch B1 exceeded the turn deadline on turn 1\nWARN samizdat.agent.beam - branch B1 died on turn 1 : sleep interrupted\nINFO samizdat.userspace - userspace cell aaa-custom saved as version 1\nINFO samizdat.mutation - cell mutation committed\nWARN samizdat.mutation - cell mutation rolled back: reload: the edited cell file did not load \u2014 cell load failed; registry rolled back: EOF while reading\nWARN samizdat.mutation - cell mutation rolled back: validate: the loop no longer compiles \u2014 Cell :mini/end not found in registry\nWARN samizdat.mutation - cell mutation rolled back: soak run threw: execution error\nWARN samizdat.mutation - cell mutation rolled back: reload: the edited cell file did not load \u2014 cell load failed; registry rolled back: EOF while reading\nINFO samizdat.userspace - userspace cell mini saved as version 1\nINFO samizdat.mutation - cell mini committed as version 1\nWARN samizdat.mutation - cell proposal rejected: mini the candidate did not load \u2014 EOF while reading\nINFO samizdat.userspace - userspace cell mini saved as version 1\nINFO samizdat.mutation - cell mini committed as version 1\nWARN samizdat.mutation - cell proposal rejected: other manifest 'beamish': validate: the loop no longer compiles \u2014 cells require ctx keys no driver provides: :start (:other/thing) wants :no-such-ctx-key. Either the key belongs in manifests/ctx-keys and the drivers must set it, or the cell should not be asking.\nWARN samizdat.userspace - userspace save ignored \u2014 no project store is bound: cell mini\nWARN samizdat.mutation - cell mini is live but UNSAVED \u2014 no project store is bound\nINFO samizdat.userspace - userspace cell loop saved as version 1\nWARN samizdat.repl - run root is not the working directory \u2014 `eval` requires from /tmp but resolves relative FILE paths against /workspace \u2014 start the harness from the project root, or use absolute paths in eval\nWARN samizdat.agent.loop - branch B1 turn 3 model call failed: context exceeded\nWARN samizdat.agent.loop - branch B1 turn 3 model call failed: boom\nINFO samizdat.userspace - userspace cell loop saved as version 2\nINFO samizdat.userspace - userspace cell invented-by-the-agent saved as version 1\nWARN samizdat.userspace - userspace save ignored \u2014 no project store is bound: cell loop\nINFO samizdat.userspace - userspace cell loop saved as version 2\nINFO samizdat.userspace - userspace cell critic saved as version 1\nINFO samizdat.userspace - userspace cell critic saved as version 1\nINFO samizdat.userspace - userspace cell critic saved as version 2\nINFO samizdat.userspace - userspace cell critic saved as version 1\nINFO samizdat.userspace - userspace prompt my-note saved as version 1\nINFO samizdat.userspace - userspace prompt my-note saved as version 2\nINFO samizdat.userspace - userspace prompt mine saved as version 1\nINFO samizdat.userspace - userspace prompt mine saved as version 2\nINFO samizdat.userspace - userspace policy gates saved as version 2\nINFO samizdat.userspace - userspace prompt cull-reprieve saved as version 1\nINFO samizdat.userspace - userspace policy manual saved as version 1\nINFO samizdat.userspace - userspace policy gates saved as version 2\nINFO samizdat.userspace - userspace prompt cull-reprieve saved as version 1\nINFO samizdat.userspace - userspace policy gates saved as version 2\nINFO samizdat.userspace - userspace cell race-target saved as version 1\nINFO samizdat.userspace - userspace policy gates saved as version 2\nINFO samizdat.userspace - userspace policy gates saved as version 3\nWARN samizdat.store.journal - journal: falling back to pr-str for a value data.json could not write: Don't know how to write JSON of class java.lang.Character\nINFO samizdat.store.runs - retention: dropped the record of 1 run(s) older than 30 days\n",
+    "bytes": 8004,
+    "truncated?": false
+   },
+   "duration-ms": 346050,
+   "disposition": "terminated"
+  },
+  "closure-coverage": {
+   "signature": {
+    "version": 1,
+    "suite": "js1-ve/v1:bab68fdf5a128ea0094ce345680d8eb0101792a0e703f8a29bfc28e4ad82a861",
+    "verifier": "sha256:e3fd1b7d73e88ec4f88e482c61912524bd48acbbe6ed3cd319a4c4ca387fff2f",
+    "input": "sha256:c5a35391029bb0c2abb3bf67eb58edec4ab358bb849234c91eae2f61dc794e2c",
+    "green?": true,
+    "exit": 0,
+    "output-truncated?": false,
+    "kind": "parsed",
+    "tests": 1630,
+    "assertions": 6451,
+    "failures": 0,
+    "errors": 0
+   },
+   "delta": {
+    "tests": 0,
+    "assertions": 6,
+    "failures": 0,
+    "errors": 0,
+    "decreased?": false,
+    "same-suite?": true,
+    "baseline": {
+     "tests": 1630,
+     "assertions": 6445,
+     "suite": "js1-ve/v1:bab68fdf5a128ea0094ce345680d8eb0101792a0e703f8a29bfc28e4ad82a861"
+    }
+   }
+  },
+  "verify-env": "js1-ve/v1:bab68fdf5a128ea0094ce345680d8eb0101792a0e703f8a29bfc28e4ad82a861",
+  "envelope": {
+   "version": 1,
+   "kind": "run",
+   "invocation-index": 1,
+   "attribution": {
+    "coordinate": "sha256:e3fd1b7d73e88ec4f88e482c61912524bd48acbbe6ed3cd319a4c4ca387fff2f",
+    "type": "bwrap-verification-env"
+   },
+   "input": {
+    "coordinate": "sha256:c5a35391029bb0c2abb3bf67eb58edec4ab358bb849234c91eae2f61dc794e2c"
+   },
+   "status": "completed",
+   "exit": 0,
+   "stdout": {
+    "text": "\nRan 1 tests. 10 assertions passed, 0 failures, 0 errors.\n{:type :summary, :test 1, :pass 10, :fail 0, :error 0}\n",
+    "bytes": 113,
+    "truncated?": false
+   },
+   "stderr": {
+    "text": "",
+    "bytes": 0,
+    "truncated?": false
+   },
+   "duration-ms": 3379,
+   "disposition": "terminated"
+  }
+ },
+ "project-run-results": [
+  "{:argv [\"bb\" \"--classpath\" \"src:test\" \"-e\" \"(require 'clojure.test 'samizdat.util-test) (let [s (clojure.test/run-tests 'samizdat.util-test)] (println s) (System/exit (if (pos? (+ (:fail s) (:error s))) 1 0)))\"], :cwd \".\", :disposition :terminated, :duration-ms 2848, :environment \"sha256:978648e50f02ffb0526ad45155e56cd082db0b21cebf67f44e7db5b606fb6f1c\", :exit 0, :input \"sha256:c5a35391029bb0c2abb3bf67eb58edec4ab358bb849234c91eae2f61dc794e2c\", :invocation 1, :status :completed, :stderr {:bytes 0, :text \"\", :truncated? false}, :stdout {:bytes 144, :text \"\\nTesting samizdat.util-test\\n\\nRan 1 tests containing 10 assertions.\\n0 failures, 0 errors.\\n{:test 1, :pass 10, :fail 0, :error 0, :type :summary}\\n\", :truncated? false}, :timeout-ms 300000}"
+ ]
+}

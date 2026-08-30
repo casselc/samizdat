@@ -16,6 +16,7 @@
   hand-rolled str/replace chains used, so the move changed the renderer,
   not the templates."
   (:require [clojure.string :as str]
+            [jolt.fs :as fs]
             [clojure.test :refer [deftest is testing]]
             [jolt.fs :as fs]
             [samizdat.agent.loop :as loop]
@@ -134,7 +135,12 @@
                         (prompt/resolve-chain [{:flie "typo"}]))))
 
 (deftest a-project-file-overrides-the-shipped-prompt
-  (let [dir (java.io.File. ".samizdat/prompts")
+  ;; Written under a temp root rather than into the checkout: the project
+  ;; directory is READ-ONLY wherever this suite runs inside the controller's
+  ;; VerificationEnvironment, and a test that can only pass in a writable
+  ;; checkout is a test that cannot be part of a closure gate.
+  (let [dir (java.io.File. (str (fs/create-temp-dir {:prefix "samizdat-prompt-"})
+                               "/.samizdat/prompts"))
         f (java.io.File. dir "chain-test.md")]
     (try
       (.mkdirs dir)

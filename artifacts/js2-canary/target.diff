@@ -1,0 +1,53 @@
+diff --git a/src/samizdat/util.clj b/src/samizdat/util.clj
+index 804856e..65a5573 100644
+--- a/src/samizdat/util.clj
++++ b/src/samizdat/util.clj
+@@ -69,14 +69,19 @@
+           (:val (reset! cache {:gen g :val (f)})))))))
+ 
+ (defn truncate-middle
+-  "If `s` is longer than `max-len`, return it shortened to exactly `max-len`
++  "If `s` is longer than `max-len`, return it shortened to at most `max-len`
+   characters by keeping the head and tail with the literal string \" … \"
+-  in the middle; otherwise return `s` unchanged."
++  in the middle; otherwise return `s` unchanged.
++
++  When `max-len` is too small for the marker, return a prefix of `s` of
++  length `max-len` instead."
+   [s max-len]
+   (if (<= (count s) max-len)
+     s
+     (let [marker " … "
+-          marker-len (count marker)
+-          head-len (quot (- max-len marker-len) 2)
+-          tail-len (- max-len marker-len head-len)]
+-      (str (subs s 0 head-len) marker (subs s (- (count s) tail-len))))))
++          marker-len (count marker)]
++      (if (< max-len marker-len)
++        (subs s 0 max-len)
++        (let [head-len (quot (- max-len marker-len) 2)
++              tail-len (- max-len marker-len head-len)]
++          (str (subs s 0 head-len) marker (subs s (- (count s) tail-len))))))))
+diff --git a/test/samizdat/util_test.clj b/test/samizdat/util_test.clj
+index fb07a5e..496885d 100644
+--- a/test/samizdat/util_test.clj
++++ b/test/samizdat/util_test.clj
+@@ -34,4 +34,17 @@
+ 
+   (testing "middle marker present"
+     (let [result (util/truncate-middle "abcdefghijklmnopqrstuvwxyz" 10)]
+-      (is (str/includes? result " … ")))))
++      (is (str/includes? result " … "))))
++
++  (testing "max-len smaller than marker returns prefix"
++    (is (= "" (util/truncate-middle "hello" 0)))
++    (is (= "a" (util/truncate-middle "abcdef" 1)))
++    (is (= "ab" (util/truncate-middle "abcdef" 2))))
++
++  (testing "max-len equal to marker length uses marker"
++    (let [result (util/truncate-middle "abcdef" 3)]
++      (is (= 3 (count result)))
++      (is (= " … " result))))
++
++  (testing "max-len just below marker length returns prefix"
++    (is (= "ab" (util/truncate-middle "abcdef" 2)))))

@@ -113,8 +113,25 @@
   ;; rejected in karamazov-qic. The mutation protocol does not use the eval
   ;; TOOL (mutation.clj references eval nowhere), so a supervisor's ability to
   ;; change the harness does not depend on this.
+  ;;
+  ;; THE BOUNDED LANE IS EXEMPT, and the rule's own words are why. It is
+  ;; deliberately not a blanket eval withhold — "a branch that has said what it
+  ;; is doing may use the REPL freely" — and in the bounded lane it would be
+  ;; exactly that, permanently: a bounded branch's whole surface is eval, doc,
+  ;; complete and done, so there is no `plan` tool for it to satisfy this with
+  ;; and no way to lift the refusal. Every observation, every mutation and
+  ;; every execution goes through eval there; withholding it withholds the
+  ;; agent.
+  ;;
+  ;; What the rule wants is a hypothesis before exploration. The bounded lane
+  ;; gets that from a stronger place: `done` is refused unless the run's own
+  ;; edit receipts name a test the controller can verify, and then the whole
+  ;; suite has to be green too. Declaring intent is enforced there by what the
+  ;; controller will accept, not by what the model said first.
   {:rule :repl-needs-a-plan
-   :when (not (samizdat.agent.state/planned? branch))
+   :when (and (nil? (:evaluator/binding ctx))
+              (nil? (:evaluator/profile ctx))
+              (not (samizdat.agent.state/planned? branch)))
    :tools #{"eval"}
    :message-file "repl-needs-a-plan"}
 

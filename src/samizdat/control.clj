@@ -36,6 +36,7 @@
   same interventions queue the HTTP control surface uses, so a REPL steer and a
   UI steer are the same event."
   (:require [samizdat.store.db :as db]
+            [samizdat.security.controller :as controller]
             [samizdat.store.interventions :as interventions]
             [samizdat.store.journal :as journal]
             [samizdat.store.runs :as runs]))
@@ -64,9 +65,14 @@
                            :branch-id branch-id :issued-by "repl"})))
 
 (defn extend!
-  "Raise a run's turn cap. For a run that is close but out of budget."
-  [conn run-id max-turns]
-  (runs/extend-budget! conn run-id max-turns))
+  "Trusted human-controller budget extension. `authority` is minted with
+  security.controller/authority from trusted config; opts requires a stable
+  :request-id and human-readable :reason."
+  ([conn authority run-id max-turns opts]
+   (controller/extend-budget!
+    authority conn (assoc opts :run-id run-id :new-max max-turns)))
+  ([conn authority run-id max-turns]
+   (extend! conn authority run-id max-turns {})))
 
 (defn pending
   "The directives waiting to be drained at the next boundary."

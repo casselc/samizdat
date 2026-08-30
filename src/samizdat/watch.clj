@@ -61,9 +61,11 @@
   judge whether its change helped."
   (:require [clojure.tools.logging :as log]
             [samizdat.agent.gates :as gates]
+            [samizdat.agent.observation :as observation]
             [samizdat.lexicon :as lexicon]
             [samizdat.prompt :as prompt]
             [samizdat.session :as session]
+            [samizdat.store.evaluator :as estore]
             [samizdat.store.interventions :as interventions]
             [samizdat.store.journal :as journal]))
 
@@ -105,6 +107,29 @@
                  {:data {:finding kind :evidence evidence}})
   (log/info "watch: raised" kind "-" detail))
 
+(defn- receipt-findings
+  "Findings that come from the run's DURABLE receipts rather than the session
+  tally. The tally counts calls; the receipts know what those calls actually
+  observed, which is the difference between `the model called eval a lot` and
+  `the model has been handed the same bytes four times`.
+
+  Never throws and never blocks: a run with no bounded binding, or a store
+  that cannot answer, contributes no findings at all."
+  [conn run-id]
+  (try
+    (when-let [binding (estore/binding-for-run conn run-id)]
+      (let [rs (->> (estore/history conn (:binding_id binding))
+                    (filter #(= :completed (:status %)))
+                    (mapcat :receipts)
+                    vec)
+            p (lexicon/policy :session-findings)]
+        (when-let [f (observation/finding
+                      rs {:threshold (:repeated-observation-threshold p)
+                          :detail (get-in p [:details
+                                             :repeated-unchanged-observation])})]
+          [f])))
+    (catch Throwable _ nil)))
+
 (defn pass!
   "One observation. Returns the findings it reacted to.
 
@@ -117,7 +142,9 @@
         ;; `is this going wrong now`, and a rate over every run the process has
         ;; done answers a different question — one that says no for a long time
         ;; after the answer became yes.
-        fresh (actionable (session/findings (session/run-window run-id)) @seen p)
+        fresh (actionable (into (vec (session/findings (session/run-window run-id)))
+                                (receipt-findings conn run-id))
+                          @seen p)
         room (- (:max-interventions p) (count @seen))
         raising (take (max 0 room) fresh)]
     (doseq [f raising]

@@ -254,17 +254,21 @@
 (defn- branch [id]
   {:id id :status :active :messages [] :turn 1})
 
-(deftest extend-raises-the-turn-cap
+(deftest queued-extend-is-rejected-by-the-beam-drain
+  ;; A queued extend carries no budget authority of its own: without a
+  ;; controller token the beam drain routes it through the trusted controller
+  ;; transaction, which refuses it with the controller's own words.
   (with-db [c]
     (let [rid (runs/start-run! c {:problem "p"})]
-      (interventions/submit! c rid {:kind "extend" :payload {:turns 20}})
+      (interventions/submit! c rid {:kind "extend" :payload {:max_turns 20}})
       (let [r (drain c rid [(branch "B1")])]
-        (is (= 20 (:max-turns r)))
-        (is (= "applied" (:status (first (interventions/history c rid))))))
-      (testing "the round's cap is the run's plus the extension"
+        (is (nil? (:max-turns r)))
+        (let [d (first (interventions/history c rid))]
+          (is (= "rejected" (:status d)))
+          (is (str/includes? (:disposition d) "controller-minted authority"))))
+      (testing "the round cap can still carry a controller-raised durable cap"
         (is (= 60 (beam/round-max-turns {:max-turns 40} {:max-turns 60})))
-        (is (= 40 (beam/round-max-turns {:max-turns 40} {}))
-            "no extension leaves the run's own cap alone")))))
+        (is (= 40 (beam/round-max-turns {:max-turns 40} {})))))))
 
 (deftest extend-without-a-turn-count-is-refused-and-says-so
   ;; A directive is never silently dropped — the same discipline `cull` on the
@@ -276,7 +280,8 @@
             [d] (interventions/history c rid)]
         (is (nil? (:max-turns r)))
         (is (= "rejected" (:status d)))
-        (is (str/includes? (str (:disposition d)) "turns"))))))
+        (is (str/includes? (str (:disposition d))
+                           "max_turns must be positive"))))))
 
 (deftest fork-becomes-a-pending-thesis-the-spawn-cell-already-honours
   ;; No scheduler machinery of its own: :beam/spawn turns a branch's
@@ -412,10 +417,9 @@
               "the run-wide message is the beam's to broadcast to every branch")
           (is (= "applied" (:status scoped))))))))
 
-(deftest extend-lands-on-a-single-branch-run
-  ;; blt.12: the old arm returned the branch untouched, assuming
-  ;; control/extend! (REPL-only) had raised the runs row — the HTTP path only
-  ;; enqueues, so the directive sat pending forever and the cap never moved.
+(deftest queued-extend-cannot-mint-budget-on-a-single-branch-run
+  ;; M3: model-visible queued directives carry no budget authority. Extension
+  ;; is a separate trusted-controller act with an idempotency key and audit.
   (with-db [c]
     (let [rid (runs/start-run! c {:problem "p" :max-turns 10})]
       (interventions/submit! c rid {:kind "extend" :payload {:turns 5}})
@@ -423,10 +427,11 @@
                                           :max-turns 10}
                                          (branch "B1") 2)
             [d] (interventions/history c rid)]
-        (is (= 5 (:extended-turns b)) "the cap travels on the branch")
-        (is (= "applied" (:status d)))
-        (is (= 15 (:max_turns (runs/get-run c rid)))
-            "and persists on the row a crash-resume reads its budget from")))))
+        (is (nil? (:extended-turns b)) "no ambient branch budget is minted")
+        (is (= "rejected" (:status d)))
+        (is (str/includes? (:disposition d) "trusted human controller"))
+        (is (= 10 (:max_turns (runs/get-run c rid)))
+            "the durable cap is unchanged without controller authority")))))
 
 (deftest an-extended-branch-routes-past-the-original-cap
   ;; blt.12: ctx is fixed for the life of the run, so past the original cap
@@ -571,32 +576,32 @@
         (is (= "completed" (:status (runs/get-run c rid)))
             "the run row records the completion, not a failure")))))
 
-(deftest a-forfeited-turns-thread-is-never-run-beside
-  ;; karamazov-blt.18: a turn that blew its deadline kept executing — it
-  ;; journals under the branch's id and shares its eval session — while the
-  ;; beam advanced the SAME branch again next round, interleaving two turns of
-  ;; one branch and making the journal diverge from the live state. The
-  ;; dangling future is remembered now, and the branch forfeits until it
-  ;; completes.
-  (let [calls (atom 0)]
+(deftest a-forfeited-turn-quiesces-before-the-next-authority
+  ;; M3 revokes, interrupts, and confirms worker quiescence before minting the
+  ;; next lease. A worker that does not quiesce fails the run closed instead.
+  (let [calls (atom 0)
+        active (atom 0)
+        max-active (atom 0)]
     (with-redefs [beam/advance-branch (fn [_ b _]
-                                        (if (= 1 (swap! calls inc))
-                                          (do (Thread/sleep 400) (assoc b :slow true))
-                                          (assoc b :fast true)))]
-      (let [in-flight (atom {})
-            ctx {:iterating-loop? true :turn-deadline-ms 50 :in-flight in-flight}
+                                        (swap! active inc)
+                                        (swap! max-active max @active)
+                                        (try
+                                          (if (= 1 (swap! calls inc))
+                                            (do (Thread/sleep 400)
+                                                (assoc b :slow true))
+                                            (assoc b :fast true))
+                                          (finally (swap! active dec))))]
+      (let [ctx {:iterating-loop? true :turn-deadline-ms 50
+                 :turn-cancel-grace-ms 250}
             b (state/new-branch {:id "B1" :problem "p"})
             [r1] (beam/advance-all ctx [b] 1)]
         (is (= 1 (:timeouts r1)) "the slow turn forfeits")
-        (is (contains? @in-flight "B1") "and its dangling future is remembered")
+        (is (not (:turn-cancellation-fault? r1))
+            "the interrupted worker confirmed quiescence")
         (let [[r2] (beam/advance-all ctx [b] 2)]
-          (is (= 1 (:timeouts r2))
-              "the next round forfeits again rather than running beside it")
-          (is (= 1 @calls) "crucially, NO second turn ran while one dangled"))
-        (Thread/sleep 500)
-        (let [[r3] (beam/advance-all ctx [b] 3)]
-          (is (true? (:fast r3)) "once the dangling turn completes, the branch advances")
-          (is (not (contains? @in-flight "B1")) "and the memory is released"))))))
+          (is (true? (:fast r2)) "confirmed quiescence permits a fresh turn")
+          (is (= 2 @calls))
+          (is (= 1 @max-active) "the old and new workers never overlap"))))))
 
 (deftest a-chat-completion-run-is-registered-and-abortable
   ;; blt.13: beam/run! was called with no :abort atom and no control/active

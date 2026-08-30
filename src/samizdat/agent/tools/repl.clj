@@ -41,7 +41,6 @@
             [samizdat.agent.source :as source]
             [samizdat.agent.tools.base :as base]
             [samizdat.prompt :as prompt]
-            [samizdat.repl :as repl]
             [samizdat.repl.route :as route]
             [samizdat.security.secrets :as secrets]))
 
@@ -52,11 +51,62 @@
   [s]
   (secrets/redact (str s) (secrets/known-values (into {} (System/getenv)))))
 
+(defn- evaluator-var [name]
+  (try
+    (requiring-resolve (symbol "samizdat.evaluator" name))
+    (catch Throwable _ nil)))
+
+(defn- bounded-route
+  "The bounded binding this call must evaluate in, ::missing-binding when the
+  branch is bounded but has none, or nil for the ordinary lane.
+
+  THE FORK THAT MUST COME BEFORE ANY IMAGE ROUTING. Upstream now decides WHICH
+  REPL image an ordinary eval reaches (samizdat.repl.route, over the
+  project-rooted image and its session). A bounded eval reaches none of them:
+  its authority is a capability-bounded SCI context, and routing it through an
+  image would hand a bounded branch the ordinary lane's authority by way of a
+  configuration table. So the bounded question is asked first, and the ordinary
+  route is the else."
+  [ctx]
+  (cond
+    (base/bounded-binding ctx) (base/bounded-binding ctx)
+    (base/bounded? ctx) ::missing-binding
+    :else nil))
+
+(defn- bounded-refusal [branch]
+  (base/refusal branch
+                (base/bounded-message {:missing-binding true})))
+
+(defn- format-eval [branch r]
+  (if (:ok r)
+    (base/ok branch (str "=> " (:value r)))
+    (base/fail branch (str "Eval error: " (:error r)))))
+
+(defn- bounded-eval [ctx binding code]
+  (if-let [evaluate! (evaluator-var "evaluate-recorded!")]
+    (try
+      (let [r (evaluate! (:conn ctx) binding code
+                         {:token (base/turn-lease-token (:turn-lease ctx))
+                          ;; The epoch and the exact per-call invocation of
+                          ;; the model call whose dispatch this IS: the eval
+                          ;; row and every receipt carry both, so the causal
+                          ;; chain from provider invocation to semantic
+                          ;; operation is durable end to end.
+                          :inference-epoch-id (:inference-epoch-id ctx)
+                          :inference-invocation-id (:inference-invocation-id ctx)
+                          :effect-permit!
+                          (fn [initiate]
+                            (base/with-turn-lease-permit! ctx initiate))})]
+        {:ok true :value (pr-str (:value r))})
+      (catch Throwable e
+        {:ok false :error (or (ex-message e) (str e))}))
+    {:ok false :error (base/bounded-message {:runtime-unavailable true})}))
+
 (defn- eval-vetted
-  "Evaluate source that has already passed the syntax gate. `note` is the
-  repair sentence when the harness closed a truncation, so the model is told
-  its code was completed rather than silently corrected — an invisible repair
-  teaches nothing and the next form drops the same closer."
+  "Evaluate source that has already passed the syntax gate, in the ORDINARY
+  lane. `note` is the repair sentence when the harness closed a truncation, so
+  the model is told its code was completed rather than silently corrected — an
+  invisible repair teaches nothing and the next form drops the same closer."
   [{:keys [branch repl-session] :as ctx} code note]
   (let [timeout (some-> (base/arg ctx :timeout-ms) str str/trim not-empty parse-long)
         session (or (:repl-session branch) repl-session)
@@ -101,16 +151,23 @@
   ;; to. Defs persist across evals within a run (the session is per-run).
   (if-let [m (base/missing ctx :code)]
     (base/malformed branch m)
-    ;; THE SAME GATE THE FILE TOOLS USE. An eval form is wholly authored in
-    ;; this call, so nothing pre-existing can be re-parented and a dropped
-    ;; closer is repaired exactly as it would be in a write_file — which is
-    ;; what this path did NOT do, for no reason anyone had decided. Run
+    ;; THE SAME GATE THE FILE TOOLS USE, IN BOTH LANES. An eval form is wholly
+    ;; authored in this call, so nothing pre-existing can be re-parented and a
+    ;; dropped closer is repaired exactly as it would be in a write_file — which
+    ;; is what this path did NOT do, for no reason anyone had decided. Run
     ;; 5e8b5973 lost 2 of its first 17 turns to `Eval error: Unmatched
     ;; delimiter: )`, a message with no line, no column and no repair, for text
     ;; the harness already knew how to fix. Unrepairable source never reaches
     ;; the reader at all: it is a malformed CALL, not a failed evaluation, so
     ;; it is :mechanics with a line and a column rather than :failure with the
     ;; reader's guess at where things went wrong.
+    ;;
+    ;; The bounded lane gets it too, deliberately. It is MECHANISM below the
+    ;; authority boundary — it reads and repairs the model's own text and
+    ;; grants nothing — and the bounded lane wants it most: the third JS2
+    ;; canary attempt spent its last twenty turns after writing an unmatched
+    ;; delimiter into its own test file. The vetted source is what gets
+    ;; evaluated AND what gets recorded, so replay stays exact.
     (let [{:keys [code problem note]} (source/vet (str (base/arg ctx :code))
                                                   {:whole? true})]
       (if problem
@@ -125,20 +182,43 @@
                                         (name (:reason problem)) true
                                         :delimiter (not= :does-not-read
                                                          (:reason problem))}))
-        (eval-vetted ctx code note)))))
+        (let [route (bounded-route ctx)]
+          (cond
+            (= ::missing-binding route) (bounded-refusal branch)
+            route (format-eval branch (bounded-eval ctx route code))
+            :else (eval-vetted ctx code note)))))))
 
 (defmethod base/run-tool "doc" [{:keys [branch] :as ctx}]
   (if-let [m (base/missing ctx :symbol)]
     (base/malformed branch m)
-    (let [d (route/doc-for ctx (str (base/arg ctx :symbol)))]
-      (if (:not-found d)
-        (base/malformed branch (str "No var " (base/arg ctx :symbol) " is loaded."))
-        (base/ok branch (str (:name d) "\n" (pr-str (:arglists d)) "\n\n" (:doc d)))))))
+    (let [route (bounded-route ctx)
+          symbol (str (base/arg ctx :symbol))]
+      (cond
+        (= ::missing-binding route) (bounded-refusal branch)
+        route (let [d (when-let [f (evaluator-var "doc")] (f route symbol))]
+                (if d
+                  (base/ok branch (str (:name d) "\n" (pr-str (:arglists d))
+                                       "\n\n" (:doc d)))
+                  (base/malformed branch
+                                  (base/bounded-message
+                                   {:no-callable true :symbol symbol}))))
+        :else (let [d (route/doc-for ctx symbol)]
+                (if (:not-found d)
+                  (base/malformed branch (str "No var " symbol " is loaded."))
+                  (base/ok branch (str (:name d) "\n" (pr-str (:arglists d))
+                                       "\n\n" (:doc d)))))))))
 
 (defmethod base/run-tool "complete" [{:keys [branch] :as ctx}]
   (if-let [m (base/missing ctx :prefix)]
     (base/malformed branch m)
-    (let [ms (route/complete-for ctx (str (base/arg ctx :prefix)))]
-      (base/ok branch (if (seq ms)
-                   (str/join "\n" (take 50 ms))
-                   (str "No symbols match " (base/arg ctx :prefix) "."))))))
+    (let [prefix (str (base/arg ctx :prefix))
+          route (bounded-route ctx)]
+      (cond
+        (= ::missing-binding route) (bounded-refusal branch)
+        route (let [ms (if-let [f (evaluator-var "complete")] (f route prefix) [])]
+                (base/ok branch (if (seq ms) (str/join "\n" ms)
+                                    (str "No callable names match " prefix "."))))
+        :else (let [ms (route/complete-for ctx prefix)]
+                (base/ok branch (if (seq ms)
+                                  (str/join "\n" (take 50 ms))
+                                  (str "No symbols match " prefix "."))))))))

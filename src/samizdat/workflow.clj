@@ -222,6 +222,59 @@
         (assoc ctx :llm-adapter (registry/adapter-for provider) :llm-config llm))
       ctx)))
 
+(def ^:private bounded-profile-capabilities
+  "The controller-fixed requested and authorized capability set per bounded
+  profile. This table, not userspace, decides what a profile requests and is
+  authorized for: the controller's authority statement, which the evaluator
+  then intersects with the request, the runtime's catalog maximum, and the
+  compiled vocabulary."
+  {:agent/project-read #{:project/read :project/list :project/search
+                         :project/stat}
+   :agent/project-develop #{:project/read :project/list :project/search
+                            :project/stat :project/edit}
+   ;; JS2. Execution is requested and authorized ONLY under its own profile.
+   ;; The two rows above are byte-for-byte what they were: a develop binding
+   ;; does not gain :project/run because this row exists, and the runtime's
+   ;; own closed maximum refuses it a second time if this table ever lies.
+   :agent/project-execute #{:project/read :project/list :project/search
+                            :project/stat :project/edit :project/run}})
+
+(defn bounded-binding
+  "Mint a controller-owned bounded binding only when userspace requested the
+  bounded lane through [:run :bounded :profile]. The controller — this
+  function, not userspace — fixes the requested and authorized capability
+  sets per profile, so a model cannot widen its own authority through config;
+  a wider or unknown profile request fails closed here, before any binding or
+  run exists. Dynamic resolution keeps SCI absent from ordinary startup."
+  ([root run-id config] (bounded-binding nil root run-id config))
+  ([conn root run-id config]
+   (when-let [requested (get-in config [:run :bounded :profile])]
+     (let [profile (cond (keyword? requested) requested
+                         (string? requested) (keyword requested))
+           capabilities (get bounded-profile-capabilities profile)]
+       (when-not capabilities
+         (throw (ex-info "Unsupported bounded profile; expected :agent/project-read, :agent/project-develop or :agent/project-execute"
+                         {:samizdat.evaluator/error :unsupported-profile
+                          :requested requested})))
+       (let [bind! (or (try (requiring-resolve 'samizdat.evaluator/bind!)
+                            (catch Throwable _ nil))
+                       (throw (ex-info "Pinned bounded evaluator runtime is unavailable"
+                                       {:samizdat.evaluator/error :runtime-unavailable})))
+             binding (bind! root run-id
+                            {:profile profile
+                             :requested capabilities
+                             :controller-authorized capabilities})]
+         (when conn
+           (let [persist! (or (try (requiring-resolve
+                                    'samizdat.evaluator/persist-binding!)
+                                   (catch Throwable _ nil))
+                              (throw (ex-info
+                                      "Bounded evaluator persistence is unavailable"
+                                      {:samizdat.evaluator/error
+                                       :runtime-unavailable})))]
+             (persist! conn run-id binding)))
+         binding)))))
+
 (defn run-turn
   "Advance one branch by one turn, through the manifest.
 
@@ -260,8 +313,14 @@
 (defn run!
   "Run one branch to completion under the stored loop definition.
   Returns {:status :answer :branch :run-id (:residual)}."
-  [{:keys [conn config llm-adapter llm-config problem max-turns]}]
-  (let [max-turns (or max-turns (get-in config [:run :max-turns]) 40)
+  [{:keys [conn config llm-adapter llm-config problem max-turns] :as opts}]
+  (if (get-in config [:run :bounded :profile])
+    ;; Bounded turns must pass through the scheduler that owns TurnLease
+    ;; mint/revoke/deadline semantics. Dynamic resolution avoids a static cycle:
+    ;; beam requires workflow to compile manifests.
+    (do (require 'samizdat.agent.beam)
+        ((resolve 'samizdat.agent.beam/run!) (assoc opts :beam-width 1)))
+    (let [max-turns (or max-turns (get-in config [:run :max-turns]) 40)
         loop-nm (active-loop-name config)
         {:keys [version compiled definition]} (load-loop! conn loop-nm)
         run-id (runs/start-run! conn {:problem problem
@@ -270,17 +329,20 @@
                                       :max-turns max-turns
                                       :beam-width 1
                                       :prompt-digest (branch-loop/prompt-digest)})
-        branch (state/new-branch {:id "B1" :problem problem
-                                  :messages (branch-loop/initial-messages
-                                             problem (workflow-prompt definition))})
         ;; The project root the file tools are confined to, and the shell tool
         ;; runs in. Configurable so a run can target another checkout.
         root (or (get-in config [:run :root]) (System/getProperty "user.dir"))
+        bounded (bounded-binding conn root run-id config)
+        branch (state/new-branch
+                {:id "B1" :problem problem
+                 :messages (branch-loop/initial-messages
+                            problem (workflow-prompt definition) nil
+                            (:trusted-orientation bounded))})
         ;; Make the project's own namespaces requirable from `eval` before any
         ;; branch takes a turn. The system prompt's whole first section is
         ;; REPL-first against the project under work, and without this that
         ;; instruction is unreachable the moment :run :root is not the harness.
-        _ (repl/ensure-project-roots! root)
+        _ (when-not bounded (repl/ensure-project-roots! root))
         ctx {:conn conn :run-id run-id :config config
              :llm-adapter llm-adapter :llm-config llm-config
              :root root
@@ -307,7 +369,14 @@
              ;; A per-run eval session, so defs the agent makes with `eval`
              ;; persist across its turns (define, then use) — REPL-first
              ;; development against the live image.
-             :repl-session (repl/new-session)
+              :repl-session (when-not bounded (repl/new-session))
+              ;; The profile marker is the binding's own minted profile, not a
+              ;; constant: the bounded lane's signal stays honest about which
+              ;; profile the controller actually granted.
+              :evaluator/profile (when bounded
+                                   (get-in bounded [:spec :context-spec
+                                                    :context/profile]))
+              :evaluator/binding bounded
              :max-turns max-turns}]
     (runs/open-branch! conn run-id {:branch-id "B1"})
     ;; The window findings are evaluated over.
@@ -359,7 +428,13 @@
         ;; The run's eval namespace does not outlive the run
         ;; (provenance CR1-6): one namespace per run, never removed, was
         ;; unbounded growth on a serve process.
-        (repl/close-session (:repl-session ctx))
+        ;; The guard is the bounded lane's: a bounded branch never gets a
+        ;; repl session, and close-session's find-ns throws on nil.
+        (when-let [session (:repl-session ctx)]
+          (repl/close-session session))
         ;; The project image outlives a session, because it is a PROCESS. Left
         ;; running it holds a port and a sandbox for the life of the harness.
-        (route/release! (:root ctx)))))))
+        ;; The bounded lane wraps this whole driver in one more form (the
+        ;; scheduler fork above), so the tail closes one level deeper than
+        ;; upstream's.
+        (route/release! (:root ctx))))))))

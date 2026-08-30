@@ -132,6 +132,13 @@
           ;; fds at peak and the default 256 soft limit made the last five
           ;; namespaces error spuriously (socket() failed / sqlite open failed
           ;; {:rc 14}) — provenance A-3. `;` not `&&` so a hardened
-          ;; environment where 1024 exceeds the hard limit still runs.
-          test  "(ulimit -n 1024 2>/dev/null; jolt -M:test)"
+          ;; environment where the raise is refused still runs.
+          ;;
+          ;; -Sn, and only UPWARD. `ulimit -n N` sets the HARD limit too, and
+          ;; lowering a hard limit is irreversible for the whole process tree:
+          ;; on a host whose default is already generous, a line meant to raise
+          ;; a limit lowers one, and the project execution environment then
+          ;; refuses because a host limit would otherwise reach inside its
+          ;; guest (JS2; RFC-012).
+          test  "(if [ \"$(ulimit -Sn)\" -lt 1024 ] 2>/dev/null; then ulimit -Sn 1024 2>/dev/null || true; fi; jolt -M:test)"
          gui   "jolt -M:gui"}}

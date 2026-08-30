@@ -628,7 +628,13 @@
         the branch's whole job.
 
         HARNESS_TURN_DEADLINE_MS still overrides, for an operator who needs it
-        for one run without editing the project's policy."}
+         for one run without editing the project's policy."}
+
+ :turn-cancel-grace-ms
+ {:value 1000 :kind :cost-ceiling :capability-tunable? false
+  :doc "How long the scheduler waits after revoking and interrupting a timed-out
+        turn worker before declaring a fail-closed cancellation fault. A fresh
+        turn authority is minted only after the old worker confirms quiescence."}
 
  :crossover
  {:value {:statuses #{"confirmed"} :limit 8}
@@ -642,6 +648,17 @@
         the whole value is that the child can build on it without re-checking.
         :limit bounds how many, newest first, because this lands in the child's
         opening context and an unbounded block would crowd out its own thesis."}
+
+ :closure-verify-timeout-ms
+ {:value 1800000 :kind :cost-ceiling :capability-tunable? false
+  :doc "Wall-clock bound on ONE closure verification — the project's whole
+        suite, run inside the controller's VerificationEnvironment after a
+        focused green. Larger than :verify-timeout-ms because it is a
+        different job: the focused gate runs the namespaces of the changed
+        test files and the closure gate runs everything, which for this
+        project is ~1600 tests. It is a ceiling, not a target, and it is
+        never spent on a run whose focused gate is red — closure runs only
+        after focused green."}
 
  :verify-timeout-ms
  {:value 600000 :kind :cost-ceiling :capability-tunable? false
@@ -903,6 +920,11 @@
           :min-green-runs 2
           :min-culled-with-evidence 2
           :provider-trouble-rate 0.2
+          ;; How many times one bounded semantic observation may return the
+          ;; same result, with no intervening mutation of that resource,
+          ;; before the watcher says so. Derived from receipts, not from text
+          ;; matching. Feedback only — no read is ever blocked by it.
+          :repeated-observation-threshold 4
           :details
           {:calls-not-parsing "a large share of turns produce no usable tool call"
            :calls-need-repair "the harness is repairing the model's tool calls often — the calls work, but the model is not writing them cleanly"
@@ -914,6 +936,7 @@
            :steering-ignored "the branch is not responding to steering AT ALL — {{fired}} gate firings across the run and {{met}} of them got what they asked for. More nagging will not help; the loop itself, or the model, is the thing to change"
            :provider-empty-replies "the provider keeps returning replies with neither content nor reasoning — the model is spending its whole output budget thinking and never reaching a tool call. The fix is MORE TOKENS or reasoning turned off for this endpoint, not more steering: raise :context-budget, or set :thinking? false if this is a local llama.cpp endpoint"
            :provider-unreliable "provider calls are failing or needing retries often. This is the endpoint, not the loop — no prompt or manifest change will help, and turns spent here are turns the run does not get back"
+           :repeated-unchanged-observation "you have observed {{coordinate}} several times and it returned the same thing every time. Nothing has changed it since. Use the result you already have; observe it again only after something writes to it"
            :selection-losing-evidence "branches are being culled while holding CONFIRMED artifacts — the beam found evidence and the retention rule threw it away. This is a SHARPENING failure, not an expansion one: widening the beam will not help, and the fix is the critic rubric or the cull thresholds"}}
   :kind :threshold :capability-tunable? false
   :doc "WHEN A LIVE SESSION TALLY BECOMES SOMETHING THE SUPERVISOR SHOULD SEE.
@@ -1654,24 +1677,33 @@
          detection engine lives in judge.clj; the vocabulary it matches on
          lives here, so it retunes per project at runtime."}
 
-  :focused-verify
+   :focused-verify
   ;; drg-4026 #47/48: the focused-verify conventions — which changed paths
   ;; count as test files, how a test path maps to its namespace, and the
   ;; command that runs just those namespaces. Project conventions, not
   ;; kernel code: a pytest or maven project retunes these without a
   ;; rebuild. The derivations live in verify.clj and read these at fire
   ;; time. :cmd-prefix is concatenated with the derived expression and a
-  ;; closing single quote for sh -c; the expression's namespaces come
-  ;; through :ns-whitelist-regex, so the quoted payload genuinely contains
-  ;; no single quotes (provenance R3-1).
-  {:value
-   {:test-file-regex "(?i)(^|/)(test|spec)s?/|[_-](test|spec)\\.[a-z]+$"
-    :root-strip-regex "^(test|gui|src)/"
-    :ext-strip-regex "\\.cljc?$"
-    :ns-whitelist-regex "[a-zA-Z0-9.*-]+"
-    :cmd-prefix "jolt -A:test -e '"}
-   :kind :threshold :capability-tunable? false
-   :doc "The focused-verify conventions as data (see the comment above)."}
+  ;; closing single quote for sh -c — the ORDINARY lane's runner; the
+  ;; expression's namespaces come through :ns-whitelist-regex, so the
+  ;; quoted payload genuinely contains no single quotes (provenance R3-1).
+  ;; The BOUNDED lane's executable and fixed argv are NOT here: they are
+  ;; controller-pinned code (samizdat.security.verification-env and
+  ;; samizdat.security.smolvm-verification-env, one pinned authority per
+  ;; verify environment, selected by trusted controller policy in
+  ;; samizdat.security.verification-provider), because this file is
+  ;; runtime-mutable by the very tier that lane's done gate
+  ;; judges — an argv authority read from here is one project/edit away
+  ;; from {:argv-prefix ["sh" "-c" "exit 0"]}, a gate the judged party can
+  ;; switch off.
+   {:value
+    {:test-file-regex "(?i)(^|/)(test|spec)s?/|[_-](test|spec)\\.[a-z]+$"
+     :root-strip-regex "^(test|gui|src)/"
+     :ext-strip-regex "\\.cljc?$"
+     :ns-whitelist-regex "[a-zA-Z0-9.*-]+"
+     :cmd-prefix "jolt -A:test -e '"}
+    :kind :threshold :capability-tunable? false
+    :doc "The focused-verify conventions as data (see the comment above)."}
 
   :ship-gates
   ;; drg-4026 #44: the model-free ship rungs as data, compiled at load by

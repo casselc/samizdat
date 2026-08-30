@@ -44,9 +44,11 @@
             [samizdat.cells :as cells]
             [samizdat.agent.gitdiff :as gitdiff]
             [samizdat.llm.client :as llm]
+            [samizdat.security.verification-env :as ve]
             [clojure.data.json :as json]
             [samizdat.store.artifacts :as artifacts]
             [samizdat.store.db :as db]
+            [samizdat.store.evaluator :as estore]
             [samizdat.store.failures :as failures]
             [samizdat.store.interventions :as interventions]
             [samizdat.store.journal :as journal]
@@ -765,6 +767,274 @@
           (let [r (ship {:config {:run {}}})]
             (is (:done? r) "ships without a verify command, as before")
             (is (not @called) "and the verify command was never run")))))))
+
+;; --- the bounded lane's done: a ControlEvent the controller verifies (M2) -----
+;;
+;; In the bounded lane `done` never reaches the ordinary method: tools.clj
+;; routes it to ship/bounded-done, which derives the PINNED verifier argv
+;; from the run's own project/edit receipts and runs it inside the M2
+;; VerificationEnvironment (security.verification-env) — the controller-owned
+;; fail-closed bwrap sandbox over a private copy of the root. Only GREEN is
+;; terminal; RED is bounded evidence and the branch continues; an
+;; unavailable Linux substrate refuses outright. The spawns are mocked here
+;; (the sandbox's own adversarial suite runs it for real).
+
+(def ^:private closure-summary
+  "What a closure verifier's output actually ENDS WITH — the summary its test
+  runner prints. The mocks below carry it because JS2 §3B made a closure
+  result that carries no readable summary inadmissible evidence: a suite that
+  ran nothing exits zero too, so `green` on its own stopped being enough. A
+  mock without this is not standing in for a verifier, it is standing in for
+  a broken one — which is a real case, and has its own test."
+  (str "Ran 1585 tests. 6254 assertions passed, 0 failures, 0 errors.\n"
+       "{:type :summary, :test 1585, :pass 6254, :fail 0, :error 0}"))
+
+(deftest bounded-done-requires-both-the-focused-and-the-closure-gate
+  ;; M4 attempt-2 hardening gate, items G, H, I and J.
+  ;;
+  ;; The focused verifier runs only the namespaces of the CHANGED TEST FILES,
+  ;; which is right for cheap iteration and blind to everything else. Attempt 1
+  ;; made that concrete: the agent deleted sh-quote and generation-cache — live
+  ;; production functions — and samizdat.util-test would have gone green on it
+  ;; had the rewrite merely compiled (finding F-4). Focused green now buys the
+  ;; closure run, not the ship.
+  (let [bounded-ctx {:conn :fake
+                     :branch (state/new-branch {:id "B1" :problem "p"})
+                     :tool-name "done" :turn 3 :args {:answer "shipped"}
+                     :root "/tmp/bounded-root" :config {:run {}}
+                     :evaluator/profile :agent/project-develop
+                     :evaluator/binding {:binding/id "bind:test"}
+                     :turn-lease (tools-base/mint-turn-lease nil "B1" 3)}
+        history-with (fn [& paths]
+                       [{:receipts (mapv (fn [p] {:op :project/edit :phase :done
+                                                  :args [p "sha256:0" "c"]})
+                                         paths)}])
+        changed ["src/x.clj" "test/x_test.clj"]]
+
+    (testing "G. focused RED => the closure suite is never run"
+      (let [closure-ran (atom false)]
+        (with-redefs [estore/history (fn [_ _] (apply history-with changed))
+                      ve/available? (fn [] true)
+                      ve/run (fn [_ _ _] {:green? false :output "1 failure"})
+                      ve/run-closure (fn [_ _ _]
+                                       (reset! closure-ran true)
+                                       {:green? true :output closure-summary})]
+          (let [r (tools/run-tool bounded-ctx)]
+            (is (not (:done? r)) "red focused is not terminal")
+            (is (false? @closure-ran)
+                "the whole suite must not be spent after every failed edit")
+            (is (str/includes? (:result r) "not green"))))))
+
+    (testing "H. focused GREEN, closure RED => completion refused with evidence"
+      (let [closure-ran (atom false)]
+        (with-redefs [estore/history (fn [_ _] (apply history-with changed))
+                      ve/available? (fn [] true)
+                      ve/run (fn [_ _ _] {:green? true :output "focused ok"})
+                      ve/run-closure
+                      (fn [_ _ _] (reset! closure-ran true)
+                        {:green? false
+                         :output "FAIL in (sh-quote-test)\nbroke something else"})]
+          (let [r (tools/run-tool bounded-ctx)]
+            (is (true? @closure-ran) "focused green buys the closure run")
+            (is (not (:done? r)) "closure red is not terminal")
+            (is (nil? (:final-answer (:branch r))) "nothing shipped")
+            (is (some? (:done-block r)))
+            (is (str/includes? (:result r) "broke something else")
+                "the closure failure is returned as evidence to act on")
+            (is (str/includes? (str/lower-case (:result r)) "whole suite"))))))
+
+    (testing "I. focused GREEN and closure GREEN => completion accepted"
+      (let [order (atom [])]
+        (with-redefs [estore/history (fn [_ _] (apply history-with changed))
+                      ve/available? (fn [] true)
+                      ve/run (fn [_ _ _] (swap! order conj :focused)
+                               {:green? true :output ""})
+                      ve/run-closure (fn [_ _ _] (swap! order conj :closure)
+                                       {:green? true :output closure-summary})]
+          (let [r (tools/run-tool bounded-ctx)]
+            (is (:done? r))
+            (is (:verified-green? r))
+            (is (= [:focused :closure] @order)
+                "focused always runs first; closure only after it is green")
+            (is (= "shipped" (:final-answer (:branch r))))))))
+
+    (testing "J. both verifiers are controller-owned; the model chooses neither"
+      (let [args (atom [])]
+        (with-redefs [estore/history (fn [_ _] (apply history-with changed))
+                      ve/available? (fn [] true)
+                      ve/run (fn [root chg _] (swap! args conj [:focused root chg])
+                               {:green? true :output ""})
+                      ve/run-closure (fn [root chg _]
+                                       (swap! args conj [:closure root chg])
+                                       {:green? true :output closure-summary})]
+          (tools/run-tool (assoc bounded-ctx :args
+                                 {:answer "shipped"
+                                  ;; Anything the model could try to say about
+                                  ;; verification is simply not read.
+                                  :verifier "rm -rf /"
+                                  :verify-cmd "echo green"
+                                  :closure false}))
+          (is (= 2 (count @args)))
+          (is (every? #(= "/tmp/bounded-root" (second %)) @args)
+              "the controller pins the root for both gates")
+          ;; The closure argv carries no derived element at all.
+          (is (= ["jolt" "-M:test"]
+                 (vec (concat ["jolt"] ve/closure-fixed-args))))
+          (is (not-any? #{"sh" "-c"} ve/closure-fixed-args)
+              "no shell composes the closure argv"))))
+
+    (testing "an unavailable closure substrate refuses rather than shipping"
+      (with-redefs [estore/history (fn [_ _] (apply history-with changed))
+                    ve/available? (fn [] true)
+                    ve/run (fn [_ _ _] {:green? true :output ""})
+                    ve/run-closure (fn [_ _ _] {:green? false :unavailable? true
+                                                :reason :no-bwrap :output ""})]
+        (let [r (tools/run-tool bounded-ctx)]
+          (is (not (:done? r)) "fail closed: no closure verdict, no ship")
+          (is (str/includes? (:result r)
+                             "verification environment is unavailable")))))))
+
+(deftest bounded-done-is-terminal-only-on-a-green-controller-verification
+  (let [bounded-ctx {:conn :fake
+                      :branch (state/new-branch {:id "B1" :problem "p"})
+                      :tool-name "done" :turn 3 :args {:answer "shipped"}
+                      :root "/tmp/bounded-root" :config {:run {}}
+                      :evaluator/profile :agent/project-develop
+                      :evaluator/binding {:binding/id "bind:test"}
+                      :turn-lease (tools-base/mint-turn-lease nil "B1" 3)}
+        ;; The receipt shape store/history returns, restricted to the edit ops
+        ;; edited-paths reads. The crafted first path passes test-file? but not
+        ;; the namespace whitelist.
+        crafted "test/foo'; touch /tmp/pwned; echo '_x.clj"
+        history-with (fn [& paths]
+                        [{:receipts (mapv (fn [p] {:op :project/edit :phase :done
+                                                   :args [p "sha256:0" "c"]})
+                                          paths)}])]
+    (testing "GREEN: focused green AND closure green => terminal"
+      (let [seen (atom nil)]
+        (with-redefs [estore/history (fn [_ _] (history-with "src/x.clj" "test/x_test.clj"))
+                      ve/available? (fn [] true)
+                      ve/run
+                      (fn [root changed timeout-ms]
+                        (reset! seen {:root root :changed changed
+                                      :timeout-ms timeout-ms})
+                        {:green? true :output ""})
+                      ve/run-closure (fn [_ _ _] {:green? true :output closure-summary})]
+          (let [r (tools/run-tool bounded-ctx)]
+            (is (:done? r) "done accepted")
+            (is (= :done (:control-event r)))
+            (is (:verified-green? r))
+            (is (= :done (:status (:branch r))))
+            (is (= "shipped" (:final-answer (:branch r))))
+            (is (= :test (:kind (:artifact r))) "a green verify is the confirmed artifact")
+            (is (= "/tmp/bounded-root" (:root @seen)) "the controller pins the root")
+            (is (= ["src/x.clj" "test/x_test.clj"] (:changed @seen))
+                "the environment verifies the run's own edited paths")
+            (is (= (ve/focused-argv ["src/x.clj" "test/x_test.clj"])
+                   (read-string (get-in r [:artifact :code])))
+                "the recorded artifact code is the controller-derived argv")
+            (is (not-any? #{"sh" "-c"} (read-string (get-in r [:artifact :code])))
+                "no shell composes anything")))))
+    (testing "RED: bounded evidence comes back and the branch continues"
+      (with-redefs [estore/history (fn [_ _] (history-with "src/x.clj" "test/x_test.clj"))
+                    ve/available? (fn [] true)
+                    ve/run
+                    (fn [_ _ _] {:green? false :output "FAIL in x-test\n1 assertion failed"})
+                    ve/run-closure (fn [_ _ _] {:green? true :output closure-summary})]
+        (let [r (tools/run-tool bounded-ctx)]
+          (is (not (:done? r)) "red is not terminal")
+          (is (= :done (:control-event r)))
+          (is (= :failure (:category r)) "a red run is evidence, like the ordinary gate")
+          (is (some? (:done-block r)))
+          (is (str/includes? (:result r) "not green"))
+          (is (str/includes? (:result r) "1 assertion failed")
+              "the bounded tail of the failure is fed back")
+          (is (nil? (:final-answer (:branch r))) "nothing shipped"))))
+    (testing "a timeout reads as red evidence, not as a ship"
+      (with-redefs [estore/history (fn [_ _] (history-with "test/x_test.clj"))
+                    ve/available? (fn [] true)
+                    ve/run (fn [_ _ _] {:green? false :timeout? true :output ""})
+                    ve/run-closure (fn [_ _ _] {:green? true :output closure-summary})]
+        (let [r (tools/run-tool bounded-ctx)]
+          (is (not (:done? r)))
+          (is (str/includes? (str/lower-case (:result r)) "timed out")))))
+    (testing "no edits at all => refused as hollow, and nothing is spawned"
+      (let [ran (atom false)]
+        (with-redefs [estore/history (fn [_ _] [])
+                      ve/available? (fn [] true)
+                      ve/run (fn [& _] (reset! ran true)
+                               {:green? true :output ""})
+                      ve/run-closure (fn [& _] (reset! ran true)
+                                       {:green? true :output ""})]
+          (let [r (tools/run-tool bounded-ctx)]
+            (is (not (:done? r)))
+            (is (str/includes? (:result r) "changed no project files"))
+            (is (not @ran) "no argv to derive => the controller runs nothing")))))
+    (testing "edits but no verifiable test among them => refused, nothing spawned"
+      (let [ran (atom false)]
+        (with-redefs [estore/history (fn [_ _] (history-with "src/x.clj"))
+                      ve/available? (fn [] true)
+                      ve/run (fn [& _] (reset! ran true)
+                               {:green? true :output ""})
+                      ve/run-closure (fn [& _] (reset! ran true)
+                                       {:green? true :output ""})]
+          (let [r (tools/run-tool bounded-ctx)]
+            (is (not (:done? r)))
+            (is (str/includes? (:result r)
+                               "none of this run's changed files is a test"))
+            (is (not @ran))))))
+    (testing "an unavailable substrate => refused with the reason, never a host spawn"
+      (let [ran (atom false)]
+        (with-redefs [estore/history (fn [_ _] (history-with "test/x_test.clj"))
+                      ve/available? (fn [] false)
+                      ve/unavailable-reason (fn [] :no-bwrap)
+                      ve/run (fn [& _] (reset! ran true)
+                               {:green? true :output ""})
+                      ve/run-closure (fn [& _] (reset! ran true)
+                                       {:green? true :output ""})]
+          (let [r (tools/run-tool bounded-ctx)]
+            (is (not (:done? r)) "fail closed: no sandbox, no terminal done")
+            (is (str/includes? (:result r) "verification environment is unavailable")
+                "the refusal names the environment, not the tests")
+            (is (str/includes? (:result r) "no-bwrap") "and the reason is right there")
+            (is (not @ran) "nothing was spawned — no fallback to the host")))))
+    (testing "the environment itself reporting unavailability refuses the same way"
+      (with-redefs [estore/history (fn [_ _] (history-with "test/x_test.clj"))
+                    ve/available? (fn [] true)
+                    ve/run (fn [_ _ _] {:green? false :unavailable? true
+                                        :reason :no-verifier-executable
+                                        :output ""})]
+        (let [r (tools/run-tool bounded-ctx)]
+          (is (not (:done? r)))
+          (is (str/includes? (:result r) "verification environment is unavailable")))))
+    (testing "containment: a crafted edited path contributes no command, model args select nothing"
+      (let [seen (atom nil)]
+        (with-redefs [estore/history (fn [_ _] (history-with crafted "test/x_test.clj"))
+                      ve/available? (fn [] true)
+                      ve/run (fn [_ changed _] (reset! seen changed)
+                               {:green? true :output ""})
+                      ve/run-closure (fn [_ _ _] {:green? true :output closure-summary})]
+          (let [r (tools/run-tool (assoc-in bounded-ctx [:args :command]
+                                            "sh -c 'rm -rf /'"))]
+            (is (:done? r) "the legitimate test still ships")
+            (is (not (str/includes? (pr-str (ve/focused-argv @seen)) "pwned"))
+                "the crafted path yielded no namespace and no argv element")
+            (is (not (str/includes? (pr-str (ve/focused-argv @seen)) "rm -rf"))
+                "a model-supplied command argument is never consulted")
+            (is (not-any? #{"sh" "-c"} (ve/focused-argv @seen)))))))
+    (testing "containment: ONLY crafted test-shaped edits => no argv, refused, never trusted"
+      (let [ran (atom false)]
+        (with-redefs [estore/history (fn [_ _] (history-with crafted))
+                      ve/run (fn [& _] (reset! ran true)
+                               {:green? true :output ""})]
+          (let [r (tools/run-tool bounded-ctx)]
+            (is (not (:done? r))
+                "a test-shaped name outside the whitelist is refused, never trusted")
+            (is (not @ran) "and nothing is spawned")))))
+    (testing "a binding with no recordable history fails closed"
+      (with-redefs [ve/run (fn [& _] {:green? true :output ""})]
+        (let [r (tools/run-tool (assoc bounded-ctx :evaluator/binding {:spec {}}))]
+          (is (not (:done? r)) "no binding id => no evidence => not terminal"))))))
 
 (deftest the-reframe-reprieve-is-a-loan-with-a-clock
   ;; vf-31m. A branch dropped into a reframe carries the failures that caused

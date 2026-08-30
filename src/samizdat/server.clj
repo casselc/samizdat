@@ -205,6 +205,12 @@
                                         :config (system/config)}
                                        (get-in req [:path-params :id])
                                        (body-json req))]
+                 (json-response (or (:status r) 200) (:body r))))]
+   [:post "/v1/runs/:id/extend"
+    (fn [req] (let [r (control/extend! {:conn (system/conn)
+                                        :config (system/config)}
+                                       (get-in req [:path-params :id])
+                                       (body-json req))]
                 (json-response (or (:status r) 200) (:body r))))]
    [:get "/v1/interventions/kinds" (fn [_] (json-response (control/kinds)))]])
 

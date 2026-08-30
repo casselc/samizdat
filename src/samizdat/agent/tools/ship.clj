@@ -5,13 +5,17 @@
   "Shipping tools: thesis, done, give_up, branch_theses — and the
   claim-evidence gates those methods share (answer-tokens,
   uncovered-tokens, engages-problem? and friends)."
-  (:require [clojure.string :as str]
+  (:require [clojure.edn]
+            [clojure.string :as str]
             [samizdat.agent.gitdiff :as gitdiff]
             [samizdat.agent.gates :as gates]
             [samizdat.agent.tools.base :as base]
             [samizdat.agent.state :as state]
             [samizdat.agent.verify :as verify]
             [samizdat.lexicon :as lexicon]
+            [samizdat.security.closure-coverage :as coverage]
+            [samizdat.security.verification-provider :as vprov]
+            [samizdat.store.evaluator :as estore]
             [samizdat.store.journal :as journal]
             [samizdat.util :as util]
             [samizdat.session :as session]))
@@ -441,6 +445,297 @@
                           :verdict :pass
                           :claim-status :confirmed
                           :tier :slow})))))
+
+;; --- the bounded lane's done: a ControlEvent the controller verifies (M2) -----
+;;
+;; In the bounded lane the model cannot run anything — its whole vocabulary is
+;; eval/doc/complete/done over the trusted evaluator surface — so the ordinary
+;; ship gate's `sh -c` verify is unreachable BY DESIGN, and done arrives as a
+;; completion REQUEST (tools.clj routes it here before the ordinary method).
+;; What settles it is the controller's own verification inside the M2
+;; verify environment the trusted controller SELECTED
+;; (samizdat.security.verification-provider — the bwrap
+;; VerificationEnvironment over a private copy, or the SmolVM ephemeral
+;; machine ported from bbagent's measured substrate): the changed paths
+;; come from the binding's tamper-evident edit receipts (never from a
+;; model-supplied command), the argv is the controller's PINNED verifier
+;; authority plus the one derived focused expression, and the run happens
+;; inside the selected fail-closed environment — no network, no host
+;; secrets/config, no write to the authoritative tree, bounded
+;; output/time, cleanup and reaping. Only a green run is terminal; every
+;; other outcome is bounded evidence handed back so the branch keeps
+;; iterating — and when the selected environment's substrate is
+;; unavailable, the whole thing REFUSES rather than degrading to another
+;; provider or a host spawn.
+
+(def closure-baseline-env
+  "The trusted-controller environment variable naming an EDN file holding a
+  clean-target ClosureCoverageSignature. Controller configuration, read from
+  the harness process's own environment like every other pinned authority in
+  this lane — never gates.edn, which the judged tier can rewrite.
+
+  Optional. Without it the closure signature is still recorded and still
+  fails closed on its own three invariants; only the DELTA is unavailable,
+  and an absent baseline is honestly absent rather than assumed to be zero."
+  "SAMIZDAT_CLOSURE_BASELINE")
+
+(defn closure-baseline
+  "The clean-target closure signature the controller pinned, or nil. Never
+  throws: a baseline that cannot be read is a comparison that cannot be made,
+  which is a smaller problem than a gate that cannot run."
+  []
+  (try
+    (when-let [path (some-> (System/getenv closure-baseline-env)
+                            str/trim not-empty)]
+      (let [v (clojure.edn/read-string (slurp path))]
+        (when (map? v) v)))
+    (catch Throwable _ nil)))
+
+(defn closure-evidence
+  "The closure gate's coverage evidence: the signature of `cresult`, the delta
+  against the controller's baseline when there is one, any warnings, and the
+  refusal when the signature is not admissible evidence at all.
+
+  Pure over its inputs apart from the baseline read, so the whole rule is
+  testable without a machine."
+  [cresult baseline]
+  (let [sig (coverage/signature
+             cresult
+             {:suite (vprov/coordinate)
+              :verifier (get-in cresult [:attribution :environment/coordinate])
+              :input (:input-coordinate cresult)})
+        d (when baseline (coverage/delta baseline sig))]
+    (cond-> {:signature sig}
+      d (assoc :delta d)
+      (seq (coverage/warnings d)) (assoc :warnings (coverage/warnings d))
+      (coverage/refusal sig) (assoc :refusal (coverage/refusal sig)))))
+
+(defn- edited-paths
+  "Every path THIS binding changed through project/edit, in first-write order
+  — the controller's own record of what the run changed, read from the
+  evaluator's append-only receipts rather than from anything the model claims
+  or from git (a bounded root need not be a repo). Only :done-phase edit
+  receipts count: a refused or errored edit wrote nothing. A missing conn or
+  binding id reads as 'nothing changed' — the gate fails closed."
+  [conn binding]
+  (if-let [binding-id (and conn (:binding/id binding))]
+    (into [] (comp (mapcat :receipts)
+                   (filter #(and (= :project/edit (:op %))
+                                 (= :done (:phase %))))
+                   (map #(first (:args %)))
+                   (distinct))
+          (estore/history conn binding-id))
+    []))
+
+(defn bounded-done
+  "The bounded lane's `done`: verify, then terminate — and only GREEN
+  terminates.
+
+  The controller — not the model — decides WHAT runs and WHERE: the run's
+  edited paths from its own receipts, the verifier argv from the SELECTED
+  provider's PINNED authority over the focused derivation (never gates.edn —
+  that file is runtime-mutable by the very tier this gate judges), and the
+  whole run inside the controller-owned verify environment selected by
+  trusted controller policy (security.verification-provider — bwrap's
+  private-copy sandbox or the SmolVM ephemeral machine, never a host spawn):
+  no network, no host secrets, no write to the authoritative tree, bounded
+  output/time, and cleanup/reaping however the run ends. The model's only
+  influence on any of it is which files it chose to write through the
+  anchored edit path; a file NAME crafted to inject a command yields no
+  namespace (ns-from-test-path's whitelist), so it can shrink the argv
+  toward empty — where the gate refuses — and can never widen it into a
+  command.
+
+  RED is not terminal: the branch gets the bounded tail of the failure and
+  keeps iterating. Neither is 'nothing to run': a hollow done (no edits) and
+  a change with no verifiable test both refuse with evidence. And when the
+  selected environment's substrate is unavailable, the done REFUSES with the
+  reason — there is no fallback to another provider or to a direct host
+  spawn, and no trust-on-unknown clause here at all: the ordinary lane's
+  :verify-unknown policy exists for a loop whose git might genuinely be
+  unable to tell, which a bounded receipt log never is."
+  [{:keys [branch] :as ctx}]
+  (let [answer (some-> (base/arg ctx :answer) str str/trim not-empty)
+        changed (edited-paths (:conn ctx) (base/bounded-binding ctx))
+        argv (vprov/focused-argv changed)
+        ;; Permit issuance is the whole verification attempt's semantic launch
+        ;; point, including the selected environment's capability probe. A
+        ;; revocation that wins during the preceding durable receipt read
+        ;; launches no host process; an attempt already permitted remains
+        ;; controller-owned work and is followed through to its green/red
+        ;; result. Nothing is probed for a hollow/no-test completion.
+        attempt (when argv
+                  (base/run-with-turn-lease-permit!
+                   ctx
+                   #(let [env-ok? (vprov/available?)
+                          timeout-ms (get-in ctx [:config :run
+                                                  :verify-timeout-ms])
+                          result (when env-ok?
+                                   (vprov/run (:root ctx) changed timeout-ms))
+                          ;; PROGRESSIVE VERIFICATION. The focused gate is
+                          ;; the cheap one and it runs first, so RED stays
+                          ;; cheap and the branch iterates against it. Only a
+                          ;; focused GREEN buys the closure run — the whole
+                          ;; suite, which is what can see the collateral a
+                          ;; focused namespace cannot. Never the other order,
+                          ;; and never the closure suite after every failed
+                          ;; edit.
+                          closure (when (and env-ok?
+                                             (:green? result)
+                                             (not (:unavailable? result)))
+                                    (vprov/run-closure
+                                     (:root ctx) changed
+                                     (or (gates/threshold :closure-verify-timeout-ms)
+                                         timeout-ms)))]
+                      {:env-ok? env-ok? :result result :closure closure
+                       :unavailable-reason
+                       (cond
+                         (not env-ok?) (vprov/unavailable-reason)
+                         (:unavailable? result) (:reason result :unknown)
+                         (:unavailable? closure) (:reason closure :unknown))})))
+        vresult (:result attempt)
+        cresult (:closure attempt)
+        unavailable-reason (:unavailable-reason attempt)
+        ;; The closure gate's own strength, read out of its own result (JS2
+        ;; §3B). Computed whenever a closure run happened at all, so a RED
+        ;; closure is described too and the record does not only exist for
+        ;; the runs that were about to pass.
+        cevidence (when (and cresult (not (:unavailable? cresult)))
+                    (closure-evidence cresult (closure-baseline)))
+        block (cond
+                (empty? changed)
+                (base/bounded-message {:done-nothing-changed true})
+
+                (nil? argv)
+                (base/bounded-message {:done-no-verifiable-test true})
+
+                ;; Fail closed on the substrate BEFORE any red/green reading:
+                ;; an unavailable sandbox is not a failing test, and it is
+                ;; never licence to spawn on the host instead.
+                unavailable-reason
+                (base/bounded-message {:done-verify-env-unavailable true
+                                       :reason unavailable-reason})
+
+                ;; vresult is present from here on, so verify-block's
+                ;; red / timeout / green clauses decide and its
+                ;; trust-on-unknown fallthrough is unreachable.
+                :else
+                (or (verify/verify-block {:verify-on? true :result vresult
+                                          :changed changed :require-test? true})
+                    ;; Focused is green. Completion now turns on the closure
+                    ;; gate, whose RED is returned as evidence the branch can
+                    ;; act on exactly like a focused RED.
+                    (when (and cresult (not (:green? cresult)))
+                      (str (base/bounded-message {:done-closure-red true})
+                           "\n\n"
+                           (verify/tail-of cresult)))
+                    ;; A closure result that is not admissible EVIDENCE is not
+                    ;; a green closure, whatever its exit code said. The three
+                    ;; refusals are narrow on purpose — an unreadable summary,
+                    ;; a summary reporting zero tests, and a summary that
+                    ;; contradicts the verdict beside it — and a coverage
+                    ;; DECREASE is deliberately not among them: deleting a
+                    ;; test is a legitimate change and this gate cannot tell a
+                    ;; legitimate one from a regression, so it warns and a
+                    ;; human explains.
+                    (when-let [r (:refusal cevidence)]
+                      (base/bounded-message {:done-closure-inadmissible true
+                                             :reason r}))))]
+    ;; The same record the ordinary ship gate keeps: a gate that was configured
+    ;; on and did nothing must not read identically to one that ran green.
+    ;; An environment that refused (unavailable) never counts as a run.
+    (let [ran? (boolean (and vresult (not (:unavailable? vresult))))
+          closure-ran? (boolean (and cresult (not (:unavailable? cresult))))]
+      (session/observe! (if ran?
+                          [:verify (if (:green? vresult) :green :red)]
+                          [:verify :skipped]))
+      ;; The closure gate is observed under its own key, so the session window
+      ;; and the gate tally can tell "focused green, closure red" from
+      ;; "focused red" — they are different failures and cost different things.
+      (when closure-ran?
+        (session/observe! [:closure-verify
+                           (if (:green? cresult) :green :red)]))
+      (when ran? (session/observe! [:verify :ran]))
+      (when (and (:conn ctx) (:run-id ctx))
+        (journal/note! (:conn ctx) (:run-id ctx) :ship-verify
+                       {:branch-id (:id branch) :turn (:turn ctx)
+                        :data (if ran?
+                                (let [envelope (vprov/verify-envelope vresult)
+                                      cenv (when closure-ran?
+                                             (vprov/verify-envelope cresult))]
+                                  (cond-> {:ran true
+                                           :stage :focused
+                                           :green (:green? vresult) :timeout (:timeout? vresult)
+                                           :blocked (some? block)
+                                           ;; BOTH gates in one row: whether
+                                           ;; the closure suite ran at all
+                                           ;; (only a focused green buys it)
+                                           ;; and what it said.
+                                           :closure-ran closure-ran?
+                                           :closure-green (when closure-ran?
+                                                            (:green? cresult))
+                                           :closure-timeout (when closure-ran?
+                                                              (:timeout? cresult))
+                                           :closure-envelope cenv
+                                           ;; The ClosureCoverageSignature and
+                                           ;; its delta (JS2 §3B): what the
+                                           ;; closure gate actually covered,
+                                           ;; recorded whether it passed or
+                                           ;; not, so the gate's strength is
+                                           ;; observable instead of inferred
+                                           ;; from the word "green".
+                                           :closure-coverage cevidence
+                                           ;; WHICH environment produced the verdict: the
+                                           ;; selected provider's policy coordinate, not prose.
+                                           :verify-env (vprov/coordinate)}
+                                    ;; The run envelope itself (RFC-012): the
+                                    ;; attribution, input coordinate,
+                                    ;; invocation index, duration and capture
+                                    ;; of the execution that produced the
+                                    ;; verdict — present exactly when a real
+                                    ;; spawn happened; a failed staging has
+                                    ;; no spawn and so no envelope.
+                                    envelope (assoc :envelope envelope)))
+                                (cond-> {:ran false
+                                         :blocked (some? block)
+                                         ;; A keyword, not a sentence, like the ordinary
+                                         ;; lane's: this row is queried.
+                                         :why (cond
+                                                (empty? changed) :nothing-changed
+                                                (nil? argv) :no-test-among-changed
+                                                :else :verify-env-unavailable)}
+                                  ;; The catalogued refusal when the
+                                  ;; environment answered the request with
+                                  ;; one — the same envelope shape a second
+                                  ;; repository renders, beside the stable
+                                  ;; :why token.
+                                  (:refusal vresult) (assoc :refusal
+                                                            (:refusal vresult))))})))
+    (if block
+      (base/fail branch (str "`done` refused.\n\n" block)
+                 :control-event :done :done-block block)
+      (let [final (or answer (base/bounded-message {:done-green true}))]
+        {:branch (assoc branch :final-answer final :status :done)
+         :category :success
+         :progress? true
+         :done? true
+         :control-event :done
+         ;; The green point the safe-state rung rewinds to, exactly as in the
+         ;; ordinary lane.
+         :verified-green? true
+         :answer final
+         :result (str "Answer accepted.\n\n" final)
+         ;; A green controller verification IS the bounded lane's confirmed
+         ;; artifact — machine-checked, not self-reported, the same reasoning
+         ;; as the ordinary lane's green ship-verify artifact. :code is the
+         ;; derived verifier argv itself: the exact thing that ran, pinned
+         ;; prefix and all.
+         :artifact {:kind :test
+                    :claim final
+                    :code (pr-str argv)
+                    :verdict :pass
+                    :claim-status :confirmed
+                    :tier :slow}}))))
 
 (defmethod base/run-tool "give_up" [{:keys [branch] :as ctx}]
   (let [reason (or (base/arg ctx :reason) "no reason given")]

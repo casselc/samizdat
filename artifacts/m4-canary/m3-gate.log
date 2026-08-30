@@ -1,0 +1,110 @@
+Samizdat 64effe150269fdebfdd9ccb619cab89187494b75
+Jolt f8899905d98a0abdcc6b4ae61dfd5c8bdb9c7277
+SCI 32d62a5136ad3dc148588752f5bcc4cc30b14752 / 0.13.53
+
+== js1-m3: M3 authority, provenance, and lease closure ==
+INFO samizdat.security.controller - budget extension a4357276-9510-450b-bf3f-6e8372d3b04b 5 -> 12 request raise-1
+INFO samizdat.security.controller - budget extension 8d2b002e-ad47-4ac2-b9a2-2e3c67d8a2b3 5 -> 9 request http-raise-1
+INFO samizdat.security.controller - budget extension d51921b1-3e95-4e74-8302-ac4b8b094c20 5 -> 12 request intervention-1
+INFO samizdat.api.control - grant python3 * recorded for run ec523ad9-3fcd-4d4d-adcb-1900661f48b0
+INFO samizdat.system - samizdat up on port 0 provider :local model local-model db :memory:
+WARN samizdat.agent.beam - branch B1 exceeded the turn deadline on turn 1
+WARN samizdat.agent.beam - branch B1 died on turn 1 : sleep interrupted
+WARN samizdat.agent.tools - tool done threw: Turn authority expired; refusing stale model effect
+WARN samizdat.agent.beam - branch B1 exceeded the turn deadline on turn 1
+WARN samizdat.agent.beam - branch B1 died on turn 1 : sleep interrupted
+INFO samizdat.agent.beam - distilled 1 finding(s) and 0 verdict(s) into memory
+WARN samizdat.agent.beam - branch B1 exceeded the turn deadline on turn 1
+
+Ran 49 tests. 246 assertions passed, 0 failures, 0 errors.
+{:type :summary, :test 49, :pass 246, :fail 0, :error 0}
+
+== js1-m3: pinned bounded evaluator ==
+M1-EVALUATOR-IDENTITIES #:evaluator{:spec-id "js1:[:map [[:context-spec [:map [[:context/bounds [:map [[:max-edit-chars 60000] [:max-list-entries 1000] [:max-read-chars 60000] [:max-search-file-chars 500000] [:max-search-files 20000] [:max-search-line-chars 300] [:max-search-pattern-chars 200] [:max-search-results 500]]]] [:context/capabilities [:vector [:project/list :project/read :project/search :project/stat]]] [:context/coordinate \"js0:[:map [[:context/bounds [:map [[:max-edit-chars 60000] [:max-list-entries 1000] [:max-read-chars 60000] [:max-search-file-chars 500000] [:max-search-files 20000] [:max-search-line-chars 300] [:max-search-pattern-chars 200] [:max-search-results 500]]]] [:context/capabilities [:vector [:project/list :project/read :project/search :project/stat]]] [:context/profile :agent/project-read] [:context/root \\\"/tmp/samizdat-m1-1787995240880-1\\\"] [:context/timeout-ms 30000]]]\"] [:context/profile :agent/project-read] [:context/root \"/tmp/samizdat-m1-1787995240880-1\"] [:context/timeout-ms 30000]]]] [:runtime-coordinate \"js1-rt/v1:[:map [[:runtime/evaluator-protocol 1] [:runtime/jolt-publish-source \\\"jolt-publish/v1:sha256:914ccd9f722efd98fe8e1e1381574a3efba04ae45a689e8c1918d420db82f0c1\\\"] [:runtime/jolt-source \\\"4af2362176160f2ed0e366689d7232b1a38adfec\\\"] [:runtime/jolt-version \\\"js1-runtime-final-1-gf8899905\\\"] [:runtime/language \\\"js0-lang/v1:[:map [[:jolt.sandbox.surface/count 156] [:jolt.sandbox.surface/lang \\\\\\\"js0-pure-sci\\\\\\\"] [:jolt.sandbox.surface/symbols [:vector [\\\\\\\"*\\\\\\\" \\\\\\\"+\\\\\\\" \\\\\\\"-\\\\\\\" \\\\\\\"->\\\\\\\" \\\\\\\"->>\\\\\\\" \\\\\\\"/\\\\\\\" \\\\\\\"<\\\\\\\" \\\\\\\"<=\\\\\\\" \\\\\\\"=\\\\\\\" \\\\\\\">\\\\\\\" \\\\\\\">=\\\\\\\" \\\\\\\"abs\\\\\\\" \\\\\\\"and\\\\\\\" \\\\\\\"apply\\\\\\\" \\\\\\\"as->\\\\\\\" \\\\\\\"assoc\\\\\\\" \\\\\\\"assoc-in\\\\\\\" \\\\\\\"boolean?\\\\\\\" \\\\\\\"char?\\\\\\\" \\\\\\\"coll?\\\\\\\" \\\\\\\"comp\\\\\\\" \\\\\\\"compare\\\\\\\" \\\\\\\"complement\\\\\\\" \\\\\\\"concat\\\\\\\" \\\\\\\"cond\\\\\\\" \\\\\\\"cond->\\\\\\\" \\\\\\\"cond->>\\\\\\\" \\\\\\\"condp\\\\\\\" \\\\\\\"conj\\\\\\\" \\\\\\\"cons\\\\\\\" \\\\\\\"constantly\\\\\\\" \\\\\\\"contains?\\\\\\\" \\\\\\\"count\\\\\\\" \\\\\\\"dec\\\\\\\" \\\\\\\"def\\\\\\\" \\\\\\\"defn\\\\\\\" \\\\\\\"defn-\\\\\\\" \\\\\\\"dissoc\\\\\\\" \\\\\\\"distinct\\\\\\\" \\\\\\\"do\\\\\\\" \\\\\\\"drop\\\\\\\" \\\\\\\"drop-last\\\\\\\" \\\\\\\"drop-while\\\\\\\" \\\\\\\"empty?\\\\\\\" \\\\\\\"even?\\\\\\\" \\\\\\\"every?\\\\\\\" \\\\\\\"filter\\\\\\\" \\\\\\\"filterv\\\\\\\" \\\\\\\"find\\\\\\\" \\\\\\\"first\\\\\\\" \\\\\\\"flatten\\\\\\\" \\\\\\\"fn\\\\\\\" \\\\\\\"fn*\\\\\\\" \\\\\\\"fn?\\\\\\\" \\\\\\\"format\\\\\\\" \\\\\\\"frequencies\\\\\\\" \\\\\\\"get\\\\\\\" \\\\\\\"get-in\\\\\\\" \\\\\\\"group-by\\\\\\\" \\\\\\\"hash-map\\\\\\\" \\\\\\\"hash-set\\\\\\\" \\\\\\\"identity\\\\\\\" \\\\\\\"if\\\\\\\" \\\\\\\"if-let\\\\\\\" \\\\\\\"if-not\\\\\\\" \\\\\\\"if-some\\\\\\\" \\\\\\\"inc\\\\\\\" \\\\\\\"integer?\\\\\\\" \\\\\\\"interleave\\\\\\\" \\\\\\\"interpose\\\\\\\" \\\\\\\"into\\\\\\\" \\\\\\\"juxt\\\\\\\" \\\\\\\"key\\\\\\\" \\\\\\\"keys\\\\\\\" \\\\\\\"keyword\\\\\\\" \\\\\\\"keyword?\\\\\\\" \\\\\\\"last\\\\\\\" \\\\\\\"let\\\\\\\" \\\\\\\"let*\\\\\\\" \\\\\\\"list\\\\\\\" \\\\\\\"list*\\\\\\\" \\\\\\\"loop\\\\\\\" \\\\\\\"loop*\\\\\\\" \\\\\\\"map\\\\\\\" \\\\\\\"map?\\\\\\\" \\\\\\\"mapcat\\\\\\\" \\\\\\\"mapv\\\\\\\" \\\\\\\"max\\\\\\\" \\\\\\\"merge\\\\\\\" \\\\\\\"merge-with\\\\\\\" \\\\\\\"min\\\\\\\" \\\\\\\"mod\\\\\\\" \\\\\\\"name\\\\\\\" \\\\\\\"namespace\\\\\\\" \\\\\\\"neg?\\\\\\\" \\\\\\\"nil?\\\\\\\" \\\\\\\"not\\\\\\\" \\\\\\\"not=\\\\\\\" \\\\\\\"nth\\\\\\\" \\\\\\\"number?\\\\\\\" \\\\\\\"odd?\\\\\\\" \\\\\\\"or\\\\\\\" \\\\\\\"partial\\\\\\\" \\\\\\\"partition\\\\\\\" \\\\\\\"partition-all\\\\\\\" \\\\\\\"peek\\\\\\\" \\\\\\\"pop\\\\\\\" \\\\\\\"pos?\\\\\\\" \\\\\\\"pr-str\\\\\\\" \\\\\\\"println\\\\\\\" \\\\\\\"quot\\\\\\\" \\\\\\\"quote\\\\\\\" \\\\\\\"range\\\\\\\" \\\\\\\"recur\\\\\\\" \\\\\\\"reduce\\\\\\\" \\\\\\\"reduce-kv\\\\\\\" \\\\\\\"rem\\\\\\\" \\\\\\\"remove\\\\\\\" \\\\\\\"rest\\\\\\\" \\\\\\\"reverse\\\\\\\" \\\\\\\"second\\\\\\\" \\\\\\\"select-keys\\\\\\\" \\\\\\\"seq\\\\\\\" \\\\\\\"seq?\\\\\\\" \\\\\\\"sequential?\\\\\\\" \\\\\\\"set\\\\\\\" \\\\\\\"set?\\\\\\\" \\\\\\\"some\\\\\\\" \\\\\\\"some->\\\\\\\" \\\\\\\"some->>\\\\\\\" \\\\\\\"some?\\\\\\\" \\\\\\\"sort\\\\\\\" \\\\\\\"sort-by\\\\\\\" \\\\\\\"split-at\\\\\\\" \\\\\\\"str\\\\\\\" \\\\\\\"string?\\\\\\\" \\\\\\\"subs\\\\\\\" \\\\\\\"symbol\\\\\\\" \\\\\\\"symbol?\\\\\\\" \\\\\\\"take\\\\\\\" \\\\\\\"take-last\\\\\\\" \\\\\\\"take-while\\\\\\\" \\\\\\\"update\\\\\\\" \\\\\\\"update-in\\\\\\\" \\\\\\\"val\\\\\\\" \\\\\\\"vals\\\\\\\" \\\\\\\"vec\\\\\\\" \\\\\\\"vector\\\\\\\" \\\\\\\"vector?\\\\\\\" \\\\\\\"when\\\\\\\" \\\\\\\"when-first\\\\\\\" \\\\\\\"when-let\\\\\\\" \\\\\\\"when-not\\\\\\\" \\\\\\\"when-some\\\\\\\" \\\\\\\"zero?\\\\\\\" \\\\\\\"zipmap\\\\\\\"]]] [:jolt.sandbox.surface/version 1]]]\\\"] [:runtime/receipt-protocol 1] [:runtime/sci-source \\\"32d62a5136ad3dc148588752f5bcc4cc30b14752\\\"] [:runtime/sci-version \\\"0.13.53\\\"]]]\"] [:samizdat.evaluator/kind :spec]]]", :instance-id "inst:m1-conformance", :binding-id "bind:m1-conformance", :context-spec "js0:[:map [[:context/bounds [:map [[:max-edit-chars 60000] [:max-list-entries 1000] [:max-read-chars 60000] [:max-search-file-chars 500000] [:max-search-files 20000] [:max-search-line-chars 300] [:max-search-pattern-chars 200] [:max-search-results 500]]]] [:context/capabilities [:vector [:project/list :project/read :project/search :project/stat]]] [:context/profile :agent/project-read] [:context/root \"/tmp/samizdat-m1-1787995240880-1\"] [:context/timeout-ms 30000]]]", :runtime "js1-rt/v1:[:map [[:runtime/evaluator-protocol 1] [:runtime/jolt-publish-source \"jolt-publish/v1:sha256:914ccd9f722efd98fe8e1e1381574a3efba04ae45a689e8c1918d420db82f0c1\"] [:runtime/jolt-source \"4af2362176160f2ed0e366689d7232b1a38adfec\"] [:runtime/jolt-version \"js1-runtime-final-1-gf8899905\"] [:runtime/language \"js0-lang/v1:[:map [[:jolt.sandbox.surface/count 156] [:jolt.sandbox.surface/lang \\\"js0-pure-sci\\\"] [:jolt.sandbox.surface/symbols [:vector [\\\"*\\\" \\\"+\\\" \\\"-\\\" \\\"->\\\" \\\"->>\\\" \\\"/\\\" \\\"<\\\" \\\"<=\\\" \\\"=\\\" \\\">\\\" \\\">=\\\" \\\"abs\\\" \\\"and\\\" \\\"apply\\\" \\\"as->\\\" \\\"assoc\\\" \\\"assoc-in\\\" \\\"boolean?\\\" \\\"char?\\\" \\\"coll?\\\" \\\"comp\\\" \\\"compare\\\" \\\"complement\\\" \\\"concat\\\" \\\"cond\\\" \\\"cond->\\\" \\\"cond->>\\\" \\\"condp\\\" \\\"conj\\\" \\\"cons\\\" \\\"constantly\\\" \\\"contains?\\\" \\\"count\\\" \\\"dec\\\" \\\"def\\\" \\\"defn\\\" \\\"defn-\\\" \\\"dissoc\\\" \\\"distinct\\\" \\\"do\\\" \\\"drop\\\" \\\"drop-last\\\" \\\"drop-while\\\" \\\"empty?\\\" \\\"even?\\\" \\\"every?\\\" \\\"filter\\\" \\\"filterv\\\" \\\"find\\\" \\\"first\\\" \\\"flatten\\\" \\\"fn\\\" \\\"fn*\\\" \\\"fn?\\\" \\\"format\\\" \\\"frequencies\\\" \\\"get\\\" \\\"get-in\\\" \\\"group-by\\\" \\\"hash-map\\\" \\\"hash-set\\\" \\\"identity\\\" \\\"if\\\" \\\"if-let\\\" \\\"if-not\\\" \\\"if-some\\\" \\\"inc\\\" \\\"integer?\\\" \\\"interleave\\\" \\\"interpose\\\" \\\"into\\\" \\\"juxt\\\" \\\"key\\\" \\\"keys\\\" \\\"keyword\\\" \\\"keyword?\\\" \\\"last\\\" \\\"let\\\" \\\"let*\\\" \\\"list\\\" \\\"list*\\\" \\\"loop\\\" \\\"loop*\\\" \\\"map\\\" \\\"map?\\\" \\\"mapcat\\\" \\\"mapv\\\" \\\"max\\\" \\\"merge\\\" \\\"merge-with\\\" \\\"min\\\" \\\"mod\\\" \\\"name\\\" \\\"namespace\\\" \\\"neg?\\\" \\\"nil?\\\" \\\"not\\\" \\\"not=\\\" \\\"nth\\\" \\\"number?\\\" \\\"odd?\\\" \\\"or\\\" \\\"partial\\\" \\\"partition\\\" \\\"partition-all\\\" \\\"peek\\\" \\\"pop\\\" \\\"pos?\\\" \\\"pr-str\\\" \\\"println\\\" \\\"quot\\\" \\\"quote\\\" \\\"range\\\" \\\"recur\\\" \\\"reduce\\\" \\\"reduce-kv\\\" \\\"rem\\\" \\\"remove\\\" \\\"rest\\\" \\\"reverse\\\" \\\"second\\\" \\\"select-keys\\\" \\\"seq\\\" \\\"seq?\\\" \\\"sequential?\\\" \\\"set\\\" \\\"set?\\\" \\\"some\\\" \\\"some->\\\" \\\"some->>\\\" \\\"some?\\\" \\\"sort\\\" \\\"sort-by\\\" \\\"split-at\\\" \\\"str\\\" \\\"string?\\\" \\\"subs\\\" \\\"symbol\\\" \\\"symbol?\\\" \\\"take\\\" \\\"take-last\\\" \\\"take-while\\\" \\\"update\\\" \\\"update-in\\\" \\\"val\\\" \\\"vals\\\" \\\"vec\\\" \\\"vector\\\" \\\"vector?\\\" \\\"when\\\" \\\"when-first\\\" \\\"when-let\\\" \\\"when-not\\\" \\\"when-some\\\" \\\"zero?\\\" \\\"zipmap\\\"]]] [:jolt.sandbox.surface/version 1]]]\"] [:runtime/receipt-protocol 1] [:runtime/sci-source \"32d62a5136ad3dc148588752f5bcc4cc30b14752\"] [:runtime/sci-version \"0.13.53\"]]]"}
+M1-LEVERAGE {:evaluations 5, :operations-per-eval [2 0 0 0 0], :multi-operation-evals 1, :operation-order [[:project/list :project/search] [] [] [] []]}
+
+Ran 25 tests. 294 assertions passed, 0 failures, 0 errors.
+{:type :summary, :test 25, :pass 294, :fail 0, :error 0}
+
+== js1-m3: ordinary suite ==
+WARN samizdat.agent.tools - tool done threw: Turn authority expired; refusing stale model effect
+WARN samizdat.agent.beam - branch B1 exceeded the turn deadline on turn 1
+WARN samizdat.agent.beam - branch B1 died on turn 1 : sleep interrupted
+INFO samizdat.agent.beam - distilled 1 finding(s) and 0 verdict(s) into memory
+WARN samizdat.agent.beam - branch B1 exceeded the turn deadline on turn 1
+INFO samizdat.security.controller - budget extension 37887e07-9162-42d9-817a-b9e838299d49 5 -> 12 request raise-1
+INFO samizdat.security.controller - budget extension a7fdeb2c-681a-4bb7-b944-38b0d1b3ec91 5 -> 9 request http-raise-1
+INFO samizdat.security.controller - budget extension 449c1bba-dc2d-4294-a253-755e04177d40 5 -> 12 request intervention-1
+  [base-test] model-facing sentences still in src/: 140 across 36 files
+ERROR samizdat.agent.tools - tool boundary-test-bare-string returned a String instead of a result map
+ERROR samizdat.agent.tools - tool boundary-test-no-branch returned a result map with no :branch, so the turn had no branch to carry forward
+WARN samizdat.agent.tools - tool boundary-test-throws threw: the tool exploded
+INFO samizdat.watch - watch: raised :provider-empty-replies - the provider keeps returning replies with neither content nor reasoning — the model is spending its whole output budget thinking and never reaching a tool call. The fix is MORE TOKENS or reasoning turned off for this endpoint, not more steering: raise :context-budget, or set :thinking? false if this is a local llama.cpp endpoint
+INFO samizdat.watch - watch: raised :provider-empty-replies - the provider keeps returning replies with neither content nor reasoning — the model is spending its whole output budget thinking and never reaching a tool call. The fix is MORE TOKENS or reasoning turned off for this endpoint, not more steering: raise :context-budget, or set :thinking? false if this is a local llama.cpp endpoint
+INFO samizdat.watch - watch: raised :calls-not-parsing - a large share of turns produce no usable tool call
+INFO samizdat.watch - watch: raised :replies-truncated - replies are hitting the token cap before emitting a call. The fix is MORE TOKENS, not more steering: the model never got far enough to call anything
+INFO samizdat.watch - watch: raised :shipping-unverified - the ship gate is being asked and cannot answer — work is shipping without its tests having been run
+INFO samizdat.watch - watch: raised :provider-empty-replies - the provider keeps returning replies with neither content nor reasoning — the model is spending its whole output budget thinking and never reaching a tool call. The fix is MORE TOKENS or reasoning turned off for this endpoint, not more steering: raise :context-budget, or set :thinking? false if this is a local llama.cpp endpoint
+INFO samizdat.watch - watch: raised :provider-empty-replies - the provider keeps returning replies with neither content nor reasoning — the model is spending its whole output budget thinking and never reaching a tool call. The fix is MORE TOKENS or reasoning turned off for this endpoint, not more steering: raise :context-budget, or set :thinking? false if this is a local llama.cpp endpoint
+WARN samizdat.store.knowledge - knowledge/recall fell back to LIKE: fts5: syntax error
+INFO samizdat.repl - eval can now reach /home/chuck/opencode/src/samizdat-controller-m4/dev
+INFO samizdat.agent.beam - loop team is a whole-run workflow; beam width forced to 1 (asked for 5)
+INFO samizdat.agent.beam - distilled 1 finding(s) and 0 verdict(s) into memory
+WARN samizdat.agent.loop - branch B1 turn 1 model call failed: socket reset
+INFO samizdat.userspace - userspace manifest worker saved as version 2
+INFO samizdat.userspace - userspace manifest authored-child saved as version 1
+INFO samizdat.watch - watch: raised :tool-failing - `done` fails more often than it works
+INFO samizdat.watch - watch: raised :tool-failing - `done` fails more often than it works
+INFO samizdat.watch - watch: raised :tool-failing - `done` fails more often than it works
+INFO samizdat.watch - watch: raised :tool-failing - `done` fails more often than it works
+INFO samizdat.api.control - grant python3 * recorded for run df9c699e-f862-4607-8556-7bcc41de624e
+INFO samizdat.system - samizdat up on port 0 provider :local model local-model db :memory:
+WARN samizdat.agent.beam - branch B1 exceeded the turn deadline on turn 1
+WARN samizdat.agent.beam - branch B1 died on turn 1 : sleep interrupted
+INFO samizdat.userspace - userspace cell aaa-custom saved as version 1
+INFO samizdat.mutation - cell mutation committed
+WARN samizdat.mutation - cell mutation rolled back: reload: the edited cell file did not load — cell load failed; registry rolled back: EOF while reading
+WARN samizdat.mutation - cell mutation rolled back: validate: the loop no longer compiles — Cell :mini/end not found in registry
+WARN samizdat.mutation - cell mutation rolled back: soak run threw: execution error
+WARN samizdat.mutation - cell mutation rolled back: reload: the edited cell file did not load — cell load failed; registry rolled back: EOF while reading
+INFO samizdat.userspace - userspace cell mini saved as version 1
+INFO samizdat.mutation - cell mini committed as version 1
+WARN samizdat.mutation - cell proposal rejected: mini the candidate did not load — EOF while reading
+INFO samizdat.userspace - userspace cell mini saved as version 1
+INFO samizdat.mutation - cell mini committed as version 1
+WARN samizdat.mutation - cell proposal rejected: other manifest 'beamish': validate: the loop no longer compiles — cells require ctx keys no driver provides: :start (:other/thing) wants :no-such-ctx-key. Either the key belongs in manifests/ctx-keys and the drivers must set it, or the cell should not be asking.
+WARN samizdat.userspace - userspace save ignored — no project store is bound: cell mini
+WARN samizdat.mutation - cell mini is live but UNSAVED — no project store is bound
+INFO samizdat.userspace - userspace cell loop saved as version 1
+WARN samizdat.repl - run root is not the working directory — `eval` requires from /tmp but resolves relative FILE paths against /home/chuck/opencode/src/samizdat-controller-m4 — start the harness from the project root, or use absolute paths in eval
+WARN samizdat.agent.loop - branch B1 turn 3 model call failed: context exceeded
+WARN samizdat.agent.loop - branch B1 turn 3 model call failed: boom
+INFO samizdat.userspace - userspace cell loop saved as version 2
+INFO samizdat.userspace - userspace cell invented-by-the-agent saved as version 1
+WARN samizdat.userspace - userspace save ignored — no project store is bound: cell loop
+INFO samizdat.userspace - userspace cell loop saved as version 2
+INFO samizdat.userspace - userspace cell critic saved as version 1
+INFO samizdat.userspace - userspace cell critic saved as version 1
+INFO samizdat.userspace - userspace cell critic saved as version 2
+INFO samizdat.userspace - userspace cell critic saved as version 1
+INFO samizdat.userspace - userspace prompt my-note saved as version 1
+INFO samizdat.userspace - userspace prompt my-note saved as version 2
+INFO samizdat.userspace - userspace prompt mine saved as version 1
+INFO samizdat.userspace - userspace prompt mine saved as version 2
+INFO samizdat.userspace - userspace policy gates saved as version 2
+INFO samizdat.userspace - userspace prompt cull-reprieve saved as version 1
+INFO samizdat.userspace - userspace policy manual saved as version 1
+INFO samizdat.userspace - userspace policy gates saved as version 2
+INFO samizdat.userspace - userspace prompt cull-reprieve saved as version 1
+INFO samizdat.userspace - userspace policy gates saved as version 2
+INFO samizdat.userspace - userspace cell race-target saved as version 1
+INFO samizdat.userspace - userspace policy gates saved as version 2
+INFO samizdat.userspace - userspace policy gates saved as version 3
+WARN samizdat.store.journal - journal: falling back to pr-str for a value data.json could not write: Don't know how to write JSON of class java.lang.Character
+INFO samizdat.store.runs - retention: dropped the record of 1 run(s) older than 30 days
+[gui.api] poller callback failed: boom
+
+Ran 1573 tests. 6320 assertions passed, 0 failures, 0 errors.
+
+{:type :summary, :test 1573, :pass 6320, :fail 0, :error 0}
+EXIT=0

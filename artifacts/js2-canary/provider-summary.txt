@@ -1,0 +1,5 @@
+total upstream calls logged (ALL attempts): 145
+status codes: {200: 144, 'exception': 1}
+models: {'fireworks.kimi-k2p7-code': 135}
+non-200: 1
+  {"path": "/v1/chat/completions", "bytes": 2148, "model": "fireworks.kimi-k2p7-code", "messages": 2, "max_tokens": 16384, "keys": ["max_tokens", "messages", "model", "temperature"], "roles": "su", "nul

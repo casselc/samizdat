@@ -231,7 +231,64 @@
    {:threshold {30000 "Subprocess wall-clock bound. A capability's own safety
                        bound, not a decision about the work."
                 2000 "SIGTERM grace before SIGKILL. How long a dying process
-                      gets to die, which is a property of processes."}}
+                      gets to die, which is a property of processes."
+                1048576 "The default per-stream output budget of run-bounded
+                         (1 MiB), ported from bbagent's measured process
+                         facility. A mechanism safety bound: what a chatty
+                         child may cost the host before the rest is counted
+                         and dropped, not a decision about the work."
+                3600000 "The longest deadline a run-bounded caller may ask
+                         for. A deadline is the only thing standing between a
+                         wedged child and a host process that waits forever —
+                         a ceiling the caller cannot decline to be protected
+                         by, like mutation.clj's soak."}}
+
+   "src/samizdat/security/smolvm_verification_env.clj"
+   {:threshold {125 "The guest prelude's own 'never reached the argv' exit
+                     status, paired with a stderr marker to disambiguate it
+                     from a workload that chose 125. A protocol constant of
+                     the image contract, not a tunable."
+                5000 "How far the machine manager's own --timeout sits BEHIND
+                      the host deadline. A property of the backstop
+                      arrangement (the host deadline classifies, the manager's
+                      only catches an unreapable tree), not a policy."}
+    :vocabulary {"Starting ephemeral machine \\(vm-[0-9a-f]+\\)\\.\\.\\."
+                 "What the machine manager's own stderr banner IS — the
+                  announcement this environment strips so :stderr describes
+                  the workload alone. Fixed by the manager's output format,
+                  like verification_env's merged-usr pattern; widening it
+                  cannot express a policy, only mis-attribute the manager's
+                  progress line to a workload."}}
+
+   "src/samizdat/security/smolvm_project_env.clj"
+   {:vocabulary {"Starting ephemeral machine \\((vm-[0-9a-f]+)\\)\\.\\.\\."
+                 "The same manager banner the verify environment strips, with
+                  the machine id captured out of it. This environment needs the
+                  id as well as the removal: a timed-out run stops and deletes
+                  THAT machine by name rather than sweeping the manager's whole
+                  table, which could be somebody else's long-lived machine.
+                  Fixed by the manager's output format; widening it cannot
+                  express a policy, only misname a machine."}}
+
+   "src/samizdat/security/closure_coverage.clj"
+   {:vocabulary {:all "The OUTPUT GRAMMAR of clojure.test's summary, in the two
+                       dialects this has to read: the host toolchain's and
+                       babashka's — babashka being the toolchain inside the
+                       guest, where the closure verifier actually runs. These
+                       are facts about what a test runner prints, like the
+                       manager's banner or a merged-/usr layout. A project
+                       cannot want them different without changing which test
+                       runner it uses, at which point the grammar is a fact
+                       about THAT runner and still not a preference."}}
+
+   "src/samizdat/security/verification_env.clj"
+   {:vocabulary {"usr/(bin|sbin|lib|lib64)"
+                 "What a merged-/usr layout IS — /bin and its siblings as
+                  relative symlinks into /usr, fixed by the OS distribution,
+                  like policy.clj's redirection grammar. The sandbox recreates
+                  exactly this shape so the pinned verifier's #!/bin/sh
+                  resolves; widening the pattern cannot express a policy, only
+                  mis-bind a host it did not mean."}}
 
    "src/samizdat/events.clj"
    {:threshold {256 "The event tap's sliding-buffer size. RFC-009 states it as

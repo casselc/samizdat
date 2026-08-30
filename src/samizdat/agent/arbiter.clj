@@ -42,6 +42,7 @@
   branch, and when, by editing gates.edn — not by editing this."
   (:require [samizdat.agent.gates :as gates]
             [samizdat.agent.state :as state]
+            [samizdat.agent.surface :as surface]
             [samizdat.util :as util]))
 
 (defn eligible
@@ -50,6 +51,16 @@
   not only what it chose."
   [ctx]
   (->> (gates/gates)
+       ;; A gate that names a tool is a gate that will PREFILL that name into
+       ;; the assistant turn (prefill-for), so a gate naming a tool this branch
+       ;; cannot call would hand the model a call it is not authorized to make
+       ;; — `{"name": "give_up"` to a bounded branch whose catalog is
+       ;; eval/doc/complete/done. Filtered here, once, on the surface the
+       ;; branch actually has: gates.edn keeps saying what it says, and the
+       ;; ones that do not apply simply do not fire.
+       (filter (fn [g] (or (nil? (:tool g))
+                           (nil? (:surface ctx))
+                           (surface/callable? (:surface ctx) (:tool g)))))
        (filter (fn [g] (and ((:when g) ctx)
                             (not (gates/budget-exceeded? g (:branch ctx))))))
        (sort-by :priority)))

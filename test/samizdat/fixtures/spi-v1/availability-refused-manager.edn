@@ -1,0 +1,1 @@
+{:environment/available? false, :environment/refusal {:refusal/category :spi.refusal/manager-unavailable, :refusal/reason "No machine manager is available to run project commands"}, :spi/kind :spi.environment/availability, :spi/version 1}

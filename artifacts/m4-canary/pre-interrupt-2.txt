@@ -1,0 +1,20 @@
+run-id: 020296a8-a068-4559-83c1-e00a361b0c22
+status: running max_turns: 60
+binding: {"binding-id": "bind:020296a8-a068-4559-83c1-e00a361b0c22", "instance-id": "inst:020296a8-a068-4559-83c1-e00a361b0c22", "orientation-digest": "sha256:75f9d4cfe5c1082a901d0d07640ea380f48441f530e811910ef742f48e1ef9d8", "profile": "project-develop", "capabilities": ["edit", "list", "read", "search", "stat"], "timeout-ms": 30000}
+evaluations: {"total": 9, "completed": 4, "failed": 5, "pending": 0}
+operations.per-evaluation: [1, 1, 1, 0]
+operations.multi-operation: 0
+operations.order: [['read'], ['read'], ['stat'], []]
+epochs: [{"id": "e1009cfa-2fa0-4294-bac0-bc1cd4501ab2", "turn": 1, "provider": "local", "model": "openrouter.z-ai/glm-5.3", "adapter": "local", "config_digest": "1b035b576ff2077fafa200d214803cf51207311bdac9653545f55b6611a49fa0", "closed_at": "2026-08-29T10:05:05.942Z"}, {"id": "568a8651-0cff-4461-9fb5-96ef81e3d4df", "turn": 18, "provider": "openai", "model": "openrouter.z-ai/glm-5.3", "adapter": "OpenAI", "config_digest": "bfc5ace21d2a071fbb85946bb452d778b8fd9a5670589efdb5bae4fa670cdf23", "closed_at": null}]
+invocations: 25
+--- pending evals ---
+evals 9 pending 0
+--- last completed turn ---
+23
+--- target tree state ---
+?? .samizdat/
+9dbc01d242d920365d88af0d0c4c1a21247ada54511693cec3939b28a785f705  /home/chuck/opencode/src/samizdat-canary-target-m4/src/samizdat/util.clj
+6263ca9237ac3d2367c10f61a52ad6e1f17ff63bd08befa81107a0dbbc6b6f60  /home/chuck/opencode/src/samizdat-canary-target-m4/test/samizdat/util_test.clj
+--- controller integrity ---
+64effe150269fdebfdd9ccb619cab89187494b75
+--- receipt row count (replay must not add rows) ---

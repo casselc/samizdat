@@ -89,7 +89,8 @@
   tool that produced it knows, and a reconstruction would be guessing."
   [conn run-id {:keys [branch-id turn tool-name args result category
                        parse-error auto-repaired assistant-text reasoning-text
-                       usage policy-refusal?]}]
+                        usage policy-refusal? inference-epoch-id
+                        inference-invocation-id]}]
   (db/with-writer
     (db/execute! conn
                    ["INSERT INTO turns (run_id, branch_id, turn, tool_name, args, result,
@@ -97,8 +98,9 @@
                                         assistant_text, reasoning_text, created_at,
                                         prompt_tokens, completion_tokens, total_tokens,
                                         cache_hit_tokens, cache_miss_tokens,
-                                        policy_refusal)
-                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+                                         policy_refusal, inference_epoch_id,
+                                         inference_invocation_id)
+                      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
                     run-id branch-id turn (str tool-name) (js (or args {}))
                     (str result) (some-> category name) parse-error
                     (if auto-repaired 1 0)
@@ -109,7 +111,8 @@
                     (:prompt-tokens usage) (:completion-tokens usage)
                     (:total-tokens usage)
                     (:cache-hit-tokens usage) (:cache-miss-tokens usage)
-                    (if policy-refusal? 1 0)]))
+                     (if policy-refusal? 1 0) inference-epoch-id
+                     inference-invocation-id]))
   (emit! conn run-id :turn {:branch-id branch-id :turn turn
                             :data {:tool tool-name :category category}}))
 
@@ -133,7 +136,8 @@
   [conn run-id branch-id]
   (db/fetch conn
             ["SELECT id, run_id, branch_id, turn, tool_name, args, result,
-                     category, parse_error, auto_repaired, created_at
+                      category, parse_error, auto_repaired, created_at,
+                      inference_epoch_id, inference_invocation_id
                 FROM turns
                WHERE run_id = ? AND branch_id = ?
                ORDER BY turn, id"
@@ -243,6 +247,30 @@
   (emit! conn run-id :artifact {:branch-id branch-id :turn turn
                                 :data {:kind kind :claim claim
                                        :claim-status claim-status}}))
+
+(defn last-context
+  "The most recent SCI context lifecycle fact for a run, as data, or nil.
+
+  Read-only projection of the `evaluator-context` events. It never allocates a
+  context and never touches the evaluator — it reads the journal, like every
+  other read model here."
+  [conn run-id]
+  (when-let [row (db/fetch-one
+                  conn ["SELECT data FROM events
+                          WHERE run_id = ? AND kind = 'evaluator-context'
+                          ORDER BY id DESC LIMIT 1" (str run-id)])]
+    (try (json/read-str (:data row) :key-fn keyword)
+         (catch Throwable _ nil))))
+
+(defn contexts
+  "Every SCI context lifecycle fact for a run, oldest first."
+  [conn run-id]
+  (->> (db/fetch conn ["SELECT data FROM events
+                         WHERE run_id = ? AND kind = 'evaluator-context'
+                         ORDER BY id" (str run-id)])
+       (keep (fn [r] (try (json/read-str (:data r) :key-fn keyword)
+                          (catch Throwable _ nil))))
+       vec))
 
 (defn artifacts
   ([conn run-id]

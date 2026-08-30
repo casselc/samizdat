@@ -1,0 +1,6 @@
+provider :bwrap available? true reason :unknown
+FOCUSED green? true exit 0 ms 6909
+CLOSURE green? true exit 0 ms 351006
+COVERAGE #:coverage{:version 1, :suite "js1-ve/v1:bab68fdf5a128ea0094ce345680d8eb0101792a0e703f8a29bfc28e4ad82a861", :verifier "sha256:e3fd1b7d73e88ec4f88e482c61912524bd48acbbe6ed3cd319a4c4ca387fff2f", :input "sha256:1c803f326050a0b200e09a83e235b8a25fca93ba271c7db60132c39307ea3b7d", :green? true, :exit 0, :output-truncated? false, :kind :parsed, :tests 1630, :assertions 6445, :failures 0, :errors 0}
+ADMISSIBLE? true refusal nil
+baseline written to /home/chuck/opencode/src/js2-evidence/closure-baseline.edn

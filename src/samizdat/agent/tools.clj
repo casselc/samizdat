@@ -129,6 +129,29 @@
     (nil? (:branch r))
     "returned a result map with no :branch, so the turn had no branch to carry forward"))
 
+(defn- dispatch
+  "One tool call, through the method its LANE defines.
+
+  One fork, and it is an authority fork rather than a routing convenience.
+  The bounded lane's `done` is a ControlEvent the CONTROLLER settles (M2),
+  never the model's own say-so: ship/bounded-done derives the pinned verifier
+  argv from the run's own edit receipts and runs it inside the
+  controller-owned VerificationEnvironment — no network, no host secrets or
+  config, bounded output/time/resources, cleanup and reaping. RED hands back
+  bounded evidence and the branch continues; only GREEN is terminal, and an
+  unavailable substrate refuses outright. The ordinary `done` method, and the
+  `sh -c` verify behind it, is unreachable in this lane.
+
+  It sits under `retrying` rather than beside it so a bounded call gets the
+  same transient-failure handling every other tool gets. Nothing here makes a
+  `done` retryable: that is `:retry-safe-tools`, a positive allowlist which
+  `done` is not on and must not be put on — re-running a completion would run
+  the controller's verifiers twice for one model decision."
+  [{:keys [tool-name] :as ctx}]
+  (if (and (base/bounded? ctx) (= "done" tool-name))
+    (ship/bounded-done ctx)
+    (base/run-tool ctx)))
+
 (defn- retrying
   "Dispatch, and run it again when the failure was TRANSIENT and the tool is
   one that re-running cannot duplicate an effect.
@@ -149,7 +172,7 @@
         classes (lexicon/wordlist :tool-error-classes)
         read-only (lexicon/wordlist :retry-safe-tools)]
     (loop [attempt 1]
-      (let [r (base/run-tool ctx)]
+      (let [r (dispatch ctx)]
         (if (or (not= :failure (:category r))
                 (not (toolerr/should-retry?
                       {:tool (:tool-name ctx)
@@ -194,12 +217,21 @@
   3. The model-bound strings are redacted. See the note above the delay."
   [{:keys [branch tool-name] :as ctx}]
   (let [known (known-values-for ctx)
-        outcome (try {:ok (retrying ctx)}
+        ;; BEFORE any dispatch, and before any retry: a call whose turn
+        ;; authority has expired is refused rather than run. A retry of a
+        ;; stale call would be a second stale call.
+        stale (base/turn-lease-refusal ctx)
+        outcome (try {:ok (or stale (retrying ctx))}
                      (catch Throwable e {:threw e}))]
     (if-let [e (:threw outcome)]
       (do (log/warn "tool" tool-name "threw:" (ex-message e))
           (redact-result
-           (base/malformed branch (str "`" tool-name "` failed: " (ex-message e)))
+           (if (= :stale (:samizdat.turn-lease/error (ex-data e)))
+             (or (base/turn-lease-refusal ctx)
+                 (base/fail branch (base/bounded-message {:stale-turn true})
+                            :stale-lease? true))
+             (base/malformed branch
+                             (str "`" tool-name "` failed: " (ex-message e))))
            known))
       (let [r (:ok outcome)]
         (if-let [fault (envelope-fault r)]
@@ -221,6 +253,8 @@
 (def missing base/missing)
 (def unavailable base/unavailable)
 (def phase-refusal base/phase-refusal)
+(def turn-lease-refusal base/turn-lease-refusal)
+(def bounded-binding base/bounded-binding)
 (def tool-names base/tool-names)
 (def answer-tokens ship/answer-tokens)
 (def uncovered-tokens ship/uncovered-tokens)

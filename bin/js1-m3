@@ -1,0 +1,124 @@
+#!/bin/sh
+# Exact JS1 M3 closure gates. Ordinary Samizdat never invokes this lane.
+#
+# The check hardening is the js1-m2 lane's contract carried over verbatim: a
+# pinned checkout with tracked modifications — Samizdat, Jolt, or the vendored
+# SCI — is refused with its dirty listing, because exact evidence must describe
+# the bytes that actually ran. Rerunning this lane therefore reruns the exact
+# M2 refusal behavior on every rerun, never a green against edited bytes.
+set -eu
+
+JOLT_SHA=f8899905d98a0abdcc6b4ae61dfd5c8bdb9c7277
+SCI_SHA=32d62a5136ad3dc148588752f5bcc4cc30b14752
+SCI_VERSION=0.13.53
+CHEZ=${JOLT_CHEZ:-/usr/local/bin/scheme}
+ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd -P)
+JOLT=${JOLT_HOME:-"$ROOT/../jolt-m2-verify-closure"}
+
+fail() {
+  printf 'js1-m3: %s\n' "$*" >&2
+  exit 1
+}
+
+# The Samizdat under test: its SHA is named in every record, and a checkout
+# with tracked modifications is refused — exact evidence must describe the
+# bytes that actually ran, in the tested repository as in its runtime.
+sha() { git -C "$ROOT" rev-parse HEAD; }
+
+check_samizdat() {
+  [ -d "$ROOT/.git" ] || fail "no Samizdat checkout at $ROOT"
+  sam_dirty=$(git -C "$ROOT" status --porcelain --untracked-files=no --ignore-submodules=all)
+  if [ -n "$sam_dirty" ]; then
+    printf 'js1-m3: tested Samizdat checkout has tracked modifications; exact evidence refused:\n%s\n' "$sam_dirty" >&2
+    exit 1
+  fi
+}
+
+check_jolt() {
+  [ -x "$JOLT/bin/jolt" ] || fail "no Jolt checkout at $JOLT"
+  [ -x "$CHEZ" ] || fail "no Chez at $CHEZ (set JOLT_CHEZ)"
+  actual=$(git -C "$JOLT" rev-parse HEAD)
+  [ "$actual" = "$JOLT_SHA" ] || fail "Jolt SHA $actual, expected $JOLT_SHA"
+  dirty=$(git -C "$JOLT" status --porcelain --untracked-files=no --ignore-submodules=all)
+  if [ -n "$dirty" ]; then
+    printf 'js1-m3: pinned Jolt checkout has tracked modifications; exact evidence refused:\n%s\n' "$dirty" >&2
+    exit 1
+  fi
+  sci_actual=$(git -C "$JOLT/vendor/sci" rev-parse HEAD)
+  [ "$sci_actual" = "$SCI_SHA" ] || fail "SCI SHA $sci_actual, expected $SCI_SHA"
+  sci_dirty=$(git -C "$JOLT/vendor/sci" status --porcelain --untracked-files=no)
+  if [ -n "$sci_dirty" ]; then
+    printf 'js1-m3: pinned SCI checkout has tracked modifications; exact evidence refused:\n%s\n' "$sci_dirty" >&2
+    exit 1
+  fi
+  version=$(tr -d '\r\n' < "$JOLT/vendor/sci/resources/SCI_VERSION")
+  [ "$version" = "$SCI_VERSION" ] || fail "SCI version $version, expected $SCI_VERSION"
+}
+
+check() {
+  check_samizdat
+  check_jolt
+  printf 'Samizdat %s\nJolt %s\nSCI %s / %s\n' \
+    "$(sha)" "$JOLT_SHA" "$SCI_SHA" "$SCI_VERSION"
+}
+
+# Every Jolt invocation below runs through this: the pinned Chez, and the
+# pinned checkout's bin first on PATH so any nested verifier resolution (the
+# ordinary suite's VE controller tries PATH, then cwd/bin/jolt) lands on THIS
+# launcher — the exact environment the M2 lane reran under.
+jolt_env() {
+  JOLT_CHEZ=$CHEZ
+  PATH="$JOLT/bin:$PATH"
+  export JOLT_CHEZ PATH
+}
+
+run_ns() {
+  label=$1
+  shift
+  printf '\n== js1-m3: %s ==\n' "$label"
+  reqs='(quote clojure.test)'
+  nses=''
+  for ns in "$@"; do
+    reqs="$reqs (quote $ns)"
+    nses="$nses (quote $ns)"
+  done
+  (cd "$ROOT" && "$JOLT/bin/jolt" -A:test -e "(require $reqs)
+    (let [{:keys [fail error] :as r} (clojure.test/run-tests$nses)]
+      (println r) (System/exit (if (pos? (+ fail error)) 1 0)))")
+}
+
+focused() {
+  run_ns 'M3 authority, provenance, and lease closure' \
+    samizdat.m3-controller-test samizdat.control-test samizdat.agent-turn-lease-test
+}
+
+bounded() {
+  printf '\n== js1-m3: pinned bounded evaluator ==\n'
+  (cd "$ROOT" && SAMIZDAT_BOUNDED_TEST=1 "$JOLT/bin/jolt" \
+    -Sdeps "{:deps {borkdude/sci {:local/root \"$JOLT/vendor/sci\"}}}" \
+    -A:test -e '(require (quote clojure.test) (quote samizdat.evaluator-test))
+      (let [{:keys [fail error] :as r} (clojure.test/run-tests (quote samizdat.evaluator-test))]
+        (println r) (System/exit (if (pos? (+ fail error)) 1 0)))')
+}
+
+full() {
+  printf '\n== js1-m3: ordinary suite ==\n'
+  # The ulimit raise mirrors the deps.edn :tasks test entry: the suite holds
+  # many open fds and the default soft limit starves it.  As in the M2 lane,
+  # the suite runs even when the raise itself is refused.
+  if (cd "$ROOT"; ulimit -n 1024 2>/dev/null; "$JOLT/bin/jolt" -M:test); then
+    :
+  else
+    fail 'ordinary suite failed'
+  fi
+}
+
+case ${1:-} in
+  check) check ;;
+  sha) printf 'Samizdat %s\n' "$(sha)" ;;
+  focused) check; jolt_env; focused ;;
+  bounded) check; jolt_env; bounded ;;
+  full) check; jolt_env; full ;;
+  test) check; jolt_env; focused; bounded; full ;;
+  *) printf 'usage: bin/js1-m3 check|sha|focused|bounded|full|test\n' >&2; exit 2 ;;
+esac

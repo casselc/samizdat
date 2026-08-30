@@ -38,8 +38,8 @@
         exception."
    :effects [:net :db]
    :requires []}
-  (fn [ctx {:keys [branch] :as data}]
-    (assoc data :call (turn/call-model ctx branch))))
+  (fn [ctx {:keys [branch turn] :as data}]
+    (assoc data :call (turn/call-model ctx branch turn))))
 
 (cell/defcell :llm/parse
   {:doc "Fold the response into the branch: parse the fence, record mechanics
@@ -57,42 +57,62 @@
 (cell/defcell :loop/provider-error
   {:doc "A provider failure is not the branch's fault: journal it as neutral
         and tell the branch to try again."
-   :effects [:db]
-   :requires []}
+    :effects [:db]
+    :requires []}
   (fn [ctx {:keys [branch turn call] :as data}]
-    (assoc data :branch (turn/provider-error-step ctx branch turn
-                                                  (:error call) (:reason call)))))
+    (assoc data :branch (turn/provider-error-step
+                         ctx branch turn (:error call) (:reason call)
+                         (select-keys call [:inference-epoch-id
+                                            :inference-invocation-id])))))
 
 (cell/defcell :loop/no-call
   {:doc "The response carried no usable tool call: say exactly what was wrong,
         journal the turn as mechanics, and make the next request start
         mid-fence so prose is not an available reply."
-   :effects [:db]
-   :requires []}
+    :effects [:db]
+    :requires []}
   (fn [ctx {:keys [branch turn parsed signals said call] :as data}]
     (assoc data :branch (turn/no-call-step ctx branch turn
                                            {:parsed parsed :signals signals
-                                            :said said :response (:response call)}))))
+                                            :said said :response (:response call)
+                                            :inference-epoch-id
+                                            (:inference-epoch-id call)
+                                            :inference-invocation-id
+                                            (:inference-invocation-id call)}))))
 
 (cell/defcell :tool/dispatch
   {:doc "Phase policy first, then the tool, then the branch bookkeeping the
         outcome demands (outcome counters, artifact banking, repeat-failure
         escalation)."
-   :effects [:db :fs :proc]
-   :requires []}
-  (fn [ctx {:keys [branch turn parsed] :as data}]
-    (merge data (turn/tool-step ctx branch turn parsed))))
+    :effects [:db :fs :proc]
+    :requires []}
+  (fn [ctx {:keys [branch turn parsed call] :as data}]
+    ;; The model call's InferenceEpoch and per-call InferenceInvocation ride
+    ;; the dispatch ctx, so the evaluator's eval rows and receipts record the
+    ;; exact provider invocation that produced them.
+    (merge data (turn/tool-step (cond-> ctx
+                                  (:inference-epoch-id call)
+                                  (assoc :inference-epoch-id
+                                         (:inference-epoch-id call))
+                                  (:inference-invocation-id call)
+                                  (assoc :inference-invocation-id
+                                         (:inference-invocation-id call)))
+                                branch turn parsed))))
 
 (cell/defcell :journal/record
   {:doc "The durable record of the turn: the turn row, any artifact and its
         entry into the shared pool, any failure, any thesis. Everything a gate
         reads and everything resume replays goes through here."
-   :effects [:db]
-   :requires []}
+    :effects [:db]
+    :requires []}
   (fn [ctx {:keys [branch turn parsed result tool said call] :as data}]
     (turn/journal-step! ctx branch turn {:parsed parsed :result result
-                                         :tool tool :said said
-                                         :response (:response call)})
+                                          :tool tool :said said
+                                          :response (:response call)
+                                          :inference-epoch-id
+                                          (:inference-epoch-id call)
+                                          :inference-invocation-id
+                                          (:inference-invocation-id call)})
     data))
 
 (cell/defcell :gate/arbiter

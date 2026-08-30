@@ -29,7 +29,9 @@
             [clojure.tools.logging :as log]
             [samizdat.agent.beam :as beam]
             [samizdat.agent.resume :as resume]
-            [samizdat.llm.registry :as registry]
+             [samizdat.llm.registry :as registry]
+             [samizdat.prompt :as prompt]
+            [samizdat.security.controller :as controller]
             [samizdat.store.grants :as grants]
             [samizdat.store.interventions :as interventions]
             [samizdat.store.runs :as runs]))
@@ -176,43 +178,84 @@
   into an HTTP 200. The resumed run is registered under `active` with a fresh
   abort flag, so abort! can stop it like any other.
 
-  `body` may carry max_turns: an explicit budget extension that reopens
-  branches closed as exhausted. Omitted, the original budget stands."
+  Resume never widens the budget. A body asking above the recorded cap is
+  refused; extension is a separate trusted-controller act."
   [{:keys [conn config]} run-id body]
   (if-not (resume/resumable? conn run-id)
     {:status 409 :body {:error {:message (str "run " run-id " is not resumable")
                                 :run_id run-id}}}
-    ;; A resume may name an arm too — a run that crashed on one model can be
-    ;; picked up on another, and saying nothing keeps the original.
-    (let [llm-config (run-llm-config (:llm config) body)
-          adapter (registry/adapter-for (:provider llm-config))
-          abort (atom false)
-          max-turns (or (:max_turns body) (:max-turns body))]
-      (future
-        (try
-          ;; Registered inside the run's thread before any work, for the same
-          ;; reason as start-run! (provenance CR1-3): an assoc on the
-          ;; caller racing a completion dissoc stranded the entry.
-          (swap! active assoc run-id {:abort abort})
-          (let [r (resume/resume! {:conn conn :config config
-                                   :llm-adapter adapter
-                                   :llm-config llm-config
-                                   :run-id run-id :abort abort
-                                   :max-turns max-turns})]
-            (swap! active dissoc run-id)
-            r)
-          (catch Throwable e
-            (log/error "resume failed:" (ex-message e))
-            (swap! active dissoc run-id)
-            {:status :error :error (ex-message e)})))
-      ;; The budget this resume is running under, from what the caller asked
-      ;; for, falling back to the row as it stood BEFORE the future started.
-      ;; Reading the row here unconditionally raced the resume that is
-      ;; rewriting it: the answer was whichever thread won, and an explicit
-      ;; max_turns extension was reported as the old budget more often than
-      ;; not.
-      {:body {:run_id run-id :status "resuming"
-              :max_turns (or max-turns (:max_turns (runs/get-run conn run-id)))}})))
+    (let [recorded (:max_turns (runs/get-run conn run-id))
+          asked (or (:max_turns body) (:max-turns body))
+          asked-num (when (some? asked)
+                      (try (Long/parseLong (str asked))
+                           (catch Throwable _ :samizdat.api.control/malformed)))]
+      (cond
+        (= :samizdat.api.control/malformed asked-num)
+        {:status 400 :body {:error {:message (prompt/render "controller-safety"
+                                                           {:max-turns-integer true})}
+                            :run_id run-id}}
+
+        (and asked-num (not (pos? asked-num)))
+        {:status 400 :body {:error {:message (prompt/render "controller-safety"
+                                                           {:max-turns-positive true})}
+                            :run_id run-id}}
+
+        (and asked-num (> asked-num recorded))
+        {:status 403
+          :body {:error {:message (prompt/render "controller-safety"
+                                                {:resume-widen true})}
+                :run_id run-id :max_turns recorded}}
+
+        :else
+        (let [llm-config (run-llm-config (:llm config) body)
+              adapter (registry/adapter-for (:provider llm-config))
+              abort (atom false)]
+          (future
+            (try
+              (swap! active assoc run-id {:abort abort})
+              (let [r (resume/resume! {:conn conn :config config
+                                       :llm-adapter adapter
+                                       :llm-config llm-config
+                                       :run-id run-id :abort abort})]
+                (swap! active dissoc run-id)
+                r)
+              (catch Throwable e
+                (log/error "resume failed:" (ex-message e))
+                (swap! active dissoc run-id)
+                {:status :error :error (ex-message e)})))
+          {:body {:run_id run-id :status "resuming"
+                  :max_turns recorded}})))))
+
+(defn extend!
+  "Trusted human control-plane budget extension. Authority comes only from the
+  server's trusted config; the body contributes the idempotency key, target cap
+  and retained audit reason, never an authority flag."
+  [{:keys [conn config]} run-id body]
+  (let [new-max (or (:max_turns body) (:max-turns body))
+        parsed (when (some? new-max)
+                 (try (Long/parseLong (str new-max))
+                      (catch Throwable _ :samizdat.api.control/malformed)))
+        result (if (= :samizdat.api.control/malformed parsed)
+                  {:ok false :code :bad-request
+                   :message (prompt/render "controller-safety"
+                                           {:max-turns-integer true})}
+                 (controller/extend-budget!
+                  (controller/authority config) conn
+                  {:run-id run-id
+                   :request-id (or (:request_id body) (:request-id body))
+                   :new-max parsed :reason (:reason body)}))]
+    (if (:ok result)
+      {:body (-> result (dissoc :ok)
+                 (assoc :run_id run-id :status "extended"))}
+      {:status (case (:code result)
+                 :bad-request 400 :unauthorized 403 :unknown-run 404
+                 :over-ceiling 403
+                 (:terminal-run :not-monotonic :request-conflict
+                  :concurrent-raise) 409
+                 400)
+       :body {:error {:message (:message result)
+                      :code (some-> (:code result) name)}
+              :run_id run-id}})))
 (defn- grant-pattern
   "The pattern from a grant payload. Accepts a map (what body-json yields), a
   bare string, or nil. Blank is not a pattern — an unset form posts empty

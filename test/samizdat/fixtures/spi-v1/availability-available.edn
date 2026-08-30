@@ -1,0 +1,1 @@
+{:environment/available? true, :environment/coordinate "sha256:2a0c02538eadaf73ff6dffa13122e97818a03560cd9f778db01e923e3db7ee6b", :spi/kind :spi.environment/availability, :spi/version 1}

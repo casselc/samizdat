@@ -556,6 +556,162 @@
    "ALTER TABLE userspace ADD COLUMN success_count INTEGER NOT NULL DEFAULT 0"
    "ALTER TABLE userspace ADD COLUMN failure_count INTEGER NOT NULL DEFAULT 0"])
 
+(def ^:private v20
+  ;; Bounded evaluator history is separate from the model-visible tape. The
+  ;; absence of a completion row is the durable pending state; intents and
+  ;; outcomes are separate append-only rows so interrupted world operations
+  ;; cannot be mistaken for settled receipts.
+  ;;
+  ;; Forward-port note: the frozen M1 schema was authored as v19 against base
+  ;; 5aa9476; upstream claimed v19 for the userspace rationale/standing
+  ;; columns, so the evaluator schema lands here unchanged in content as v20.
+  ["CREATE TABLE IF NOT EXISTS evaluator_evals (
+      id           INTEGER PRIMARY KEY AUTOINCREMENT,
+      spec_id      TEXT NOT NULL,
+      instance_id  TEXT NOT NULL,
+      binding_id   TEXT NOT NULL,
+      binding_seq  INTEGER NOT NULL,
+      context_spec TEXT NOT NULL,
+      runtime      TEXT NOT NULL,
+      source       TEXT NOT NULL,
+      created_at   TEXT NOT NULL
+    )"
+   "CREATE UNIQUE INDEX IF NOT EXISTS idx_evaluator_evals_binding_seq
+      ON evaluator_evals(binding_id, binding_seq)"
+   "CREATE TABLE IF NOT EXISTS evaluator_receipts (
+      id         INTEGER PRIMARY KEY AUTOINCREMENT,
+      eval_id    INTEGER NOT NULL REFERENCES evaluator_evals(id),
+      seq        INTEGER NOT NULL,
+      phase      TEXT NOT NULL,
+      op         TEXT NOT NULL,
+      args       TEXT,
+      result     TEXT,
+      error      TEXT,
+      created_at TEXT NOT NULL
+    )"
+   "CREATE UNIQUE INDEX IF NOT EXISTS idx_evaluator_receipts_phase
+      ON evaluator_receipts(eval_id, seq, phase)"
+   "CREATE TABLE IF NOT EXISTS evaluator_completions (
+      id         INTEGER PRIMARY KEY AUTOINCREMENT,
+      eval_id    INTEGER NOT NULL REFERENCES evaluator_evals(id),
+      status     TEXT NOT NULL,
+      result     TEXT,
+      created_at TEXT NOT NULL
+    )"
+   "CREATE UNIQUE INDEX IF NOT EXISTS idx_evaluator_completions_once
+      ON evaluator_completions(eval_id)"])
+
+(def ^:private v21
+  ;; The controller-minted EvaluatorBinding, durable before the first model
+  ;; turn.  Evaluation rows alone are not enough to reconstruct a binding that
+  ;; has taken no eval turn yet, and deriving authority from current defaults on
+  ;; resume would silently widen or otherwise change an old run.  context_spec
+  ;; is the complete canonical inert ContextSpec, including root, effective
+  ;; capabilities, bounds, timeout and its self-coordinate.
+  ["CREATE TABLE IF NOT EXISTS evaluator_bindings (
+      binding_id  TEXT PRIMARY KEY,
+      run_id      TEXT NOT NULL UNIQUE REFERENCES runs(id),
+      work_id     TEXT NOT NULL,
+      instance_id TEXT NOT NULL,
+      spec_id     TEXT NOT NULL,
+      context_spec TEXT NOT NULL,
+      runtime     TEXT NOT NULL,
+      created_at  TEXT NOT NULL
+    )"])
+
+(def ^:private v22
+  ;; Every provider invocation is an InferenceEpoch.  The row is provenance,
+  ;; not a scheduling knob: provider/model and the bounded evaluator identity
+  ;; (when present) are fixed before the call, while turns reference the epoch
+  ;; they eventually journal.  Probes may have epochs without turn rows.
+  ["CREATE TABLE IF NOT EXISTS inference_epochs (
+      id          TEXT PRIMARY KEY,
+      run_id      TEXT NOT NULL REFERENCES runs(id),
+      branch_id   TEXT NOT NULL,
+      turn        INTEGER NOT NULL,
+      provider    TEXT NOT NULL DEFAULT '',
+      model       TEXT NOT NULL DEFAULT '',
+      binding_id  TEXT,
+      spec_id     TEXT,
+      runtime     TEXT,
+      created_at  TEXT NOT NULL
+    )"
+   "CREATE INDEX IF NOT EXISTS idx_inference_epochs_run
+      ON inference_epochs(run_id, branch_id, turn)"
+   "ALTER TABLE turns ADD COLUMN inference_epoch_id TEXT"])
+
+(def ^:private v23
+  ;; An extension is one retained, idempotent controller act.  This table is
+  ;; intentionally outside the prunable event tail: the run cap must never
+  ;; outlive the audit that explains who raised it and why.
+  ["CREATE TABLE IF NOT EXISTS budget_extensions (
+      id            INTEGER PRIMARY KEY AUTOINCREMENT,
+      run_id        TEXT NOT NULL REFERENCES runs(id),
+      request_id    TEXT NOT NULL,
+      principal     TEXT NOT NULL,
+      old_max_turns INTEGER NOT NULL,
+      new_max_turns INTEGER NOT NULL,
+      reason        TEXT NOT NULL,
+      created_at    TEXT NOT NULL
+    )"
+   "CREATE UNIQUE INDEX IF NOT EXISTS idx_budget_extensions_request
+      ON budget_extensions(request_id)"])
+
+(def ^:private v24
+  ;; Retained fail-closed terminality for an unquiesced turn worker.  Events are
+  ;; a prunable tail and therefore cannot be the fact that prevents resume from
+  ;; minting fresh authority while stale work may still exist.
+  ["ALTER TABLE runs ADD COLUMN terminal_reason TEXT"])
+
+(def ^:private v25
+  ;; M3 closure records.
+  ;;
+  ;; The durable binding carries the EXACT trusted-orientation bytes and their
+  ;; digest, so resume restores what the run was actually oriented on instead of
+  ;; re-rendering a mutable prompt resource (a drifted prompt must not be able
+  ;; to change a resumed run's trusted surface).
+  ;;
+  ;; Evaluator eval rows and receipts carry the InferenceEpoch id of the model
+  ;; call whose tool dispatch produced them, closing the causal chain from
+  ;; provider invocation to semantic operation.
+  ;;
+  ;; An InferenceEpoch spans every provider call with an UNCHANGED safe
+  ;; realization — provider, model, adapter and a digest of the nonsecret llm
+  ;; config.  adapter/config_digest record that realization; closed_at closes an
+  ;; epoch the moment the realization changes (a provider switch on resume), so
+  ;; at most one epoch per run is open and reuse is a durable fact rather than
+  ;; an inference from timestamps.
+  ["ALTER TABLE evaluator_bindings ADD COLUMN orientation TEXT"
+   "ALTER TABLE evaluator_bindings ADD COLUMN orientation_digest TEXT"
+   "ALTER TABLE evaluator_evals ADD COLUMN inference_epoch_id TEXT"
+   "ALTER TABLE evaluator_receipts ADD COLUMN inference_epoch_id TEXT"
+   "ALTER TABLE inference_epochs ADD COLUMN adapter TEXT NOT NULL DEFAULT ''"
+   "ALTER TABLE inference_epochs ADD COLUMN config_digest TEXT NOT NULL DEFAULT ''"
+   "ALTER TABLE inference_epochs ADD COLUMN closed_at TEXT"])
+
+(def ^:private v26
+  ;; Final M3 closure: the REUSABLE InferenceEpoch is separated from the
+  ;; PER-CALL InferenceInvocation.  An epoch spans every provider call whose
+  ;; safe realization is unchanged; an invocation is exactly one provider call
+  ;; under that epoch.  Turns, evaluator eval rows, and intent/outcome receipts
+  ;; reference the invocation (and through it the epoch), so every durable
+  ;; effect names the exact provider call that produced it — not just the
+  ;; realization that call shared with its neighbours.
+  ["CREATE TABLE IF NOT EXISTS inference_invocations (
+      id          TEXT PRIMARY KEY,
+      epoch_id    TEXT NOT NULL REFERENCES inference_epochs(id),
+      run_id      TEXT NOT NULL REFERENCES runs(id),
+      branch_id   TEXT NOT NULL,
+      turn        INTEGER NOT NULL,
+      created_at  TEXT NOT NULL
+    )"
+   "CREATE INDEX IF NOT EXISTS idx_inference_invocations_run
+      ON inference_invocations(run_id, epoch_id, turn)"
+   "ALTER TABLE turns ADD COLUMN inference_invocation_id TEXT"
+   "ALTER TABLE evaluator_evals ADD COLUMN inference_invocation_id TEXT"
+   "ALTER TABLE evaluator_receipts ADD COLUMN inference_invocation_id TEXT"])
+
 (def migrations
   "Ordered. Index 0 is migration 1; PRAGMA user_version holds the count applied."
-  [v1 v2 v3 v4 v5 v6 v7 v8 v9 v10 v11 v12 v13 v14 v15 v16 v17 v18 v19])
+  [v1 v2 v3 v4 v5 v6 v7 v8 v9 v10 v11 v12 v13 v14 v15 v16 v17 v18 v19 v20
+   v21 v22 v23 v24 v25 v26])

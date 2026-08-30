@@ -1,0 +1,364 @@
+;; JS2 — bounded project execution + real development canary.
+;; Inert EDN; no secrets. The JS1 M4 records (artifacts/js1-m4-attempt-2.edn,
+;; artifacts/js1-m4-self-hosting-canary.edn) are separate and frozen and are
+;; not superseded by this one.
+{:js2/decision :pass
+ :js2/record-date "2026-08-29"
+
+ :coordinates
+ {:js2-executable-oracle "26db106f6147f7a93375f891ce7edcd02965448d"
+  :js2-evidence-oracle   "recorded by the commit containing this file"
+  :js2-jolt              "c8d9181e23cc37aa91a38fdcbd01c93917b1be50"
+  :js2-jolt-base         "f8899905d98a0abdcc6b4ae61dfd5c8bdb9c7277"
+  :sci                   "32d62a5136ad3dc148588752f5bcc4cc30b14752"
+  :sci-version           "0.13.53"
+  :guest-image-sha256    "c5329b4b7ecb1ac816cb86c1f6e7f57737d5240a2306be84847c8279e80ad984"
+  :upstream-base         "effcf7dbf439bd3baa2718bc3e780f2031ecae59"
+  :upstream-moved?       false
+  :forward-port-performed? false
+  :branched-from         "d03564521b3bdf0733e42b13e7e89c2563d2be19"
+  :m4-attempt-2-executable-oracle "d03564521b3bdf0733e42b13e7e89c2563d2be19"
+  :m4-attempt-2-evidence-oracle   "f811ea7f3d025b6b376722082656bf69e3be3151"
+  :m4-attempt-1-evidence-oracle   "0ad7070368ae79ebbbba95a998f5ffda4b551dd9"
+  :m3-executable-oracle           "b1d69867c1d02d34f9130309ae55c9baffc55c29"
+  :js2-commits ["b5b2f7a" "7035476" "7b22a73" "774d2ba" "26db106"]
+  :m4-branches-rebased? false}
+
+ :runtime
+ {:profile-added :agent/project-execute
+  :capability-added :project/run
+  :profiles-unchanged [:agent/minimal :agent/project-read :agent/project-develop]
+  :develop-still-excludes-run? true
+  :read-still-excludes-run? true
+  :runtime-coordinate-prefix "js2-rt/v1:"
+  :prior-runtime-coordinate-prefix "js1-rt/v1:"
+  :capability-catalog-in-coordinate? true
+  :language-surface-unchanged? true
+  :receipt-protocol 1
+  :evaluator-protocol 1
+  :jolt-gate {:lanes [:js0sandbox :js0authority :scifunctional :interruptnest]
+              :result :green}}
+
+ :entry-fixes
+ {:repeated-observation-invalidation
+  {:rule "any successful project mutation clears the WHOLE repeat state"
+   :search-pattern-is-never-a-coordinate? true
+   :filesystem-dependency-tracking-built? false
+   :direction-of-error :suppress-only}
+  :closure-coverage-signature
+  {:namespace "samizdat.security.closure-coverage"
+   :records [:tests :assertions :failures :errors :suite :verifier :input]
+   :dialects-read [:host-toolchain :in-guest-babashka]
+   :key-order-independent? true
+   :fail-closed-on [:closure-summary-unparseable :closure-zero-tests
+                    :closure-summary-contradicts-verdict]
+   :decrease-is :warning-only
+   :parity-with-host-suite-required? false}}
+
+ :gate
+ {:command "bin/js2 test" :exit 0
+  :focused      {:tests 53   :assertions 279  :failures 0 :errors 0}
+  :bounded      {:tests 50   :assertions 421  :failures 0 :errors 0}
+  :environments {:tests 91   :assertions 761  :failures 0 :errors 0}
+  :ordinary     {:tests 1630 :assertions 6678 :failures 0 :errors 0}
+  :new-pin :guest-image-digest
+  :js1-gates-unmodified? true}
+
+ :closure-preflight-on-untouched-target
+ {:focused-green? true :focused-ms 6909
+  :closure-green? true :closure-ms 351006
+  :baseline {:tests 1630 :assertions 6445 :failures 0 :errors 0}
+  :admissible? true
+  :first-preflight-red? true
+  :first-preflight-cause
+  "a new fd-floor test asserted a refusal ORDER that is only true on a host
+   with a machine manager; inside the closure verifier's sandbox :no-manager
+   is refused first and correctly. Fixed before the canary — the M4 lesson,
+   applied to JS2's own suite."}
+
+ :controller {:path "samizdat-controller-js2"
+              :sha "26db106f6147f7a93375f891ce7edcd02965448d"
+              :tracked-modifications 0 :unchanged? true}
+ :jolt       {:path "jolt-js2" :sha "c8d9181e23cc37aa91a38fdcbd01c93917b1be50"
+              :tracked-modifications 0}
+
+ :target
+ {:path "samizdat-canary-target-js2"
+  :base "26db106f6147f7a93375f891ce7edcd02965448d"
+  :task-defect-unsolved-at-base? true
+  :base-digests {"src/samizdat/util.clj" "sha256:9dbc01d242d920365d88af0d0c4c1a21247ada54511693cec3939b28a785f705"
+                 "test/samizdat/util_test.clj" "sha256:6263ca9237ac3d2367c10f61a52ad6e1f17ff63bd08befa81107a0dbbc6b6f60"}
+  :final-digests {"src/samizdat/util.clj" "sha256:576d37d9e15665db084640cc83c72886a1bce3bbfef9a27b8abc55ed4daae18d"
+                  "test/samizdat/util_test.clj" "sha256:850fd125480c3e34dd4b915c376a7b946bdf39c6bdb134cff9c8bf8fdacac923"}
+  :final-digests-match-last-receipts? true
+  :unexplained-mutation? false
+  :protected-config-mutated? false
+  :files-changed 2
+  :source-diff-lines 24}
+
+ :task {:id :js1-m4-truncate-middle-totality
+        :identical-to-m4-attempts? true
+        :run-request-sha256 "64e6e852f5839a9ae0d58b4e45b5d97377fafea7a714082611bcff2fffb16a18"
+        :why-reused
+        "The task is real and unsolved at the JS2 base (both files are
+         byte-identical to what M4 ran against), and holding it constant is
+         the only way JS2's REPL-leverage question has a controlled
+         comparison: same task, same model, same budget, and the capability
+         as the only difference. The cost is that JS2's difficulty is
+         calibrated to M4's; n=1 either side."}
+
+ :run
+ {:id "495fa9cb-b2c2-4a29-8c6d-bce497fd9efc"
+  :database "js2-evidence/js2-canary.sqlite3"
+  :binding-id "bind:495fa9cb-b2c2-4a29-8c6d-bce497fd9efc"
+  :instance-id "inst:495fa9cb-b2c2-4a29-8c6d-bce497fd9efc"
+  :profile :agent/project-execute
+  :capabilities #{:project/read :project/list :project/search :project/stat
+                  :project/edit :project/run}
+  :evaluation-timeout-ms 660000
+  :orientation-digest "sha256:3b4b860eb2312f62646964d9cc1acae8e52bf15bf9275809cba3273528047fe8"
+  :initial-budget 60 :final-budget 60 :budget-extensions 0
+  :turns-used 8
+  :started-at "2026-08-30T04:05:55.450Z"
+  :ended-at "2026-08-30T04:16:11.481Z"
+  :terminal-status :completed :branch-status :done}
+
+ :provider
+ {:adapter :openai :endpoint-kind :local-openai-compatible-router
+  :model "fireworks.kimi-k2p7-code"
+  :epochs 1 :epoch-id "6a2f1f41-d13e-4ace-8012-02467d41ab4a"
+  :switched? false :mixed-provider? false :provider-errors 0
+  :inference-invocations 9 :credentials-in-record? false
+  :same-model-as-m4-attempt-2? true}
+
+ :execution-environment
+ {:type :samizdat/smolvm-project-env
+  :mode :project-run
+  :operations #{:describe :run}
+  :coordinate "sha256:978648e50f02ffb0526ad45155e56cd082db0b21cebf67f44e7db5b606fb6f1c"
+  :policy-coordinate-prefix "js2-spe/v1:"
+  :network :none :writeback :none :privilege :unprivileged
+  :lifecycle :ephemeral-machine-per-execution
+  :pooling? false
+  :boot-cost-ms-observed 3000
+  :host-fd-floor 65536
+  :distinct-from-verify-environment? true}
+
+ :verification-environment
+ {:selected :bwrap
+  :coordinate "js1-ve/v1:bab68fdf5a128ea0094ce345680d8eb0101792a0e703f8a29bfc28e4ad82a861"
+  :deliberately-different-substrate-from-development? true}
+
+ :project-run
+ {:invocations 1
+  :argv ["bb" "--classpath" "src:test" "-e"
+         "(require 'clojure.test 'samizdat.util-test) (let [s (clojure.test/run-tests 'samizdat.util-test)] (println s) (System/exit (if (pos? (+ (:fail s) (:error s))) 1 0)))"]
+  :cwd "." :timeout-ms 300000
+  :status :completed :exit 0 :duration-ms 2848
+  :environment "sha256:978648e50f02ffb0526ad45155e56cd082db0b21cebf67f44e7db5b606fb6f1c"
+  :input "sha256:c5a35391029bb0c2abb3bf67eb58edec4ab358bb849234c91eae2f61dc794e2c"
+  :disposition :terminated
+  :stdout-summary "Ran 1 tests containing 10 assertions. 0 failures, 0 errors."
+  :timeouts 0
+  :green-before-done? true
+  :counted-as-acceptance? false}
+
+ :isolation-evidence
+ {:probe-source "artifacts/js2-canary/probes/adversarial.clj"
+  :authoritative-tree-unchanged-in-every-probe? true
+  :probes
+  {:modify-existing-file :succeeded-privately
+   :create-project-file :succeeded-privately
+   :delete-project-file :succeeded-privately
+   :chmod-and-rename :succeeded-privately
+   :read-host-environment :only-the-constructed-guest-environment
+   :read-host-paths :refused
+   :network :no-route-off-the-machine
+   :raw-input-export :masked
+   :privilege :uid-1000-no-suid-binaries
+   :daemon :did-not-survive-the-machine}
+  :also-pinned-by "samizdat.js2-project-env-test (91 tests / 761 assertions, machine-backed)"}
+
+ :timeout-canary
+ {:requested-timeout-ms 15000 :observed-status :timeout
+  :exit-present? false
+  :disposition :hard-cleaned
+  :machine-stopped-and-deleted "vm-8354941f"
+  :sweep-clean? true
+  :poison-lifted-after-clean-sweep? true
+  :surviving-guest-children 0
+  :next-invocation-fresh? true
+  :measured-note
+  "The sweep is not decorative: on the first timeout probe the manager's own
+   table still held the machine after the process tree was reaped, which is
+   bbagent's measured A3a finding reproduced here."}
+
+ :recovery
+ [{:cycle 1 :method :sigkill
+   :after-committed-mutation? true
+   :after-completed-execution? true
+   :interrupted-after-turn 7 :resumed-at-turn 8
+   :mutation-receipts-in-history 2
+   :execution-receipts-in-history 1
+   :replayed-evaluations 7
+   :evals-before 7 :evals-after 7
+   :edit-outcomes-before 2 :edit-outcomes-after 2
+   :run-outcomes-before 1 :run-outcomes-after 1
+   :pending-evals-at-kill 0
+   :execution-provider-invocations-before-replay 0
+   :execution-provider-invocations-after-replay 0
+   :machines-before-replay "No machines found"
+   :machines-after-replay "No machines found"
+   :target-digest-unchanged? true :target-mtime-unchanged? true
+   :binding-identity-unchanged? true :context-spec-unchanged? true
+   :runtime-coordinate-unchanged? true :orientation-digest-unchanged? true
+   :durable-budget-before 60 :durable-budget-after 60
+   :reconstruction-ms 134
+   :work-continued? true
+   :offline-proof "artifacts/js2-canary/replay-proof.txt"
+   :offline-proof-on-copy? true}]
+
+ :sci-context-lifecycle
+ [{:phase :allocated     :context-id "2e8a22ca-f7e0-4037-9e1f-5b84d9b9c0eb"}
+  {:phase :reconstructed :context-id "c5cce59e-a1cd-4b2c-a7df-8529ee27c986"
+   :supersedes "2e8a22ca-f7e0-4037-9e1f-5b84d9b9c0eb" :replayed-evaluations 7}]
+
+ :persistent-helper {:defined? false
+                     :why "the run finished in 8 turns without needing one"}
+
+ :verification
+ {:done-attempts 1
+  :focused {:green true :exit 0}
+  :closure {:green true :exit 0}
+  :both-required? true :model-selected-verifier? false
+  :verify-env "js1-ve/v1:bab68fdf5a128ea0094ce345680d8eb0101792a0e703f8a29bfc28e4ad82a861"
+  :input-coordinate "sha256:c5a35391029bb0c2abb3bf67eb58edec4ab358bb849234c91eae2f61dc794e2c"}
+
+ :closure-coverage
+ {:baseline {:tests 1630 :assertions 6445 :failures 0 :errors 0}
+  :final    {:tests 1630 :assertions 6451 :failures 0 :errors 0}
+  :delta    {:tests 0 :assertions 6 :failures 0 :errors 0
+             :decreased? false :same-suite? true}
+  :admissible? true :warnings []
+  :host-ordinary-suite {:tests 1630 :assertions 6678}
+  :host-vs-isolated-assertion-gap 227
+  :gap-explanation
+  "The environments differ by design — a different toolchain and a different
+   filesystem, and host-dependent tests that skip inside a sandbox. M4 had
+   the same class of gap (6373 vs 6254) and no way to say so; the point of
+   the signature is that the gap is now a number rather than an absence."}
+
+ :interventions
+ {:operator 0
+  :budget-extensions 0
+  :hidden-authority-supplied? false :task-manually-solved? false
+  :target-manually-edited? false :verification-bypassed? false}
+
+ :trajectory
+ {:turns 8
+  :by-tool {"eval" 7 "done" 1}
+  :by-category {:neutral 7 :success 1}
+  :evaluations {:total 7 :completed 7 :failed 0}
+  :semantic-operations {:total 7 :project/read 2 :project/stat 2
+                        :project/edit 2 :project/run 1}
+  :ops-per-eval 1.00 :ops-per-model-turn 0.88
+  :multi-operation-evals 0
+  :project-run-calls 1 :project-run-per-model-turn 0.12
+  :project-run-eval-shapes {"run+analyze+branch" 1}
+  :multi-operation-evals-containing-a-run 0
+  :model-roundtrips-between-edit-and-execution [1]
+  :repeated-observation-signatures {}
+  :repeated-equivalent-executions {}
+  :persistent-helpers 0
+  :anchored-mutations 2 :whole-file-rewrites-of-existing-file 0
+  :done-attempts 1
+  :turn-lease-timeouts 0 :provider-errors 0
+  :wall-clock-ms 616031
+  :execution-duration-ms 2848
+  :execution-share-of-wall-clock 0.0046}
+
+ :comparison
+ {:disclaimer
+  "n=1 either side. Same task, same model, same budget, same provider path;
+   the capability and its orientation are the difference, and no causal claim
+   is made from one run each."
+  :m4-attempt-2 {:turns 50 :evals 49 :failed-evals 10 :semantic-ops 12
+                 :ops-per-eval 0.24 :multi-op-evals 0
+                 :repeated-observation-signatures 4
+                 :anchored-mutations 3 :helpers 1
+                 :done-attempts 1 :operator-interventions 1
+                 :project-run-calls 0 :status :pass}
+  :js2         {:turns 8 :evals 7 :failed-evals 0 :semantic-ops 7
+                :ops-per-eval 1.00 :multi-op-evals 0
+                :repeated-observation-signatures 0
+                :anchored-mutations 2 :helpers 0
+                :done-attempts 1 :operator-interventions 0
+                :project-run-calls 1 :status :pass}}
+
+ :aborted-attempts
+ [{:attempt 1 :turns 16 :cause :execution-provider
+   :what "every project/run failed EMFILE inside the guest while removing the
+          project's .git; the controller had been launched with `ulimit -n
+          4096`, and the HOST limit reached inside the guest through whatever
+          serves the read-only mount."
+   :fixed-by "a pinned host fd floor, a catalogued :host-fd-limit refusal, and
+              launchers that raise the SOFT limit only"
+   :journal-sha256 "a7e2fbeb6a8d144cff0dd3035c2ebbb69304e2d3c14aa3e182e1ed780ef63a35"}
+  {:attempt 2 :turns 16 :cause :prompt
+   :what "the orientation named `[\"bb\" \"-M:test\"]` as the whole suite;
+          babashka has no -M alias flag, and the whole suite cannot run in
+          that guest at all because it carries the toolchain and not the
+          project's resolved dependencies."
+   :fixed-by "an orientation that names only commands verified inside the guest"
+   :journal-sha256 "4d362a1754afe9029e0be4699d08223a062a55cf685067b082a5f7eeb2c44bb2"}
+  {:attempt 3 :turns 60 :cause :model-behavior
+   :what "a valid production run in which the model never called project/run
+          once in 60 turns, corrupted its own test file with an unmatched
+          delimiter, and looped on re-reading files until the budget ran out.
+          Invalid as a JS2 canary under §20; not a JS2 failure."
+   :fixed-by "nothing — re-run, unchanged controller, no intervention needed"
+   :journal-sha256 "170aa4566820020f8af99c9098fcc40beb7d68766386c6717a1d4b70cd3c6c2f"}]
+
+ :known-gaps
+ [{:where :smolvm-verification-env :kind :host-coupling
+   :what "the same host open-file coupling; not fixed, because JS2 verifies
+          through bwrap and produces no evidence about that provider."}
+  {:where :smolvm-verification-env :kind :closure-argv
+   :what "closure-argv is [\"bb\" \"-M:test\"], which cannot work: no -M flag,
+          and the guest lacks the project's resolved dependencies. That
+          provider has no working closure gate for a project like this one."
+   :mitigated-by "JS2 §3B refuses an unreadable closure summary, so such a
+                  gate now fails closed rather than green."}]
+
+ :nonclaims
+ ["n=1 either side; the M4 comparison is evidence, not proof, and no causal
+   claim is made for the capability."
+  "Nothing is established about any one model's general capability. Attempt 3
+   is the same model, the same task and the same controller finishing zero
+   percent of the work in 60 turns."
+  "project/run was exercised ONCE. The isolation is pinned by 91 machine-backed
+   tests and ten adversarial probes, but the CANARY's execution evidence is a
+   single successful invocation."
+  "multi-operation evals were ZERO again, as in M4 attempt 2. ops/eval rose
+   from 0.24 to 1.00, but no single evaluation combined two semantic
+   operations — the compound-observation leverage attempt 1 showed has still
+   not recurred."
+  "No persistent SCI helper was defined, so this run adds nothing to M4's
+   helper-reconstruction evidence."
+  "The guest cannot run the project's whole suite. project/run's demonstrated
+   value here is a focused namespace, not a full development toolchain."
+  "The recovery evidence is ONE SIGKILL cycle, at turn 7 of 8."
+  "The host-side execution-provider counter is process-local; 'replay launched
+   nothing' is proven against a counter that starts at zero in a new process,
+   which is the honest form of the claim and not a stronger one."]
+
+ :preserved
+ {:journal-db {:path "js2-evidence/js2-canary.sqlite3"
+               :sha256 "af2963f20c4403c90e392e7f9b4d752e9041cdcf87db700aaaa4d355d4576f14"
+               :tracked? false :why-untracked ".gitignore excludes *.sqlite3"}
+  :committed-supporting-records "artifacts/js2-canary/"
+  :aborted-attempt-journals "js2-evidence/attempt{1,2,3}-*-js2-canary.sqlite3"
+  :guest-image {:path "js2-evidence/worker-image.tar" :bytes 148299264
+                :sha256 "c5329b4b7ecb1ac816cb86c1f6e7f57737d5240a2306be84847c8279e80ad984"
+                :tracked? false :why-untracked "a 148 MB binary is not source"}
+  :m4-records-untouched? true}}

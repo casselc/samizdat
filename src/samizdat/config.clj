@@ -246,6 +246,12 @@
                             (env-long "JOLT_NREPL_PORT")
                             7888)}
        :db       {:path (or (env "HARNESS_DB") "samizdat.sqlite3")}
+       ;; Trusted local controller authority.  These values are read at process
+       ;; startup and never accepted from a run/resume request or model tool.
+       :controller {:budget-token (env "HARNESS_BUDGET_TOKEN")
+                    :budget-ceiling (env-long "HARNESS_BUDGET_CEILING")
+                    :budget-principal (or (env "HARNESS_BUDGET_PRINCIPAL")
+                                          "human-controller")}
        :llm      {:provider    provider
                   :base-url    (or (env "HARNESS_BASE_URL") (:base-url defaults))
                   :api-key     (some-> (:key-env defaults) env)
@@ -280,8 +286,8 @@
                   ;; the call. Deliberately BELOW the turn deadline (900000) so
                   ;; the HTTP layer gives up first, with a typed exception that
                   ;; unwinds the thread and closes the socket. If the scheduler's
-                  ;; deadline fires first it only abandons the branch's turn --
-                  ;; the thread stays parked in the read and leaks.
+                  ;; deadline fires first it revokes turn authority, interrupts,
+                  ;; and requires bounded worker quiescence before another turn.
                   :max-response-ms (or (env-long "HARNESS_MAX_RESPONSE_MS") 600000)}
        ;; Generous by default: self-building is the primary use, and a
        ;; REPL-first feature run spends many turns prototyping before it ships.

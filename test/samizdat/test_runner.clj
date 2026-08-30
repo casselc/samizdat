@@ -64,7 +64,9 @@
             [mycelium.validate-warn-test]
             [mycelium.validation-test]
             [mycelium.workflow-test]
-            [samizdat.agent-test]
+             [samizdat.agent-test]
+             [samizdat.agent-turn-lease-test]
+             [samizdat.m3-controller-test]
             [samizdat.base-test]
             [samizdat.boundary-test]
             [samizdat.compaction-test]
@@ -87,6 +89,11 @@
             [samizdat.decompose-test]
             [samizdat.decompose-run-test]
             [samizdat.verify-test]
+            [samizdat.verification-env-test]
+            [samizdat.smolvm-verification-env-test]
+            [samizdat.js2-project-env-test]
+            [samizdat.canonical-edn-test]
+            [samizdat.execution-env-spi-test]
             [samizdat.feature-test]
             [samizdat.telemetry-test]
             [samizdat.supervisor-test]
@@ -98,6 +105,9 @@
             [samizdat.files-test]
             [samizdat.edit-test]
             [samizdat.eval-mode-test]
+            [samizdat.evaluator-store-test]
+            [samizdat.evaluator-test]
+            [samizdat.js2-project-run-test]
             [samizdat.grep-test]
             [samizdat.hashline-test]
             [samizdat.control-test]
@@ -139,6 +149,7 @@
             [samizdat.tournament-test]
             [samizdat.trajectory-test]
             [samizdat.store-test]
+            [samizdat.surface-test]
             [samizdat.gui-api-test]
             [samizdat.gui-ops-test]
             [samizdat.gui-graph-test]
@@ -200,8 +211,11 @@
     samizdat.tournament-test
     samizdat.trajectory-test
     samizdat.store-test
+    samizdat.surface-test
     samizdat.llm-test
-    samizdat.agent-test
+     samizdat.agent-test
+     samizdat.agent-turn-lease-test
+     samizdat.m3-controller-test
     samizdat.base-test
     samizdat.boundary-test
     samizdat.compaction-test
@@ -224,6 +238,11 @@
     samizdat.decompose-test
     samizdat.decompose-run-test
     samizdat.verify-test
+    samizdat.verification-env-test
+    samizdat.smolvm-verification-env-test
+    samizdat.js2-project-env-test
+    samizdat.canonical-edn-test
+    samizdat.execution-env-spi-test
     samizdat.feature-test
     samizdat.telemetry-test
     samizdat.supervisor-test
@@ -235,6 +254,9 @@
     samizdat.files-test
     samizdat.edit-test
     samizdat.eval-mode-test
+    samizdat.evaluator-store-test
+    samizdat.evaluator-test
+    samizdat.js2-project-run-test
     samizdat.grep-test
     samizdat.hashline-test
     samizdat.control-test
