@@ -771,6 +771,16 @@
 ;; unavailable Linux substrate refuses outright. The spawns are mocked here
 ;; (the sandbox's own adversarial suite runs it for real).
 
+(def ^:private closure-summary
+  "What a closure verifier's output actually ENDS WITH — the summary its test
+  runner prints. The mocks below carry it because JS2 §3B made a closure
+  result that carries no readable summary inadmissible evidence: a suite that
+  ran nothing exits zero too, so `green` on its own stopped being enough. A
+  mock without this is not standing in for a verifier, it is standing in for
+  a broken one — which is a real case, and has its own test."
+  (str "Ran 1585 tests. 6254 assertions passed, 0 failures, 0 errors.\n"
+       "{:type :summary, :test 1585, :pass 6254, :fail 0, :error 0}"))
+
 (deftest bounded-done-requires-both-the-focused-and-the-closure-gate
   ;; M4 attempt-2 hardening gate, items G, H, I and J.
   ;;
@@ -800,7 +810,7 @@
                       ve/run (fn [_ _ _] {:green? false :output "1 failure"})
                       ve/run-closure (fn [_ _ _]
                                        (reset! closure-ran true)
-                                       {:green? true :output ""})]
+                                       {:green? true :output closure-summary})]
           (let [r (tools/run-tool bounded-ctx)]
             (is (not (:done? r)) "red focused is not terminal")
             (is (false? @closure-ran)
@@ -832,7 +842,7 @@
                       ve/run (fn [_ _ _] (swap! order conj :focused)
                                {:green? true :output ""})
                       ve/run-closure (fn [_ _ _] (swap! order conj :closure)
-                                       {:green? true :output ""})]
+                                       {:green? true :output closure-summary})]
           (let [r (tools/run-tool bounded-ctx)]
             (is (:done? r))
             (is (:verified-green? r))
@@ -848,7 +858,7 @@
                                {:green? true :output ""})
                       ve/run-closure (fn [root chg _]
                                        (swap! args conj [:closure root chg])
-                                       {:green? true :output ""})]
+                                       {:green? true :output closure-summary})]
           (tools/run-tool (assoc bounded-ctx :args
                                  {:answer "shipped"
                                   ;; Anything the model could try to say about
@@ -901,7 +911,7 @@
                         (reset! seen {:root root :changed changed
                                       :timeout-ms timeout-ms})
                         {:green? true :output ""})
-                      ve/run-closure (fn [_ _ _] {:green? true :output ""})]
+                      ve/run-closure (fn [_ _ _] {:green? true :output closure-summary})]
           (let [r (tools/run-tool bounded-ctx)]
             (is (:done? r) "done accepted")
             (is (= :done (:control-event r)))
@@ -922,7 +932,7 @@
                     ve/available? (fn [] true)
                     ve/run
                     (fn [_ _ _] {:green? false :output "FAIL in x-test\n1 assertion failed"})
-                    ve/run-closure (fn [_ _ _] {:green? true :output ""})]
+                    ve/run-closure (fn [_ _ _] {:green? true :output closure-summary})]
         (let [r (tools/run-tool bounded-ctx)]
           (is (not (:done? r)) "red is not terminal")
           (is (= :done (:control-event r)))
@@ -936,7 +946,7 @@
       (with-redefs [estore/history (fn [_ _] (history-with "test/x_test.clj"))
                     ve/available? (fn [] true)
                     ve/run (fn [_ _ _] {:green? false :timeout? true :output ""})
-                    ve/run-closure (fn [_ _ _] {:green? true :output ""})]
+                    ve/run-closure (fn [_ _ _] {:green? true :output closure-summary})]
         (let [r (tools/run-tool bounded-ctx)]
           (is (not (:done? r)))
           (is (str/includes? (str/lower-case (:result r)) "timed out")))))
@@ -995,7 +1005,7 @@
                       ve/available? (fn [] true)
                       ve/run (fn [_ changed _] (reset! seen changed)
                                {:green? true :output ""})
-                      ve/run-closure (fn [_ _ _] {:green? true :output ""})]
+                      ve/run-closure (fn [_ _ _] {:green? true :output closure-summary})]
           (let [r (tools/run-tool (assoc-in bounded-ctx [:args :command]
                                             "sh -c 'rm -rf /'"))]
             (is (:done? r) "the legitimate test still ships")

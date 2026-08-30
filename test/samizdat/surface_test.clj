@@ -157,13 +157,21 @@
                  3))
         "a read after a write to the same file is legitimate"))
 
-  (testing "a mutation of a DIFFERENT path does not reset"
-    (is (seq (observation/repeated-unchanged
-              [(r :project/read ["a.clj"] "SAME")
-               (r :project/read ["a.clj"] "SAME")
-               (r :project/edit ["b.clj" "sha256:x" "new"] {:path "b.clj"})
-               (r :project/read ["a.clj"] "SAME")]
-              3))))
+  (testing "a mutation of a DIFFERENT path resets too — JS2 §3A"
+    ;; M4 reset only signatures naming the mutated path. That is too
+    ;; optimistic in the direction that matters: a write BENEATH a listed or
+    ;; searched directory invalidates that list or search while naming a
+    ;; different path, and no receipt stream can say which writes those are
+    ;; without filesystem dependency tracking, which JS2 deliberately does not
+    ;; build. Any successful mutation now clears everything. The cost is a
+    ;; suppressed warning; a feedback signal is allowed to be wrong in that
+    ;; direction and in no other.
+    (is (empty? (observation/repeated-unchanged
+                 [(r :project/read ["a.clj"] "SAME")
+                  (r :project/read ["a.clj"] "SAME")
+                  (r :project/edit ["b.clj" "sha256:x" "new"] {:path "b.clj"})
+                  (r :project/read ["a.clj"] "SAME")]
+                 3))))
 
   (testing "different arguments are different observations"
     (is (empty? (observation/repeated-unchanged

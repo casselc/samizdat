@@ -35,7 +35,20 @@
   It is feedback only. Nothing here blocks a read: a fresh read after a
   mutation, after a restart with no prior result in the model's context, or
   with materially different arguments is legitimate and is exactly what the
-  intervening-mutation reset is for."
+  intervening-mutation reset is for.
+
+  JS2 §3A made the invalidation CONSERVATIVE. The M4 coordinate rule was too
+  optimistic in two ways at once. `project/search` leads with a SEARCH
+  PATTERN rather than a resource path, so a pattern was being read as a
+  filesystem coordinate — reported as one in the finding, and compared
+  against mutation paths as one. And a per-path reset cannot see that a write
+  BENEATH a listed or searched directory invalidates the earlier list or
+  search even though the exact paths differ. Both are now settled the same
+  way: any successful project mutation clears the WHOLE accumulated repeat
+  state. Since this signal is feedback, over-clearing can only ever suppress
+  a warning; it can never manufacture one — which is the direction a
+  feedback signal is allowed to be wrong in. Filesystem dependency tracking
+  is deliberately not built here."
   (:require [clojure.string :as str]))
 
 (def observation-ops
@@ -46,15 +59,21 @@
 (def mutation-ops
   #{:project/edit})
 
+(def ^:private path-leading-ops
+  "The operations whose FIRST argument is a project path. Membership is the
+  whole rule: `project/search` is absent because it leads with a pattern, and
+  a pattern is not a coordinate — reading one as a path is how a regex ends
+  up printed in a finding as though it named a file."
+  #{:project/read :project/list :project/stat :project/edit})
+
 (defn- coordinate
   "The resource a receipt is about, when it names one: the first string
-  argument. project/read, /stat, /list and /edit all lead with the path.
-  nil for a search, whose subject is a pattern rather than one resource — a
-  search is still counted as a repeat by its full signature, it just cannot
-  be invalidated by a write to one path."
-  [args]
+  argument of a path-leading operation. nil for a search, whose subject is a
+  pattern rather than a resource — a search is still counted as a repeat by
+  its full signature, it simply has no filesystem coordinate to report."
+  [op args]
   (let [a (first args)]
-    (when (string? a) a)))
+    (when (and (contains? path-leading-ops op) (string? a)) a)))
 
 (defn- signature
   "The exact identity of one observation: operation plus canonical arguments."
@@ -70,23 +89,23 @@
   `[{:op :args :path :count :result}]`, most repeated first, for every
   signature seen at least `threshold` times.
 
-  A mutation resets every signature naming the same path, because after a
-  write the same read legitimately answers differently. A mutation whose path
-  cannot be determined resets everything, which is the conservative direction:
-  it can only ever suppress this signal, never manufacture it."
+  ANY successful project mutation clears the WHOLE accumulated state, and the
+  same read afterwards begins a fresh count. A per-path reset would have to
+  answer questions a receipt stream cannot: whether the write landed beneath
+  a directory an earlier list or search walked, whether a pattern's result
+  set moved. Clearing everything answers none of them and needs to answer
+  none of them — the cost is a suppressed warning, and this is a signal whose
+  only job is to be right when it fires."
   [receipts threshold]
   (let [seen (reduce
               (fn [acc {:keys [op args result phase] :as r}]
                 (cond
                   ;; Only settled, successful receipts are evidence. An error
-                  ;; receipt did not observe anything.
+                  ;; receipt did not observe anything, and a refused mutation
+                  ;; changed nothing to invalidate.
                   (not= :done phase) acc
 
-                  (mutation-ops op)
-                  (let [p (coordinate args)]
-                    (if p
-                      (into {} (remove (fn [[[_ a] _]] (= p (first a)))) acc)
-                      {}))
+                  (mutation-ops op) {}
 
                   (observation-ops op)
                   (let [sig (signature r)
@@ -95,7 +114,7 @@
                       (update-in acc [sig :count] inc)
                       (assoc acc sig {:count 1 :result result
                                       :op op :args (vec args)
-                                      :path (coordinate args)})))
+                                      :path (coordinate op args)})))
 
                   :else acc))
               {}

@@ -5,13 +5,15 @@
   "Shipping tools: thesis, done, give_up, branch_theses — and the
   claim-evidence gates those methods share (answer-tokens,
   uncovered-tokens, engages-problem? and friends)."
-  (:require [clojure.string :as str]
+  (:require [clojure.edn]
+            [clojure.string :as str]
             [samizdat.agent.gitdiff :as gitdiff]
             [samizdat.agent.gates :as gates]
             [samizdat.agent.tools.base :as base]
             [samizdat.agent.state :as state]
             [samizdat.agent.verify :as verify]
             [samizdat.lexicon :as lexicon]
+            [samizdat.security.closure-coverage :as coverage]
             [samizdat.security.verification-provider :as vprov]
             [samizdat.store.evaluator :as estore]
             [samizdat.store.journal :as journal]
@@ -435,6 +437,48 @@
 ;; unavailable, the whole thing REFUSES rather than degrading to another
 ;; provider or a host spawn.
 
+(def closure-baseline-env
+  "The trusted-controller environment variable naming an EDN file holding a
+  clean-target ClosureCoverageSignature. Controller configuration, read from
+  the harness process's own environment like every other pinned authority in
+  this lane — never gates.edn, which the judged tier can rewrite.
+
+  Optional. Without it the closure signature is still recorded and still
+  fails closed on its own three invariants; only the DELTA is unavailable,
+  and an absent baseline is honestly absent rather than assumed to be zero."
+  "SAMIZDAT_CLOSURE_BASELINE")
+
+(defn closure-baseline
+  "The clean-target closure signature the controller pinned, or nil. Never
+  throws: a baseline that cannot be read is a comparison that cannot be made,
+  which is a smaller problem than a gate that cannot run."
+  []
+  (try
+    (when-let [path (some-> (System/getenv closure-baseline-env)
+                            str/trim not-empty)]
+      (let [v (clojure.edn/read-string (slurp path))]
+        (when (map? v) v)))
+    (catch Throwable _ nil)))
+
+(defn closure-evidence
+  "The closure gate's coverage evidence: the signature of `cresult`, the delta
+  against the controller's baseline when there is one, any warnings, and the
+  refusal when the signature is not admissible evidence at all.
+
+  Pure over its inputs apart from the baseline read, so the whole rule is
+  testable without a machine."
+  [cresult baseline]
+  (let [sig (coverage/signature
+             cresult
+             {:suite (vprov/coordinate)
+              :verifier (get-in cresult [:attribution :environment/coordinate])
+              :input (:input-coordinate cresult)})
+        d (when baseline (coverage/delta baseline sig))]
+    (cond-> {:signature sig}
+      d (assoc :delta d)
+      (seq (coverage/warnings d)) (assoc :warnings (coverage/warnings d))
+      (coverage/refusal sig) (assoc :refusal (coverage/refusal sig)))))
+
 (defn- edited-paths
   "Every path THIS binding changed through project/edit, in first-write order
   — the controller's own record of what the run changed, read from the
@@ -521,6 +565,12 @@
         vresult (:result attempt)
         cresult (:closure attempt)
         unavailable-reason (:unavailable-reason attempt)
+        ;; The closure gate's own strength, read out of its own result (JS2
+        ;; §3B). Computed whenever a closure run happened at all, so a RED
+        ;; closure is described too and the record does not only exist for
+        ;; the runs that were about to pass.
+        cevidence (when (and cresult (not (:unavailable? cresult)))
+                    (closure-evidence cresult (closure-baseline)))
         block (cond
                 (empty? changed)
                 (base/bounded-message {:done-nothing-changed true})
@@ -547,7 +597,19 @@
                     (when (and cresult (not (:green? cresult)))
                       (str (base/bounded-message {:done-closure-red true})
                            "\n\n"
-                           (verify/tail-of cresult)))))]
+                           (verify/tail-of cresult)))
+                    ;; A closure result that is not admissible EVIDENCE is not
+                    ;; a green closure, whatever its exit code said. The three
+                    ;; refusals are narrow on purpose — an unreadable summary,
+                    ;; a summary reporting zero tests, and a summary that
+                    ;; contradicts the verdict beside it — and a coverage
+                    ;; DECREASE is deliberately not among them: deleting a
+                    ;; test is a legitimate change and this gate cannot tell a
+                    ;; legitimate one from a regression, so it warns and a
+                    ;; human explains.
+                    (when-let [r (:refusal cevidence)]
+                      (base/bounded-message {:done-closure-inadmissible true
+                                             :reason r}))))]
     ;; The same record the ordinary ship gate keeps: a gate that was configured
     ;; on and did nothing must not read identically to one that ran green.
     ;; An environment that refused (unavailable) never counts as a run.
@@ -584,6 +646,14 @@
                                            :closure-timeout (when closure-ran?
                                                               (:timeout? cresult))
                                            :closure-envelope cenv
+                                           ;; The ClosureCoverageSignature and
+                                           ;; its delta (JS2 §3B): what the
+                                           ;; closure gate actually covered,
+                                           ;; recorded whether it passed or
+                                           ;; not, so the gate's strength is
+                                           ;; observable instead of inferred
+                                           ;; from the word "green".
+                                           :closure-coverage cevidence
                                            ;; WHICH environment produced the verdict: the
                                            ;; selected provider's policy coordinate, not prose.
                                            :verify-env (vprov/coordinate)}
