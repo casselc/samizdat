@@ -281,24 +281,37 @@
   (testing "the floor is part of the environment's pinned policy and identity"
     (is (pos? (:host/nofile spe/resource-limits)))
     (is (contains? (:executor/limits (spe/environment-description)) :host/nofile)))
-  (testing "a hard limit below the floor is a catalogued refusal, not a spawn"
-    (let [spawned (atom false)]
-      (with-redefs [spe/host-fd-limits (fn [] [1024 1024])
-                    proc/run-bounded (fn [& _] (reset! spawned true)
-                                       {:status :exited :exit 0})]
-        (is (= :host-fd-limit (spe/request-run-refusal)))
-        (let [r (spe/run "/tmp" {:request/argv ["bb"] :request/cwd "."
-                                 :request/timeout-ms 1000})]
-          (is (= :refused (:status r)))
-          (is (= :host-fd-limit (:reason r)))
-          (is (false? @spawned))
-          (is (= :spi.refusal/host-fd-limit
-                 (get-in (spe/refusal-envelope :host-fd-limit)
-                         [:environment/refusal :refusal/category])))))))
-  (testing "a sufficient hard limit lets the request through"
-    (with-redefs [spe/host-fd-limits (fn [] [1024 1048576])]
-      (is (not= :host-fd-limit (spe/request-run-refusal))
-          "a low SOFT limit is fine — the spawn raises it within the hard one"))))
+  (testing "the refusal is catalogued in the shared namespace"
+    (is (= :spi.refusal/host-fd-limit
+           (get-in (spe/refusal-envelope :host-fd-limit)
+                   [:environment/refusal :refusal/category]))))
+  ;; Everything the substrate would otherwise refuse on FIRST is held true, so
+  ;; the assertion is about the fd floor and not about which refusal a
+  ;; particular host reaches first. Written this way deliberately: the same
+  ;; test has to mean the same thing on a developer's machine, inside the
+  ;; closure verifier's sandbox where there is no machine manager at all, and
+  ;; on the gate's host where there is one.
+  (let [image {:image {:path "/nonexistent-but-resolved" :digest "sha256:x" :bytes 0}}]
+    (testing "a hard limit below the floor is a catalogued refusal, not a spawn"
+      (let [spawned (atom false)]
+        (with-redefs [spe/available? (fn [] true)
+                      smve/guest-image (fn [] image)
+                      spe/host-fd-limits (fn [] [1024 1024])
+                      proc/run-bounded (fn [& _] (reset! spawned true)
+                                         {:status :exited :exit 0})]
+          (is (= :host-fd-limit (spe/request-run-refusal)))
+          (let [r (spe/run "/tmp" {:request/argv ["bb"] :request/cwd "."
+                                   :request/timeout-ms 1000})]
+            (is (= :refused (:status r)))
+            (is (= :host-fd-limit (:reason r)))
+            (is (false? @spawned)
+                "a host that cannot grant the floor spawns nothing at all")))))
+    (testing "a sufficient hard limit lets the request through"
+      (with-redefs [spe/available? (fn [] true)
+                    smve/guest-image (fn [] image)
+                    spe/host-fd-limits (fn [] [1024 1048576])]
+        (is (nil? (spe/request-run-refusal))
+            "a low SOFT limit is fine — the spawn raises it within the hard one")))))
 
 (deftest the-manager-spawn-runs-under-the-pinned-fd-floor
   (when @substrate?
