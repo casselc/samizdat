@@ -195,30 +195,49 @@ interference the moment a server has two: run A timing out would stop and
 delete run B's still-running machine, which B owns and A knows nothing
 about.
 
-Ownership is established two ways, in order, and never by assumption:
+Ownership has exactly **one** source: the manager's own startup banner,
+which names the machine it started for this spawn. That is not an inference
+— it is the manager telling this invocation which machine is its.
 
-1. **The manager's own word.** Its startup banner names the machine it
-   started for this spawn. That is not an inference, and when it is present
-   nothing else is consulted.
-2. **The set difference**, as a bounded fallback. A baseline of the table is
-   read immediately *before* every spawn, so everything in it belongs to
-   somebody else and is never a candidate; a machine absent from the
-   baseline and present afterwards, with this spawn the one that just ended,
-   is accepted — and *exactly one* such machine is. Two candidates is a
-   coincidence with two candidates, not ownership.
+**Without a banner, ownership is UNKNOWN and nothing is deleted.** A
+set-difference fallback lived here briefly — the single machine that appeared
+since a baseline read before the spawn — and it is wrong under concurrency in
+a way that is easy to miss:
 
-When neither settles it the cleanup does **nothing**: it reports
-`:cleanup/clean? false` with the ambiguous candidates named, the poison is
-therefore never lifted, and the lane fails closed with the surviving state
-visible. A provider that refuses further executions is a problem an operator
-can see; a run that deleted another run's machine is a problem nobody sees
-until the other run reports nonsense. `:cleanup/clean?` likewise means *none
-of ours remains*, not *the table is empty* — another run's machine is not
-this invocation's uncleanliness.
+    A reads its baseline (empty) and spawns
+    B spawns after A's baseline was taken
+    A times out; A's own machine never registered, or is already gone
+    A has no banner id
+    the table now holds exactly one machine A did not see: vm-B
+
+The difference is `{vm-B}` — exactly one candidate, and it belongs to B. The
+rule would have deleted a healthy machine belonging to another run, and been
+most confident precisely when it was alone in the world with somebody else's
+VM. The baseline and the table are still gathered, as **evidence**
+(`:cleanup/candidates`): they can tell an operator *these appeared while this
+invocation ran*; they may not tell the cleanup *therefore kill them*.
+
+When ownership is unknown the cleanup does **nothing**, reports
+`:cleanup/clean? false`, and this invocation stays poisoned — the lane fails
+closed with the surviving state visible. A provider that refuses further
+executions is a problem an operator can see; a run that deleted another run's
+machine is a problem nobody sees until the other run reports nonsense.
+`:cleanup/clean?` likewise means *none of ours remains*, not *the table is
+empty* — another run's machine is not this invocation's uncleanliness.
 
 Each run result names the machine it ran in (`:machine`), which is what
 makes "this cleanup touched only its own machine" a checkable claim rather
 than an assurance.
+
+**The poison is a SET of unresolved invocations, not a flag.** It was one
+slot holding one invocation, which cannot represent two overlapping timeouts:
+the second overwrote the first, and whichever cleanup finished first cleared
+the other's uncertainty along with its own — after which a new execution
+started on a provider that still had an unresolved machine and no memory of
+it. Each invocation now poisons and resolves its **own** entry
+(`unresolved-poison` names them); a new execution is refused while any entry
+remains; and no invocation can clear another's. A clean cleanup vouches for
+the machine it stopped and says nothing about an execution failing beside it.
 
 **The host must not reach inside.** The first JS2 canary attempt found that
 it could. A controller started with `ulimit -n 4096` produced a guest in

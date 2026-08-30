@@ -484,7 +484,24 @@
 ;; ═══════════════════════════════════════════════════════════════════════════
 
 (def ^:private invocations (atom 0))
-(def ^:private poisoned (atom nil))
+
+(def ^:private poisoned
+  "The invocations whose timeout cleanup has NOT been shown to be clean, as
+  {invocation -> evidence}.
+
+  A SET, not a flag, and that is the correction. It was one slot holding one
+  invocation, which is indistinguishable from correct while at most one
+  execution can be in flight — and loses state the moment two overlap:
+
+    A times out          poison = A
+    B times out          poison = B      <- A's uncertainty is now unrecorded
+    A cleans up          poison = nil    <- B's uncertainty is gone with it
+    C starts             ...on a provider with an unresolved machine
+
+  The last line is the whole problem: C runs believing the environment is
+  settled because A said so about itself. Each invocation now poisons and
+  resolves its OWN entry, and no invocation can clear another's."
+  (atom {}))
 
 (defn invocation-count
   "How many machine executions this process's environment has ATTEMPTED.
@@ -493,10 +510,23 @@
   @invocations)
 
 (defn poisoned?
-  "Whether a prior timeout left this environment in a state no new execution
-  may be issued from."
+  "Whether ANY invocation's timeout cleanup is still unresolved. A boolean
+  read-model over the poison set; `unresolved-poison` is what says which."
   []
-  (some? @poisoned))
+  (boolean (seq @poisoned)))
+
+(defn unresolved-poison
+  "The invocations still poisoned, with the evidence each carries. What an
+  operator reads to find out WHICH execution the lane is fenced by; a
+  provider that refuses every request without saying why is a provider nobody
+  can unblock."
+  []
+  @poisoned)
+
+(defn- poison!
+  "Record one invocation's cleanup as unresolved."
+  [invocation evidence]
+  (swap! poisoned assoc invocation evidence))
 
 (defn- claim-invocation! [] (swap! invocations inc))
 
@@ -533,39 +563,43 @@
        vec))
 
 (defn owned-machines
-  "The machines THIS invocation is entitled to stop and delete, or
-  ::ambiguous when that cannot be established.
+  "The machines THIS invocation is entitled to stop and delete, or ::unknown
+  when that cannot be established.
 
   THE CROSS-RUN SAFETY RULE, and the reason it is a named function.
 
-  The frozen JS2 implementation swept every `vm-*` the manager's table held.
-  That was correct for a single-execution canary and is WRONG for an ordinary
-  server: run A timing out would stop and delete run B's machine, which is
-  still running, still owned, and none of A's business. Aggressively deleting
-  an unknown VM is a worse failure than leaving one behind.
+  Ownership has exactly ONE source: the manager's own startup banner, which
+  names the machine it started for this spawn. That is not an inference — it
+  is the manager telling this invocation which machine is its.
 
-  Ownership is established two ways, in this order:
+  WITHOUT IT, OWNERSHIP IS UNKNOWN AND NOTHING IS DELETED. There was a
+  fallback here that took the single machine which had appeared since a
+  baseline read before the spawn, and it is wrong under concurrency in a way
+  that is easy to miss:
 
-  1. THE MANAGER'S OWN WORD. Its startup banner names the machine it started
-     for this spawn. That is not an inference — it is the manager telling this
-     invocation which machine is its — and when it is present nothing else is
-     consulted.
-  2. THE SET DIFFERENCE, as a bounded fallback. `baseline` is the table read
-     immediately BEFORE this spawn, so everything in it belongs to somebody
-     else and is never a candidate. A machine absent from the baseline and
-     present now, with this spawn the one that just ended, is plausibly this
-     spawn's — and exactly one such machine is accepted. More than one is not
-     ownership, it is a coincidence with two candidates, and it refuses.
+    A reads its baseline (empty) and spawns
+    B spawns after A's baseline was taken
+    A times out; A's own machine never registered, or is already gone
+    A has no banner id
+    the table now holds exactly one machine that A did not see: vm-B
 
-  Never `all vm-* are mine`."
+  The difference is {vm-B}, exactly one candidate, and it belongs to B. The
+  rule would have deleted a healthy machine belonging to another run, and
+  been most confident precisely when it was alone in the world with somebody
+  else's VM.
+
+  The baseline and the table are still gathered — as EVIDENCE. They can tell
+  an operator `these appeared while this invocation ran`. They may not tell
+  the cleanup `therefore kill them`. Leaving an unattributable machine behind
+  and refusing further executions is a failure an operator can see and undo;
+  deleting another run's machine is one nobody sees until that run reports
+  nonsense."
   [baseline id after]
-  (let [baseline (set baseline)
-        new-machines (vec (remove baseline (listed-machines after)))]
-    (cond
-      id [id]
-      (empty? new-machines) []
-      (= 1 (count new-machines)) new-machines
-      :else ::ambiguous)))
+  (let [candidates (vec (remove (set baseline) (listed-machines after)))]
+    (if id
+      [id]
+      ;; No banner, no ownership. `candidates` travels on as evidence only.
+      ::unknown)))
 
 (defn- hard-cleanup!
   "The hard boundary after an uncertain timeout.
@@ -582,18 +616,16 @@
   run that asked the manager and was told so are different claims, and only
   the second is evidence.
 
-  When ownership is ambiguous nothing is stopped at all: the cleanup reports
-  `:cleanup/clean? false` with the ambiguous candidates named, the provider's
-  poison is therefore never lifted, and the lane fails closed with the
-  surviving state visible. A provider that refuses every further execution is
-  a problem an operator can see and fix; a run that deleted another run's
-  machine is a problem nobody sees until the other run reports nonsense."
+  When ownership is UNKNOWN nothing is stopped at all: the cleanup reports
+  `:cleanup/clean? false` with the unattributable candidates named as
+  evidence, this invocation's poison is therefore never lifted, and the lane
+  fails closed with the surviving state visible."
   [baseline id]
   (let [manager (str (fs/which smve/manager-exec-name))
         before (surviving-machines)
         owned (owned-machines baseline id before)
-        ambiguous? (= ::ambiguous owned)
-        targets (if ambiguous? [] owned)
+        unknown? (= ::unknown owned)
+        targets (if unknown? [] owned)
         acted (vec (for [n targets
                          verb ["stop" "delete"]]
                      (do (try (proc/run-bounded {:timeout-ms 30000}
@@ -603,25 +635,30 @@
         after (surviving-machines)
         remaining (set (listed-machines after))]
     (cond-> {:cleanup/baseline (vec (sort baseline))
-             :cleanup/owned (if ambiguous? :ambiguous (vec owned))
+             :cleanup/owned (if unknown? :unknown (vec owned))
              :cleanup/machines-before before
              :cleanup/acted acted
              :cleanup/machines-after after
              ;; CLEAN means none of OURS remains — not that the table is
              ;; empty. Another run's machine standing in the table is not this
-             ;; invocation's uncleanliness, and treating it as one would
-             ;; poison this provider for the life of the process.
-             :cleanup/clean? (and (not ambiguous?)
+             ;; invocation's uncleanliness, and treating it as one would fence
+             ;; this provider for the life of the process. Unknown ownership
+             ;; is never clean: there may be a survivor and we cannot say.
+             :cleanup/clean? (and (not unknown?)
                                   (not-any? remaining owned))}
-      ambiguous?
-      (assoc :cleanup/ambiguous
+      unknown?
+      ;; EVIDENCE, not authority. What appeared while this invocation ran, so
+      ;; an operator has somewhere to start; the cleanup acted on none of it.
+      (assoc :cleanup/candidates
              (vec (remove (set baseline) (listed-machines before)))))))
 
-(defn clear-poison!
-  "Lift the poison after a completed hard cleanup. Exposed so the sequencing
-  is visible and testable rather than an implicit side effect."
-  []
-  (reset! poisoned nil))
+(defn resolve-poison!
+  "Lift ONE invocation's poison after ITS cleanup came back clean. Exposed so
+  the sequencing is visible and testable rather than an implicit side effect,
+  and scoped to one invocation so a clean cleanup cannot vouch for an
+  execution it knows nothing about."
+  [invocation]
+  (swap! poisoned dissoc invocation))
 
 ;; ═══════════════════════════════════════════════════════════════════════════
 ;; The run.
@@ -674,8 +711,12 @@
   guess at somebody else's machine."
   #"Starting ephemeral machine \((vm-[0-9a-f]+)\)\.\.\.")
 
-(defn- machine-id
-  "The ephemeral machine's own id, from the manager's banner, or nil."
+(defn machine-id
+  "The ephemeral machine's own id, from the manager's banner, or nil.
+
+  THE ONLY SOURCE OF OWNERSHIP (see `owned-machines`), and public so a test
+  can suppress it and prove the cleanup refrains from acting rather than
+  guessing. A pure function over captured text."
   [stderr-text]
   (second (re-find machine-banner (str stderr-text))))
 
@@ -787,10 +828,17 @@
             ;; POISON FIRST, then clean, then lift. The ordering is the
             ;; contract: no execution may be issued while the poison stands,
             ;; and the poison stands until the machine table has been swept.
-            _ (when timed-out? (reset! poisoned {:invocation index}))
+            _ (when timed-out?
+                (poison! index {:invocation index
+                                :machine (machine-id (:stderr r))
+                                :at (System/currentTimeMillis)}))
             cleanup (when timed-out?
                       (let [c (hard-cleanup! baseline (machine-id (:stderr r)))]
-                        (when (:cleanup/clean? c) (clear-poison!))
+                        ;; THIS invocation's poison, and only this one. A
+                        ;; clean cleanup vouches for the machine it stopped;
+                        ;; it says nothing about an execution running beside
+                        ;; it that has not finished failing yet.
+                        (when (:cleanup/clean? c) (resolve-poison! index))
                         c))
             status (cond
                      timed-out? :timeout
@@ -843,8 +891,9 @@
                                (cond-> {:acted (:cleanup/acted cleanup)
                                         :clean? (:cleanup/clean? cleanup)
                                         :owned (:cleanup/owned cleanup)}
-                                 (:cleanup/ambiguous cleanup)
-                                 (assoc :ambiguous (:cleanup/ambiguous cleanup)))))))
+                                 (:cleanup/candidates cleanup)
+                                 (assoc :candidates
+                                        (:cleanup/candidates cleanup)))))))
       (catch Throwable e
         ;; A staging failure (unrepresentable symlink, a tree over the
         ;; manifest budget, a root-owned project) is a FAILED run the model

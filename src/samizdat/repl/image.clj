@@ -120,9 +120,32 @@
           ;; the supervisor it now spawns, and inheriting the harness's
           ;; environment would have handed the model every provider key inside
           ;; a process that can also write files into the project.
-          proc (process/process argv {:dir (str root)
-                                      :env (secrets/scrub-env
-                                            (into {} (System/getenv)))})]
+          ;; THE CHILD'S PROJECT COORDINATE, set explicitly rather than
+          ;; inherited. `:dir` sets the OS working directory, and that used to
+          ;; be the whole story — but this runtime gives JOLT_PWD PRECEDENCE
+          ;; over the OS cwd when it resolves `user.dir` and user-facing
+          ;; relative paths, and the launcher exports JOLT_PWD=$PWD for the
+          ;; harness process. So the child was started in the project and then
+          ;; told, by an inherited variable, that its project was the
+          ;; CONTROLLER's checkout.
+          ;;
+          ;; Everything downstream followed from that: `(slurp "README.md")`
+          ;; in a project image read the harness's README, relative paths
+          ;; resolved outside the run root, and the image could not read its
+          ;; own resources. Four tests in this repository asserted exactly
+          ;; those properties and were failing on Linux, where they were read
+          ;; as the absent sandbox backend's fault — but they are not sandbox
+          ;; properties at all. They are supposed to hold under `:none`, and
+          ;; now they do.
+          ;;
+          ;; Set here, at the spawn seam, because this is where the child's
+          ;; project identity is decided. The runtime is not wrong to prefer
+          ;; an explicit JOLT_PWD; handing it the parent's was.
+          project-root (str (fs/canonicalize root))
+          proc (process/process argv {:dir project-root
+                                      :env (assoc (secrets/scrub-env
+                                                   (into {} (System/getenv)))
+                                                  "JOLT_PWD" project-root)})]
       (if (await-port! port (connect-timeout-ms))
         (do (log/info "project image up on" port "rooted at" root
                       (if (= :none backend) "(unsandboxed)" (str "under " (name backend))))

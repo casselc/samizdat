@@ -811,9 +811,16 @@
     ;; intervene, prompt), every one of them refused and none of them able to
     ;; be otherwise.
     ;;
-    ;; What the supervisor is for in a bounded run is already there and
-    ;; stronger: `done` is settled by the controller's own focused and closure
-    ;; verifiers, not by anything the branch says about itself.
+    ;; The narrow claim, and only the narrow one: ORDINARY upstream oversight
+    ;; is incompatible with the bounded surface and is therefore not run
+    ;; there. It is NOT that verification replaces everything a supervisor
+    ;; does. Verification settles exactly one question — whether `done` is
+    ;; earned, and it settles that by the controller's own focused and closure
+    ;; verifiers rather than by anything the branch says about itself. A
+    ;; supervisor also watches for a run going nowhere, spending its budget
+    ;; badly, or repeating itself, and nothing here covers that. An
+    ;; authority-compatible bounded oversight mechanism is separate work and
+    ;; is not in this milestone.
     (if-not (and conn run-id llm-adapter (:enabled? p)
                  (not (base/bounded-binding ctx)))
       (constantly nil)

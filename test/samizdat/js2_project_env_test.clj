@@ -112,6 +112,20 @@
 (defn- run! [root argv & [options]]
   (spe/run root (spe/validate-request argv options)))
 
+(defn- machine-names
+  "The ephemeral machines the manager's table names right now, as a set."
+  []
+  (set (re-seq #"vm-[0-9a-f]+"
+               (str (:out (proc/run {:timeout-ms 20000}
+                                    "smolvm" "machine" "ls"))))))
+
+(defn- machines-since
+  "Machines that appeared since `baseline` and are still there. A TEST-side
+  helper: a test knows what it started, which is exactly the knowledge the
+  production cleanup refuses to assume."
+  [baseline]
+  (into #{} (remove baseline) (machine-names)))
+
 (defn- refusal-of [f]
   (try (f) nil
        (catch Throwable e (:samizdat.smolvm-project-env/error (ex-data e)))))
@@ -605,12 +619,183 @@
         (is (= :terminated (:disposition rb)))
         (is (false? (spe/poisoned?)))))))
 
-(deftest ownership-refuses-rather-than-guessing-when-it-cannot-be-established
-  ;; Pure over `owned-machines`, so the ambiguous branch is provable without
-  ;; arranging a real race. The names are the manager's own shape (vm- plus
-  ;; lowercase hex), because that is what the table parser accepts — a fixture
-  ;; spelling them any other way would pass while proving nothing about real
-  ;; manager output. The rule, four ways:
+(deftest two-simultaneous-timeouts-each-clean-up-only-themselves
+  ;; §12. The poison used to be ONE SLOT holding one invocation, which cannot
+  ;; represent two overlapping timeouts: the second overwrote the first, and
+  ;; whichever finished cleaning cleared the other's uncertainty along with
+  ;; its own. A third execution then started on a provider that still had an
+  ;; unresolved machine and no memory of it.
+  ;;
+  ;; Both timeouts here are REAL machines timing out at the same time.
+  (when @substrate?
+    (with-project [root]
+      (let [ra (promise) rb (promise)
+            fa (future (deliver ra (run! root ["/bin/sh" "-c" "sleep 600"]
+                                        {:timeout-ms 12000})))
+            fb (future (Thread/sleep 1500)
+                       (deliver rb (run! root ["/bin/sh" "-c" "sleep 600"]
+                                         {:timeout-ms 12000})))]
+        (try
+          (let [a (deref ra 200000 ::never) b (deref rb 200000 ::never)]
+            (testing "both really timed out, in two different machines"
+              (is (= :timeout (:status a)))
+              (is (= :timeout (:status b)))
+              (is (string? (:machine a)))
+              (is (string? (:machine b)))
+              (is (not= (:machine a) (:machine b)))
+              (is (not= (:invocation a) (:invocation b))))
+
+            (testing "each cleanup acted on ITS OWN machine and no other"
+              (is (= [(:machine a)] (get-in a [:cleanup :owned])))
+              (is (= [(:machine b)] (get-in b [:cleanup :owned])))
+              (is (= #{(str "stop " (:machine a)) (str "delete " (:machine a))}
+                     (set (get-in a [:cleanup :acted]))))
+              (is (= #{(str "stop " (:machine b)) (str "delete " (:machine b))}
+                     (set (get-in b [:cleanup :acted]))))
+              (is (not-any? #(str/includes? % (str (:machine b)))
+                            (get-in a [:cleanup :acted])))
+              (is (not-any? #(str/includes? % (str (:machine a)))
+                            (get-in b [:cleanup :acted]))))
+
+            (testing "both resolved, so the provider is usable again"
+              (is (true? (get-in a [:cleanup :clean?])))
+              (is (true? (get-in b [:cleanup :clean?])))
+              (is (false? (spe/poisoned?)))
+              (is (empty? (spe/unresolved-poison))))
+
+            (testing "and neither machine is left in the manager's table"
+              (let [t (str (:out (proc/run {:timeout-ms 15000}
+                                           "smolvm" "machine" "ls")))]
+                (is (not (str/includes? t (str (:machine a)))))
+                (is (not (str/includes? t (str (:machine b)))))))
+
+            (testing "a fresh execution runs afterwards"
+              (let [n (run! root ["/bin/sh" "-c" "echo after-two-timeouts"])]
+                (is (= :completed (:status n))))))
+          (finally (future-cancel fa) (future-cancel fb)))))))
+
+(deftest the-poison-set-holds-every-unresolved-invocation-separately
+  ;; §12's state-machine requirement, and the reason the poison is a SET.
+  ;;
+  ;; It was one slot holding one invocation. Two overlapping timeouts then
+  ;; overwrote each other, and whichever cleaned up first cleared the other's
+  ;; uncertainty along with its own — after which a new execution started on a
+  ;; provider that still had an unresolved machine and no memory of it.
+  ;;
+  ;; Both invocations here are REAL machines really timing out, with the
+  ;; manager's banner suppressed so neither cleanup can come back clean and
+  ;; both stay unresolved by the real code path. Nothing is forced: the set is
+  ;; observed, one entry is resolved, and the other has to survive it.
+  (when @substrate?
+    (with-project [root]
+      (let [before (machine-names)]
+        (try
+          (let [ra (promise) rb (promise)]
+            (with-redefs [spe/machine-id (constantly nil)]
+              (let [fa (future (deliver ra (run! root ["/bin/sh" "-c" "sleep 600"]
+                                                 {:timeout-ms 12000})))
+                    fb (future (Thread/sleep 1500)
+                               (deliver rb (run! root ["/bin/sh" "-c" "sleep 600"]
+                                                 {:timeout-ms 12000})))]
+                (try
+                  (let [a (deref ra 200000 ::never)
+                        b (deref rb 200000 ::never)]
+                    (is (= :timeout (:status a)))
+                    (is (= :timeout (:status b)))
+                    (is (not= (:invocation a) (:invocation b)))
+
+                    (testing "BOTH are unresolved at once — one slot could not hold this"
+                      (let [p (spe/unresolved-poison)]
+                        (is (contains? p (:invocation a)))
+                        (is (contains? p (:invocation b)))
+                        (is (<= 2 (count p))))
+                      (is (true? (spe/poisoned?))))
+
+                    (testing "neither acted on anything, having no ownership"
+                      (is (= [] (get-in a [:cleanup :acted])))
+                      (is (= [] (get-in b [:cleanup :acted]))))
+
+                    (testing "resolving A leaves B poisoned — the whole point"
+                      (spe/resolve-poison! (:invocation a))
+                      (is (not (contains? (spe/unresolved-poison) (:invocation a))))
+                      (is (contains? (spe/unresolved-poison) (:invocation b)))
+                      (is (true? (spe/poisoned?))
+                          "the provider is still fenced by B")
+                      (is (= :environment-poisoned (spe/request-run-refusal))))
+
+                    (testing "and resolving B empties it"
+                      (spe/resolve-poison! (:invocation b))
+                      (is (empty? (spe/unresolved-poison)))
+                      (is (false? (spe/poisoned?)))
+                      (is (nil? (spe/request-run-refusal)))))
+                  (finally (future-cancel fa) (future-cancel fb))))))
+          (finally
+            ;; The suppression means nothing cleaned itself up. Remove the
+            ;; machines THIS TEST caused, by difference against its own
+            ;; baseline — the test knows what it started; the production
+            ;; cleanup deliberately does not, which is what it is proving.
+            (doseq [i (keys (spe/unresolved-poison))] (spe/resolve-poison! i))
+            (doseq [m (machines-since before)]
+              (proc/run {:timeout-ms 30000} "smolvm" "machine" "stop" m)
+              (proc/run {:timeout-ms 30000} "smolvm" "machine" "delete" m))))))))
+
+(deftest a-timeout-without-a-banner-refuses-to-touch-another-runs-machine
+  ;; §13, the exact missed race. B is a REAL machine belonging to another
+  ;; execution and still running. A times out with its banner suppressed, so
+  ;; the only candidate in the manager's table is B's machine — which is
+  ;; precisely when the old set-difference rule was most confident and most
+  ;; wrong.
+  (when @substrate?
+    (with-project [root]
+      (let [real-id spe/machine-id
+            rb (promise)
+            fb (future (deliver rb (run! root ["/bin/sh" "-c" "sleep 40; echo B-OK"]
+                                         {:timeout-ms 150000})))]
+        (try
+          (Thread/sleep 5000)                      ; let B's machine exist
+          (let [a (with-redefs [spe/machine-id (constantly nil)]
+                    (run! root ["/bin/sh" "-c" "sleep 600"] {:timeout-ms 12000}))
+                b (deref rb 200000 ::never)]
+            (testing "A timed out with no usable ownership signal"
+              (is (= :timeout (:status a)))
+              (is (= :unknown (get-in a [:cleanup :owned]))))
+
+            (testing "and therefore stopped and deleted NOTHING"
+              (is (= [] (get-in a [:cleanup :acted]))))
+
+            (testing "it fails closed rather than guessing"
+              (is (false? (get-in a [:cleanup :clean?])))
+              (is (true? (spe/poisoned?)))
+              (is (contains? (spe/unresolved-poison) (:invocation a))))
+
+            (testing "the candidates are recorded as EVIDENCE, not acted on"
+              (is (some? (get-in a [:cleanup :candidates]))))
+
+            (testing "B — the other run's machine — was untouched and completed"
+              (is (= :completed (:status b)))
+              (is (= 0 (:exit b)))
+              (is (str/includes? (get-in b [:stdout :text]) "B-OK")))
+
+            (testing "and while A is poisoned the provider refuses new work"
+              (is (= :environment-poisoned (spe/request-run-refusal)))
+              (let [r (spe/run root {:request/argv ["bb"] :request/cwd "."
+                                     :request/timeout-ms 1000})]
+                (is (= :refused (:status r)))
+                (is (= :environment-poisoned (:reason r)))))
+
+            (testing "resolving A's poison — and only A's — reopens the lane"
+              (spe/resolve-poison! (:invocation a))
+              (is (false? (spe/poisoned?)))
+              (is (nil? (spe/request-run-refusal)))))
+          (finally
+            (future-cancel fb)
+            (doseq [i (keys (spe/unresolved-poison))] (spe/resolve-poison! i))))))))
+
+(deftest ownership-comes-from-the-manager-or-it-does-not-come-at-all
+  ;; Pure over `owned-machines`. The names are the manager's own shape (vm-
+  ;; plus lowercase hex), because that is what the table parser accepts — a
+  ;; fixture spelling them any other way would pass while proving nothing
+  ;; about real manager output.
   (testing "the manager's own word settles it, and nothing else is consulted"
     (is (= ["vm-aaaaaaaa"]
            (spe/owned-machines ["vm-bbbbbbbb"] "vm-aaaaaaaa"
@@ -618,18 +803,28 @@
     (is (= ["vm-aaaaaaaa"]
            (spe/owned-machines [] "vm-aaaaaaaa" "No machines found"))
         "even when the table no longer lists it"))
-  (testing "without it, exactly one machine new since the baseline is owned"
-    (is (= ["vm-11111111"]
-           (spe/owned-machines ["vm-00000000"] nil "vm-00000000\nvm-11111111")))
-    (is (= [] (spe/owned-machines ["vm-00000000"] nil "vm-00000000"))
-        "nothing new means nothing of ours survived"))
-  (testing "two candidates is a coincidence, not ownership — it refuses"
-    (is (= :samizdat.security.smolvm-project-env/ambiguous
+  (testing "WITHOUT it ownership is unknown, however few candidates there are"
+    ;; The set-difference fallback that used to live here is gone, and this is
+    ;; the race it could not survive: A's baseline is taken before B exists, B
+    ;; spawns, A times out with no banner, and the one machine A did not see
+    ;; is B's. Exactly one candidate, and it belongs to somebody else.
+    (is (= :samizdat.security.smolvm-project-env/unknown
+           (spe/owned-machines ["vm-00000000"] nil "vm-00000000\nvm-11111111"))
+        "one new machine is not ownership — it is the dangerous case")
+    (is (= :samizdat.security.smolvm-project-env/unknown
+           (spe/owned-machines [] nil "vm-11111111")))
+    (is (= :samizdat.security.smolvm-project-env/unknown
+           (spe/owned-machines ["vm-00000000"] nil "vm-00000000"))
+        "and neither is no new machine: without a banner we simply cannot say")
+    (is (= :samizdat.security.smolvm-project-env/unknown
            (spe/owned-machines ["vm-00000000"] nil
-                               "vm-00000000\nvm-11111111\nvm-22222222"))))
-  (testing "a machine in the baseline is NEVER a candidate"
-    (is (= [] (spe/owned-machines ["vm-000000b1" "vm-000000b2"] nil
-                                  "vm-000000b1\nvm-000000b2")))))
+                               "vm-00000000\nvm-11111111\nvm-22222222")))))
+
+(deftest the-machine-id-is-read-from-the-managers-own-banner
+  (is (= "vm-5c84bc5c"
+         (spe/machine-id "Starting ephemeral machine (vm-5c84bc5c)...\nmore output")))
+  (is (nil? (spe/machine-id "no banner here")))
+  (is (nil? (spe/machine-id ""))))
 
 (deftest a-project-edit-changes-what-the-next-run-is-handed
   ;; §16 J. The staged input is the authoritative tree AT THE MOMENT OF THE
