@@ -800,7 +800,22 @@
   time (see cells/oversight.clj :oversight/reason)."
   [{:keys [conn run-id llm-adapter] :as ctx}]
   (let [p (lexicon/policy :oversight)]
-    (if-not (and conn run-id llm-adapter (:enabled? p))
+    ;; NOT OVER A BOUNDED RUN, for the same structural reason the repl session
+    ;; two lines below is `(when-not bounded …)`: the supervisor is an
+    ;; ORDINARY role with an ordinary tool surface, and a bounded run has
+    ;; neither. Its whole vocabulary is eval, doc, complete and done over one
+    ;; binding's authority, so a supervisor pass spends a model call to make
+    ;; calls the bounded surface refuses — measured in the JS2 convergence
+    ;; smoke, where a completed 27-turn bounded run carried 63 further turn
+    ;; slots of supervisor calls (shell, fetch_turn, introspect, cells,
+    ;; intervene, prompt), every one of them refused and none of them able to
+    ;; be otherwise.
+    ;;
+    ;; What the supervisor is for in a bounded run is already there and
+    ;; stronger: `done` is settled by the controller's own focused and closure
+    ;; verifiers, not by anything the branch says about itself.
+    (if-not (and conn run-id llm-adapter (:enabled? p)
+                 (not (base/bounded-binding ctx)))
       (constantly nil)
       (oversight/start!
        (assoc ctx :enabled? true

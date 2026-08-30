@@ -175,6 +175,29 @@
                                        :evaluator/binding develop-binding}))
             (str tool " must reach the bounded lane"))))))
 
+(deftest the-oversight-stream-does-not-run-over-a-bounded-run
+  ;; Upstream opens a parallel supervisor stream over a running run. It is an
+  ;; ORDINARY role with an ordinary tool surface; a bounded run has neither,
+  ;; so every call it makes is refused — 63 wasted turn slots in the JS2
+  ;; convergence smoke, on a bounded run that had already completed in 27.
+  ;;
+  ;; Asserted through the same predicate the guard uses, because the stream
+  ;; itself needs a live conn, run and adapter to start and this namespace
+  ;; loads without any of them.
+  (testing "a bounded ctx is recognised by binding and by profile"
+    (is (base/bounded? {:evaluator/binding develop-binding}))
+    (is (base/bounded? {:evaluator/profile :agent/project-develop}))
+    (is (some? (base/bounded-binding {:evaluator/binding develop-binding}))))
+  (testing "and an ordinary one is not"
+    (is (not (base/bounded? {})))
+    (is (nil? (base/bounded-binding {}))))
+  (testing "the supervisor's own tools are outside a bounded surface"
+    (let [s (surface/of-binding develop-binding)]
+      (doseq [tool ["shell" "fetch_turn" "introspect" "cells" "intervene"]]
+        (is (not (surface/callable? s tool))
+            (str "a bounded branch cannot call " tool
+                 " — which is why a supervisor over a bounded run can do nothing"))))))
+
 (deftest a-bounded-branch-has-no-role-so-the-role-surface-does-not-narrow-it
   ;; Upstream's role surface refuses any tool outside the role's catalogue.
   ;; A bounded branch carries no :role — roles are the ordinary lane's
