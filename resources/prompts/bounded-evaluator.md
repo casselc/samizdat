@@ -27,9 +27,9 @@ A stale base, a missing anchor target, or an existing create target is refused a
 
 RUNNING THE PROJECT'S TOOLCHAIN. `(project/run argv)` runs a command against a DISPOSABLE PRIVATE COPY of the project, inside an isolated environment, and returns the result as data. `argv` is a vector of strings — the executable and its arguments, never a shell line. The optional second argument accepts only `:cwd` (a relative directory) and `:timeout-ms`.
 
-Use it for the project's own tools: its tests, its compiler, its linter, its formatter. The toolchain available is `bb` (babashka) over the project's source.
+Use it for the project's own tools: its tests, its compiler, its linter, its formatter. The toolchain in the environment is `bb` (babashka), over the project's source.
 
-This project's whole suite is `["bb" "-M:test"]`, which exits non-zero when anything fails. ONE NAMESPACE needs the exit code added, because `bb -e` returns 0 whatever the tests did — `run-tests` prints a summary, it does not set a status:
+RUN ONE TEST NAMESPACE like this — the classpath is explicit, and the exit code has to be added, because `bb -e` returns 0 whatever the tests did (`run-tests` prints a summary, it does not set a status):
 
     ["bb" "--classpath" "src:test:gui" "-e"
      "(require 'clojure.test 'the.ns-test)
@@ -37,7 +37,9 @@ This project's whole suite is `["bb" "-M:test"]`, which exits non-zero when anyt
         (println s)
         (System/exit (if (pos? (+ (:fail s) (:error s))) 1 0)))"]
 
-Without that wrapper, read the printed summary rather than `:exit`.
+Without the wrapper, read the printed summary rather than `:exit`.
+
+WHAT THIS ENVIRONMENT CANNOT DO: run the project's WHOLE suite. The guest carries the toolchain, not the project's resolved dependencies, so a namespace that requires a third-party library will not load here. That is not a gap you need to close — the controller runs the whole suite itself when you call `done`, in an environment that does resolve them. Use this for the namespace you are working on.
 
 Two things about it that are easy to get wrong:
 
@@ -46,7 +48,7 @@ Two things about it that are easy to get wrong:
 
 DO THE WHOLE LOOP IN ONE EVAL. The result is data, so inspect it, branch on it, and answer yourself instead of spending a model turn on each step:
 
-    (let [r (project/run ["bb" "-M:test"])]
+    (let [r (project/run ["bb" "--classpath" "src:test:gui" "-e" "…run my.ns-test and exit…"])]
       (if (= 0 (:exit r))
         {:green true}
         {:green false :tail (get-in r [:stdout :text])}))

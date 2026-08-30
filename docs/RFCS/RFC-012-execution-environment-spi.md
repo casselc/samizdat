@@ -203,14 +203,32 @@ environment's identity), and a host that cannot grant it REFUSES
 (`:spi.refusal/host-fd-limit`) rather than producing a development run whose
 failure a model will read as its own code being wrong.
 
-**Known gap: the SmolVM VERIFY environment has the same coupling and is not
-fixed here.** It composes the same guest command and would hit the same
-EMFILE on a repository with a large `.git` under a low host limit. It is left
-alone deliberately: JS2's canary verifies through the bwrap environment, the
-verify environment's argv contents are pinned by an M4-era test, and changing
-a component this milestone's evidence does not exercise in order to fix a
-fault this milestone did not observe there is how a milestone's blast radius
-grows. It should be fixed with its own evidence.
+**Two known gaps in the SmolVM VERIFY environment, found by JS2 and left
+alone deliberately.** Both are recorded rather than fixed: JS2's canary
+verifies through the bwrap environment, so this milestone produces no
+evidence about the other one, and changing a component whose behaviour a
+milestone does not exercise is how blast radius grows. Each should be fixed
+with its own evidence.
+
+1. **The same host coupling.** It composes the same guest command and would
+   hit the same EMFILE on a repository with a large `.git` under a low host
+   limit.
+2. **Its closure argv cannot run this project's suite.** `closure-argv` is
+   `["bb" "-M:test"]`, and babashka has no `-M` alias flag at all — it reads
+   `-M:test` as a filename. Even corrected, the pinned guest carries the
+   toolchain and not the project's *resolved dependencies*, so any namespace
+   requiring a third-party library fails to load. The SmolVM verify
+   environment therefore has no working closure gate for a project like this
+   one.
+
+   The second gap is worth stating carefully, because the system already
+   handles it correctly and that is the interesting part. A closure verifier
+   that cannot load the code produces output with no parseable summary, and
+   JS2 §3B refuses exactly that: `:closure-summary-unparseable`, and `done`
+   is refused rather than accepted on a verdict nobody could read. A gate
+   that cannot run now fails closed instead of failing green — which is what
+   the coverage signature was added for, arrived at from a direction nobody
+   designed it for.
 
 **Replay covers executions.** A `project/run` is an `:actuation` in the
 sandbox's receipt grammar, so a reconstruction consumes its recorded receipt
