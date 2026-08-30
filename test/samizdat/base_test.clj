@@ -83,6 +83,29 @@
 (defn- src-files []
   (sort (map str (fs/glob "src" "**.clj"))))
 
+(defn- read-forms
+  "Every top-level form of `text`, as data.
+
+  Under an explicit `*ns*` first, because src/ is full of auto-resolved
+  keywords — `::timeout`, `::absent`, `::ambiguous`, upstream's and this
+  lineage's alike — and the reader resolves those against whatever namespace
+  happens to be current. Run alone this scanner was fine; run late in a full
+  suite, and again inside the acceptance sandbox, the same files stopped
+  reading and four tests here crashed on `Invalid token: ::…`, a failure with
+  nothing to do with what they check.
+
+  And with a fallback that spells `::` as `:` when even that will not read.
+  The namespace a keyword resolves to is irrelevant to every rule below —
+  they ask about prose, vocabulary and numbers — so a scan over `:timeout`
+  where the reader refuses `::timeout` audits exactly the same code. Only
+  reached when the first read fails, so nothing changes where `::` reads."
+  [text]
+  (letfn [(rd [t] (read-string {:read-cond :allow} (str "[" t "]")))]
+    (binding [*ns* (the-ns 'samizdat.base-test)]
+      (try (rd text)
+           (catch Throwable _ (rd (str/replace text "::" ":")))))))
+
+
 (defn- forms-of [file]
   ;; Read rather than grep. The reader knows which characters are inside a
   ;; string, which are a comment, and which are a regex literal; a text scan
@@ -97,9 +120,7 @@
   ;; tests here crashed on `Invalid token: ::…` — a failure with nothing to do
   ;; with what they check. A scanner whose result depends on what ran before
   ;; it is not a scanner.
-  (map strip-docstrings
-       (binding [*ns* (the-ns 'samizdat.base-test)]
-         (read-string {:read-cond :allow} (str "[" (slurp file) "]")))))
+  (map strip-docstrings (read-forms (slurp file))))
 
 (defn- collect [pred form]
   (let [acc (atom [])]

@@ -47,6 +47,14 @@
 
 ;; --- the running image ------------------------------------------------------
 
+(def ^:private launcher?
+  "Whether a project image can be STARTED here at all — `image/spawn-argv`
+  runs `jolt` by bare name against the child's PATH, which the bounded lane's
+  acceptance sandbox does not carry. A test that cannot start the thing it
+  observes has made no observation; it says so rather than crashing. See the
+  fuller note in samizdat.repl-confinement-test."
+  (delay (some? (fs/which "jolt"))))
+
 (defn- project!
   "A minimal project tree with one readable asset."
   []
@@ -57,6 +65,7 @@
     root))
 
 (deftest a-sandboxed-image-works-on-the-project-and-cannot-leave-it
+  (when @launcher?
   ;; The whole bead, end to end. If this passes, karamazov-zrq is closable
   ;; once the routing in round 4 points eval here.
   (let [root (project!)
@@ -108,9 +117,10 @@
               (is (= ":DENIED" (:value r)))))))
       (finally
         (image/stop! im)
-        (.delete (java.io.File. escape))))))
+        (.delete (java.io.File. escape)))))))
 
 (deftest stopping-an-image-kills-it-and-is-idempotent
+  (when @launcher?
   (let [root (project!)
         im (image/start! {:root root
                           :backend (sandbox/backend-for :auto (System/getProperty "os.name"))
@@ -124,7 +134,7 @@
       (testing "the profile does not outlive the image it confined"
         (is (not (.exists (java.io.File. ^String (:profile im))))))
       (testing "stopping twice is not an error"
-        (is (nil? (image/stop! im)))))))
+        (is (nil? (image/stop! im))))))))
 
 (deftest stopping-nothing-is-not-an-error
   ;; start! returns nil on failure and callers tear down in a finally, so this
@@ -134,6 +144,7 @@
 ;; --- one connection per eval ------------------------------------------------
 
 (deftest concurrent-evals-do-not-read-each-others-replies
+  (when @launcher?
   ;; The image is shared by every branch and the beam runs branches in
   ;; PARALLEL. With one transport for the image they interleaved: send is
   ;; locked internally but recv is not, and both readers share the transport's
@@ -153,9 +164,10 @@
                                 (future [i (:value (image/eval-in im (str "(do (Thread/sleep 40) (* " i " 100))")))]))))]
           (is (every? (fn [[i v]] (= (str (* i 100)) v)) rs)
               (str "a concurrent eval read another's reply: " (pr-str rs)))))
-      (finally (image/stop! im)))))
+      (finally (image/stop! im))))))
 
 (deftest an-abandoned-eval-does-not-poison-the-next-one
+  (when @launcher?
   ;; route/eval-for bounds an eval by abandoning the future blocked in recv.
   ;; With a shared transport, closing the socket under it freed the fd for
   ;; reuse and the abandoned reader ate the NEXT image's replies — measured:
@@ -170,4 +182,4 @@
         (is (= "timeout" (:error-type t))))
       (is (= "42" (:value (route/eval-for ctx "(+ 40 2)" nil 25000)))
           "the image never recovered from a timed-out eval")
-      (finally (route/release! root)))))
+      (finally (route/release! root))))))
