@@ -1,0 +1,180 @@
+;; JS2 CONVERGENCE CLOSURE — the machine-readable record.
+;;
+;; Supersedes artifacts/js2-convergence.edn for closure purposes. Does not
+;; replace it: that file describes the bytes that ran at 9391ce5 and is still
+;; true about them.
+{:milestone :js2-convergence-closure
+ :result :pass
+ :date "2026-08-30"
+
+ :supersedes
+ {:record "artifacts/js2-convergence.edn"
+  :evidence "docs/JS2_CONVERGENCE_EVIDENCE.md"
+  :executable-oracle "9391ce59b1771c22885742bd208f97dbe0a55d30"
+  :for "closure purposes only — the prior record is not edited, and its
+        historical claims about the bytes that ran at 9391ce5 stand"
+  :withdrawn-claim
+  "That the four ordinary-suite failures were upstream's own Linux-sandbox
+   failures. They were project-image cwd failures. See :finding-a."}
+
+ :coordinates
+ {:branch "js2-converge-closure-34a21ab"
+  :closure-executable-oracle "6b8f5cceb723e7f5589103b0617fe1e69e9f242e"
+  :pushed-executable-oracle "6b8f5cceb723e7f5589103b0617fe1e69e9f242e"
+  :upstream-base "34a21ab1fb1063ad3eac7905f98a37ad5635427f"
+  :jolt "c8d9181e23cc37aa91a38fdcbd01c93917b1be50"
+  :jolt-remote-branch "js2-project-run"
+  :sci {:sha "32d62a5136ad3dc148588752f5bcc4cc30b14752" :version "0.13.53"}
+  :chez "10.4.1"
+  :guest-image "sha256:c5329b4b7ecb1ac816cb86c1f6e7f57737d5240a2306be84847c8279e80ad984"
+  :journal "sha256:109bbd14c6a54b771996d8c7ea1dbfdc1237500cb8f2d4b782033e3d0c5cdea0"}
+
+ :push-records
+ [{:label :push-a :what "branch creation, before any closure work"
+   :local "3ca9bd63b2f840b8cf23b0f5b2f5c67ac722755a"
+   :remote "3ca9bd63b2f840b8cf23b0f5b2f5c67ac722755a" :verified? true}
+  {:label :push-b :what "the implementation, tracked-clean and gated"
+   :local "6b8f5cceb723e7f5589103b0617fe1e69e9f242e"
+   :remote "6b8f5cceb723e7f5589103b0617fe1e69e9f242e" :verified? true}
+  {:label :push-c :what "this evidence"
+   :local :see-docs :remote :see-docs :verified? true}]
+
+ :finding-a
+ {:name "project-image cwd / JOLT_PWD"
+  :where "src/samizdat/repl/image.clj start!"
+  :cause "the child was given a scrubbed copy of the controller's own
+          environment, which still carried the controller's JOLT_PWD; the
+          Jolt launcher prefers JOLT_PWD over the process cwd, so the project
+          image resolved relative paths against the CONTROLLER's root while
+          :dir said otherwise"
+  :fix "the spawn sets JOLT_PWD to the canonical project root, so the two
+        agree and there is one answer to \"where am I\""
+  :ordinary-suite-before {:tests 1860 :assertions 7978 :failures 4 :errors 0}
+  :ordinary-suite-after  {:tests 1864 :assertions 8037 :failures 0 :errors 0}
+  :allowlist :deleted
+  :allowlist-note "not retired, not kept for compatibility — a named exception
+                   is a load-bearing claim about a cause, and this one was
+                   false for as long as it stood"}
+
+ :finding-b
+ {:name "per-invocation poison"
+  :where "src/samizdat/security/smolvm_project_env.clj"
+  :was "one slot holding one invocation"
+  :defect "two overlapping timeouts: the second overwrote the first, and
+           whichever cleanup finished first cleared the other's uncertainty
+           along with its own — after which a new execution started on a
+           provider that still had an unresolved machine and no memory of it"
+  :now "a set of {invocation -> evidence}; each invocation poisons and
+        resolves only its own entry; a new execution is refused while any
+        entry remains; no invocation can clear another's"}
+
+ :finding-c
+ {:name "banner-only ownership"
+  :where "src/samizdat/security/smolvm_project_env.clj owned-machines"
+  :was "the manager's banner, else the single machine appearing since a
+        baseline read immediately before the spawn"
+  :defect "under concurrency the difference can name another run's machine —
+           A's own machine never registers, B spawns after A's baseline, the
+           difference is exactly one candidate and it is B's. The rule was
+           most confident precisely when it was alone with somebody else's VM."
+  :now "one source only: the manager's own startup banner. No banner means
+        ownership UNKNOWN, nothing is deleted, the cleanup is not clean, and
+        the invocation stays poisoned. The table travels as evidence
+        (:cleanup/candidates), never as authority."}
+
+ :gate
+ {:command "bin/js2 test" :exit 0
+  :lanes
+  [{:lane "authority, provenance, lease and surface closure"
+    :tests 60 :assertions 332 :failures 0 :errors 0}
+   {:lane "pinned bounded evaluator"
+    :tests 52 :assertions 428 :failures 0 :errors 0}
+   {:lane "project execution and verification environments (machine-backed)"
+    :tests 98 :assertions 851 :failures 0 :errors 0}
+   {:lane "concurrent execution ownership (machine-backed)"
+    :tests 6 :assertions 87 :failures 0 :errors 0}
+   {:lane "ordinary suite"
+    :tests 1864 :assertions 8037 :failures 0 :errors 0}]
+  :new-concurrency-tests
+  [:two-simultaneous-timeouts-each-clean-up-only-themselves
+   :the-poison-set-holds-every-unresolved-invocation-separately
+   :a-timeout-without-a-banner-refuses-to-touch-another-runs-machine
+   :ownership-comes-from-the-manager-or-it-does-not-come-at-all]
+  :kept-concurrency-tests
+  [:concurrent-executions-clean-up-only-their-own-machines
+   :two-successful-concurrent-executions-do-not-interfere]}
+
+ :smoke
+ {:run-id "0e737c73-9d23-430b-bdef-01966c5a7ef2"
+  :profile :agent/project-execute
+  :model "fireworks.kimi-k2p7-code"
+  :budget 60 :turns-used 16 :beam-width 1
+  :evaluations 13 :operations 13
+  :ops {:project/read 3 :project/stat 3 :project/edit 3 :project/run 4}
+  :multi-operation-evals 0
+  :model-roundtrips-between-an-edit-and-its-next-execution [1 1]
+  :target "a disposable checkout of the closure oracle; the task was the real
+           unsolved truncate-middle totality defect"
+  :outcome :completed}
+
+ :restart
+ {:pre-kill-snapshot {:file "pre-kill.txt" :lines 54 :bytes 11908
+                      :verified-before-the-signal? true
+                      :fields-checked 20}
+  :precondition-at-snapshot {:edits 2 :runs 1 :pending 0 :turn 11 :evals 9}
+  :true-interruption-point {:edits 3 :runs 2 :pending 0 :turn 13 :evals 11}
+  :signal "SIGKILL (-9) to the Chez/Jolt controller process"
+  :resume {:same-db? true :same-target? true :same-run? true
+           :binding-id-unchanged? true :instance-id-unchanged? true
+           :runtime-coordinate-unchanged? true
+           :context-spec-coordinate-unchanged? true
+           :orientation-digest-unchanged? true
+           :sci-context :fresh
+           :replayed-evaluations 11
+           :work-continued? true}}
+
+ :replay-proof
+ {:process :fresh-offline
+  :evaluations-replayed 13
+  :edit-receipts 3 :run-receipts 4
+  :execution-provider-invocation-count {:before 0 :after 0}
+  :manager-table {:before "No machines found" :after "No machines found"}
+  :target-digests-unchanged? true
+  :target-mtimes-unchanged? true
+  :binding-id-unchanged? true
+  :orientation-digest-unchanged? true
+  :sci-context :fresh
+  :elapsed-ms 177}
+
+ :closure-coverage
+ {:suite "js1-ve/v1:bab68fdf5a128ea0094ce345680d8eb0101792a0e703f8a29bfc28e4ad82a861"
+  :verifier "sha256:e3fd1b7d73e88ec4f88e482c61912524bd48acbbe6ed3cd319a4c4ca387fff2f"
+  :baseline {:input "sha256:d009bb70afa2a1ca17fd8de16a7ff6fbb1b0fadeb943a2176ffb66e1f12681d5"
+             :tests 1864 :assertions 7691 :failures 0 :errors 0 :green? true}
+  :final {:input "sha256:cdf0c42f6463e4ab0555e771fa7c7ec2efe103d596e4ceced44f27508665e3c9"
+          :tests 1864 :assertions 7697 :failures 0 :errors 0 :green? true}
+  :delta {:tests 0 :assertions 6 :failures 0 :errors 0
+          :decreased? false :same-suite? true}
+  :focused {:green? true :exit 0 :tests 1 :assertions 10}
+  :note "isolated closure counts, NOT the host ordinary-suite counts; the two
+         are measured by different verifiers and are never subtracted"}
+
+ :integrity
+ {:controller {:sha "6b8f5cceb723e7f5589103b0617fe1e69e9f242e"
+               :tracked-dirty 0 :untracked 0}
+  :jolt {:tracked-dirty 0} :sci {:tracked-dirty 0}
+  :target-changed-files ["src/samizdat/util.clj" "test/samizdat/util_test.clj"]
+  :machines-left-running 0
+  :controller-processes-left-running 0}
+
+ :frozen-history-untouched
+ ["js1-m1-glm-5aa9476" "js1-m2-current-e051714" "js1-m3-current-effcf7d"
+  "js1-m4-attempt2-effcf7d" "js1-m4-current-effcf7d" "js1-bounded-samizdat"
+  "js2-project-run-effcf7d" "js2-converge-34a21ab"]
+
+ :out-of-scope
+ "JS3; bounded supervisor/oversight; a Linux sandbox backend for ordinary
+  repl.image; worker pooling; long-lived SmolVM workers; network authority;
+  package-install authority; multi-agent shared SCI; Cedar; MCP/A2A/ACP; bb4t
+  convergence; broad Jolt convergence; SmolVM verification redesign; a new
+  scheduler; a new memory architecture."}

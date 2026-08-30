@@ -1,0 +1,52 @@
+run: {"id": "0e737c73-9d23-430b-bdef-01966c5a7ef2", "status": "completed", "model": "fireworks.kimi-k2p7-code", "max_turns": 60, "started_at": "2026-08-30T17:12:10.976Z", "ended_at": "2026-08-30T17:28:28.652Z", "terminal_reason": null}
+turns: 16
+  by tool: {"eval": 15, "done": 1}
+  by category: {"neutral": 13, "mechanics": 2, "success": 1}
+binding:
+  context-spec: {:context/bounds {:max-edit-chars 60000, :max-list-entries 1000, :max-read-chars 60000, :max-search-file-chars 500000, :max-search-files 20000, :max-search-line-chars 300, :max-search-pattern-chars 200, :max-search-results 500}, :context/capabilities [:project/edit :project/list :project/read :project/run :project/search :project/stat], :context/coordinate "js0:[:map [[:context/bounds [:map [[:max
+  runtime: js2-rt/v1:[:map [[:runtime/capability-catalog [:map [[:catalog/compiled [:vector [":project/edit" ":project/list" ":proj
+  orientation-digest: sha256:3b4b860eb2312f62646964d9cc1acae8e52bf15bf9275809cba3273528047fe8
+evals: 13 {"completed": 13}
+  evals containing def/defn: []
+operations total: 13
+  by op: {":project/read": 3, ":project/stat": 3, ":project/edit": 3, ":project/run": 4}
+  per-eval: [1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1]
+  multi-operation evals: 0
+  ops/eval: 1.00
+  ops/model-turn: 0.81
+project/run:
+  executions: 4
+  runs/model-turn: 0.25
+  evals containing a run: 4
+  multi-operation evals containing a run: 0
+  eval shapes containing a run: {"run+analyze+branch": 4}
+  repeated equivalent executions: {"[[\"bb\" \"--classpath\" \"src:test\" \"-e\" \"(require 'clojure.test 'samizdat.util-test)\\n(let [s (clojure.test/run-tests 'samizdat.util-test)]\\n  (println s)\\n  (Syst": 4}
+  model roundtrips between an edit and its next execution: [1, 1]
+  repeated observation signatures: {":project/read [\"src/samizdat/util.clj\"]": 2, ":project/stat [\"src/samizdat/util.clj\"]": 2}
+epochs:
+   {"id": "99b48e7d-5f0b-4a67-80c7-b775635bd704", "turn": 1, "provider": "openai", "model": "fireworks.kimi-k2p7-code", "adapter": "OpenAI", "config_digest": "e602ba3be87abe01616672b744e2a0667af312a9045900ac16f0ceaa15b077e3", "closed_at": null}
+invocations: 17
+sci context lifecycle:
+   2 {"context-id":"0a293924-28d1-427f-9f44-a4ce2fcebd63","instance-id":"inst:0e737c73-9d23-430b-bdef-01966c5a7ef2","binding-id":"bind:0e737c73-9d23-430b-bdef-01966c5a7ef2","phase":"allocated"}
+   31 {"context-id":"7893c035-00ac-4de5-a591-05a93794d607","instance-id":"inst:0e737c73-9d23-430b-bdef-01966c5a7ef2","binding-id":"bind:0e737c73-9d23-430b-bdef-01966c5a7ef2","supersedes":"0a293924-28d1-427f-9f44-a4ce2fcebd63","replayed-evaluations":11,"phase":"reconstructed"}
+   43 {"context-id":"05f9e9a1-ae95-48e9-9cc3-668819aa3e96","instance-id":"inst:0e737c73-9d23-430b-bdef-01966c5a7ef2","binding-id":"bind:0e737c73-9d23-430b-bdef-01966c5a7ef2","supersedes":"7893c035-00ac-4de5-a591-05a93794d607","replayed-evaluations":13,"phase":"reconstructed"}
+interventions:
+   [1, "message", "watch", "applied", 13, "{\"text\":\"[harness] Something is going wrong with how this run is being spent, and it is worth stopping to look at before you continue.\\n\\nthe branch is not resp"]
+ship-verify events:
+   37 {"ran":true,"stage":"focused","green":true,"timeout":false,"blocked":false,"closure-ran":true,"closure-green":true,"closure-timeout":false,"closure-envelope":{"version":1,"kind":"run","invocation-index":2,"attribution":{"coordinate":"sha256:e3fd1b7d73e88ec4f88e482c61912524bd48acbbe6ed3cd319a4c4ca387fff2f","type":"bwrap-verification-env"},"input":{"coordinate":"sha256:cdf0c42f6463e4ab0555e771fa7c7ec2efe103d596e4ceced44f27508665e3c9"},"status":"completed","exit":0,"stdout":{"text":"  [base-test] model-facing sentences still in src\/: 132 across 35 files\n[gui.api] poller callback failed: boom\n\nRan 1864 tests. 7697 assertions passed, 0 failures, 0 errors.\n\n{:type :summary, :test 1864, :pass 7697, :fail 0, :error 0}\n","bytes":235,"truncated?":false},"stderr":{"text":"WARN samizdat.agent.tools - tool done threw: Turn authority expired; refusing stale model effect\nWARN samizdat.agent.beam - branch B1 exceeded the turn deadline on turn 1\nWARN samizdat.agent.beam - branch B1 died on turn 1 : sleep interrupted\nINFO samizdat.agent.beam - distilled 1 finding(s) and 0 verdict(s) into memory\nWARN samizdat.agent.beam - branch B1 exceeded the turn deadline on turn 1\nINFO samizdat.security.controller - budget extension 6b5b77ac-42d7-4fe6-af38-e1851d0bf69b 5 -> 12 request raise-1\nINFO samizdat.security.controller - budget extension a8b70846-dcbc-4a48-b82e-80ada1a30b86 5 -> 9 request http-raise-1\nINFO samizdat.security.controller - budget extension e8e1ecf6-f744-4e48-9b51-2a529899ec4e 5 -> 12 request intervention-1\nERROR samizdat.agent.tools - tool boundary-test-bare-string returned a String instead of a result map\nERROR samizdat.agent.tools - tool boundary-test-no-branch returned a result map with no :branch, so the turn had no branch to carry forward\nWARN samizdat.agent.tools - tool boundary-test-throws threw: the tool exploded\nINFO samizdat.watch - watch: raised :provider-empty-replies - the provider keeps returning replies with neither content nor reasoning \u2014
+edit receipts:
+   intent ["src/samizdat/util.clj" "sha256:9dbc01d242d920365d88af0d0c4c1a21247ada54511693cec3939b28a785f705" "  \"If `s` is longer than `max-len`, return it shortened to  | 
+   outcome  | {:bytes 3806, :digest "sha256:fd79dcc68d67db46f944a81e413e30900b9a47a329fb892341f382b870ac758a", :kind :file, :path "src/samizdat/util.clj"}
+   intent ["test/samizdat/util_test.clj" "sha256:6263ca9237ac3d2367c10f61a52ad6e1f17ff63bd08befa81107a0dbbc6b6f60" "  (testing \"middle marker present\"\n    (let [result | 
+   outcome  | {:bytes 2038, :digest "sha256:53a044230b0c584dd70a7dcfbe3f8d1f9451af9528d45f1376801fae0dc3768d", :kind :file, :path "test/samizdat/util_test.clj"}
+   intent ["src/samizdat/util.clj" "sha256:fd79dcc68d67db46f944a81e413e30900b9a47a329fb892341f382b870ac758a" "  (if (<= (count s) max-len)\n    s\n    (let [marker \" … \ | 
+   outcome  | {:bytes 3805, :digest "sha256:1e893dd154a64fce5f41555b593b268442b9220265db9d70da4963742c9f50f7", :kind :file, :path "src/samizdat/util.clj"}
+run receipts:
+   intent [["bb" "--classpath" "src:test" "-e" "(require 'clojure.test 'samizdat.util-test)\n(let [s (clojure.test/run-tests 'samizdat.util-test)]\n  (println s)\n  (System/exit (if (pos? (+ (:fail s) (:error s | 
+   outcome  | {:argv ["bb" "--classpath" "src:test" "-e" "(require 'clojure.test 'samizdat.util-test)\n(let [s (clojure.test/run-tests 'samizdat.util-test)]\n  (println s)\n  (System/exit (if (pos? (+ (:fail s) (:error s))) 1 0)))"], :cwd ".", :disposition :terminated, :duration-ms 3357, :environment "sha256:978648e50f02ffb0526ad45155e56cd082db0b21cebf67f44e7db5b606fb6f1c", :exit 1, :input "sha256:9d7ed6e3ba1b4
+   intent [["bb" "--classpath" "src:test" "-e" "(require 'clojure.test 'samizdat.util-test)\n(let [s (clojure.test/run-tests 'samizdat.util-test)]\n  (println s)\n  (System/exit (if (pos? (+ (:fail s) (:error s | 
+   outcome  | {:argv ["bb" "--classpath" "src:test" "-e" "(require 'clojure.test 'samizdat.util-test)\n(let [s (clojure.test/run-tests 'samizdat.util-test)]\n  (println s)\n  (System/exit (if (pos? (+ (:fail s) (:error s))) 1 0)))"], :cwd ".", :disposition :terminated, :duration-ms 3899, :environment "sha256:978648e50f02ffb0526ad45155e56cd082db0b21cebf67f44e7db5b606fb6f1c", :exit 0, :input "sha256:cdf0c42f6463e
+   intent [["bb" "--classpath" "src:test" "-e" "(require 'clojure.test 'samizdat.util-test)\n(let [s (clojure.test/run-tests 'samizdat.util-test)]\n  (println s)\n  (System/exit (if (pos? (+ (:fail s) (:error s | 
+   outcome  | {:argv ["bb" "--classpath" "src:test" "-e" "(require 'clojure.test 'samizdat.util-test)\n(let [s (clojure.test/run-tests 'samizdat.util-test)]\n  (println s)\n  (System/exit (if (pos? (+ (:fail s) (:error s))) 1 0)))"], :cwd ".", :disposition :terminated, :duration-ms 3278, :environment "sha256:978648e50f02ffb0526ad45155e56cd082db0b21cebf67f44e7db5b606fb6f1c", :exit 0, :input "sha256:cdf0c42f6463e
+   intent [["bb" "--classpath" "src:test" "-e" "(require 'clojure.test 'samizdat.util-test)\n(let [s (clojure.test/run-tests 'samizdat.util-test)]\n  (println s)\n  (System/exit (if (pos? (+ (:fail s) (:error s | 
+   outcome  | {:argv ["bb" "--classpath" "src:test" "-e" "(require 'clojure.test 'samizdat.util-test)\n(let [s (clojure.test/run-tests 'samizdat.util-test)]\n  (println s)\n  (System/exit (if (pos? (+ (:fail s) (:error s))) 1 0)))"], :cwd ".", :disposition :terminated, :duration-ms 3335, :environment "sha256:978648e50f02ffb0526ad45155e56cd082db0b21cebf67f44e7db5b606fb6f1c", :exit 0, :input "sha256:cdf0c42f6463e

@@ -1,0 +1,27 @@
+=== TRUE interruption point, read from the DB AFTER the process died ===
+controller processes now: 3196747 3196749 (none)
+run: {"id": "0e737c73-9d23-430b-bdef-01966c5a7ef2", "status": "running", "max_turns": 60, "terminal_reason": null}
+branches: [{"id": "B1", "status": "active", "inactive_reason": null}]
+turns durable: 13 last turn: 13
+evals: 11 pending: 0
+   0 done (project/read "src/samizdat/util.clj")
+   1 done (project/read "test/samizdat/util_test.clj")
+   2 done (project/stat "src/samizdat/util.clj")
+   3 done (project/edit "src/samizdat/util.clj" "sha256:9dbc01d242d920365d88af0d0c4c1a21247ada545116
+   4 done (project/stat "test/samizdat/util_test.clj")
+   5 done (project/edit "test/samizdat/util_test.clj" "sha256:6263ca9237ac3d2367c10f61a52ad6e1f17ff6
+   6 done (let [r (project/run ["bb" "--classpath" "src:test" "-e" "(require 'clojure.test 'samizdat
+   7 done (project/read "src/samizdat/util.clj")
+   8 done (project/stat "src/samizdat/util.clj")
+   9 done (project/edit "src/samizdat/util.clj" "sha256:fd79dcc68d67db46f944a81e413e30900b9a47a329fb
+   10 done (let [r (project/run ["bb" "--classpath" "src:test" "-e" "(require 'clojure.test 'samizdat
+receipts: 22
+epochs closed_at: [{"id": "99b48e7d-5f0b-4a67-80c7-b775635bd704", "turn": 1, "closed_at": null}]
+invocations: 14
+--- target after the kill ---
+1e893dd154a64fce5f41555b593b268442b9220265db9d70da4963742c9f50f7  /home/chuck/opencode/src/js2-closure-target/src/samizdat/util.clj
+53a044230b0c584dd70a7dcfbe3f8d1f9451af9528d45f1376801fae0dc3768d  /home/chuck/opencode/src/js2-closure-target/test/samizdat/util_test.clj
+/home/chuck/opencode/src/js2-closure-target/src/samizdat/util.clj mtime=1788110061 bytes=3805
+/home/chuck/opencode/src/js2-closure-target/test/samizdat/util_test.clj mtime=1788110014 bytes=2038
+--- manager table after the kill ---
+No machines found

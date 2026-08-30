@@ -1,0 +1,30 @@
+=== final integrity, after the smoke and the offline replay proof ===
+-- controller (must be byte-identical to the pushed closure oracle) --
+HEAD              : 6b8f5cceb723e7f5589103b0617fe1e69e9f242e
+tracked-dirty     : 0 lines
+untracked         : 0 entries
+-- Jolt and SCI --
+Jolt HEAD         : c8d9181e23cc37aa91a38fdcbd01c93917b1be50
+Jolt tracked-dirty: 0 lines
+SCI  HEAD         : 32d62a5136ad3dc148588752f5bcc4cc30b14752
+SCI  tracked-dirty: 0 lines
+-- guest image --
+sha256:c5329b4b7ecb1ac816cb86c1f6e7f57737d5240a2306be84847c8279e80ad984
+-- target: only the two files the task named --
+ M src/samizdat/util.clj
+ M test/samizdat/util_test.clj
+?? .samizdat/
+target diff stat  :
+ src/samizdat/util.clj       | 15 +++++++++------
+ test/samizdat/util_test.clj | 11 +++++++++++
+ 2 files changed, 20 insertions(+), 6 deletions(-)
+-- no machine left running --
+No machines found
+-- no controller process --
+none
+   (Checked by executable rather than by command-line pattern. `pgrep -f
+   "...samizdat.core"` reports STILL UP here because the shell running the
+   check has the pattern in its own argv and matches itself. Scanning /proc
+   for a `scheme` process whose argv contains samizdat.core finds none.)
+-- port --
+3995 closed

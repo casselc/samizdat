@@ -1,0 +1,108 @@
+=== FOCUSED ===
+
+Ran 1 tests. 4 assertions passed, 0 failures, 0 errors.
+{:type :summary, :test 1, :pass 4, :fail 0, :error 0}
+
+
+
+=== CLOSURE ===
+  [base-test] model-facing sentences still in src/: 132 across 35 files
+[gui.api] poller callback failed: boom
+
+Ran 1864 tests. 7691 assertions passed, 0 failures, 0 errors.
+
+{:type :summary, :test 1864, :pass 7691, :fail 0, :error 0}
+
+WARN samizdat.agent.tools - tool done threw: Turn authority expired; refusing stale model effect
+WARN samizdat.agent.beam - branch B1 exceeded the turn deadline on turn 1
+WARN samizdat.agent.beam - branch B1 died on turn 1 : sleep interrupted
+INFO samizdat.agent.beam - distilled 1 finding(s) and 0 verdict(s) into memory
+WARN samizdat.agent.beam - branch B1 exceeded the turn deadline on turn 1
+INFO samizdat.security.controller - budget extension 8e98cdc8-b9cb-4153-8ad6-b57bb6ade0da 5 -> 12 request raise-1
+INFO samizdat.security.controller - budget extension 7d85458f-82ac-4a75-998b-22ad72225969 5 -> 9 request http-raise-1
+INFO samizdat.security.controller - budget extension 084a13b7-fd19-4209-aab0-184154d680f7 5 -> 12 request intervention-1
+ERROR samizdat.agent.tools - tool boundary-test-bare-string returned a String instead of a result map
+ERROR samizdat.agent.tools - tool boundary-test-no-branch returned a result map with no :branch, so the turn had no branch to carry forward
+WARN samizdat.agent.tools - tool boundary-test-throws threw: the tool exploded
+INFO samizdat.watch - watch: raised :provider-empty-replies - the provider keeps returning replies with neither content nor reasoning — the model is spending its whole output budget thinking and never reaching a tool call. The fix is MORE TOKENS or reasoning turned off for this endpoint, not more steering: raise :context-budget, or set :thinking? false if this is a local llama.cpp endpoint
+INFO samizdat.watch - watch: raised :provider-empty-replies - the provider keeps returning replies with neither content nor reasoning — the model is spending its whole output budget thinking and never reaching a tool call. The fix is MORE TOKENS or reasoning turned off for this endpoint, not more steering: raise :context-budget, or set :thinking? false if this is a local llama.cpp endpoint
+INFO samizdat.watch - watch: raised :calls-not-parsing - a large share of turns produce no usable tool call
+INFO samizdat.watch - watch: raised :replies-truncated - replies are hitting the token cap before emitting a call. The fix is MORE TOKENS, not more steering: the model never got far enough to call anything
+INFO samizdat.watch - watch: raised :shipping-unverified - the ship gate is being asked and cannot answer — work is shipping without its tests having been run
+INFO samizdat.watch - watch: raised :provider-empty-replies - the provider keeps returning replies with neither content nor reasoning — the model is spending its whole output budget thinking and never reaching a tool call. The fix is MORE TOKENS or reasoning turned off for this endpoint, not more steering: raise :context-budget, or set :thinking? false if this is a local llama.cpp endpoint
+INFO samizdat.watch - watch: raised :provider-empty-replies - the provider keeps returning replies with neither content nor reasoning — the model is spending its whole output budget thinking and never reaching a tool call. The fix is MORE TOKENS or reasoning turned off for this endpoint, not more steering: raise :context-budget, or set :thinking? false if this is a local llama.cpp endpoint
+WARN samizdat.store.knowledge - knowledge/recall fell back to LIKE: fts5: syntax error
+INFO samizdat.repl - eval can now reach /workspace/dev
+INFO samizdat.agent.beam - loop team is a whole-run workflow; beam width forced to 1 (asked for 5)
+INFO samizdat.agent.beam - distilled 1 finding(s) and 0 verdict(s) into memory
+WARN samizdat.agent.loop - branch B1 turn 1 model call failed: socket reset
+INFO samizdat.userspace - userspace manifest worker saved as version 2
+INFO samizdat.userspace - userspace manifest authored-child saved as version 1
+INFO samizdat.watch - watch: raised :tool-failing - `done` fails more often than it works
+INFO samizdat.agent.beam - distilled 2 finding(s) and 0 verdict(s) into memory
+INFO samizdat.watch - watch: raised :tool-failing - `done` fails more often than it works
+INFO samizdat.watch - watch: raised :tool-failing - `done` fails more often than it works
+INFO samizdat.watch - watch: raised :tool-failing - `done` fails more often than it works
+INFO samizdat.watch - watch: raised :tool-failing - `done` fails more often than it works
+INFO samizdat.api.control - grant python3 * recorded for run f98d6b60-362d-4f96-8993-16328895539d
+INFO samizdat.system - samizdat up on port 0 provider :local model local-model db :memory:
+WARN samizdat.agent.beam - branch B1 exceeded the turn deadline on turn 1
+WARN samizdat.agent.beam - branch B1 died on turn 1 : sleep interrupted
+INFO samizdat.userspace - userspace cell aaa-custom saved as version 1
+INFO samizdat.mutation - cell mutation committed
+WARN samizdat.mutation - cell mutation rolled back: reload: the edited cell file did not load — cell load failed; registry rolled back: EOF while reading
+WARN samizdat.mutation - cell mutation rolled back: validate: the loop no longer compiles — Cell :mini/end not found in registry
+WARN samizdat.mutation - cell mutation rolled back: soak run threw: execution error
+WARN samizdat.mutation - cell mutation rolled back: reload: the edited cell file did not load — cell load failed; registry rolled back: EOF while reading
+WARN samizdat.mutation - cell mutation rolled back: reload: the edited cell file did not load — cell load failed; registry rolled back: Unable to resolve symbol: defcell in this context
+INFO samizdat.userspace - userspace cell mini saved as version 1
+INFO samizdat.mutation - cell mini committed as version 1
+WARN samizdat.mutation - cell proposal rejected: mini the candidate did not load — EOF while reading
+INFO samizdat.userspace - userspace cell mini saved as version 1
+INFO samizdat.mutation - cell mini committed as version 1
+WARN samizdat.mutation - cell proposal rejected: other manifest 'beamish': validate: the loop no longer compiles — cells require ctx keys no driver provides: :start (:other/thing) wants :no-such-ctx-key. Either the key belongs in manifests/ctx-keys and the drivers must set it, or the cell should not be asking.
+WARN samizdat.userspace - userspace save ignored — no project store is bound: cell mini
+WARN samizdat.mutation - cell mini is live but UNSAVED — no project store is bound
+INFO samizdat.userspace - userspace cell loop saved as version 1
+WARN samizdat.mutation - cell proposal rejected: feature/supervise Nothing was saved. This body defines :feature/route, which belongs to feature.
+
+Saving it under `feature/supervise` would register the same cell ids from two files, and load order decides which one wins. Nothing would look wrong at the time — the body compiles, the cells register, the dry run passes — and the damage would appear later, when somebody edits feature and their version is silently shadowed by this copy.
+
+Two ways forward, and the first is almost always the right one:
+
+- **Save under the owning name.** If this is an edit to feature, save it as feature and the version history stays where the next reader will look for it.
+- **Give the new cells ids of their own.** If this is genuinely a new cell, rename its `defcell` ids so nothing else defines them.
+
+ERROR samizdat.repl.route - eval routed to a project image with no :root — the ctx did not carry one; refusing rather than confining to nothing
+ERROR samizdat.repl.route - eval routed to a project image with no :root — the ctx did not carry one; refusing rather than confining to nothing
+WARN samizdat.repl - run root is not the working directory — `eval` requires from /tmp but resolves relative FILE paths against /workspace — start the harness from the project root, or use absolute paths in eval
+WARN samizdat.agent.loop - branch B1 turn 3 model call failed: context exceeded
+WARN samizdat.agent.loop - branch B1 turn 3 model call failed: boom
+INFO samizdat.userspace - userspace cell loop saved as version 2
+INFO samizdat.userspace - userspace cell invented-by-the-agent saved as version 1
+WARN samizdat.userspace - userspace save ignored — no project store is bound: cell loop
+INFO samizdat.userspace - userspace cell loop saved as version 2
+INFO samizdat.userspace - userspace cell critic saved as version 1
+INFO samizdat.userspace - userspace cell critic saved as version 1
+INFO samizdat.userspace - userspace cell critic saved as version 2
+INFO samizdat.userspace - userspace cell critic saved as version 1
+INFO samizdat.userspace - userspace prompt my-note saved as version 1
+INFO samizdat.userspace - userspace prompt my-note saved as version 2
+INFO samizdat.userspace - userspace prompt mine saved as version 1
+INFO samizdat.userspace - userspace prompt mine saved as version 2
+INFO samizdat.userspace - userspace policy gates saved as version 2
+INFO samizdat.userspace - userspace prompt cull-reprieve saved as version 1
+INFO samizdat.userspace - userspace policy manual saved as version 1
+INFO samizdat.userspace - userspace policy gates saved as version 2
+INFO samizdat.userspace - userspace prompt cull-reprieve saved as version 1
+INFO samizdat.userspace - userspace policy gates saved as version 2
+INFO samizdat.userspace - userspace cell race-target saved as version 1
+INFO samizdat.userspace - userspace policy gates saved as version 2
+INFO samizdat.userspace - userspace policy gates saved as version 3
+WARN samizdat.agent.oversight - oversight pass failed: boom
+WARN samizdat.agent.oversight - oversight pass failed: boom
+WARN cells.oversight - oversight :reason failed: provider exploded
+WARN samizdat.agent.oversight - oversight pass failed: boom
+WARN samizdat.agent.oversight - oversight pass failed: boom
+WARN samizdat.store.journal - journal: falling back to pr-str for a value data.json could not write: Don't know how to write JSON of class java.lang.Character
+INFO samizdat.store.runs - retention: dropped the record of 1 run(s) older than 30 days

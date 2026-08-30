@@ -1,0 +1,6 @@
+The launcher shell (3194500) had already exec'd away; the controller process is the Chez/Jolt process it became.
+SIGKILL (-9) sent to controller pid 3194505 at 2026-08-30T10:14:51-07:00
+process alive after 5s: no
+remaining samizdat.core processes: 3196620 3196669 
+manager table immediately after the kill:
+No machines found

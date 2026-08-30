@@ -1,0 +1,7 @@
+{
+ "run_id": "0e737c73-9d23-430b-bdef-01966c5a7ef2",
+ "status": "running",
+ "beam_width": 1,
+ "max_turns": 60,
+ "note": "The POST returned a 503 - api.control/start-run! waits 30s for on-start and the bounded binding mint plus orientation read exceeded it. The run itself started normally; this file records the id read from the authoritative journal."
+}
