@@ -88,8 +88,18 @@
   ;; string, which are a comment, and which are a regex literal; a text scan
   ;; knows none of that and would flag the word "IMPORTANT" in a comment
   ;; while missing a prompt assembled across two lines.
+  ;;
+  ;; UNDER AN EXPLICIT `*ns*`, because src/ is full of auto-resolved keywords
+  ;; (`::timeout`, `::absent`, `::ambiguous`) and the reader resolves those
+  ;; against whatever namespace happens to be current. Run alone this scanner
+  ;; was fine; run late in a full suite, after other namespaces had been
+  ;; created and removed around it, the same files stopped reading and four
+  ;; tests here crashed on `Invalid token: ::…` — a failure with nothing to do
+  ;; with what they check. A scanner whose result depends on what ran before
+  ;; it is not a scanner.
   (map strip-docstrings
-       (read-string {:read-cond :allow} (str "[" (slurp file) "]"))))
+       (binding [*ns* (the-ns 'samizdat.base-test)]
+         (read-string {:read-cond :allow} (str "[" (slurp file) "]")))))
 
 (defn- collect [pred form]
   (let [acc (atom [])]

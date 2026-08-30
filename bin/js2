@@ -206,6 +206,9 @@ full() {
                 | grep -vxF "$UPSTREAM_KNOWN_FAILING" || true)
   if [ -n "$unexplained" ]; then
     printf 'js2: failures current upstream does not account for:\n%s\n' "$unexplained" >&2
+    # The detail too, not just the names — a gate that says only WHICH test
+    # broke makes the next person run the whole suite again to find out how.
+    printf '%s\n' "$out" | grep -A8 -E '^(FAIL|ERROR) in' >&2 || true
     exit 1
   fi
   if [ -n "$failing" ]; then
