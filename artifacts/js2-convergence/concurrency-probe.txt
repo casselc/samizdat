@@ -1,0 +1,18 @@
+manager table BEFORE: "No machines found"
+B is running; starting A with a 12s deadline
+
+A  invocation: 2  machine: vm-5c84bc5c
+A  status: :timeout  disposition: :hard-cleaned
+A  cleanup owned: ["vm-5c84bc5c"]
+A  cleanup acted: ["stop vm-5c84bc5c" "delete vm-5c84bc5c"]
+A  cleanup clean?: true
+A  poisoned after: false
+
+B  invocation: 1  machine: vm-c4568dd5
+B  status: :completed  exit: 0  disposition: :terminated
+B  stdout: "B-COMPLETED"
+
+A machine == B machine? false
+B's machine among A's cleanup targets? false
+manager table AFTER: "No machines found"
+A's machine still in the table? false

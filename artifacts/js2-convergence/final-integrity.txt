@@ -1,0 +1,73 @@
+=== target diff ===
+diff --git a/src/samizdat/util.clj b/src/samizdat/util.clj
+index 804856e..ab5edfc 100644
+--- a/src/samizdat/util.clj
++++ b/src/samizdat/util.clj
+@@ -69,14 +69,19 @@
+           (:val (reset! cache {:gen g :val (f)})))))))
+ 
+ (defn truncate-middle
+-  "If `s` is longer than `max-len`, return it shortened to exactly `max-len`
++  "If `s` is longer than `max-len`, return it shortened to at most `max-len`
+   characters by keeping the head and tail with the literal string \" … \"
+-  in the middle; otherwise return `s` unchanged."
++  in the middle; otherwise return `s` unchanged.
++
++  When `max-len` is too small to fit the marker, returns the first `max-len`
++  characters of `s` instead of throwing."
+   [s max-len]
+   (if (<= (count s) max-len)
+     s
+     (let [marker " … "
+-          marker-len (count marker)
+-          head-len (quot (- max-len marker-len) 2)
+-          tail-len (- max-len marker-len head-len)]
+-      (str (subs s 0 head-len) marker (subs s (- (count s) tail-len))))))
++          marker-len (count marker)]
++      (if (< max-len marker-len)
++        (subs s 0 max-len)
++        (let [head-len (quot (- max-len marker-len) 2)
++              tail-len (- max-len marker-len head-len)]
++          (str (subs s 0 head-len) marker (subs s (- (count s) tail-len))))))))
+diff --git a/test/samizdat/util_test.clj b/test/samizdat/util_test.clj
+index fb07a5e..1674fcf 100644
+--- a/test/samizdat/util_test.clj
++++ b/test/samizdat/util_test.clj
+@@ -34,4 +34,21 @@
+ 
+   (testing "middle marker present"
+     (let [result (util/truncate-middle "abcdefghijklmnopqrstuvwxyz" 10)]
+-      (is (str/includes? result " … ")))))
++      (is (str/includes? result " … "))))
++
++  (testing "max-len smaller than marker returns prefix of max-len"
++    (is (= "ab" (util/truncate-middle "abcdefghij" 2)))
++    (is (= "a" (util/truncate-middle "abcdefghij" 1)))
++    (is (= "" (util/truncate-middle "abcdefghij" 0))))
++
++  (testing "max-len exactly marker length returns marker"
++    (is (= " … " (util/truncate-middle "abcdefghij" 3))))
++
++  (testing "max-len larger than marker keeps head/marker/tail behaviour"
++    (is (= " … j" (util/truncate-middle "abcdefghij" 4)))
++    (is (= "a … j" (util/truncate-middle "abcdefghij" 5))))
++
++  (testing "result never exceeds max-len for small bounds"
++    (doseq [max-len (range 0 8)]
++      (is (>= max-len (count (util/truncate-middle "The quick brown fox jumps over the lazy dog" max-len)))))))
++
+=== target status ===
+ M src/samizdat/util.clj
+ M test/samizdat/util_test.clj
+?? .samizdat/
+=== final digests ===
+ddc22be3c2711b83c7909a926df504f500c25e4524d810cf2c4deaf9c0fa411b  /home/chuck/opencode/src/samizdat-target-conv/src/samizdat/util.clj
+409e8cb7bc360aa3f0b8c216b3f821b789142799dad9ba4417eac132ea8b2e45  /home/chuck/opencode/src/samizdat-target-conv/test/samizdat/util_test.clj
+=== controller integrity ===
+9391ce59b1771c22885742bd208f97dbe0a55d30
+tracked modifications: 0
+=== jolt integrity ===
+c8d9181e23cc37aa91a38fdcbd01c93917b1be50
+tracked modifications: 0
+=== machines left running ===
+No machines found

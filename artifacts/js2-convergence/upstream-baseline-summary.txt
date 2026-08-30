@@ -1,0 +1,6 @@
+      1 FAIL in (a-sandboxed-image-works-on-the-project-and-cannot-leave-it) (image_test.clj:84)
+      1 FAIL in (a-sandboxed-image-works-on-the-project-and-cannot-leave-it) (image_test.clj:88)
+      1 FAIL in (eval-cannot-read-harness-source-from-a-project-run) (repl_confinement_test.clj:105)
+      1 FAIL in (eval-resolves-relative-paths-against-the-run-root) (repl_confinement_test.clj:97)
+      1 Ran 1658 tests. 6532 assertions passed, 4 failures, 0 errors.
+      1 {:type :summary, :test 1658, :pass 6532, :fail 4, :error 0}

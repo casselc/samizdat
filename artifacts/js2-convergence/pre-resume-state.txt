@@ -1,0 +1,11 @@
+=== TRUE interruption point, read from the DB after the process died ===
+last turn      19
+run status     running
+evals          16
+receipts       28
+completions    16
+edit outcomes  4
+run outcomes   1
+pending evals  0
+budget         60
+epochs         1
