@@ -40,6 +40,7 @@ stay exactly as they were; so do the frozen JS2 experiment
 | `target.diff` | the complete final diff of the disposable target |
 | `final-integrity.txt` | controller, Jolt and SCI unchanged; target diff; no machine and no controller left running |
 | `journal-db.sha256` | digest pinning the untracked authoritative journal |
+| `push-c.txt` | the push freeze record: PUSH C's own SHAs, which its commit could not contain, plus origin and the Jolt oracle read back afterwards |
 
 ## The authoritative journal is not tracked here
 

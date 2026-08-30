@@ -1,0 +1,50 @@
+PUSH C — the evidence commit, and its own SHAs.
+
+A commit cannot contain its own hash, so the evidence commit named this file
+and this commit fills it in. That is the whole reason this commit exists.
+
+  PUSH C local           : cdbd59e0cc12db2cd0bd0106773920f5de793759
+  PUSH C remote (origin) : cdbd59e0cc12db2cd0bd0106773920f5de793759
+  equal                  : yes, verified by reading origin back after the push
+
+Branch: js2-converge-closure-34a21ab
+
+The three push records in full:
+
+  PUSH A  branch creation, before any closure work
+          local  3ca9bd63b2f840b8cf23b0f5b2f5c67ac722755a
+          remote 3ca9bd63b2f840b8cf23b0f5b2f5c67ac722755a   equal
+
+  PUSH B  the implementation, tracked-clean and gated
+          local  6b8f5cceb723e7f5589103b0617fe1e69e9f242e
+          remote 6b8f5cceb723e7f5589103b0617fe1e69e9f242e   equal
+          this is the CLOSURE EXECUTABLE ORACLE, and the commit the
+          smoke actually ran from
+
+  PUSH C  the evidence
+          local  cdbd59e0cc12db2cd0bd0106773920f5de793759
+          remote cdbd59e0cc12db2cd0bd0106773920f5de793759   equal
+
+  PUSH D  this freeze record — its SHA is the branch tip after this commit,
+          and is verified in the session report rather than inside itself,
+          for the same reason PUSH C's could not be.
+
+No force push. Nothing merged to main. No frozen branch rebased, amended,
+moved or rewritten.
+
+=== origin, read after PUSH C ===
+  ff9cfd8cf6bf08c0f61b71cc98eee8c354efa861	codex/embed-aspects
+  b942890a205e1c5d2a9a7d277ce9c3ad7e7f5d5e	js1-bounded-samizdat
+  36b913c9f0f9313c71255c3f7d725e06f2280b31	js1-m1-glm-5aa9476
+  a7e857fbde5b5603477a6982c28275aae728e294	js1-m2-current-e051714
+  64effe150269fdebfdd9ccb619cab89187494b75	js1-m3-current-effcf7d
+  f811ea7f3d025b6b376722082656bf69e3be3151	js1-m4-attempt2-effcf7d
+  0ad7070368ae79ebbbba95a998f5ffda4b551dd9	js1-m4-current-effcf7d
+  3ca9bd63b2f840b8cf23b0f5b2f5c67ac722755a	js2-converge-34a21ab
+  cdbd59e0cc12db2cd0bd0106773920f5de793759	js2-converge-closure-34a21ab
+  8edc570b6db6e178244b2c000c60ef8644f47690	js2-project-run-effcf7d
+  5a17de8e6bd3fb82617f2986f11019f092e1ad3b	main
+
+=== the Jolt oracle, unmoved ===
+  c8d9181e23cc37aa91a38fdcbd01c93917b1be50	refs/heads/js2-project-run
+  expected c8d9181e23cc37aa91a38fdcbd01c93917b1be50
