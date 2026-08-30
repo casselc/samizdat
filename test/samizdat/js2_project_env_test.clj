@@ -76,7 +76,15 @@
          (tests)))
      (tests))))
 
-(def ^:private substrate? (delay (spe/available?)))
+(def ^:private substrate?
+  "Whether this host can actually EXECUTE, which is not the same question as
+  whether the substrate exists. A host with a machine manager but an
+  open-file limit below the pinned floor has a substrate and refuses every
+  request — and the M4 lesson is that a machine-backed test which assumes the
+  host it was written on is how a closure gate goes red for reasons that
+  belong to the harness. So the guard is the environment's own answer to
+  'may this run', not a component of it."
+  (delay (nil? (spe/request-run-refusal))))
 
 (defn- seed-project!
   "A synthetic authoritative project root: the tree a run is handed
@@ -363,10 +371,12 @@
           (is (fs/exists? (str root "/src/pe/core.clj")))
           (is (fs/exists? (str root "/sub/dir/marker.txt")))
           (is (not (fs/exists? (str root "/brand-new.txt")))))))
-    (is (= :refused (:status (spe/run "/tmp" {:request/argv ["bb"]
-                                              :request/cwd "."
-                                              :request/timeout-ms 1000})))
-        "without a substrate the run refuses; it never spawns on the host")))
+    (let [r (spe/run "/tmp" {:request/argv ["bb"] :request/cwd "."
+                             :request/timeout-ms 1000})]
+      (is (= :refused (:status r))
+          "without a usable environment the run refuses; it never spawns on the host")
+      (is (= (spe/request-run-refusal) (:reason r))
+          "and says which of its own refusals applied"))))
 
 (deftest the-workload-reaches-no-host-secret-path-or-network
   (when @substrate?

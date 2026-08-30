@@ -404,7 +404,7 @@
    :spi.refusal/environment-poisoned
    "prior execution timed out; hard cleanup incomplete"
    :spi.refusal/host-fd-limit
-   "controller open-file limit below the pinned floor; staging unreliable"
+   "controller open-file limit below floor; staging unreliable"
    :spi.refusal/unknown
    "project execution environment refused; reason uncatalogued"})
 

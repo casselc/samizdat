@@ -141,10 +141,17 @@ environments() {
 
 full() {
   printf '\n== js2: ordinary suite ==\n'
-  # The ulimit raise mirrors the deps.edn :tasks test entry: the suite holds
-  # many open fds and the default soft limit starves it. As in the js1 lanes,
-  # the suite runs even when the raise itself is refused.
-  if (cd "$ROOT"; ulimit -n 4096 2>/dev/null; "$JOLT/bin/jolt" -M:test); then
+  # The suite holds many open fds and a low soft limit starves it (provenance
+  # A-3). RAISE THE SOFT LIMIT ONLY: `ulimit -n N` sets the hard limit too, and
+  # lowering a hard limit is irreversible for the whole process tree — which on
+  # a host whose default is already generous turns a line meant to raise a
+  # limit into one that lowers it, and the project execution environment then
+  # refuses because a host limit would otherwise reach inside its guest.
+  if (cd "$ROOT"
+      if [ "$(ulimit -Sn)" -lt 65536 ] 2>/dev/null; then
+        ulimit -Sn 65536 2>/dev/null || ulimit -Sn "$(ulimit -Hn)" 2>/dev/null || true
+      fi
+      "$JOLT/bin/jolt" -M:test); then
     :
   else
     fail 'ordinary suite failed'
