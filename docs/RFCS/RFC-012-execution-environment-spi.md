@@ -187,6 +187,31 @@ may be issued while the poison stands. There is no worker pool for a
 timeout to have to poison across — a fresh ephemeral machine per execution
 measures at roughly two seconds to boot, which is why there is not one.
 
+**The host must not reach inside.** The first JS2 canary attempt found that
+it could. A controller started with `ulimit -n 4096` produced a guest in
+which the prelude's removal of the project's `.git` (7684 loose objects)
+failed `EMFILE` on *every* execution, while the guest's own limits were
+identical either way (1024 soft / 4096 hard) — the limit that mattered was
+the **host's**, inherited by whatever serves the read-only mount. The model
+saw "the environment failed" for work that was fine.
+
+The number was not the defect; the coupling was. An environment that behaves
+differently depending on how the harness was launched is not isolated, it is
+coincidentally working. So the manager spawn runs under a **pinned open-file
+floor** (`:host/nofile`, part of `:executor/limits` and therefore part of the
+environment's identity), and a host that cannot grant it REFUSES
+(`:spi.refusal/host-fd-limit`) rather than producing a development run whose
+failure a model will read as its own code being wrong.
+
+**Known gap: the SmolVM VERIFY environment has the same coupling and is not
+fixed here.** It composes the same guest command and would hit the same
+EMFILE on a repository with a large `.git` under a low host limit. It is left
+alone deliberately: JS2's canary verifies through the bwrap environment, the
+verify environment's argv contents are pinned by an M4-era test, and changing
+a component this milestone's evidence does not exercise in order to fix a
+fault this milestone did not observe there is how a milestone's blast radius
+grows. It should be fixed with its own evidence.
+
 **Replay covers executions.** A `project/run` is an `:actuation` in the
 sandbox's receipt grammar, so a reconstruction consumes its recorded receipt
 and returns the historical result having launched nothing. The execution

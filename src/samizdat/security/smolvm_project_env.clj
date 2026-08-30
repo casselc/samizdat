@@ -99,7 +99,26 @@
    :worker/stdout-max-bytes 1048576        ;; 1 MiB kept per stream
    :worker/stderr-max-bytes 1048576
    :worker/timeout-ms 600000               ;; the ceiling: 10 minutes
-   :worker/default-timeout-ms 300000})     ;; what an unspecified request gets
+   :worker/default-timeout-ms 300000       ;; what an unspecified request gets
+   ;; The open-file floor the MANAGER SPAWN runs under, and the reason it is
+   ;; pinned here rather than left to whatever launched the harness.
+   ;;
+   ;; MEASURED: a controller started with `ulimit -n 4096` produced a guest in
+   ;; which `rm -rf` of the project's .git (7684 loose objects) failed EMFILE,
+   ;; deterministically, on every execution — the prelude then refused, and the
+   ;; model read "the environment failed" for work that was fine. The guest's
+   ;; own limits were identical either way (1024 soft / 4096 hard); the limit
+   ;; that mattered was the HOST's, inherited by whatever serves the read-only
+   ;; mount.
+   ;;
+   ;; That is the defect, not the number: a host-side resource limit reached
+   ;; inside an environment whose whole claim is that the host does not reach
+   ;; inside it. An environment that behaves differently depending on how the
+   ;; harness was launched is not isolated, it is coincidentally working. So
+   ;; the spawn runs under a pinned limit, and a host that cannot grant it
+   ;; REFUSES rather than producing a development run whose failure the model
+   ;; will read as its own.
+   :host/nofile 65536})
 
 (def request-limits
   "What a model-supplied request may be, before anything is staged. Bounds on
@@ -217,6 +236,37 @@
   (when (available?) (:image (smve/guest-image))))
 
 ;; ═══════════════════════════════════════════════════════════════════════════
+;; The host-side open-file floor.
+;; ═══════════════════════════════════════════════════════════════════════════
+
+(defn host-fd-limits
+  "[soft hard] RLIMIT_NOFILE of THIS process, from its own /proc entry, or nil
+  when it cannot be read. The controller's limit, not the guest's — the guest
+  has its own and they are unrelated."
+  []
+  (try
+    (when-let [line (->> (str/split-lines (slurp "/proc/self/limits"))
+                         (filter #(str/starts-with? % "Max open files"))
+                         first)]
+      (let [[soft hard] (->> (str/split (subs line (count "Max open files")) #"\s+")
+                             (remove str/blank?)
+                             (take 2)
+                             (map #(if (= "unlimited" %) Long/MAX_VALUE (parse-long %))))]
+        (when (and soft hard) [soft hard])))
+    (catch Throwable _ nil)))
+
+(defn- limiter
+  "The controller-owned rlimit wrapper for the manager spawn: `prlimit` set to
+  the pinned floor. nil when the host cannot provide it — the caller refuses
+  rather than spawning under whatever it happened to inherit."
+  []
+  (let [floor (:host/nofile resource-limits)
+        [_ hard] (or (host-fd-limits) [nil nil])
+        exe (some-> (fs/which "prlimit") str)]
+    (when (and exe hard (>= hard floor))
+      [exe (str "--nofile=" floor ":" floor)])))
+
+;; ═══════════════════════════════════════════════════════════════════════════
 ;; The RFC-012 description. Its MODE is what distinguishes it from the verify
 ;; environment's description, and the mode is in the coordinate, so a
 ;; development envelope can never be mistaken for an acceptance one.
@@ -269,7 +319,14 @@
                                           :worker/stdout-max-bytes
                                           :worker/stderr-max-bytes
                                           :worker/timeout-ms
-                                          :worker/default-timeout-ms]))}))
+                                          :worker/default-timeout-ms
+                                          ;; Part of the identity: an
+                                          ;; environment staged under a
+                                          ;; different fd floor is a different
+                                          ;; environment, because that is
+                                          ;; exactly what was observed to
+                                          ;; change its behaviour.
+                                          :host/nofile]))}))
 
 (defn environment-coordinate
   "The canonical-EDN coordinate of the description — recomputed, never
@@ -320,7 +377,8 @@
    ;; This environment's own, which the verify environment has no analogue
    ;; for: it never has to poison, because nothing it runs is reused, and it
    ;; never refuses a request for being unclean.
-   :environment-poisoned :spi.refusal/environment-poisoned})
+   :environment-poisoned :spi.refusal/environment-poisoned
+   :host-fd-limit :spi.refusal/host-fd-limit})
 
 (def ^:private refusal-reasons
   {:spi.refusal/not-linux
@@ -345,6 +403,8 @@
    "project owner identity unreadable, root-owned, underived"
    :spi.refusal/environment-poisoned
    "prior execution timed out; hard cleanup incomplete"
+   :spi.refusal/host-fd-limit
+   "controller open-file limit below the pinned floor; staging unreliable"
    :spi.refusal/unknown
    "project execution environment refused; reason uncatalogued"})
 
@@ -509,6 +569,10 @@
     (poisoned?) :environment-poisoned
     (not (available?)) (unavailable-reason)
     (nil? (resolved-image)) :no-guest-image
+    ;; Checked before every request, not once at startup: the limit belongs to
+    ;; the process, and a controller that lowered its own is a controller whose
+    ;; executions would silently start behaving differently.
+    (nil? (limiter)) :host-fd-limit
     :else nil))
 
 (defn- refusal-result
@@ -521,8 +585,9 @@
   [reason]
   {:status :refused
    :reason reason
-   :message (message (if (= :environment-poisoned reason)
-                       {:run-poisoned true}
+   :message (message (case reason
+                       :environment-poisoned {:run-poisoned true}
+                       :host-fd-limit {:run-host-fd-limit true}
                        {:run-unavailable true}))})
 
 (defn- capped-stream
@@ -581,7 +646,7 @@
         manifest (smve/input-manifest root)
         identity (smve/guest-identity (smve/project-identity root))
         host-ms (:request/timeout-ms request)]
-    {:argv (into [(str (fs/which smve/manager-exec-name))]
+    {:argv (into (conj (vec (limiter)) (str (fs/which smve/manager-exec-name)))
                  (smve/machine-argv
                   {:root (str (fs/canonicalize root))
                    :image (:path image)

@@ -160,6 +160,15 @@
     (is (= :run-options-shape
            (refusal-of #(spe/validate-request ["bb"] "cwd=."))))))
 
+(deftest the-working-directory-lands-in-the-guest-command-not-the-wrapper
+  ;; The prelude's CWD slot is positional and is located from the END of the
+  ;; argv, so the rlimit wrapper in front of the manager cannot shift it.
+  (when @substrate?
+    (with-project [root]
+      (let [r (run! root ["/bin/sh" "-c" "pwd"] {:cwd "sub/dir"})]
+        (is (= :completed (:status r)))
+        (is (= "/work/sub/dir\n" (get-in r [:stdout :text])))))))
+
 (deftest the-working-directory-is-relative-and-cannot-climb-out
   (is (= "." (:request/cwd (spe/validate-request ["bb"] nil))))
   (is (= "." (:request/cwd (spe/validate-request ["bb"] {:cwd "."}))))
@@ -249,6 +258,52 @@
             "and claims no invocation index: it attempted no execution")
         (is (nil? (spe/run-envelope r))
             "a refusal is not a run and has no run envelope")))))
+
+(deftest a-host-fd-limit-below-the-floor-refuses-rather-than-staging-badly
+  ;; MEASURED, not hypothetical. A controller started with `ulimit -n 4096`
+  ;; produced a guest in which the prelude's removal of the project's .git
+  ;; (7684 loose objects) failed EMFILE on every execution — while the guest's
+  ;; OWN limits were identical either way. A host-side resource limit was
+  ;; reaching inside an environment whose claim is that the host does not.
+  ;;
+  ;; The spawn now runs under a pinned floor, and a host that cannot grant it
+  ;; refuses: a development run that failed for the controller's reasons is
+  ;; one the model will read as its own code being wrong, which is worse than
+  ;; no run at all.
+  (testing "the floor is part of the environment's pinned policy and identity"
+    (is (pos? (:host/nofile spe/resource-limits)))
+    (is (contains? (:executor/limits (spe/environment-description)) :host/nofile)))
+  (testing "a hard limit below the floor is a catalogued refusal, not a spawn"
+    (let [spawned (atom false)]
+      (with-redefs [spe/host-fd-limits (fn [] [1024 1024])
+                    proc/run-bounded (fn [& _] (reset! spawned true)
+                                       {:status :exited :exit 0})]
+        (is (= :host-fd-limit (spe/request-run-refusal)))
+        (let [r (spe/run "/tmp" {:request/argv ["bb"] :request/cwd "."
+                                 :request/timeout-ms 1000})]
+          (is (= :refused (:status r)))
+          (is (= :host-fd-limit (:reason r)))
+          (is (false? @spawned))
+          (is (= :spi.refusal/host-fd-limit
+                 (get-in (spe/refusal-envelope :host-fd-limit)
+                         [:environment/refusal :refusal/category])))))))
+  (testing "a sufficient hard limit lets the request through"
+    (with-redefs [spe/host-fd-limits (fn [] [1024 1048576])]
+      (is (not= :host-fd-limit (spe/request-run-refusal))
+          "a low SOFT limit is fine — the spawn raises it within the hard one"))))
+
+(deftest the-manager-spawn-runs-under-the-pinned-fd-floor
+  (when @substrate?
+    (with-project [root]
+      (let [argv (:argv (spe/build-execution
+                         root (spe/validate-request ["bb"] nil)))
+            floor (:host/nofile spe/resource-limits)]
+        (is (str/ends-with? (first argv) "prlimit")
+            "the manager spawn is wrapped, deterministically and not per-host")
+        (is (= (str "--nofile=" floor ":" floor) (second argv)))
+        (is (str/ends-with? (nth argv 2) "smolvm"))
+        (testing "and the guest command after it is unchanged"
+          (is (= ["machine" "run"] (subvec argv 3 5))))))))
 
 (deftest a-poisoned-environment-refuses-until-cleanup-completes
   (let [spawned (atom false)]
