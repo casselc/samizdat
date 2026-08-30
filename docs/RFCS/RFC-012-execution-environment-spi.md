@@ -1,12 +1,16 @@
 # RFC-012 — The execution environment SPI
 
-**Status:** implemented for the M2 VerificationEnvironment, and for a second
+**Status:** implemented for the M2 VerificationEnvironment; for a second
 speaker — the SmolVM verify environment
 (`samizdat.security.smolvm-verification-env`, ported from the bbagent
 ecosystem's measured execution substrate), which produces every rule this
 RFC states plus the `:project-changed` run status its live-tree bracket
-makes possible; the replay kind is contract-only (no replay path exists on
-this side yet).
+makes possible; and, from JS2, for a THIRD — the SmolVM
+ProjectExecutionEnvironment (`samizdat.security.smolvm-project-env`), which
+is the first speaker here that is not a verifier at all. The replay
+envelope kind remains contract-only (no side constructs one from a live
+reconstruction yet), though the bounded evaluator's own receipt replay now
+covers executions as well as mutations — see **Two authorities** below.
 
 ## Purpose
 
@@ -122,10 +126,101 @@ set (unknown keys refused), and must be wholly inert.
   replay performs nothing, so the counter it reports is the counter that
   was there before it ran.
 
+### Two authorities, one boundary (JS2)
+
+The SPI now describes environments of two different **kinds**, and keeping
+them apart is the point of the `:executor/mode` field rather than a detail
+of it.
+
+| | VerificationEnvironment | ProjectExecutionEnvironment |
+|---|---|---|
+| namespaces | `verification-env`, `smolvm-verification-env` | `smolvm-project-env` |
+| mode | `:executor/mode :verify-only` | `:executor/mode :project-run` |
+| operations | `#{:describe :verify}` | `#{:describe :run}` |
+| who chooses the argv | the CONTROLLER, derived from the binding's own edit receipts | the MODEL, within a controller-pinned guest toolchain |
+| what the result is evidence for | ACCEPTANCE — a green one is what makes `done` terminal | DEVELOPMENT — it tells the model whether its work looks right |
+| selector | `security.verification-provider` (`SAMIZDAT_VERIFY_ENV`) | `security.project-execution-provider` (`SAMIZDAT_PROJECT_EXEC_ENV`) |
+| policy coordinate prefix | `js1-ve/v1:`, `js1-smve/v1:` | `js2-spe/v1:` |
+
+They share the low-level boundary and share no authority. The SmolVM
+mechanism — manager approval, the digest-pinned guest image, the derived
+project identity, the input manifest, the guest command composition
+(`smolvm-verification-env/machine-argv`) — has exactly one implementation,
+because the isolation must behave identically in both and one
+implementation is how it stays that way. Everything above it is separate:
+each environment owns its own limits, its own refusal catalogue, its own
+invocation counter, and its own coordinate, and the coordinates are
+distinguished by prefix as well as by content so two kinds of evidence can
+never be mistaken for one another.
+
+Three invariants follow, and each is pinned by test:
+
+- **A model's argv is structured data, never a command line.** The request
+  is a non-empty vector of bounded non-blank strings, and nothing composes a
+  shell string from it at any layer. Shell metacharacters inside an element
+  are ordinary argument text, because nothing parses them; the security
+  boundary is the isolated world, not a character set. `project/run` IS the
+  arbitrary-code authority and an executable denylist would be pretending
+  otherwise.
+- **The model's option set is CLOSED.** `:cwd` (relative, non-escaping) and
+  `:timeout-ms` (narrowing only) and nothing else. Every controller decision
+  — image, network, mounts, environment, resource limits, identity, host
+  cwd, cleanup, provider — is refused by name rather than ignored, so a
+  request that believed it changed one fails loudly instead of drawing
+  conclusions from an environment it does not have.
+- **No writeback, ever.** The authoritative tree is mounted read-only and
+  masked; the workspace that absorbs writes lives and dies inside the
+  machine. The description says so (`:executor/workspace {:writeback
+  :none}`), and the tests assert it host-side: a run that modifies, creates,
+  deletes, chmods and renames project files leaves the authoritative tree's
+  input coordinate byte-identical. `project/edit` remains the only thing
+  that changes it.
+
+**The timeout is a machine-lifecycle event, not just a status.** A host
+deadline bounds host *waiting*; it does not prove the child inside the
+machine died (bbagent's measured A3a result — killing the manager's front
+end leaves the machine running). So a timed-out execution reaps the process
+tree descendants-first, marks the environment POISONED, stops and deletes
+the machine *by the id the manager's own banner named*, re-asks the manager
+what it still has, and lifts the poison only on a clean answer. No execution
+may be issued while the poison stands. There is no worker pool for a
+timeout to have to poison across — a fresh ephemeral machine per execution
+measures at roughly two seconds to boot, which is why there is not one.
+
+**Replay covers executions.** A `project/run` is an `:actuation` in the
+sandbox's receipt grammar, so a reconstruction consumes its recorded receipt
+and returns the historical result having launched nothing. The execution
+provider's invocation counter is process-local and moves only for a real
+spawn, which is what makes that a checkable claim rather than a hopeful one:
+after a restart the counter is zero, and replaying a history full of
+executions must leave it there.
+
+### Closure coverage signatures (JS2 §3B)
+
+A green closure verdict says a suite exited zero. It does not say how much
+ran, and an empty suite exits zero too. `samizdat.security.closure-coverage`
+reads the verifier's own summary — in both toolchain dialects, key-order
+independent, because the host runner and the in-guest babashka print
+different ones — and records a **ClosureCoverageSignature** beside the
+suite, verifier and input coordinates that make a count mean anything.
+
+It refuses in exactly three places, all of them cases where the closure
+result has stopped being evidence: an unreadable summary, a summary
+reporting zero tests, and a summary whose own failure counts contradict the
+green verdict beside it. A coverage **decrease** is a warning and never a
+refusal — deleting a test is a legitimate change and this layer cannot tell
+a legitimate one from a regression. There is deliberately no
+assertion-count security theorem and no required parity with any host suite:
+the environments differ by design, `:coverage/suite` is carried so a
+cross-suite comparison is visibly wrong rather than tempting, and the
+delta against a controller-supplied clean-target baseline is exposed for a
+human to explain.
+
 ### Refusal catalogues are per-environment
 
 Each environment catalogues **its own refusal points, none invented**.
-This environment's are (`verification-env`'s `refusal-categories`):
+The bwrap verify environment's are (`verification-env`'s
+`refusal-categories`):
 `:not-linux`, `:no-bwrap`, `:no-prlimit`, `:sandbox-unavailable`,
 `:no-verifier-executable`, `:no-verifiable-test` →
 `:spi.refusal/not-linux`, `:spi.refusal/no-bubblewrap`,
@@ -136,6 +231,11 @@ executor's catalogue (manager, guest image, project identity) is
 different, and the difference is the point: the shared surface is the
 `:spi.refusal/` namespace, the shape, and the either/or rule — pinned by
 `execution-env-spi-test/refusal-catalogues-are-per-environment-while-the-namespace-is-shared`.
+The ProjectExecutionEnvironment's catalogue is the SmolVM verify
+environment's substrate refusals plus one the verify side has no analogue
+for — `:environment-poisoned` → `:spi.refusal/environment-poisoned` — because
+nothing the verify side runs is reused and it therefore never has to refuse
+a request for being unclean.
 
 ### The private-copy coordinate (RFC-012's input naming)
 

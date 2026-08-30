@@ -3,9 +3,10 @@
 ;; SPDX-License-Identifier: GPL-3.0-or-later
 
 (ns samizdat.evaluator
-  "Trusted bounded evaluator mechanism for JS1. M1 shipped the read-only
-  :agent/project-read profile; M2 adds the :agent/project-develop profile and
-  its one semantic mutation.
+  "Trusted bounded evaluator mechanism. M1 shipped the read-only
+  :agent/project-read profile; M2 added the :agent/project-develop profile and
+  its one semantic mutation; JS2 adds the :agent/project-execute profile and
+  its one semantic EXECUTION.
 
   This namespace intentionally requires jolt.sandbox and therefore loads only
   in the pinned bounded lane. Ordinary Samizdat reaches it through dynamic
@@ -35,7 +36,28 @@
    the target's own directory atomically published into place, and the return is
   the new content's canonical digest. Intent is recorded before actuation and
   outcome after; a replay consumes the recorded receipt and never re-executes
-  the write."
+  the write.
+
+  The JS2 execution side, (project/run argv) and (project/run argv options),
+  is the one genuinely new authority class since M1: the model names an argv
+  and it RUNS, inside a controller-selected isolated ExecutionEnvironment.
+  Nothing about that authority lives here. This namespace validates nothing
+  about the request and knows nothing about machines: it checks that the
+  binding holds :project/run, hands the arguments to the selected project
+  execution provider, and records intent before and outcome after exactly as
+  it does for an edit. The isolation, the pinned image, the read-only project
+  mount, the private overlay, the constructed environment, the bounds, the
+  cleanup and the fail-closed refusal are the provider's
+  (samizdat.security.project-execution-provider), because they are policy and
+  this is mechanism.
+
+  Two properties of the execution side are this namespace's, though, and both
+  are load-bearing. Its result is DEVELOPMENT evidence and is read by nothing
+  that decides completion — `done` crosses the controller's own verifiers and
+  has no path to a project/run result at all. And a replayed execution
+  consumes its receipt and launches NOTHING: the same replay rule as every
+  other semantic operation, which is why the execution provider's invocation
+  counter is the thing a resume is checked against."
   (:require [clojure.set :as set]
              [clojure.string :as str]
              [jolt.fs :as fs]
@@ -47,13 +69,14 @@
              [samizdat.store.evaluator :as store]
              [samizdat.store.journal :as journal]))
 
-(def jolt-coordinate "4af2362176160f2ed0e366689d7232b1a38adfec")
+(def jolt-coordinate "c8d9181e23cc37aa91a38fdcbd01c93917b1be50")
 (def jolt-publish-coordinate
   "jolt-publish/v1:sha256:914ccd9f722efd98fe8e1e1381574a3efba04ae45a689e8c1918d420db82f0c1")
 (def sci-coordinate "32d62a5136ad3dc148588752f5bcc4cc30b14752")
 (def sci-version "0.13.53")
 (def profile-id :agent/project-read)
 (def develop-profile-id :agent/project-develop)
+(def execute-profile-id :agent/project-execute)
 (def top-level-tools surface/bounded-top-level-tools)
 (def profile-capabilities
   "The :agent/project-read catalog maximum, derived from the sandbox's closed
@@ -63,6 +86,13 @@
   "The :agent/project-develop catalog maximum: the read profile plus the one
   semantic mutation, from the same table."
   (:profile/max-capabilities (get sandbox/profiles develop-profile-id)))
+(def execute-capabilities
+  "The :agent/project-execute catalog maximum: the develop profile plus the
+  one semantic execution, from the same table. Reading it from the table
+  rather than composing it here is the point — the runtime's closed maximum
+  decides, and a develop binding cannot acquire :project/run by anything
+  written on this side."
+  (:profile/max-capabilities (get sandbox/profiles execute-profile-id)))
 (def semantic-operation-order surface/semantic-operation-order)
 (def compiled-capabilities
   "The operation vocabulary this build actually compiles — the code-level
@@ -92,6 +122,24 @@
 ;; :context/bounds, never through here.
 (def ^:private mechanism-bounds
   {:timeout-ceiling-ms 30000
+   ;; The evaluation ceiling for a binding that holds :project/run.
+   ;;
+   ;; The 30-second ceiling above bounds COMPUTATION INSIDE SCI, which is the
+   ;; thing an unbounded model expression can hang the process with. A
+   ;; project/run is not that: it is a controller-owned execution in another
+   ;; machine, already bounded by the execution provider's own pinned wall
+   ;; clock, whose whole point is that a real project suite takes minutes. An
+   ;; evaluation ceiling below the execution ceiling would make the capability
+   ;; unusable — every useful run would die at 30 seconds having already spent
+   ;; the machine — and would do it in the shape of a timeout the model would
+   ;; read as its own code being slow.
+   ;;
+   ;; It is still a MECHANISM bound, not a tunable: it is selected by the
+   ;; capability set the CONTROLLER authorized, which no request can widen,
+   ;; and a binding without :project/run keeps the 30-second ceiling exactly.
+   ;; The slack over the execution ceiling is for the rest of an eval — the
+   ;; observations and the local computation around the run.
+   :execute-timeout-ceiling-ms 660000
    :path-chars 4096
    :search-match-budget 200000
    ;; How deep interrupted? walks a cause chain looking for a Jolt
@@ -106,6 +154,16 @@
 ;; interrupt token (see evaluate-guarded!) that no caller-held token can
 ;; disarm or outlive.
 (def default-timeout-ms (:timeout-ceiling-ms mechanism-bounds))
+(def execute-timeout-ms (:execute-timeout-ceiling-ms mechanism-bounds))
+
+(defn timeout-ceiling
+  "The per-evaluation ceiling for an EFFECTIVE capability set. Derived, never
+  configured: a binding that may execute gets the execution ceiling and every
+  other binding gets the ordinary one."
+  [capabilities]
+  (if (contains? (set capabilities) :project/run)
+    execute-timeout-ms
+    default-timeout-ms))
 
 ;; A model-supplied path is one bounded non-empty relative string, and a
 ;; search pattern at most max-search-pattern-chars, before any filesystem
@@ -140,7 +198,23 @@ PREFER THE FOUR-ARGUMENT ANCHORED FORM for a change to an existing file: (projec
 
 The three-argument form (project/edit path base new-content) replaces the WHOLE file, and with base :absent creates a new one. Use it to create a file, or when you genuinely intend to rewrite the entire contents. Rewriting a whole existing file from memory is how unrelated definitions get silently deleted.
 
-Both forms refuse, and write nothing, on: a stale base, a missing anchor target, an existing create target, the operator's run config, a symbolic link in any component, a non-regular-file target, a missing parent, or content over the bound. The write is a temp file in the target's directory: create is an atomic Linux no-replace publication, replacement is an atomic rename."}})
+Both forms refuse, and write nothing, on: a stale base, a missing anchor target, an existing create target, the operator's run config, a symbolic link in any component, a non-regular-file target, a missing parent, or content over the bound. The write is a temp file in the target's directory: create is an atomic Linux no-replace publication, replacement is an atomic rename."}
+   :project/run
+   {:name "project/run"
+    :arglists [["argv"] ["argv" "options"]]
+    :doc "Run a command against a DISPOSABLE PRIVATE COPY of the project, inside an isolated execution environment, and return the result as data.
+
+argv is a non-empty vector of strings — the executable and its arguments, never a shell command line. options is an optional map accepting only :cwd (a relative directory inside the workspace) and :timeout-ms (which may only NARROW the environment's ceiling). Anything else is refused: the image, the network, the mounts, the environment variables, the resource limits and the identity are the controller's, not yours.
+
+WHAT IT IS FOR: running the project's own toolchain while you work — its tests, its compiler, its linter, its formatter. It is how you find out whether an edit you just made is right, without spending a turn guessing.
+
+WHAT THE WORKSPACE IS: a private copy. Writes inside it succeed and then vanish with the environment — build artifacts, caches, files a formatter rewrote, anything. THEY DO NOT CHANGE THE REAL PROJECT. The only thing that changes the real project is project/edit.
+
+WHAT IT IS NOT: verification. A green run here is evidence for YOU. Completion is decided by the controller's own verifiers when you call done, which run independently and are not this. Running the suite here does not make you done, and skipping it does not stop you being done.
+
+The result is a map: :status (:completed, :timeout, :failed or :refused), :exit (present only when the workload actually exited), :stdout and :stderr (each {:text :bytes :truncated?}, where :bytes is what was WRITTEN and :text may be cut short), :duration-ms, :argv, :cwd, :invocation, and the :environment and :input coordinates naming what ran it and which project bytes it ran against.
+
+ONE EVAL CAN DO THE WHOLE LOOP: inspect state, run the toolchain, read the structured result, branch on it, and return a short conclusion. Do that instead of spending a model turn per command — see (doc \"eval\")."}})
 
 (def tool-docs
   {"eval" {:name "eval" :arglists [["code"]]
@@ -152,6 +226,27 @@ Both forms refuse, and write nothing, on: a stale base, a missing anchor target,
    "done" {:name "done" :arglists [[]]
            :doc "Emit a completion request. M1 refuses successful completion because verification is unavailable."}})
 
+(defn capability-catalog
+  "The runtime's capability/profile catalog, as an inert value.
+
+  Part of the RuntimeCoordinate from JS2 onward (§4.1). M4's coordinate named
+  the Jolt source, the language surface and the two protocol versions, which
+  between them could not distinguish a runtime that gained a capability from
+  one that had not — and a capability catalog is exactly the kind of thing a
+  durable binding must be reconstructed against. Both halves are here: the
+  runtime's CLOSED profile maxima, and the operation vocabulary this build
+  actually compiles. A runtime that offers a profile this build cannot supply
+  operations for, or a build that compiles an operation the runtime has no
+  capability for, is a different runtime and says so."
+  []
+  (sandbox/inert
+   {:catalog/profiles
+    (into {} (map (fn [[id data]]
+                    [(str id)
+                     (vec (sort (map str (:profile/max-capabilities data))))]))
+          sandbox/profiles)
+    :catalog/compiled (vec (sort (map str compiled-capabilities)))}))
+
 (defn runtime-snapshot []
    (sandbox/inert
     {:runtime/jolt-source jolt-coordinate
@@ -160,11 +255,22 @@ Both forms refuse, and write nothing, on: a stale base, a missing anchor target,
     :runtime/sci-source sci-coordinate
     :runtime/sci-version sci-version
     :runtime/language (sandbox/language-coordinate)
+    :runtime/capability-catalog (capability-catalog)
     :runtime/evaluator-protocol 1
     :runtime/receipt-protocol 1}))
 
-(defn runtime-coordinate []
-  (str "js1-rt/v1:" (subs (sandbox/canonical-coordinate (runtime-snapshot)) 4)))
+(defn runtime-coordinate
+  "The exact identity of the runtime a durable binding was minted under.
+
+  The prefix moves with the coordinate's CONTENT, deliberately: this is
+  `js2-rt/v1:`, not `js1-rt/v1:`, because the JS2 runtime is a different
+  runtime — different Jolt source, a capability the M4 catalog did not have,
+  and a catalog identity M4's coordinate did not name at all. A JS1 binding
+  and a JS2 binding must not be able to look like each other, and a resume
+  that crosses them must fail closed on the mismatch rather than reconstruct
+  a JS1 history into a runtime that can execute."
+  []
+  (str "js2-rt/v1:" (subs (sandbox/canonical-coordinate (runtime-snapshot)) 4)))
 
 (defn- canonical-root [root]
   (str (fs/canonicalize root)))
@@ -184,18 +290,21 @@ Both forms refuse, and write nothing, on: a stale base, a missing anchor target,
 (defn- resolve-timeout
   "The per-evaluation computational ceiling, in milliseconds.
 
-  Defaults to 30 seconds. The controller may only NARROW it: a requested
-  value above the default is attenuated down to the default, exactly as a
-  requested capability beyond authorization is intersected away, and zero or
-  a negative value is refused rather than read as \"no ceiling\". Nothing a
-  caller or controller supplies can stretch an evaluation past the default."
-  [timeout-ms]
-  (let [requested (or timeout-ms default-timeout-ms)]
-    (when-not (and (integer? requested) (pos? requested))
-      (fail! :invalid-timeout
-             "timeout-ms: positive integer milliseconds required"
-             {:timeout-ms timeout-ms}))
-    (min (long requested) (long default-timeout-ms))))
+  Defaults to the ceiling the binding's own effective authority derives (30
+  seconds, or the execution ceiling for a binding that holds :project/run).
+  The controller may only NARROW it: a requested value above the ceiling is
+  attenuated down to it, exactly as a requested capability beyond
+  authorization is intersected away, and zero or a negative value is refused
+  rather than read as \"no ceiling\". Nothing a caller or controller supplies
+  can stretch an evaluation past the ceiling its capabilities derive."
+  ([timeout-ms] (resolve-timeout timeout-ms default-timeout-ms))
+  ([timeout-ms ceiling]
+   (let [requested (or timeout-ms ceiling)]
+     (when-not (and (integer? requested) (pos? requested))
+       (fail! :invalid-timeout
+              "timeout-ms: positive integer milliseconds required"
+              {:timeout-ms timeout-ms}))
+     (min (long requested) (long ceiling)))))
 
 (defn- profile-maximum
   "The catalog maximum for a profile, from the sandbox's closed profile
@@ -225,7 +334,13 @@ Both forms refuse, and write nothing, on: a stale base, a missing anchor target,
               :context/root (canonical-root root)
               :context/capabilities (vec (sort-by str effective))
               :context/bounds (merge default-bounds bounds)
-              :context/timeout-ms (resolve-timeout timeout-ms)}]
+              ;; The ceiling follows the EFFECTIVE set, computed above — not
+              ;; the profile and not the request. A project-execute binding
+              ;; the controller attenuated down to reads gets the ordinary
+              ;; 30-second ceiling, because it can no longer do the thing the
+              ;; longer one exists for.
+              :context/timeout-ms (resolve-timeout
+                                   timeout-ms (timeout-ceiling effective))}]
     (assoc base :context/coordinate (sandbox/canonical-coordinate base))))
 
 (defn evaluator-spec [context]
@@ -765,6 +880,42 @@ Both forms refuse, and write nothing, on: a stale base, a missing anchor target,
                 {:path rel :kind :file :bytes (alength content-bytes)
                  :digest (str "sha256:" (bytes-digest content-bytes))}))))))))
 
+(defn- execution-provider
+  "The selected project execution provider's Var, resolved dynamically.
+
+  Dynamic for the same reason the whole bounded lane is: this namespace loads
+  only where SCI is on the classpath, and the execution provider pulls in the
+  machine substrate. A binding without :project/run never touches it, and a
+  binding with it that cannot load it fails closed at the call — never by
+  falling through to anything that runs on the host."
+  [name]
+  (or (try (requiring-resolve
+            (symbol "samizdat.security.project-execution-provider" name))
+           (catch Throwable _ nil))
+      (fail! :execution-provider-unavailable
+             (message {:run-provider-unavailable true})
+             {:provider/fn name})))
+
+(defn- run-project-command
+  "The (project/run argv options) semantics, run inside the operation's
+  intent/outcome recording.
+
+  Everything here is a hand-off. The request is validated by the PROVIDER,
+  before any staging and having launched nothing — an invalid request is an
+  evaluation error the model reads and fixes, exactly like a bad argument to
+  any other operation. The execution is the provider's, in the isolated
+  environment the controller selected. The result comes back as inert data
+  and becomes the receipt.
+
+  This function deliberately contains no policy: no argv inspection, no
+  executable list, no path rule, no bound. Every one of those belongs to the
+  execution environment, and a copy of one here would be a second place for
+  the boundary to be wrong."
+  [root argv options]
+  (let [validate! (execution-provider "validate-request")
+        run! (execution-provider "run")]
+    (run! root (validate! argv options))))
+
 (defn- operation-builders [context world-observer hook]
   (let [root (:context/root context)
         bounds (:context/bounds context)
@@ -877,8 +1028,25 @@ Both forms refuse, and write nothing, on: a stale base, a missing anchor target,
                ([rel base old-text new-text]
                 (observe
                  :project/edit [rel base old-text new-text]
-                 #(replace-project-text root bounds rel base old-text new-text))))}]
-    [read-op list-op search-op stat-op edit-op]))
+                 #(replace-project-text root bounds rel base old-text new-text))))}
+        run-op
+        ;; :actuation, not :observation — and the classification matters for
+        ;; exactly one thing: replay. An execution is recorded and replayed
+        ;; from its receipt like a mutation, so a reconstruction consumes the
+        ;; historical result and launches no environment. It is NOT an
+        ;; actuation upon the project: the authoritative tree cannot change
+        ;; through here, and `edited-paths` — the controller's record of what
+        ;; a run changed — reads :project/edit receipts and nothing else, so
+        ;; a run can never widen what the verifier verifies.
+        {:id :project/run :name 'run :effect :actuation
+         :fn (fn
+               ([argv]
+                (observe :project/run [argv]
+                         #(run-project-command root argv nil)))
+               ([argv options]
+                (observe :project/run [argv options]
+                         #(run-project-command root argv options))))}]
+    [read-op list-op search-op stat-op edit-op run-op]))
 
 (defn- make-instance [spec observer]
   (let [hook (atom nil)
@@ -910,8 +1078,9 @@ Both forms refuse, and write nothing, on: a stale base, a missing anchor target,
   hit from the other direction, where the per-turn context described tools the
   binding never had (finding F-1).
 
-  It teaches four things, and attempt 1 showed each of them costs turns when
-  it is missing:
+  It teaches five things. Attempt 1 showed each of the first four costs turns
+  when it is missing; the fifth is JS2's new authority, and the cost of not
+  teaching it is a model that never uses it:
 
   1. WHAT is callable — the only part attempt 1 already had.
   2. HOW to call it. The bounded lane replaces the base system prompt
@@ -922,10 +1091,21 @@ Both forms refuse, and write nothing, on: a stale base, a missing anchor target,
      top-level tool names. Attempt 1's agents tried `project/read`,
      `project/stat` and `project/edit` as top-level tools five times.
   4. WHICH mutation shape to reach for. The whole-file form is how attempt 1
-     destroyed two live functions; the anchored form is the default here."
+     destroyed two live functions; the anchored form is the default here.
+  5. THAT the project's toolchain can be run, what the workspace it runs in
+     is (disposable, private, no writeback), that its result is development
+     evidence and not completion, and that the whole inspect/run/branch loop
+     belongs in ONE eval. Attempt 2 spent turns 29-49 validating a helper one
+     assertion per model turn with the answer computable in one; the shape of
+     the leverage is taught here rather than hoped for."
   [binding]
   (let [surface (surface/of-binding binding)
         develop? (contains? (:capabilities surface) :project/edit)
+        ;; JS2's fifth thing to teach, and the same rule as the other four:
+        ;; it renders only for a binding that actually holds :project/run, so
+        ;; a develop binding is never told about a capability it does not
+        ;; have — which is finding F-1 from the other direction.
+        execute? (contains? (:capabilities surface) :project/run)
         ;; The template is one file of conditionals, so the branches that do
         ;; not fire still leave their surrounding whitespace behind. Sections
         ;; are trimmed and their blank runs collapsed here rather than by
@@ -946,7 +1126,8 @@ Both forms refuse, and write nothing, on: a stale base, a missing anchor target,
                            :example-op (or (first (:operation-names surface))
                                            "project/read")})
          "\n\n" (section (cond-> {:orientation-guidance true}
-                           develop? (assoc :orientation-develop true))))))
+                           develop? (assoc :orientation-develop true)
+                           execute? (assoc :orientation-execute true))))))
 
 (defn orientation-digest
   "The content coordinate of trusted-orientation bytes.  The durable binding

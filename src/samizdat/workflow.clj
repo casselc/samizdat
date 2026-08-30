@@ -224,7 +224,13 @@
   {:agent/project-read #{:project/read :project/list :project/search
                          :project/stat}
    :agent/project-develop #{:project/read :project/list :project/search
-                            :project/stat :project/edit}})
+                            :project/stat :project/edit}
+   ;; JS2. Execution is requested and authorized ONLY under its own profile.
+   ;; The two rows above are byte-for-byte what they were: a develop binding
+   ;; does not gain :project/run because this row exists, and the runtime's
+   ;; own closed maximum refuses it a second time if this table ever lies.
+   :agent/project-execute #{:project/read :project/list :project/search
+                            :project/stat :project/edit :project/run}})
 
 (defn bounded-binding
   "Mint a controller-owned bounded binding only when userspace requested the
@@ -240,7 +246,7 @@
                          (string? requested) (keyword requested))
            capabilities (get bounded-profile-capabilities profile)]
        (when-not capabilities
-         (throw (ex-info "Unsupported bounded profile; expected :agent/project-read or :agent/project-develop"
+         (throw (ex-info "Unsupported bounded profile; expected :agent/project-read, :agent/project-develop or :agent/project-execute"
                          {:samizdat.evaluator/error :unsupported-profile
                           :requested requested})))
        (let [bind! (or (try (requiring-resolve 'samizdat.evaluator/bind!)

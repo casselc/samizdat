@@ -89,6 +89,7 @@
             [samizdat.verify-test]
             [samizdat.verification-env-test]
             [samizdat.smolvm-verification-env-test]
+            [samizdat.js2-project-env-test]
             [samizdat.canonical-edn-test]
             [samizdat.execution-env-spi-test]
             [samizdat.feature-test]
@@ -102,6 +103,7 @@
             [samizdat.edit-test]
             [samizdat.evaluator-store-test]
             [samizdat.evaluator-test]
+            [samizdat.js2-project-run-test]
             [samizdat.grep-test]
             [samizdat.control-test]
             [samizdat.util-test]
@@ -219,6 +221,7 @@
     samizdat.verify-test
     samizdat.verification-env-test
     samizdat.smolvm-verification-env-test
+    samizdat.js2-project-env-test
     samizdat.canonical-edn-test
     samizdat.execution-env-spi-test
     samizdat.feature-test
@@ -232,6 +235,7 @@
     samizdat.edit-test
     samizdat.evaluator-store-test
     samizdat.evaluator-test
+    samizdat.js2-project-run-test
     samizdat.grep-test
     samizdat.control-test
     samizdat.util-test

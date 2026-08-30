@@ -260,6 +260,27 @@
                   cannot express a policy, only mis-attribute the manager's
                   progress line to a workload."}}
 
+   "src/samizdat/security/smolvm_project_env.clj"
+   {:vocabulary {"Starting ephemeral machine \\((vm-[0-9a-f]+)\\)\\.\\.\\."
+                 "The same manager banner the verify environment strips, with
+                  the machine id captured out of it. This environment needs the
+                  id as well as the removal: a timed-out run stops and deletes
+                  THAT machine by name rather than sweeping the manager's whole
+                  table, which could be somebody else's long-lived machine.
+                  Fixed by the manager's output format; widening it cannot
+                  express a policy, only misname a machine."}}
+
+   "src/samizdat/security/closure_coverage.clj"
+   {:vocabulary {:all "The OUTPUT GRAMMAR of clojure.test's summary, in the two
+                       dialects this has to read: the host toolchain's and
+                       babashka's — babashka being the toolchain inside the
+                       guest, where the closure verifier actually runs. These
+                       are facts about what a test runner prints, like the
+                       manager's banner or a merged-/usr layout. A project
+                       cannot want them different without changing which test
+                       runner it uses, at which point the grammar is a fact
+                       about THAT runner and still not a preference."}}
+
    "src/samizdat/security/verification_env.clj"
    {:vocabulary {"usr/(bin|sbin|lib|lib64)"
                  "What a merged-/usr layout IS — /bin and its siblings as

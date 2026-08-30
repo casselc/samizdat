@@ -57,8 +57,13 @@
   "The semantic operations, in documentation order. These are ordinary Clojure
   calls INSIDE eval and are never top-level tool names — the distinction
   attempt 1's agent got wrong five times, calling `project/read` and
-  `project/stat` as though they were tools."
-  [:project/read :project/list :project/search :project/stat :project/edit])
+  `project/stat` as though they were tools.
+
+  Order is observe, then mutate, then execute: it is the order the
+  orientation documents them in and the order a turn that is going well
+  spends them in."
+  [:project/read :project/list :project/search :project/stat :project/edit
+   :project/run])
 
 (defn operation-name
   "The in-eval callable text for a semantic operation id: `project/read`."

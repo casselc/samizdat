@@ -140,7 +140,28 @@
     {:name samizdat.security.smolvm-verification-env/verify-envelope
      :summary "One run projected into the SPI's run envelope — including the :project-changed status the bwrap environment cannot produce: an unanchored run carries no input coordinate and its process outcome is demoted to :output/process."}
     {:name samizdat.security.verification-provider/selected
-    :summary "Trusted controller selection between the bounded lane's verify environments (:bwrap default, :smolvm via SAMIZDAT_VERIFY_ENV) — code and the harness process's own environment, never gates.edn. Fail closed both ways: an unavailable selected provider refuses with its own reason, and an unrecognized name refuses as :unknown-provider rather than quietly running the default."}]}
+    :summary "Trusted controller selection between the bounded lane's verify environments (:bwrap default, :smolvm via SAMIZDAT_VERIFY_ENV) — code and the harness process's own environment, never gates.edn. Fail closed both ways: an unavailable selected provider refuses with its own reason, and an unrecognized name refuses as :unknown-provider rather than quietly running the default."}
+    {:name samizdat.security.closure-coverage/signature
+     :summary "The ClosureCoverageSignature: what a closure verification actually covered, read out of its own summary in either toolchain dialect, beside the suite/verifier/input coordinates that make a count mean something. A closure result whose summary cannot be read, that reports zero tests, or that contradicts its own verdict is refused as evidence; a coverage DECREASE only warns."}
+    {:name samizdat.security.closure-coverage/delta
+     :summary "The coverage movement from a clean-target baseline to a final closure signature. Exposes the numbers and whether they fell; decides nothing, and never compares mechanically across two different suites."}]}
+
+ {:group "Model-authorized project execution"
+  :entries
+  [{:name samizdat.security.smolvm-project-env/run
+    :summary "The JS2 ProjectExecutionEnvironment — where a MODEL's own argv runs. An ephemeral machine per execution whose only host filesystem is the project mounted read-only and then masked; everything the workload writes lands in an overlay that dies with the machine, so the authoritative tree is byte-identical afterwards and project/edit remains the only thing that changes it. No network, no host environment, no capabilities, unprivileged, bounded streams and wall clock. Its result is DEVELOPMENT evidence and settles nothing about completion."}
+   {:name samizdat.security.smolvm-project-env/validate-request
+    :summary "One model request as a validated execution request: argv as a non-empty vector of bounded non-blank strings (never a shell line), and a CLOSED option set of :cwd and :timeout-ms only. The image, network, mounts, environment, resource limits, identity, cleanup and provider are controller constants and are refused BY NAME rather than ignored; the timeout may narrow the pinned ceiling and never widen it."}
+   {:name samizdat.security.smolvm-project-env/environment-description
+    :summary "What this environment IS, in the RFC-012 vocabulary — :executor/mode :project-run, operations #{:describe :run}, :writeback :none, and the argv named as :model-supplied. The mode is what keeps a development envelope from being read as an acceptance one."}
+   {:name samizdat.security.smolvm-project-env/run-envelope
+    :summary "One execution projected into the SPI's run envelope, with the invocation index, the attribution, the staged input coordinate, the bounded streams and the disposition. Development evidence, journalled and compared under keys the verify envelopes cannot be confused with."}
+   {:name samizdat.security.smolvm-project-env/invocation-count
+    :summary "How many real machine executions this process's environment attempted. Process-local by construction, and moved by nothing but a spawn — which is what makes 'a replayed project/run launched nothing' a checkable claim."}
+   {:name samizdat.security.smolvm-project-env/poisoned?
+    :summary "Whether a timed-out execution left this environment unusable. A host deadline bounds host WAITING and does not prove the child inside the machine died, so a timeout poisons, the machine is stopped and deleted by name, the manager's table is re-asked, and only a clean answer lifts the poison."}
+   {:name samizdat.security.project-execution-provider/selected
+    :summary "Trusted controller selection of the project execution environment (:smolvm default, via SAMIZDAT_PROJECT_EXEC_ENV) — code and the harness process's own environment, never gates.edn. Deliberately separate from the VERIFY provider selector: shared mechanism, separate authority. Fail closed both ways, and never a fallback to a host process, a shell, or the verify sandbox."}]}
 
  {:group "The record"
   :entries

@@ -1,0 +1,163 @@
+#!/bin/sh
+# Exact JS2 gates. Ordinary Samizdat never invokes this lane.
+#
+# A NEW gate, not a widened old one. bin/js1-m3 pins the M4 runtime and must
+# keep pinning it: rewriting it to accept the JS2 Jolt would make every
+# historical M1-M4 record claim to have run against a runtime that did not
+# exist when they ran. The two lanes coexist; neither describes the other's
+# bytes.
+#
+# The check hardening is the js1 lanes' contract carried over verbatim: a
+# pinned checkout with tracked modifications — Samizdat, Jolt, or the vendored
+# SCI — is refused with its dirty listing, because exact evidence must describe
+# the bytes that actually ran. JS2 adds one more pin for the same reason: the
+# guest image the project execution environment runs a model's argv inside is
+# named by DIGEST, so the isolation evidence describes the image that provided
+# it.
+set -eu
+
+JOLT_SHA=c8d9181e23cc37aa91a38fdcbd01c93917b1be50
+SCI_SHA=32d62a5136ad3dc148588752f5bcc4cc30b14752
+SCI_VERSION=0.13.53
+CHEZ=${JOLT_CHEZ:-/usr/local/bin/scheme}
+ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd -P)
+JOLT=${JOLT_HOME:-"$ROOT/../jolt-js2"}
+
+fail() {
+  printf 'js2: %s\n' "$*" >&2
+  exit 1
+}
+
+sha() { git -C "$ROOT" rev-parse HEAD; }
+
+check_samizdat() {
+  [ -d "$ROOT/.git" ] || fail "no Samizdat checkout at $ROOT"
+  sam_dirty=$(git -C "$ROOT" status --porcelain --untracked-files=no --ignore-submodules=all)
+  if [ -n "$sam_dirty" ]; then
+    printf 'js2: tested Samizdat checkout has tracked modifications; exact evidence refused:\n%s\n' "$sam_dirty" >&2
+    exit 1
+  fi
+}
+
+check_jolt() {
+  [ -x "$JOLT/bin/jolt" ] || fail "no Jolt checkout at $JOLT"
+  [ -x "$CHEZ" ] || fail "no Chez at $CHEZ (set JOLT_CHEZ)"
+  actual=$(git -C "$JOLT" rev-parse HEAD)
+  [ "$actual" = "$JOLT_SHA" ] || fail "Jolt SHA $actual, expected $JOLT_SHA"
+  dirty=$(git -C "$JOLT" status --porcelain --untracked-files=no --ignore-submodules=all)
+  if [ -n "$dirty" ]; then
+    printf 'js2: pinned Jolt checkout has tracked modifications; exact evidence refused:\n%s\n' "$dirty" >&2
+    exit 1
+  fi
+  sci_actual=$(git -C "$JOLT/vendor/sci" rev-parse HEAD)
+  [ "$sci_actual" = "$SCI_SHA" ] || fail "SCI SHA $sci_actual, expected $SCI_SHA"
+  sci_dirty=$(git -C "$JOLT/vendor/sci" status --porcelain --untracked-files=no)
+  if [ -n "$sci_dirty" ]; then
+    printf 'js2: pinned SCI checkout has tracked modifications; exact evidence refused:\n%s\n' "$sci_dirty" >&2
+    exit 1
+  fi
+  version=$(tr -d '\r\n' < "$JOLT/vendor/sci/resources/SCI_VERSION")
+  [ "$version" = "$SCI_VERSION" ] || fail "SCI version $version, expected $SCI_VERSION"
+}
+
+# The guest image is the JS2 pin the js1 lanes had no equivalent of: it is
+# what a model's argv actually runs inside, so the isolation evidence is only
+# as exact as the bytes that provided the isolation.
+check_image() {
+  [ -n "${SAMIZDAT_SMOLVM_IMAGE:-}" ] || \
+    fail "SAMIZDAT_SMOLVM_IMAGE is unset; the project execution environment has no guest"
+  [ -n "${SAMIZDAT_SMOLVM_IMAGE_SHA256:-}" ] || \
+    fail "SAMIZDAT_SMOLVM_IMAGE_SHA256 is unset; an unpinned guest image is refused"
+  [ -f "$SAMIZDAT_SMOLVM_IMAGE" ] || \
+    fail "no guest image at $SAMIZDAT_SMOLVM_IMAGE"
+  image_actual=$(sha256sum "$SAMIZDAT_SMOLVM_IMAGE" | cut -d' ' -f1)
+  expected=$(printf '%s' "$SAMIZDAT_SMOLVM_IMAGE_SHA256" | sed 's/^sha256://')
+  [ "$image_actual" = "$expected" ] || \
+    fail "guest image digest $image_actual, expected $expected"
+}
+
+check() {
+  check_samizdat
+  check_jolt
+  check_image
+  printf 'Samizdat %s\nJolt %s\nSCI %s / %s\nGuest image sha256:%s\n' \
+    "$(sha)" "$JOLT_SHA" "$SCI_SHA" "$SCI_VERSION" "$image_actual"
+}
+
+# Every Jolt invocation below runs through this: the pinned Chez, and the
+# pinned checkout's bin first on PATH so any nested verifier resolution lands
+# on THIS launcher.
+jolt_env() {
+  JOLT_CHEZ=$CHEZ
+  PATH="$JOLT/bin:$PATH"
+  export JOLT_CHEZ PATH
+}
+
+run_ns() {
+  label=$1
+  shift
+  printf '\n== js2: %s ==\n' "$label"
+  reqs='(quote clojure.test)'
+  nses=''
+  for ns in "$@"; do
+    reqs="$reqs (quote $ns)"
+    nses="$nses (quote $ns)"
+  done
+  (cd "$ROOT" && "$JOLT/bin/jolt" -A:test -e "(require $reqs)
+    (let [{:keys [fail error] :as r} (clojure.test/run-tests$nses)]
+      (println r) (System/exit (if (pos? (+ fail error)) 1 0)))")
+}
+
+# Authority, provenance and lease closure — the M1-M4 contract this milestone
+# must not have moved, plus the derived-surface conformance.
+focused() {
+  run_ns 'authority, provenance, lease and surface closure' \
+    samizdat.m3-controller-test samizdat.control-test \
+    samizdat.agent-turn-lease-test samizdat.surface-test
+}
+
+# The pinned bounded evaluator: M1/M2/M4's own lane, and JS2's semantic
+# execution beside it, under the exact runtime and the vendored SCI.
+bounded() {
+  printf '\n== js2: pinned bounded evaluator ==\n'
+  (cd "$ROOT" && SAMIZDAT_BOUNDED_TEST=1 "$JOLT/bin/jolt" \
+    -Sdeps "{:deps {borkdude/sci {:local/root \"$JOLT/vendor/sci\"}}}" \
+    -A:test -e '(require (quote clojure.test) (quote samizdat.evaluator-test)
+                         (quote samizdat.js2-project-run-test))
+      (let [{:keys [fail error] :as r}
+            (clojure.test/run-tests (quote samizdat.evaluator-test)
+                                    (quote samizdat.js2-project-run-test))]
+        (println r) (System/exit (if (pos? (+ fail error)) 1 0)))')
+}
+
+# The execution environments, for real. Both of them: the model-authorized one
+# JS2 adds, and the controller-owned verify one it must not have disturbed.
+# These boot actual machines; check_image has already pinned which bytes.
+environments() {
+  run_ns 'project execution and verification environments (machine-backed)' \
+    samizdat.js2-project-env-test samizdat.smolvm-verification-env-test \
+    samizdat.execution-env-spi-test samizdat.verification-env-test
+}
+
+full() {
+  printf '\n== js2: ordinary suite ==\n'
+  # The ulimit raise mirrors the deps.edn :tasks test entry: the suite holds
+  # many open fds and the default soft limit starves it. As in the js1 lanes,
+  # the suite runs even when the raise itself is refused.
+  if (cd "$ROOT"; ulimit -n 4096 2>/dev/null; "$JOLT/bin/jolt" -M:test); then
+    :
+  else
+    fail 'ordinary suite failed'
+  fi
+}
+
+case ${1:-} in
+  check) check ;;
+  sha) printf 'Samizdat %s\n' "$(sha)" ;;
+  focused) check; jolt_env; focused ;;
+  bounded) check; jolt_env; bounded ;;
+  env) check; jolt_env; environments ;;
+  full) check; jolt_env; full ;;
+  test) check; jolt_env; focused; bounded; environments; full ;;
+  *) printf 'usage: bin/js2 check|sha|focused|bounded|env|full|test\n' >&2; exit 2 ;;
+esac

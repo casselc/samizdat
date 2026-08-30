@@ -33,6 +33,35 @@ inside the process. A model that wants a value out can encode it.
 That limit is a statement of scope, not a gap to be closed later. Everything
 below should be read against it.
 
+**The bounded lane is a different world, and JS2 made the difference load-
+bearing.** A bounded binding's model does not run in this process at all: it
+evaluates in a capability-bounded SCI context whose whole vocabulary is a
+reviewed pure language plus the semantic operations its ContextSpec
+authorizes (RFC-012, `samizdat.evaluator`). From JS2 one of those operations
+is `project/run` — genuinely arbitrary code, genuinely executed — and the
+containment there is real rather than scoped away:
+
+- it runs in an **ephemeral virtual machine**, not this process;
+- the authoritative project is mounted **read-only and then masked**, and
+  everything the workload writes lands in an overlay that dies with the
+  machine;
+- the guest environment is **constructed, not filtered** — the manager
+  forwards no host environment, so there is no host credential to omit by
+  accident and no `redact` to depend on;
+- there is **no network** and no host filesystem beyond the project mount;
+- the workload is **unprivileged, with no capabilities**, as a uid derived
+  from the project's own owner.
+
+So the sentence above — "a model that wants a value out can encode it" —
+describes the ordinary lane's in-process `eval` and does not describe
+`project/run`. The two must not be reasoned about together: the ordinary
+lane's containment gap is a scope decision, and the bounded lane's isolation
+is a property with adversarial tests behind it
+(`js2-project-env-test`). What the bounded lane deliberately does NOT
+promise is that a green `project/run` means anything about acceptance —
+that is the controller's verifiers' job, and invariant 7 below is what keeps
+the two apart.
+
 ## Model
 
 Two layers, ported from dirge rather than reinvented: **secrets never enter
@@ -195,6 +224,7 @@ Reading the load-bearing solid edges:
 | 4 | `grants` are written only by a human. | The model has no edge into the grants table; the API's write path is human-only. |
 | 5 | A complex command never rides an `allow`. | `policy/decide` promotes it to a whole-command claim. `policy-test/complex-commands-never-ride-an-allow`. |
 | 6 | The run config (`.samizdat/config.edn`) — the ship-gate definition — is not writable by the run it gates. | `files/run-config?` refuses it in `write_file`/`edit_file`; `policy/decide` hard-denies any shell statement naming it under a write-capable head (grants do not unlock it). Reads stay open. `files-test/the-run-config-is-not-writable-by-the-run-it-gates`, `policy-test/the-shell-cannot-mutate-the-run-config-either`. Hardcoded in src on purpose: a protected list in agent-editable gates.edn could be unprotected by the party it protects against (karamazov-kvw). |
+| 7 | A model-authorized `project/run` cannot change the authoritative project, and its result cannot satisfy `done`. | The environment: the project is mounted read-only and masked, and the overlay dies with the machine (`smolvm-project-env`; `js2-project-env-test/the-private-workspace-is-writable-and-the-real-project-is-not`). The gate: `ship/edited-paths` reads `:project/edit` receipts and nothing else, so an execution is neither a changed path nor a verifier input (`js2-project-run-test/a-green-execution-is-not-a-changed-path-and-not-a-completion`). Development evidence and acceptance evidence have different authority and different provenance, and the duplication between them is deliberate. |
 
 **A property is only as strong as the graph it is checked against.** Adding a
 model-reachable tool means adding a node to the diagram above and extending the

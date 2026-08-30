@@ -572,12 +572,22 @@
 ;; The manager command line: an image, one read-only mount, and data.
 ;; ═══════════════════════════════════════════════════════════════════════════
 
-(defn- machine-argv
+(defn machine-argv
   "The manager arguments after the executable itself. The guest command is
   the image's own prelude followed by DATA — a contract version, the
   identity to run as, the paths to hide, a working directory, then the
-  pinned verifier argv — never shell source assembled here, and nothing a
-  caller supplies is interpolated into anything that gets parsed."
+  argv to run — never shell source assembled here, and nothing a caller
+  supplies is interpolated into anything that gets parsed.
+
+  PUBLIC because the JS2 ProjectExecutionEnvironment
+  (samizdat.security.smolvm-project-env) composes the same guest command.
+  That is mechanism sharing, not authority sharing (RFC-012 §8): the
+  boundary — read-only project mount, overlay workspace, no --net, the
+  CONSTRUCTED guest environment, the privilege drop — is one implementation
+  because it must behave identically in both, while WHO may ask for a run,
+  WHAT argv it may name, and what the result is evidence FOR stay entirely
+  separate. Every controller-owned element here is a constant of this
+  namespace, so a caller supplying a model's argv cannot reach any of it."
   [{:keys [root image argv identity hidden host-timeout-ms]}]
   (-> ["machine" "run"
        "--image" image
