@@ -1,0 +1,16 @@
+=== JS2 controller (frozen) ===
+26db106f6147f7a93375f891ce7edcd02965448d
+tracked-clean: 0 modified
+=== JS2 target ===
+26db106f6147f7a93375f891ce7edcd02965448d
+?? .samizdat/
+=== task file digests (identical to M4 attempts 1 and 2) ===
+9dbc01d242d920365d88af0d0c4c1a21247ada54511693cec3939b28a785f705  ../samizdat-canary-target-js2/src/samizdat/util.clj
+6263ca9237ac3d2367c10f61a52ad6e1f17ff63bd08befa81107a0dbbc6b6f60  ../samizdat-canary-target-js2/test/samizdat/util_test.clj
+=== jolt / sci ===
+c8d9181e23cc37aa91a38fdcbd01c93917b1be50
+32d62a5136ad3dc148588752f5bcc4cc30b14752
+=== guest image ===
+c5329b4b7ecb1ac816cb86c1f6e7f57737d5240a2306be84847c8279e80ad984  worker-image.tar
+=== clean-target closure baseline ===
+#:coverage{:version 1, :suite "js1-ve/v1:bab68fdf5a128ea0094ce345680d8eb0101792a0e703f8a29bfc28e4ad82a861", :verifier "sha256:e3fd1b7d73e88ec4f88e482c61912524bd48acbbe6ed3cd319a4c4ca387fff2f", :input "sha256:1c803f326050a0b200e09a83e235b8a25fca93ba271c7db60132c39307ea3b7d", :green? true, :exit 0, :output-truncated? false, :kind :parsed, :tests 1630, :assertions 6445, :failures 0, :errors 0}

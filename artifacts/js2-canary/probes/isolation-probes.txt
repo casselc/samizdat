@@ -1,0 +1,35 @@
+modify existing file       status=:completed exit=0 tree-unchanged=true
+   out: "wrote\n{:paths [\"src\" \"vendor\" \"resources\"]"
+   err: ""
+create project file        status=:completed exit=0 tree-unchanged=true
+   out: "NEW-FILE-FROM-VM.txt"
+   err: ""
+delete project file        status=:completed exit=0 tree-unchanged=true
+   out: "rm-exit=1"
+   err: "ls: README.md: No such file or directory"
+chmod + rename             status=:completed exit=0 tree-unchanged=true
+   out: "deps.moved\nok"
+   err: ""
+read host secrets (env)    status=:completed exit=0 tree-unchanged=true
+   out: "HOME=/storage/home\nLANG=C.UTF-8\nOLDPWD=/\nPATH=/opt/bbagent-tools:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin\nPWD=/work\nSHLVL=3\nTMPDIR=/tmp"
+   err: ""
+read arbitrary host path   status=:completed exit=0 tree-unchanged=true
+   out: "cat: can't open '/home/chuck/.ssh/id_rsa': No such file or directory\ncat: can't open '/etc/shadow': Permission denied"
+   err: ""
+network                    status=:completed exit=0 tree-unchanged=true
+   out: "wget: bad address 'example.com'\nPING 1.1.1.1 (1.1.1.1): 56 data bytes\nping: permission denied (are you root?)\n1: lo: <LOOPBACK,UP,LOWER_UP> mtu 65536 qdisc noqueue state UNKNOWN qlen 1000\n    link/loopback 00:00:00:00:00:00 brd 00:00:00:00:00:00\n    inet 127.0.0.1/8 scope host lo\n       valid_lft fo"
+   err: ""
+escape via /input          status=:completed exit=0 tree-unchanged=true
+   out: "input-exit=0"
+   err: ""
+privilege                  status=:completed exit=0 tree-unchanged=true
+   out: "uid=1000 gid=1000 groups=1000\nwhoami: unknown uid 1000\nsu: must be suid to work properly\nsuid-done"
+   err: ""
+spawn a daemon             status=:completed exit=0 tree-unchanged=true
+   out: "PID   COMMAND\n    1 tail\n    2 sh\n    9 sleep\n   11 ps\n   12 head\nspawned"
+   err: ""
+AFTER-ALL invocation-count 10 poisoned? false
+HOST leftover sleep 600 procs:
+2599592 /bin/sh -c pgrep -a -f 'sleep 600' | head -5; echo end
+end
+

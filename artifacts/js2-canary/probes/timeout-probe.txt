@@ -1,0 +1,13 @@
+before: smolvm front-ends 1 machines: No machines found
+elapsed-ms 21987
+status :timeout
+exit-present? false
+disposition :hard-cleaned
+cleanup {:acted ["stop vm-8354941f" "delete vm-8354941f"], :clean? true}
+duration-ms 15121
+invocation 1
+poisoned-after? false
+ENVELOPE-STATUS :timeout
+after: smolvm front-ends 1 machines: No machines found
+surviving guest children on host: end
+next-run status :completed exit 0 out "fresh-environment-ok" invocation 2

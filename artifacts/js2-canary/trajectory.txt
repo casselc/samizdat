@@ -1,0 +1,42 @@
+run: {"id": "495fa9cb-b2c2-4a29-8c6d-bce497fd9efc", "status": "completed", "model": "fireworks.kimi-k2p7-code", "max_turns": 60, "started_at": "2026-08-30T04:05:55.450Z", "ended_at": "2026-08-30T04:16:11.481Z", "terminal_reason": null}
+turns: 8
+  by tool: {"eval": 7, "done": 1}
+  by category: {"neutral": 7, "success": 1}
+binding:
+  context-spec: {:context/bounds {:max-edit-chars 60000, :max-list-entries 1000, :max-read-chars 60000, :max-search-file-chars 500000, :max-search-files 20000, :max-search-line-chars 300, :max-search-pattern-chars 200, :max-search-results 500}, :context/capabilities [:project/edit :project/list :project/read :project/run :project/search :project/stat], :context/coordinate "js0:[:map [[:context/bounds [:map [[:max
+  runtime: js2-rt/v1:[:map [[:runtime/capability-catalog [:map [[:catalog/compiled [:vector [":project/edit" ":project/list" ":proj
+  orientation-digest: sha256:3b4b860eb2312f62646964d9cc1acae8e52bf15bf9275809cba3273528047fe8
+evals: 7 {"completed": 7}
+  evals containing def/defn: []
+operations total: 7
+  by op: {":project/read": 2, ":project/stat": 2, ":project/edit": 2, ":project/run": 1}
+  per-eval: [1, 1, 1, 1, 1, 1, 1]
+  multi-operation evals: 0
+  ops/eval: 1.00
+  ops/model-turn: 0.88
+project/run:
+  executions: 1
+  runs/model-turn: 0.12
+  evals containing a run: 1
+  multi-operation evals containing a run: 0
+  eval shapes containing a run: {"run+analyze+branch": 1}
+  repeated equivalent executions: {}
+  model roundtrips between an edit and its next execution: [1]
+  repeated observation signatures: {}
+epochs:
+   {"id": "6a2f1f41-d13e-4ace-8012-02467d41ab4a", "turn": 1, "provider": "openai", "model": "fireworks.kimi-k2p7-code", "adapter": "OpenAI", "config_digest": "32ebab6c0b98f5638894df7eb1d455a340e4173db6881dec3873ff853eecb021", "closed_at": null}
+invocations: 9
+sci context lifecycle:
+   2 {"context-id":"2e8a22ca-f7e0-4037-9e1f-5b84d9b9c0eb","instance-id":"inst:495fa9cb-b2c2-4a29-8c6d-bce497fd9efc","binding-id":"bind:495fa9cb-b2c2-4a29-8c6d-bce497fd9efc","phase":"allocated"}
+   15 {"context-id":"c5cce59e-a1cd-4b2c-a7df-8529ee27c986","instance-id":"inst:495fa9cb-b2c2-4a29-8c6d-bce497fd9efc","binding-id":"bind:495fa9cb-b2c2-4a29-8c6d-bce497fd9efc","supersedes":"2e8a22ca-f7e0-4037-9e1f-5b84d9b9c0eb","replayed-evaluations":7,"phase":"reconstructed"}
+interventions:
+ship-verify events:
+   16 {"ran":true,"stage":"focused","green":true,"timeout":false,"blocked":false,"closure-ran":true,"closure-green":true,"closure-timeout":false,"closure-envelope":{"version":1,"kind":"run","invocation-index":2,"attribution":{"coordinate":"sha256:e3fd1b7d73e88ec4f88e482c61912524bd48acbbe6ed3cd319a4c4ca387fff2f","type":"bwrap-verification-env"},"input":{"coordinate":"sha256:c5a35391029bb0c2abb3bf67eb58edec4ab358bb849234c91eae2f61dc794e2c"},"status":"completed","exit":0,"stdout":{"text":"  [base-test] model-facing sentences still in src\/: 140 across 36 files\n[gui.api] poller callback failed: boom\n\nRan 1630 tests. 6451 assertions passed, 0 failures, 0 errors.\n\n{:type :summary, :test 1630, :pass 6451, :fail 0, :error 0}\n","bytes":235,"truncated?":false},"stderr":{"text":"WARN samizdat.agent.tools - tool done threw: Turn authority expired; refusing stale model effect\nWARN samizdat.agent.beam - branch B1 exceeded the turn deadline on turn 1\nWARN samizdat.agent.beam - branch B1 died on turn 1 : sleep interrupted\nINFO samizdat.agent.beam - distilled 1 finding(s) and 0 verdict(s) into memory\nWARN samizdat.agent.beam - branch B1 exceeded the turn deadline on turn 1\nINFO samizdat.security.controller - budget extension 63b27c84-296f-465c-aea4-2dd2a44ca7aa 5 -> 12 request raise-1\nINFO samizdat.security.controller - budget extension 053496d3-b905-4944-b364-c5738a49eebe 5 -> 9 request http-raise-1\nINFO samizdat.security.controller - budget extension b642f1f9-a32f-4bfb-95ac-c5102c37ae53 5 -> 12 request intervention-1\nERROR samizdat.agent.tools - tool boundary-test-bare-string returned a String instead of a result map\nERROR samizdat.agent.tools - tool boundary-test-no-branch returned a result map with no :branch, so the turn had no branch to carry forward\nWARN samizdat.agent.tools - tool boundary-test-throws threw: the tool exploded\nINFO samizdat.watch - watch: raised :provider-empty-replies - the provider keeps returning replies with neither content nor reasoning \u2014
+edit receipts:
+   intent ["src/samizdat/util.clj" "sha256:9dbc01d242d920365d88af0d0c4c1a21247ada54511693cec3939b28a785f705" "  \"If `s` is longer than `max-len`, return it shortened to  | 
+   outcome  | {:bytes 3815, :digest "sha256:576d37d9e15665db084640cc83c72886a1bce3bbfef9a27b8abc55ed4daae18d", :kind :file, :path "src/samizdat/util.clj"}
+   intent ["test/samizdat/util_test.clj" "sha256:6263ca9237ac3d2367c10f61a52ad6e1f17ff63bd08befa81107a0dbbc6b6f60" "  (testing \"middle marker present\"\n    (let [result | 
+   outcome  | {:bytes 2016, :digest "sha256:850fd125480c3e34dd4b915c376a7b946bdf39c6bdb134cff9c8bf8fdacac923", :kind :file, :path "test/samizdat/util_test.clj"}
+run receipts:
+   intent [["bb" "--classpath" "src:test" "-e" "(require 'clojure.test 'samizdat.util-test) (let [s (clojure.test/run-tests 'samizdat.util-test)] (println s) (System/exit (if (pos? (+ (:fail s) (:error s))) 1 0 | 
+   outcome  | {:argv ["bb" "--classpath" "src:test" "-e" "(require 'clojure.test 'samizdat.util-test) (let [s (clojure.test/run-tests 'samizdat.util-test)] (println s) (System/exit (if (pos? (+ (:fail s) (:error s))) 1 0)))"], :cwd ".", :disposition :terminated, :duration-ms 2848, :environment "sha256:978648e50f02ffb0526ad45155e56cd082db0b21cebf67f44e7db5b606fb6f1c", :exit 0, :input "sha256:c5a35391029bb0c2abb3
