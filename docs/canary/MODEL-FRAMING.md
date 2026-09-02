@@ -40,13 +40,22 @@ top-5 is actions.
 
 Baselines for reference: majority `:hold` = 37.8% top-1 / 38.5% counterfactual.
 
-| model | framing | top-1 | counterfactual | control | wrong+confident |
+The two right-hand columns here are **per-role accuracy**, which is what the
+harness reported at the time. They are NOT responsiveness or invariance; see the
+correction below, and treat them only as a like-for-like comparison across rows.
+
+| model | framing | top-1 | c/f acc | ctrl acc | wrong+confident |
 | --- | --- | ---: | ---: | ---: | ---: |
 | 0.8B | completion, counterbal. | 16.2% | 23.1% | 11.8% | 0.0% |
 | 0.8B | **no-think, counterbal.** | 16.2% | 23.1% | 11.8% | 2.7% |
 | 2B | completion, counterbal. | 18.9% | 30.8% | 11.8% | 5.4% |
-| 2B | **no-think, counterbal.** | **54.1%** | **46.2%** | 58.8% | 27.0% |
+| 2B | **no-think, counterbal.** | **54.1%** | 46.2% | 58.8% | 27.0% |
 | 27B | **no-think, fixed order** | **56.8%** | 30.8% | 76.5% | 40.5% |
+
+The 27B row has **not** been re-measured under the corrected relational metrics
+and is the only row still reported solely on the old ones. Its top-1 (56.8%,
+fixed order) is comparable; its 30.8% is not comparable with the 2B's relational
+7.7% below. Re-running it is an open thread.
 
 **Correction, after fixing the metrics.** The line above originally read "the 2B
 clears the bar", citing 46.2% "counterfactual accuracy" against the majority's
