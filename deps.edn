@@ -83,7 +83,23 @@
 
  :nrepl/middleware [nrepl.middleware/default-middleware]
 
- :aliases {:test {:extra-paths ["test" "gui"]
+ :aliases {;; The embedded closed-domain scoring CANARY. jolt-llama, the native
+           ;; shim it loads and the model weights it needs live ONLY here, so
+           ;; `jolt test` and `jolt serve` never see them. samizdat.decide and
+           ;; cells.decide are in the base tree and are exercised by the
+           ;; ordinary suite with an injected scorer and no model present; this
+           ;; alias is only for running the canary against a real one.
+           ;;
+           ;; Needs, at run time and not at load time:
+           ;;   JOLT_LLAMA_LIB    built libjolt_llama.so
+           ;;   JOLT_LLAMA_MODEL  a .gguf
+           :canary {:extra-paths ["dev"]
+                    :extra-deps
+                    {casselc/jolt-llama
+                     {:git/url "https://github.com/casselc/jolt-llama.git"
+                      :git/sha "6ec88472bc63371ac9b70729ffbd58e35f35ce8d"}}}
+
+           :test {:extra-paths ["test" "gui"]
                   :main-opts ["-m" "samizdat.test-runner"]}
            ;; command-line nREPL client, plus the test tree, so the live
            ;; process can run the suite over nREPL without paying startup:

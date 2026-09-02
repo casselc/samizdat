@@ -27,6 +27,11 @@
             [samizdat.agent.judge]
             [samizdat.agent.planner]
             [samizdat.agent.telemetry]
+            ;; cells/decide.clj scores a closed decision domain through this.
+            ;; Nothing else in src reaches for it -- the capability is
+            ;; deliberately only reachable from the cell layer -- which is
+            ;; exactly the shape this preload exists to catch.
+            [samizdat.decide]
             [samizdat.engine.proc]))
 
 ;; decompose was the one shipped-cell dependency nothing in src reached, so it

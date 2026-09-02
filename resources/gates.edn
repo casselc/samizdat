@@ -2388,4 +2388,39 @@
              :description "Abandon the task, stating why it cannot be finished."
              :parameters {:type "object"
                           :properties {:reason {:type "string"}}
-                          :required ["reason"]}}}}
+                          :required ["reason"]}}}
+
+ ;; ---- embedded closed-domain scoring (samizdat.decide)
+ ;;
+ ;; These bound a decision the harness makes by RANKING a set it already wrote
+ ;; down, never by generating one. The failure mode being bounded is acting on
+ ;; a coin flip, so both numbers are about declining rather than about spend.
+
+ :decide-min-margin
+ {:value 0.5 :kind :threshold :capability-tunable? false
+  :doc "Minimum log-probability gap between the best and second-best candidate
+        before the selection is acted on. Below it the decision defers and
+        records what it would have chosen. In nats: 0.5 is roughly a 1.65x
+        likelihood ratio, so the winner has to be clearly ahead rather than
+        merely ahead. Not capability-tunable -- lowering it buys more decisions
+        by making them on weaker evidence, which is the whole thing this
+        guards."}
+
+ :decide-max-candidates
+ {:value 12 :kind :threshold :capability-tunable? false
+  :doc "Largest closed domain that may be offered for scoring. A domain that
+        needs more than this has usually stopped being a decision and started
+        being a search, and a long tail of near-identical options makes the
+        margin meaningless. Refused with :domain/too-large rather than
+        truncated: silently scoring a subset would misreport what was
+        considered."}
+
+ :decide-require-comparable
+ {:value true :kind :threshold :capability-tunable? false
+  :doc "Whether candidates must all have the same token length to be compared.
+        Measured, not assumed: a candidate's first token is scored from the base
+        distribution and later tokens by single-token decodes, which are
+        different kernel paths on a hybrid model, so unequal-length candidates
+        have scores built from different mixtures. Equal-length action
+        vocabularies are the natural controller shape, so holding this costs
+        nothing. See jolt-llama docs/EXACTNESS.md."}}

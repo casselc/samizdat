@@ -70,6 +70,7 @@
             [samizdat.base-test]
             [samizdat.boundary-test]
             [samizdat.compaction-test]
+            [samizdat.decide-test]
             [samizdat.collab-test]
             [samizdat.select-test]
             [samizdat.session-test]
@@ -219,6 +220,7 @@
     samizdat.base-test
     samizdat.boundary-test
     samizdat.compaction-test
+    samizdat.decide-test
     samizdat.collab-test
     samizdat.select-test
     samizdat.session-test

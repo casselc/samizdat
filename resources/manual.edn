@@ -218,4 +218,17 @@
    {:name samizdat.repl.route/release!
     :summary "Stop the project image for a root. The next eval starts a fresh one, losing everything defined at the REPL."}
    {:name samizdat.security.sandbox/seatbelt-profile
-    :summary "The macOS profile the project image runs under, as text — read it when a refusal is surprising."}]}]
+    :summary "The macOS profile the project image runs under, as text — read it when a refusal is surprising."}]}
+
+ {:group "Deciding among options you already wrote down"
+  :entries
+  [{:name samizdat.decide/decide
+    :summary "One closed-domain decision end to end: check the domain is legal, score it, apply the trusted selection rule, and return the journal-shaped record. Never throws; a broken scorer becomes a deferral."}
+   {:name samizdat.decide/legal-domain?
+    :summary "Whether a candidate set may be scored at all, answering with WHICH rule it broke rather than true/false — the refusal is journalled."}
+   {:name samizdat.decide/select
+    :summary "The trusted selection rule. The model does not decide here: a thin margin, an incomparable domain or a missing score all defer rather than guess."}
+   {:name samizdat.decide/comparable?
+    :summary "Whether these candidates' scores may be compared to each other at all. Equal token lengths only — measured, not assumed. See jolt-llama docs/EXACTNESS.md."}
+   {:name samizdat.decide/leaks?
+    :summary "Which forbidden keys a record would carry into the journal — pointers, state blobs, logits, tokens, prompts. Nil means safe to write."}]}]
