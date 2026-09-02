@@ -336,15 +336,61 @@
       (let [own (str (fs/cwd) "/bin/" verifier-exec-name)]
         (when (fs/executable? own) own))))
 
+(defn canonical-verifier
+  "The resolved verifier as a CANONICAL absolute path, or nil.
+
+  resolve-verifier returns whatever fs/which or the cwd fallback produced, and
+  that string is not necessarily normalised: a PATH entry carrying `..`, or a
+  symlink, yields a path whose lexical form and whose real target differ. Every
+  later decision -- is it under /usr, is it inside the verified root, where does
+  the staged placeholder go -- is a decision about the REAL file, so it is made
+  on the canonical form and never on the string.
+
+  Also insists on a regular executable file. A directory or a dangling symlink
+  reaching this far would otherwise be staged and bound."
+  [exec]
+  (when exec
+    (try
+      (let [c (str (fs/canonicalize exec))]
+        (when (and (str/starts-with? c "/")
+                   (fs/regular-file? c {:nofollow-links true})
+                   (fs/executable? c))
+          c))
+      (catch Throwable _ nil))))
+
+(defn verifier-inside-root?
+  "Whether the canonical verifier lives inside the tree being verified.
+
+  THE PROJECT UNDER VERIFICATION MUST NOT SUPPLY ITS OWN VERIFIER. resolve-
+  verifier falls back to (fs/cwd)/bin/jolt, which is the harness's own launcher
+  when samizdat runs from its checkout -- but it is project-controlled content
+  if the controller is ever invoked from inside a project, and an entry on the
+  inherited PATH could point there too.
+
+  Before the verifier executable was bound, such a path simply failed to exec:
+  the namespace had no such file, so a hostile bin/jolt could not run and the
+  weakness stayed latent. Binding the executable removes that accident, so the
+  check has to become deliberate. A verifier inside the verified root is
+  refused, and the lane fails closed.
+
+  A fake verifier that ignored the fixed arguments and exited zero would make
+  verification green without running anything, which is the whole property this
+  environment exists to provide."
+  [exec root]
+  (boolean
+   (when (and exec root)
+     (let [croot (try (str (fs/canonicalize root)) (catch Throwable _ nil))]
+       (and croot (or (= exec croot)
+                      (str/starts-with? exec (str croot "/"))))))))
+
 (defn- verifier-exec-bind
   "The [src dest] ro-bind for the verifier EXECUTABLE ITSELF, when it lives
   outside the already-bound /usr.
 
-  resolve-verifier returns an absolute host path taken from the controller's
-  PATH, and the stage binds /usr, a private /home carrying only the dependency
-  caches, and a checkout root when the verifier is a checkout-launched bin/jolt.
-  A verifier that is none of those -- a standalone binary in a user prefix such
-  as ~/.local/bin, which is what an install into a user-owned prefix produces --
+  The stage binds /usr, a private /home carrying only the dependency caches,
+  and a checkout root when the verifier is a checkout-launched bin/jolt. A
+  verifier that is none of those -- a standalone binary in a user prefix such as
+  ~/.local/bin, which is what an install into a user-owned prefix produces --
   resolved to a path that did not exist inside the namespace, and the lane died
   at exec:
 
@@ -356,14 +402,23 @@
   performing produced no output to check.
 
   Binds the FILE, not its directory. A bin directory in a user prefix holds
-  other host binaries, and none of them is the pinned verifier; exposing the
-  one executable the policy already names is not a widening of what the
-  sandbox can reach. Read-only like every other bind here.
+  other host binaries, and none of them is the pinned verifier; exposing the one
+  executable the policy already names is not a widening of what the sandbox can
+  reach. Read-only like every other bind here.
 
-  Returns nil for a verifier under /usr, which the usr binds already cover."
+  Takes the CANONICAL path, so the /usr test is about the real file rather than
+  a string that may contain `..` or traverse a symlink. Returns nil for a
+  verifier under /usr, which the usr binds already cover.
+
+  KNOWN LIMITATION, recorded rather than papered over: binding the executable
+  alone suffices for a self-contained binary whose interpreter and libraries
+  live under the existing system binds. It is NOT sufficient for a launch script
+  that locates resources relative to $0, a binary with $ORIGIN-relative
+  libraries in the same prefix, or a shebang interpreter outside /usr. Those
+  fail closed -- the child cannot start -- rather than escaping confinement."
   [exec]
-  (when (and exec (not (str/starts-with? (str exec) "/usr/")))
-    [(str exec) (str exec)]))
+  (when (and exec (not= exec "/usr") (not (str/starts-with? exec "/usr/")))
+    [exec exec]))
 
 (defn- verifier-root
   "The checkout root when the resolved verifier is a checkout-launched jolt
@@ -701,6 +756,12 @@
                                   [[(str "/" dir) (str "/" dir)]]))))
                            merged-usr-dirs)
         cache-binds (home-cache-binds stage)
+        cexec (canonical-verifier exec)
+        _ (when (verifier-inside-root? cexec root)
+            ;; fail closed: a verifier the verified project could have written
+            (throw (ex-info "verifier resolves inside the tree being verified"
+                            {:samizdat/refusal :verifier-inside-verified-root
+                             :verifier cexec})))
         vroot (some-> exec verifier-root)
         verifier-binds (when vroot
                          (fs/create-dirs (str stage vroot))
@@ -713,7 +774,7 @@
         ;; "Can't create file at ...: Read-only file system". An empty
         ;; placeholder is staged at the same path for the bind to land on.
         exec-bind (when-not vroot
-                    (when-let [pair (verifier-exec-bind exec)]
+                    (when-let [pair (verifier-exec-bind cexec)]
                       (let [dest (str stage (first pair))]
                         (fs/create-dirs (str (some-> (fs/path dest) .getParent)))
                         (spit dest "")

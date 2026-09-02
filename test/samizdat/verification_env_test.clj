@@ -513,3 +513,35 @@
                            (subs (:output r) 0 (min 400 (count (:output r))))))
       (is (str/includes? (:output r) ":fail 0"))
       (is (str/includes? (:output r) ":error 0")))))
+
+;; ── the verifier's own authority ────────────────────────────────────────────
+;;
+;; Added after an adversarial review of the executable bind. Binding the
+;; verifier removed an accident that had been masking a resolution weakness:
+;; resolve-verifier falls back to (fs/cwd)/bin/jolt, and before the bind such a
+;; path simply failed to exec because the namespace had no such file. A fake
+;; verifier that ignored its arguments and exited zero would make verification
+;; green without running anything, so the check has to be deliberate.
+
+(deftest the-verifier-path-is-canonical-before-it-is-trusted
+  (testing "every decision -- under /usr, inside the root, where the placeholder
+            goes -- is about the REAL file, never the string"
+    (is (= "/home/chuck/.local/bin/jolt"
+           (ve/canonical-verifier "/home/chuck/.local/bin/jolt"))
+        "an ordinary absolute path resolves to itself")
+    (is (nil? (ve/canonical-verifier "/usr/bin"))
+        "a directory is not an executable")
+    (is (nil? (ve/canonical-verifier "/nonexistent/jolt"))
+        "a path that does not resolve is refused")
+    (is (nil? (ve/canonical-verifier nil)))))
+
+(deftest a-verifier-inside-the-verified-tree-is-refused
+  (testing "the project under verification must not supply its own verifier"
+    (is (true? (ve/verifier-inside-root? "/p/bin/jolt" "/p"))
+        "a project-supplied bin/jolt is inside the tree")
+    (is (true? (ve/verifier-inside-root? "/p" "/p"))
+        "the root itself counts as inside")
+    (is (false? (ve/verifier-inside-root? "/home/u/.local/bin/jolt" "/p"))
+        "a verifier outside the tree is fine")
+    (testing "and a sibling that merely shares a name prefix is NOT inside"
+      (is (false? (ve/verifier-inside-root? "/p-evil/bin/jolt" "/p"))))))
