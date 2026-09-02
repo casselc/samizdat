@@ -33,7 +33,26 @@
   (or (System/getenv "JOLT_LLAMA_MODEL")
       (throw (ex-info "set JOLT_LLAMA_MODEL" {}))))
 
-(def jolt-llama-sha (or (System/getenv "JOLT_LLAMA_SHA") "unrecorded"))
+(def expected-jolt-llama-sha
+  "The jolt-llama coordinate this acceptance canary is pinned to.
+
+  REQUIRED. It used to default to \"unrecorded\", so the canary would happily
+  produce green evidence attributed to nothing -- which is the one thing an
+  acceptance artifact must not do."
+  (System/getenv "JOLT_LLAMA_SHA"))
+
+(def failures (atom []))
+
+(defn check!
+  "Record an assertion. The canary previously PRINTED its acceptance conditions
+  and exited nonzero only for a bad encoding, so a run could report a prefix
+  mismatch, silently take the cold path, and still exit 0. Every condition is
+  now a gate."
+  [label ok?]
+  (if ok?
+    (println (format "  ok   %s" label))
+    (do (println (format "  FAIL %s" label)) (swap! failures conj label)))
+  ok?)
 
 (def actions
   [{:id :hold :text " hold"} {:id :scale :text " scale"}
@@ -99,8 +118,19 @@
             enc (decide/verify-encodings actions tk)]
         (println "model:" (:desc m))
         (println "model sha256:" (:content-id m))
-        (println "jolt-llama:" jolt-llama-sha)
-        (println "encodings verified:" (:ok? enc))
+        (println "jolt-llama:" (pr-str expected-jolt-llama-sha))
+        (println "llama runtime:" (llama/runtime-build-id))
+        (check! "the jolt-llama coordinate is recorded"
+                (and expected-jolt-llama-sha
+                     (= 40 (count expected-jolt-llama-sha))))
+        (check! "the native runtime is attributable"
+                (not (llama/unattributed? (llama/runtime-build-id))))
+        (check! "action encodings are exactly one distinct token each" (:ok? enc))
+        (check! "every encoding is non-empty"
+                (every? #(pos? (:n-tokens %)) (:encodings enc)))
+        (check! "token ids are distinct"
+                (let [ts (map (comp first :tokens) (:encodings enc))]
+                  (= (count ts) (count (distinct ts)))))
         (when-not (:ok? enc)
           (println "ABORTING: unverified encodings measure fragments (#8)")
           (System/exit 1))
@@ -150,6 +180,12 @@
                 (println (format "  incoming prompt %d tokens; first %d identical to the saved spine: %s"
                                  (count toks2) n-exact reusable?))
 
+                ;; For THIS acceptance canary a prefix mismatch is a FAILURE:
+                ;; the point is to prove reuse happened. Silently taking the
+                ;; cold path and exiting 0 would report success for a run that
+                ;; never exercised the thing being accepted. Cold rebase remains
+                ;; correct behaviour and is exercised as the negative case below.
+                (check! "turn-2 prefix reuse is actually available" reusable?)
                 (if-not reusable?
                   (do (println "  PREFIX MISMATCH -> cold rebase, explicitly.")
                       (llama/clear! s)
@@ -201,13 +237,20 @@
                                                (double (get (:scores warm) id)))))))
                     (println)
                     (println (format "  max |delta| over the domain: %.8f" max-d))
-                    (println (format "  ranking identical:  %s"
-                                     (= (mapv :id (:domain dec-cold))
-                                        (mapv :id (:domain dec-warm)))))
-                    (println (format "  same decision:      %s / %s"
-                                     (name (:decision dec-cold)) (name (:decision dec-warm))))
-                    (println (format "  same selected:      %s"
-                                     (= (:selected dec-cold) (:selected dec-warm))))
+                    (check! "the restored prefix equals the incoming token prefix"
+                            (= stable (vec (take n-exact toks2))))
+                    (check! "every action score is identical cold vs warm"
+                            (zero? max-d))
+                    (check! "ranking is identical"
+                            (= (mapv :id (:domain dec-cold))
+                               (mapv :id (:domain dec-warm))))
+                    (check! "decision is identical"
+                            (= (:decision dec-cold) (:decision dec-warm)))
+                    (check! "selected action is identical"
+                            (= (:selected dec-cold) (:selected dec-warm)))
+                    (check! "scoring convention is the expected single-token one"
+                            (= :teacher-forced/first-from-base-rest-single-token
+                               (:convention cold)))
                     (println (format "  scoring convention: %s" (:convention cold)))
 
                     ;; ---- the negative case, asserted rather than assumed
@@ -222,5 +265,17 @@
                                          (:jolt.llama/error (ex-data e))))]
                       (println "  restoring spine alpha's state under spine beta:"
                                (pr-str refused))
-                      (println "  refused with a prefix mismatch:"
-                               (= :state/prefix-mismatch refused)))))))))))))
+                      (check! "a foreign spine is refused with :state/prefix-mismatch"
+                              (= :state/prefix-mismatch refused))
+                      ;; and the session must survive the refusal
+                      (llama/clear! s)
+                      (llama/eval! s toks2)
+                      (check! "the session remains usable after the refusal"
+                              (pos? (count (llama/top-k s 3 {:pieces? false})))))))))))))))
+
+(let [fs @failures]
+  (println)
+  (if (empty? fs)
+    (println "EXACT-SPINE CANARY OK")
+    (do (println "EXACT-SPINE CANARY FAILURES:" (pr-str fs))
+        (System/exit 1))))
