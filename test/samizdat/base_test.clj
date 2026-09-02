@@ -201,6 +201,16 @@
                       config file's defaults depend on a resource read that
                       the config file has to happen before."}}
 
+   "src/samizdat/decide.clj"
+   {:threshold {200 "The maximum length of a provenance STRING that may enter
+                     the journal. A sanitisation bound on an append-only store,
+                     not a policy: raising it at runtime is precisely how a
+                     blob, a prompt or a native handle's printed form gets
+                     durably recorded, which is the thing the allowlist around
+                     it exists to prevent. What IS policy here -- the margin,
+                     the domain size cap, the comparability requirement --
+                     lives in gates.edn and is read per decision."}}
+
    "src/samizdat/server.clj"
    {:threshold {:all "HTTP status codes and the response-body cap of a
                       transport. Protocol constants, not policy."}}

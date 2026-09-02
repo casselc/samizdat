@@ -17,129 +17,304 @@
 ;; SPDX-License-Identifier: GPL-3.0-or-later
 
 (ns samizdat.decide-test
-  "Closed-domain decisions, tested with no model present.
+  "Closed-domain decisions, tested with NO model.
 
-  That is the point of the scorer seam: every branch below is reachable with a
-  scorer that returns a literal map, so this namespace runs in the ordinary
-  suite on a machine with no inference engine, no native library and no model
-  weights. The one test that does need a real model is in the canary script,
-  not here."
+  That is the point of the scorer seam: every branch is reachable with a scorer
+  that returns a literal map, so this namespace runs in the ordinary suite on a
+  machine with no inference engine, no native library and no model weights. The
+  tests that need a real model live in the canaries, not here."
   (:require [clojure.test :refer [deftest is testing]]
+            [mycelium.cell :as cell]
             [samizdat.cells :as cells]
             [samizdat.decide :as decide]
-            [samizdat.manifests :as manifests]))
+            [samizdat.manifests :as manifests]
+            [samizdat.store.db :as db]
+            [samizdat.store.journal :as journal]
+            [samizdat.store.runs :as runs]))
 
-(def ^:private actions
-  [{:id :hold     :tokens [1]}
-   {:id :scale    :tokens [2]}
-   {:id :rollback :tokens [3]}])
+(def ^:private vocabulary
+  [{:id :hold     :text " HOLD"     :tokens [11]}
+   {:id :scale    :text " SCALE"    :tokens [12]}
+   {:id :rollback :text " ROLLBACK" :tokens [13]}])
+
+(defn- domain-of
+  ([] (domain-of (decide/all-legal)))
+  ([legality]
+   (decide/authorize vocabulary
+                     {:legality legality :id :test-domain :revision "v1"
+                      :state-coord "state:abc" :authority :test})))
 
 (defn- scorer-returning [scores]
   (fn [_ctx _cands] {:scores scores}))
 
-(deftest illegal-domains-are-refused-with-a-reason
-  (testing "each refusal names WHICH rule it broke, because the journal records it"
-    (is (= :domain/empty (decide/legal-domain? [] {})))
-    (is (= :domain/not-a-sequence (decide/legal-domain? nil {})))
-    (is (= :domain/too-large (decide/legal-domain? actions {:max-candidates 2})))
-    (is (= :domain/missing-id (decide/legal-domain? [{:tokens [1]}] {})))
-    (is (= :domain/duplicate-id
-           (decide/legal-domain? [{:id :a :tokens [1]} {:id :a :tokens [2]}] {})))
-    (is (nil? (decide/legal-domain? actions {})))))
+(def ^:private good-scores {:hold -0.2 :scale -3.0 :rollback -4.0})
+(def ^:private policy {:min-margin 0.5})
+
+(defn- run
+  ([scorer] (run scorer (domain-of)))
+  ([scorer domain]
+   (decide/decide {:scorer scorer :domain domain :policy policy
+                   :prov-ctx {:run-id "r1" :model-id "test"}})))
+
+;; ------------------------------------------------------------- baseline
 
 (deftest a-clear-winner-is-acted-on
-  (let [r (decide/decide {:scorer (scorer-returning {:hold -0.2 :scale -3.0 :rollback -4.0})
-                          :candidates actions
-                          :policy {:min-margin 0.5}
-                          :model-id "test"})]
+  (let [r (run (scorer-returning good-scores))]
     (is (= :act (:decision r)))
     (is (= :hold (:selected r)))
     (is (< 2.7 (:margin r) 2.9))
+    (is (= 3 (:n-offered r)))
     (is (= 3 (:n-scored r)))))
 
 (deftest a-near-tie-defers-rather-than-guessing
-  (testing "a controller may decline; acting on a coin flip is the failure mode"
-    (let [r (decide/decide {:scorer (scorer-returning {:hold -1.00 :scale -1.02 :rollback -4.0})
-                            :candidates actions
-                            :policy {:min-margin 0.5}
-                            :model-id "test"})]
+  (let [r (run (scorer-returning {:hold -1.00 :scale -1.02 :rollback -4.0}))]
+    (is (= :defer (:decision r)))
+    (is (= :reason/below-margin (:reason r)))
+    (is (nil? (:selected r)))
+    (testing "and records what it would have picked, so the deferral is reviewable"
+      (is (= :hold (:would-have-selected r))))))
+
+;; ------------------------------------------------- #6 scorer fails closed
+
+(deftest a-partial-score-map-defers-instead-of-collapsing-the-domain
+  (testing "THE fail-open case: 3 authorized, 1 scored, used to become :act"
+    (let [r (run (scorer-returning {:hold -1.0}))]
       (is (= :defer (:decision r)))
-      (is (= :reason/below-margin (:reason r)))
+      (is (= :reason/incomplete-scores (:reason r)))
       (is (nil? (:selected r)))
-      (testing "and it still records what it would have picked, so the deferral is reviewable"
-        (is (= :hold (:would-have-selected r)))))))
+      (testing "and the record names which candidates went unscored"
+        (is (= #{:scale :rollback} (set (get-in r [:score-check :missing]))))))))
 
-(deftest unequal-length-candidates-are-not-compared
-  (testing "carried from the jolt-llama exactness measurement, not assumed"
-    (let [mixed [{:id :hold :tokens [1]} {:id :roll-back-now :tokens [1 2 3 4]}]
-          r (decide/decide {:scorer (scorer-returning {:hold -1.0 :roll-back-now -3.0})
-                            :candidates mixed
-                            :policy {:min-margin 0.1}
-                            :model-id "test"})]
+(deftest every-invalid-score-shape-is-refused
+  (doseq [[label bad expected]
+          [["all missing"   {}                                        :reason/no-scores]
+           ["nil score"     {:hold -1.0 :scale nil :rollback -3.0}    :reason/incomplete-scores]
+           ["string score"  {:hold -1.0 :scale "x" :rollback -3.0}    :reason/invalid-scores]
+           ["NaN"           {:hold -1.0 :scale ##NaN :rollback -3.0}  :reason/invalid-scores]
+           ["+Inf"          {:hold -1.0 :scale ##Inf :rollback -3.0}  :reason/invalid-scores]
+           ["-Inf"          {:hold -1.0 :scale ##-Inf :rollback -3.0} :reason/invalid-scores]]]
+    (testing label
+      (let [r (run (scorer-returning bad))]
+        (is (= :defer (:decision r)) label)
+        (is (= expected (:reason r)) label)
+        (is (nil? (:selected r)) label)))))
+
+(deftest a-nil-score-is-missing-not-invalid
+  (testing "nil means the scorer did not answer; a string means it answered badly.
+            Distinct because a training pipeline should tell them apart"
+    (let [r (run (scorer-returning {:hold -1.0 :scale nil :rollback -3.0}))]
+      (is (= :reason/incomplete-scores (:reason r)))
+      (is (= [:scale] (get-in r [:score-check :missing]))))))
+
+(deftest an-unknown-extra-id-fails-closed-and-never-enters-the-domain
+  (let [r (run (scorer-returning (assoc good-scores :DELETE-EVERYTHING 0.0)))]
+    (testing "fail closed: a scorer bound to a stale domain is not trustworthy
+              about the current one"
       (is (= :defer (:decision r)))
-      (is (= :reason/not-comparable (:reason r)))))
-  (testing "and equal-length candidates are"
-    (is (decide/comparable? actions))
-    (is (not (decide/comparable? [{:id :a :tokens [1]} {:id :b :tokens [1 2]}])))))
+      (is (= :reason/invalid-scores (:reason r)))
+      (is (= [:DELETE-EVERYTHING] (get-in r [:score-check :extra]))))
+    (testing "and the extra id is nowhere in the ranked domain"
+      (is (not (contains? (set (map :id (:domain r))) :DELETE-EVERYTHING)))
+      (is (= 3 (count (:domain r)))))))
 
-(deftest a-failing-scorer-defers-instead-of-killing-the-run
-  (let [r (decide/decide {:scorer (fn [_ _] (throw (ex-info "engine died" {})))
-                          :candidates actions
-                          :policy {:min-margin 0.5}
-                          :model-id "test"})]
+(deftest a-scorer-exception-never-escapes-decide
+  (let [r (run (fn [_ _] (throw (ex-info "engine died" {}))))]
     (is (= :defer (:decision r)))
     (is (= :reason/scorer-failed (:reason r)))))
 
-(deftest an-illegal-domain-never-reaches-the-scorer
-  (testing "refusing early is what keeps a malformed domain out of the model"
-    (let [called (atom false)
-          r (decide/decide {:scorer (fn [_ _] (reset! called true) {:scores {}})
-                            :candidates []
-                            :policy {}
-                            :model-id "test"})]
-      (is (false? @called))
-      (is (= :defer (:decision r)))
-      (is (= :domain/empty (:domain-check r))))))
+(deftest a-malformed-scorer-result-is-refused
+  (doseq [bad [nil "nope" {:scores nil} {:scores []} 42]]
+    (let [r (run (fn [_ _] bad))]
+      (is (= :defer (:decision r)) (str "for " (pr-str bad)))
+      (is (= :reason/no-scores (:reason r)) (str "for " (pr-str bad))))))
 
-(deftest the-ordering-is-total-and-reproducible
-  (testing "equal scores break by id, so a replay journals the same order"
-    (let [tied [{:id :b :tokens [1]} {:id :a :tokens [1]} {:id :c :tokens [1]}]
-          once (decide/rank tied {:a -1.0 :b -1.0 :c -1.0})
-          twice (decide/rank (reverse tied) {:a -1.0 :b -1.0 :c -1.0})]
-      (is (= [:a :b :c] (mapv :id once)))
-      (is (= (mapv :id once) (mapv :id twice))))))
+;; ------------------------------------------- #7 legality fails closed
+
+(deftest a-domain-with-no-legality-source-is-refused
+  (testing "the fail-open default this replaces: no rule used to mean all legal"
+    (let [naked {:domain/candidates vocabulary}
+          r (run (scorer-returning good-scores) naked)]
+      (is (= :defer (:decision r)))
+      (is (= :reason/unauthorized-domain (:reason r)))
+      (is (= :domain/no-legality-source (:domain-check r))))))
+
+(deftest an-illegal-action-never-reaches-the-scorer
+  (let [seen (atom nil)
+        legality (decide/legality :test-policy "v3" #(not= :rollback (:id %)))
+        d (domain-of legality)
+        r (decide/decide {:scorer (fn [_ cands] (reset! seen (mapv :id cands))
+                                    {:scores {:hold -0.2 :scale -3.0}})
+                          :domain d :policy policy})]
+    (is (= [:hold :scale] @seen) "the scorer never saw the rejected action")
+    (is (= :act (:decision r)))
+    (testing "and the rejection is recorded, so an auditor can see why it was absent"
+      (is (= [:rollback] (:rejected r))))))
+
+(deftest an-empty-authorized-domain-is-refused
+  (let [d (domain-of (decide/legality :none "v1" (constantly false)))
+        r (run (scorer-returning {}) d)]
+    (is (= :defer (:decision r)))
+    (is (= :domain/empty (:domain-check r)))))
+
+(deftest duplicate-semantic-ids-are-refused
+  (let [d (decide/authorize [{:id :hold :tokens [1]} {:id :hold :tokens [2]}]
+                            {:legality (decide/all-legal) :id :d :revision "v1"})
+        r (run (scorer-returning {:hold -1.0}) d)]
+    (is (= :defer (:decision r)))
+    (is (= :domain/duplicate-id (:domain-check r)))))
+
+(deftest all-legal-is-explicit-and-recorded
+  (testing "a caller that MEANS everything is legal can say so, and it shows"
+    (let [d (domain-of)]
+      (is (= :all-legal (:domain/legality-source d)))
+      (is (= 3 (count (:domain/candidates d)))))))
+
+;; ---------------------------------------------- #5 audit keeps the domain
+
+(deftest the-full-offered-domain-survives-a-scoring-failure
+  (testing "an unscored candidate must not disappear because rank filtered it"
+    (let [r (run (scorer-returning {:hold -1.0}))]
+      (is (= 3 (count (:domain r))) "all three offered candidates are recorded")
+      (is (= #{:hold :scale :rollback} (set (map :id (:domain r)))))
+      (let [by-id (into {} (map (juxt :id identity) (:domain r)))]
+        (is (= :missing (:scoring-status (by-id :scale))))
+        (is (= :missing (:scoring-status (by-id :rollback))))
+        (is (nil? (:score (by-id :scale))))
+        (testing "even the one that WAS scored is not presented as a decision"
+          (is (= 3 (:n-offered r)))
+          (is (zero? (:n-scored r))))))))
+
+(deftest an-invalid-score-is-distinguished-from-a-missing-one-per-candidate
+  (let [r (run (scorer-returning {:hold -1.0 :scale ##NaN}))
+        by-id (into {} (map (juxt :id identity) (:domain r)))]
+    (is (= :invalid (:scoring-status (by-id :scale))))
+    (is (= :missing (:scoring-status (by-id :rollback))))))
+
+(deftest a-successful-decision-records-every-candidate-with-its-rank
+  (let [r (run (scorer-returning good-scores))]
+    (is (= [0 1 2] (mapv :rank (:domain r))))
+    (is (every? #(= :ok (:scoring-status %)) (:domain r)))
+    (is (every? :score (:domain r)))))
+
+;; --------------------------------------------------- #9 provenance
+
+(deftest provenance-is-recorded-and-allowlisted
+  (let [r (decide/decide
+           {:scorer (fn [_ _] {:scores good-scores
+                               :meta {:convention :teacher-forced
+                                      :homogeneous? true
+                                      ;; must NOT survive: not on the scorer allowlist
+                                      :authority :i-say-so
+                                      ;; must NOT survive: not scalar
+                                      :latency-ms {:nested :thing}}})
+            :domain (domain-of)
+            :policy policy
+            :prov-ctx {:run-id "r1" :branch-id "B1" :turn 7
+                       :domain-id :test-domain :domain-revision "v1"
+                       :policy-revision "gates@v9" :min-margin 0.5
+                       :model-sha256 "abc123" :state-coord "state:abc"
+                       ;; must NOT survive: not on the provenance allowlist
+                       :secret "hunter2"}})
+        p (:provenance r)]
+    (testing "allowlisted coordinates are kept"
+      (is (= "r1" (:run-id p)))
+      (is (= 7 (:turn p)))
+      (is (= "gates@v9" (:policy-revision p)))
+      (is (= "abc123" (:model-sha256 p)))
+      (is (= :teacher-forced (:convention p)))
+      (is (true? (:homogeneous? p))))
+    (testing "a scorer cannot assert authority it does not have"
+      (is (nil? (:authority p))))
+    (testing "unknown keys and non-scalar values are dropped"
+      (is (nil? (:secret p)))
+      (is (nil? (:latency-ms p))))))
+
+(deftest provenance-survives-every-failure-path
+  (testing "a deferral is exactly when you most need to know which policy ran"
+    (doseq [scorer [(scorer-returning {:hold -1.0})
+                    (fn [_ _] (throw (ex-info "boom" {})))
+                    (fn [_ _] nil)]]
+      (let [r (decide/decide {:scorer scorer :domain (domain-of) :policy policy
+                              :prov-ctx {:run-id "r1" :policy-revision "gates@v9"}})]
+        (is (= "r1" (get-in r [:provenance :run-id])))
+        (is (= "gates@v9" (get-in r [:provenance :policy-revision])))))))
+
+;; ------------------------------------------------------- journal safety
 
 (deftest the-journal-record-carries-no-machine-state
-  (testing "pointers, blobs, logits, tokens and prompts must never be journalled"
-    (let [r (decide/decide {:scorer (scorer-returning {:hold -0.2 :scale -3.0 :rollback -4.0})
-                            :candidates (mapv #(assoc % :state ::blob :ptr 140234) actions)
-                            :context "a long prompt that must not be recorded"
-                            :policy {:min-margin 0.5}
-                            :model-id "qwen35 0.8B Q4_0"})]
-      (testing "even though the CANDIDATES carried them in"
-        (is (nil? (decide/leaks? r))))
-      (is (not (contains? (set (mapcat keys (:domain r))) :state)))
-      (is (not (contains? (set (mapcat keys (:domain r))) :ptr)))
-      (testing "and the model is identified by a descriptive string, not a handle"
-        (is (string? (:model-id r))))))
-  (testing "leaks? actually detects a leak, so the test above is not vacuous"
+  (let [r (decide/decide
+           {:scorer (fn [_ _] {:scores good-scores
+                               :meta {:logits [1 2 3] :session ::handle}})
+            :domain (decide/authorize
+                     (mapv #(assoc % :state ::blob :ptr 140234) vocabulary)
+                     {:legality (decide/all-legal) :id :d :revision "v1"})
+            :policy policy
+            :context "a long prompt that must not be recorded"
+            :prov-ctx {:prompt "nor this"}})]
+    (testing "even though candidates, scorer meta and context all carried them in"
+      (is (nil? (decide/leaks? r))))
+    (is (not (contains? (set (mapcat keys (:domain r))) :state)))
+    (is (not (contains? (set (mapcat keys (:domain r))) :tokens))))
+  (testing "leaks? actually detects a leak, so the assertion above is not vacuous"
     (is (= #{:state} (decide/leaks? {:domain [{:id :a :state ::blob}]})))
     (is (= #{:logits} (decide/leaks? {:a {:b [{:logits [1 2 3]}]}})))))
 
-(deftest the-record-is-enough-to-audit-without-rerunning
-  (let [r (decide/decide {:scorer (scorer-returning {:hold -0.2 :scale -3.0 :rollback -4.0})
-                          :candidates actions
-                          :policy {:min-margin 0.5}
-                          :model-id "qwen35 0.8B Q4_0"})]
-    (testing "every offered option appears with its score, not only the winner"
-      (is (= 3 (count (:domain r))))
-      (is (every? :score (:domain r)))
-      (is (= [0 1 2] (mapv :rank (:domain r)))))
-    (testing "and the numbers a reader would check are all present"
-      (is (= 3 (:n-offered r)))
-      (is (some? (:margin r)))
-      (is (some? (:reason r))))))
+;; ------------------------------------------------------- #8 encodings
 
+(deftest action-encodings-are-verified-not-truncated
+  (let [toks {" HOLD" [11] " SCALE" [12] " ROLLBACK" [13 14] " PAGE" [] " STOP" [11]}
+        tk (fn [t] (get toks t))]
+    (testing "a genuinely single-token vocabulary passes"
+      (let [r (decide/verify-encodings [{:id :hold :text " HOLD"}
+                                        {:id :scale :text " SCALE"}] tk)]
+        (is (:ok? r))
+        (is (= [1 1] (mapv :n-tokens (:encodings r))))))
+    (testing "a multi-token encoding is a PROBLEM, not something to truncate"
+      (let [r (decide/verify-encodings [{:id :rollback :text " ROLLBACK"}] tk)]
+        (is (not (:ok? r)))
+        (is (= :encoding/multi-token (:problem (first (:problems r)))))
+        (is (= 2 (:n-tokens (first (:problems r)))))))
+    (testing "an empty encoding is refused"
+      (let [r (decide/verify-encodings [{:id :page :text " PAGE"}] tk)]
+        (is (not (:ok? r)))
+        (is (= :encoding/empty (:problem (first (:problems r)))))))
+    (testing "two actions sharing a token id are refused: they are not distinct"
+      (let [r (decide/verify-encodings [{:id :hold :text " HOLD"}
+                                        {:id :stop :text " STOP"}] tk)]
+        (is (not (:ok? r)))
+        (is (= :encoding/aliased (:problem (first (:problems r)))))
+        (is (= #{:hold :stop} (set (:ids (first (:problems r))))))))
+    (testing "a tokenizer that throws is reported, not propagated"
+      (let [r (decide/verify-encodings [{:id :x :text " X"}]
+                                       (fn [_] (throw (ex-info "no tokenizer" {}))))]
+        (is (not (:ok? r)))
+        (is (= :encoding/tokenize-failed (:problem (first (:problems r)))))))))
+
+(deftest comparability-requires-real-equal-length-encodings
+  (is (decide/comparable? [{:id :a :tokens [1]} {:id :b :tokens [2]}]))
+  (is (not (decide/comparable? [{:id :a :tokens [1]} {:id :b :tokens [1 2]}])))
+  (testing "a zero-token candidate is not comparable, it is unencoded"
+    (is (not (decide/comparable? [{:id :a :tokens []} {:id :b :tokens []}]))))
+  (testing "and neither is one with no encoding at all"
+    (is (not (decide/comparable? [{:id :a} {:id :b}])))))
+
+(deftest unequal-length-candidates-defer
+  (let [d (decide/authorize [{:id :hold :tokens [1]}
+                             {:id :roll-back-now :tokens [1 2 3 4]}]
+                            {:legality (decide/all-legal) :id :d :revision "v1"})
+        r (decide/decide {:scorer (scorer-returning {:hold -1.0 :roll-back-now -3.0})
+                          :domain d :policy {:min-margin 0.1}})]
+    (is (= :defer (:decision r)))
+    (is (= :reason/not-comparable (:reason r)))))
+
+;; --------------------------------------------------- ordering stability
+
+(deftest the-ordering-is-total-and-reproducible
+  (let [tied [{:id :b :tokens [1]} {:id :a :tokens [1]} {:id :c :tokens [1]}]
+        s {:a -1.0 :b -1.0 :c -1.0}]
+    (is (= [:a :b :c] (mapv :id (decide/rank tied s))))
+    (is (= (mapv :id (decide/rank tied s))
+           (mapv :id (decide/rank (reverse tied) s))))))
 
 ;; ------------------------------------------------- the canary manifest
 
@@ -151,20 +326,129 @@
   (is (some? (manifests/compile-definition @manifest))))
 
 (deftest every-invariant-the-manifest-claims-is-actually-enforced
-  (testing "a rule documented as enforced that nothing checks is the dangerous
-            direction, so assert the derived constraint set is non-empty and
-            that nothing is silently unenforced"
-    (is (= 2 (count (manifests/enforced-constraints @manifest))))
-    (is (empty? (manifests/unenforced-invariants @manifest)))))
+  (is (= 2 (count (manifests/enforced-constraints @manifest))))
+  (is (empty? (manifests/unenforced-invariants @manifest))))
 
 (deftest journalling-before-acting-is-a-compile-error-not-a-convention
   (cells/load-cells!)
   (testing "reordering the workflow so it acts before recording is REFUSED"
-    (let [bad (assoc @manifest :edges {:start :apply :apply :score :score :end})]
-      (is (thrown? Throwable (manifests/compile-definition bad)))))
-  (testing "and scoring a domain that was never established as legal is too"
-    (let [bad (assoc @manifest
-                     :cells {:score :decide/score :apply :decide/apply
-                             :start :decide/domain}
-                     :edges {:score :apply :apply :start :start :end})]
-      (is (thrown? Throwable (manifests/compile-definition bad))))))
+    (is (thrown? Throwable
+                 (manifests/compile-definition
+                  (assoc @manifest :edges {:start :apply :apply :score :score :end})))))
+  (testing "and scoring a domain that was never authorized is too"
+    (is (thrown? Throwable
+                 (manifests/compile-definition
+                  (assoc @manifest :edges {:score :apply :apply :start :start :end}))))))
+
+
+;; ------------------------------------------- the cells, still with no model
+
+(defn- handler [id] (cells/load-cells!) (:handler (cell/get-cell! id)))
+
+(defmacro ^:private with-run [[conn-sym run-sym] & body]
+  `(let [~conn-sym (db/open! ":memory:")]
+     (try
+       (let [~run-sym (runs/start-run! ~conn-sym
+                                       {:problem "decide cell test"
+                                        :provider "literal" :model "none"
+                                        :max-turns 1 :beam-width 1})]
+         ~@body)
+       (finally (db/close ~conn-sym)))))
+
+(deftest the-domain-cell-refuses-to-authorize-without-a-legality-source
+  (testing "the fail-open default this replaces"
+    (with-run [conn run-id]
+      (let [data ((handler :decide/domain) {} {:decide/vocabulary vocabulary})
+            out ((handler :decide/score) {:conn conn :run-id run-id}
+                 (assoc data :decide/scorer (scorer-returning good-scores)))]
+        (is (= :defer (:decide/decision out)))
+        (is (= :reason/unauthorized-domain (:reason (:decide/record out))))
+        (is (= :domain/no-legality-source (:domain-check (:decide/record out))))))))
+
+(deftest the-domain-cell-authorizes-when-legality-is-explicit
+  (with-run [conn run-id]
+    (let [data ((handler :decide/domain) {} {:decide/vocabulary vocabulary
+                                             :decide/all-legal? true})
+          out ((handler :decide/score) {:conn conn :run-id run-id}
+               (assoc data :decide/scorer (scorer-returning good-scores)
+                      :decide/scorer-id "literal@v0"))]
+      (is (= :act (:decide/decision out)))
+      (is (= :hold (:selected (:decide/record out)))))))
+
+(deftest a-legality-predicate-in-the-cell-keeps-an-action-from-the-scorer
+  (with-run [conn run-id]
+    (let [seen (atom nil)
+          data ((handler :decide/domain) {}
+                {:decide/vocabulary vocabulary
+                 :decide/legal? #(not= :rollback (:id %))
+                 :decide/legality-source :test-policy
+                 :decide/legality-revision "v3"})
+          out ((handler :decide/score) {:conn conn :run-id run-id}
+               (assoc data :decide/scorer
+                      (fn [_ cands] (reset! seen (mapv :id cands))
+                        {:scores {:hold -0.2 :scale -3.0}})))]
+      (is (= [:hold :scale] @seen))
+      (is (= [:rollback] (:rejected (:decide/record out))))
+      (testing "and the legality coordinate reaches the record"
+        (is (= :test-policy (get-in out [:decide/record :provenance :legality-source])))
+        (is (= "v3" (get-in out [:decide/record :provenance :legality-revision])))))))
+
+(deftest a-decision-round-trips-through-real-sqlite-with-its-provenance
+  (testing "the journal is the causal truth, so prove the row survives"
+    (with-run [conn run-id]
+      (let [data ((handler :decide/domain) {} {:decide/vocabulary vocabulary
+                                               :decide/all-legal? true})
+            _ ((handler :decide/score) {:conn conn :run-id run-id}
+               (assoc data :decide/scorer (scorer-returning good-scores)
+                      :decide/scorer-id "literal@v0"
+                      :decide/model-coord {:model-sha256 "abc123"
+                                           :model-id "test-model"}))
+            back (journal/last-note conn run-id :decide)
+            g (fn [k] (or (get back k) (get back (name k))))]
+        (is (some? back))
+        (is (= "act" (g :decision)))
+        (is (= "hold" (g :selected)))
+        (is (= 3 (count (g :domain))))
+        (testing "provenance survives the JSON round trip"
+          (let [p (g :provenance)
+                gp (fn [k] (or (get p k) (get p (name k))))]
+            (is (= run-id (gp :run-id)))
+            (is (= "abc123" (gp :model-sha256)))
+            (is (= "literal@v0" (gp :scorer-id)))
+            (is (some? (gp :policy-revision)))))
+        (testing "and nothing forbidden came with it"
+          (is (nil? (decide/leaks? back))))))))
+
+(deftest a-scorer-is-never-journalled
+  (with-run [conn run-id]
+    (let [data ((handler :decide/domain) {} {:decide/vocabulary vocabulary
+                                             :decide/all-legal? true})
+          _ ((handler :decide/score) {:conn conn :run-id run-id}
+             (assoc data :decide/scorer (scorer-returning good-scores)
+                    :decide/context "a prompt that must not be stored"))
+          back (journal/last-note conn run-id :decide)]
+      (is (nil? (decide/leaks? back)))
+      (is (not (contains? (set (map name (keys back))) "scorer")))
+      (is (not (contains? (set (map name (keys back))) "context"))))))
+
+(deftest qualified-keywords-survive-the-journal
+  (testing "data.json drops a keyword's namespace; durable puts it back"
+    (is (= {:reason "reason/below-margin" :domain-check "domain/empty"}
+           (decide/durable {:reason :reason/below-margin
+                            :domain-check :domain/empty})))
+    (is (= {:a [{:b "x/y"}]} (decide/durable {:a [{:b :x/y}]})))
+    (testing "and an unqualified keyword is left alone"
+      (is (= {:a :ok} (decide/durable {:a :ok}))))))
+
+(deftest an-incomplete-score-map-is-journalled-as-a-deferral-with-the-full-domain
+  (with-run [conn run-id]
+    (let [data ((handler :decide/domain) {} {:decide/vocabulary vocabulary
+                                             :decide/all-legal? true})
+          _ ((handler :decide/score) {:conn conn :run-id run-id}
+             (assoc data :decide/scorer (scorer-returning {:hold -1.0})))
+          back (journal/last-note conn run-id :decide)
+          g (fn [k] (or (get back k) (get back (name k))))]
+      (is (= "defer" (g :decision)))
+      (is (= "reason/incomplete-scores" (g :reason)))
+      (testing "all three offered candidates are still in the durable record"
+        (is (= 3 (count (g :domain))))))))
