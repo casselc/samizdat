@@ -97,7 +97,11 @@
                     :extra-deps
                     {casselc/jolt-llama
                      {:git/url "https://github.com/casselc/jolt-llama.git"
-                      :git/sha "6ec88472bc63371ac9b70729ffbd58e35f35ce8d"}}}
+                      ;; the PROMOTED coordinate: jolt-llama v0 safety
+                      ;; hardening, gate passed. The ORIGINAL canary evidence
+                      ;; was produced against 6ec88472 and is not rewritten;
+                      ;; docs/canary/EMBEDDED-DECISION.md records both.
+                      :git/sha "c668dbdd8443af4004ab6fea281a18e9ea954621"}}}
 
            :test {:extra-paths ["test" "gui"]
                   :main-opts ["-m" "samizdat.test-runner"]}

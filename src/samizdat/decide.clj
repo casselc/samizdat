@@ -17,99 +17,220 @@
 ;; SPDX-License-Identifier: GPL-3.0-or-later
 
 (ns samizdat.decide
-  "Scoring a CLOSED decision domain, as mechanism.
+  "Scoring an AUTHORIZED, CLOSED decision domain, as mechanism.
 
-  The shape this exists to support:
+      trusted state -> authorized DecisionDomain -> scoring
+                    -> trusted selection -> journal
 
-      trusted state -> finite legal domain -> scoring -> trusted selection
-                                                               -> journal
+  A model ranks options trusted code authorized. It never names an option,
+  never widens the set, and never emits text that is acted on.
 
-  A model ranks options that trusted code wrote down. It never names an option,
-  never widens the set, and never emits text that is acted on. If the scorer
-  returns nonsense, the worst it can do is misorder a list the caller already
-  decided was entirely legal — which is the reason to prefer this shape over
-  generation wherever a decision is genuinely closed.
+  THREE THINGS THIS NAMESPACE FAILS CLOSED ON, each learned from review:
 
-  MECHANISM ONLY, per AGENTS.md. Nothing here decides WHEN to score, WHAT the
-  domain is, or what the thresholds are. The domain arrives as an argument, the
-  thresholds arrive as an argument, and the decision to call is the cell's.
+  1. A DOMAIN IS NOT A VOCABULARY. `decide` takes a DecisionDomain that
+     something trusted already authorized against the current state. There is
+     no path from a bare list of actions to a decision, because a default of
+     `(constantly true)` turns \"nobody supplied a rule\" into \"everything is
+     permitted\" -- silently, and in the one direction that matters.
 
-  This is deliberately NOT a samizdat.llm.adapter/Adapter. That protocol is
-  shaped for generation over HTTP — chat-url, auth-headers, chat-body,
-  parse-chat, prefill — and carries the retry, timeout and think-block
-  discipline that generation needs. Scoring a closed domain asks a different
-  question and needs none of it. Making it an Adapter would mean inheriting a
-  machine built for a problem this does not have.
+  2. EVIDENCE MUST BE COMPLETE. Every authorized candidate needs exactly one
+     finite score. A scorer that answers for one option out of five used to
+     collapse the domain to that option and return a confident :act; now it
+     defers with :reason/incomplete-scores. Partial evidence is not weak
+     evidence, it is absent evidence about the options that went unscored.
+
+  3. THE AUDIT KEEPS WHAT WAS OFFERED, not what survived. An unscored candidate
+     stays in the record with :scoring-status, because the question an auditor
+     asks is \"what did trusted code permit, what evidence arrived for each,
+     and why did policy act or defer\" -- not \"what came back from rank\".
+
+  MECHANISM ONLY, per AGENTS.md. Nothing here decides WHEN to score, WHICH
+  actions exist, what is legal, or what the thresholds are. All four arrive as
+  arguments; the vocabulary and the legality rules live in resources/.
+
+  Deliberately NOT a samizdat.llm.adapter/Adapter. That protocol is chat-url,
+  auth-headers, chat-body, parse-chat, prefill -- generation over HTTP, carrying
+  the retry and timeout discipline generation needs. Ranking a closed set asks a
+  different question and needs none of it.
 
   THE SCORER SEAM is a plain function, injected:
 
-      (fn [context candidates] -> {:scores {id logprob} :meta {...}})
+      (fn [context candidates] -> {:scores {id number} :meta {...}})
 
   A function rather than a protocol because there is one method. Injected
-  rather than required so that nothing here loads a native library: samizdat
-  must not acquire a hard runtime dependency on an inference engine to run its
-  own test suite, and the pure functions below are the majority of the code.")
+  rather than required so nothing here loads a native library: samizdat must
+  not need an inference engine to run its own test suite, and every branch
+  below is reachable with a scorer that returns a literal map.")
 
-;; ---------------------------------------------------------------- domain
+;; ------------------------------------------------------- decision domain
 
-(defn legal-domain?
-  "Whether `candidates` is a domain this code is willing to score.
+(defn all-legal
+  "An explicit legality source that permits every action.
 
-  Returns nil when legal, or a keyword naming the first violation. A keyword
-  rather than a boolean because the caller journals the refusal, and 'illegal'
-  without a reason is not auditable."
-  [candidates {:keys [max-candidates] :or {max-candidates 32}}]
-  (cond
-    (not (sequential? candidates))          :domain/not-a-sequence
-    (empty? candidates)                     :domain/empty
-    (< max-candidates (count candidates))   :domain/too-large
-    (not (every? map? candidates))          :domain/not-maps
-    (not (every? :id candidates))           :domain/missing-id
-    (not= (count candidates)
-          (count (distinct (map :id candidates)))) :domain/duplicate-id
-    :else nil))
+  A NAMED fixture, not a default. The distinction is the whole point of #7: a
+  caller that means \"this domain is entirely legal in this state\" can say so
+  and the record shows it said so, while a caller that simply forgot supplies
+  nothing and is refused. The two used to be indistinguishable."
+  []
+  {:legality/source :all-legal
+   :legality/revision "fixture"
+   :legality/pred (fn [_candidate] true)})
 
-(defn comparable?
-  "Whether these candidates' scores may be compared against each other.
+(defn legality
+  "A trusted legality source: a predicate plus the provenance to audit it.
 
-  Carried over from the jolt-llama exactness work, where it was measured rather
-  than assumed. Scoring a candidate reads the first token's log-probability from
-  the base distribution and reaches any later tokens by single-token decodes.
-  On a hybrid model those are different kernel paths, so candidates of DIFFERENT
-  token lengths have scores built from different mixtures of them. The head of
-  the distribution is stable, but a near-tie between a 1-token and a 4-token
-  candidate is not evidence.
+  `source` names the authority (a policy id, a gates key, a rule namespace) and
+  `revision` pins which version of it ran, so a decision can be re-derived later
+  against the rule that actually applied rather than today's."
+  [source revision pred]
+  {:legality/source source
+   :legality/revision revision
+   :legality/pred pred})
 
-  Equal-length candidates — and the single-token case in particular — are
-  exactly comparable. A controller's action vocabulary is naturally that shape,
-  so this is a cheap invariant to hold rather than a real restriction."
-  [candidates]
-  (let [lens (distinct (map (comp count :tokens) candidates))]
-    (and (= 1 (count lens)) (some? (first lens)))))
+(defn authorize
+  "Project a vocabulary through a trusted legality source into a DecisionDomain.
+
+  This is the only way to obtain something `decide` will act on. Returns
+
+    {:domain/id :domain/revision :domain/state-coord :domain/authority
+     :domain/legality-source :domain/legality-revision
+     :domain/candidates [...] :domain/rejected [...]}
+
+  `:domain/rejected` is kept because an action trusted policy REFUSED is part of
+  the decision's evidence: an auditor asking why the model never considered
+  :rollback deserves a better answer than its absence.
+
+  The candidates that survive are the only ones a scorer ever sees, which is
+  what makes \"the model cannot widen authority\" a structural property rather
+  than a convention."
+  [vocabulary {:keys [legality id revision state-coord authority]}]
+  (let [pred (:legality/pred legality)
+        vocab (vec vocabulary)
+        keep? (fn [c] (boolean (pred c)))]
+    {:domain/id                id
+     :domain/revision          revision
+     :domain/state-coord       state-coord
+     :domain/authority         authority
+     :domain/legality-source   (:legality/source legality)
+     :domain/legality-revision (:legality/revision legality)
+     :domain/candidates        (filterv keep? vocab)
+     :domain/rejected          (mapv :id (remove keep? vocab))}))
+
+(defn domain-problem
+  "Why this DecisionDomain may not be scored, or nil.
+
+  A keyword, never a boolean: the refusal is journalled, and \"illegal\" without
+  a cause cannot be audited or learned from."
+  [domain {:keys [max-candidates] :or {max-candidates 32}}]
+  (let [cands (:domain/candidates domain)]
+    (cond
+      (not (map? domain))                      :domain/not-authorized
+      (nil? (:domain/legality-source domain))  :domain/no-legality-source
+      (not (sequential? cands))                :domain/not-authorized
+      (empty? cands)                           :domain/empty
+      (< max-candidates (count cands))         :domain/too-large
+      (not (every? map? cands))                :domain/not-maps
+      (not (every? :id cands))                 :domain/missing-id
+      (not= (count cands)
+            (count (distinct (map :id cands)))) :domain/duplicate-id
+      :else nil)))
+
+;; ---------------------------------------------------------- score contract
+
+(defn- finite-number?
+  "A usable score. Rejects nil, strings, NaN and both infinities.
+
+  NaN needs the self-comparison because every ordinary comparison against it is
+  false, which is exactly how it slips past a range check and then makes a sort
+  order meaningless. Infinities are rejected because they make every margin
+  either infinite or NaN, so the guard that is supposed to force a deferral
+  would instead wave the decision through."
+  [x]
+  (and (number? x)
+       (let [d (double x)]
+         (and (== d d)                                  ; not NaN
+              (not (Double/isInfinite d))))))
+
+(defn score-problem
+  "Why this scorer result may not be used, or nil. Never throws.
+
+  Returns {:reason kw :missing [...] :invalid [...] :extra [...]} so the record
+  names WHICH candidates broke the contract, not merely that something did.
+  Three distinct reasons because they are three distinct failures and an
+  auditor -- or a later training pipeline -- needs to tell them apart:
+
+    :reason/no-scores          nothing usable came back at all
+    :reason/incomplete-scores  a candidate the domain authorized went unscored
+    :reason/invalid-scores     a score was not a finite number, or the scorer
+                               answered for an id the domain never offered
+
+  Extra ids FAIL CLOSED rather than being ignored. A scorer answering about
+  options that were never authorized is not a scorer that can be trusted about
+  the ones that were -- most likely it is bound to a stale domain, which is the
+  case where quietly proceeding is worst."
+  [domain result]
+  (let [ids (map :id (:domain/candidates domain))
+        scores (:scores result)]
+    (cond
+      (not (map? result)) {:reason :reason/no-scores}
+      (not (map? scores)) {:reason :reason/no-scores}
+      (empty? scores)     {:reason :reason/no-scores}
+      :else
+      ;; An explicit nil counts as MISSING, not invalid. The scorer answered
+      ;; with nothing, which is the same evidential state as not answering; a
+      ;; string or a NaN is a corrupt answer. A later training pipeline needs
+      ;; to tell absent evidence from bad evidence, so the two do not merge.
+      (let [answered? (fn [id] (and (contains? scores id)
+                                    (some? (get scores id))))
+            missing (vec (remove answered? ids))
+            invalid (vec (remove #(finite-number? (get scores %))
+                                 (filter answered? ids)))
+            extra   (vec (remove (set ids) (keys scores)))]
+        (cond
+          (seq invalid) {:reason :reason/invalid-scores
+                         :invalid invalid :missing missing :extra extra}
+          (seq extra)   {:reason :reason/invalid-scores
+                         :invalid [] :missing missing :extra extra}
+          (seq missing) {:reason :reason/incomplete-scores
+                         :missing missing :invalid [] :extra []}
+          :else nil)))))
 
 ;; ------------------------------------------------------------- selection
 
 (defn margin
   "Gap between the best and second-best score, or nil for a single candidate.
 
-  This is the number the deferral policy is written against: how much better
-  the winner is, not how good it is. An absolute score says nothing useful,
-  because it moves with prompt length and model."
+  The number the deferral policy is written against: how much better the winner
+  is, not how good it is. An absolute score says nothing useful on its own,
+  because it moves with prompt length and with the model."
   [ranked]
   (when (< 1 (count ranked))
     (- (double (:score (first ranked))) (double (:score (second ranked))))))
 
+(defn comparable?
+  "Whether these candidates' scores may be compared to each other.
+
+  Carried from the jolt-llama exactness measurement, not assumed. A candidate's
+  first token is read from the base distribution and any later tokens by
+  single-token decodes; on a hybrid model those are different kernel paths, so
+  candidates of different token lengths have scores built from different
+  mixtures. Equal-length -- and single-token in particular -- is exactly
+  comparable, and a controller's action vocabulary is naturally that shape."
+  [candidates]
+  (let [lens (distinct (map (comp count :tokens) candidates))]
+    (and (= 1 (count lens)) (some? (first lens)) (pos? (first lens)))))
+
 (defn rank
   "Order candidates by score, best first, attaching :rank.
 
-  Ties are broken by :id so the ordering is total and reproducible. An unstable
-  order would make the journal disagree with itself across replays of the same
-  run, which is worse than an arbitrary but fixed rule."
+  Only ever maps over the candidates the DOMAIN authorized, which is what makes
+  it structurally impossible for a scorer to introduce an option. Ties break by
+  :id so the ordering is total: an unstable order would make the journal
+  disagree with itself across replays of the same run."
   [candidates scores]
   (->> candidates
        (map (fn [c] (assoc c :score (get scores (:id c))
-                              :n-tokens (some-> (:tokens c) count))))
-       (filter :score)
+                           :n-tokens (some-> (:tokens c) count))))
        (sort-by (juxt (comp - double :score) (comp str :id)))
        (map-indexed (fn [i c] (assoc c :rank i)))
        vec))
@@ -117,21 +238,13 @@
 (defn select
   "Trusted selection over scored candidates. THE MODEL DOES NOT DECIDE HERE.
 
-  Returns {:decision :act|:defer :selected id :margin d :reason kw ...}.
+  Deferral is the default when evidence is weak, because this is a controller:
+  doing nothing is a legal outcome and usually a safe one, whereas acting on a
+  coin flip is neither.
 
-  Deferral is the default when the evidence is weak, because this is a
-  controller: doing nothing is a legal outcome and usually a safe one, whereas
-  acting on a coin flip is neither. Three ways to decline:
-
-    :reason/below-margin       the top two are within `min-margin` of each other
-    :reason/not-comparable     unequal token lengths, so the ordering is not
-                               evidence at the precision the margin assumes
-    :reason/no-scores          the scorer returned nothing usable
-
-  `min-margin` comes from gates.edn via the cell. It is not defaulted to
-  anything meaningful here on purpose: a policy number living in mechanism is
-  exactly what AGENTS.md forbids, and a silent default would be that with extra
-  steps."
+  `min-margin` is not defaulted to anything meaningful on purpose. A policy
+  number living in mechanism is what AGENTS.md forbids, and a silent default
+  would be exactly that with extra steps."
   [ranked {:keys [min-margin require-comparable?]
            :or   {require-comparable? true}}]
   (let [m (margin ranked)]
@@ -151,50 +264,83 @@
       {:decision :act :reason :reason/clear-winner :margin m
        :selected (:id (first ranked))})))
 
-;; --------------------------------------------------------------- audit
+;; ------------------------------------------------------------ provenance
+
+(def ^:private provenance-keys
+  "The ONLY keys allowed into a journalled decision's provenance.
+
+  An allowlist rather than a denylist. Provenance is assembled from a scorer's
+  metadata and a caller's context, both of which will grow keys nobody here
+  anticipated, and an append-only journal has no second chance -- so the safe
+  direction is to drop what is not recognised rather than to trust every future
+  contributor to have read this."
+  #{;; where in the run
+    :decision-id :run-id :branch-id :turn :state-coord
+    ;; what was authorized, by whom, under which rule
+    :domain-id :domain-revision :authority :legality-source :legality-revision
+    ;; the policy that decided
+    :policy-revision :min-margin :require-comparable?
+    ;; who scored, with what
+    :scorer-id :convention :homogeneous?
+    ;; the model as an ARTIFACT, not a description
+    :model-id :model-sha256 :model-repo :model-revision :model-file
+    :tokenizer-family
+    ;; the runtime under it
+    :jolt-llama-sha :llama-cpp-sha :native-abi
+    ;; observation, when it happens to be available
+    :latency-ms :inference-epoch :trace-id :span-id})
+
+(def ^:private scorer-meta-keys
+  "Scorer-supplied metadata that may reach the journal.
+
+  Narrower than provenance-keys: a scorer is the least trusted contributor to
+  the record, so it may only speak to how IT scored, never to what was
+  authorized or which policy applied."
+  #{:convention :homogeneous? :latency-ms :inference-epoch :trace-id :span-id
+    :scorer-id :model-id :model-sha256 :model-repo :model-revision :model-file
+    :tokenizer-family :jolt-llama-sha :llama-cpp-sha :native-abi})
+
+(defn- scalar?
+  "Whether a value is small and inert enough to journal.
+
+  Bounds the provenance values as well as their keys. An allowlisted KEY
+  carrying a 50 MB blob or a native handle would defeat the allowlist, so the
+  value has to be a scalar and a string has to be short."
+  [v]
+  (or (nil? v)
+      (boolean? v)
+      (number? v)
+      (keyword? v)
+      (and (string? v) (<= (count v) 200))))
+
+(defn provenance
+  "Assemble a journal-safe provenance map from allowlisted parts.
+
+  Scorer metadata goes through the narrower allowlist first, then the whole
+  thing through the value check, so neither an unexpected key nor an
+  unexpectedly large value survives."
+  [ctx scorer-meta]
+  (let [safe (fn [allow m]
+               (into {} (for [[k v] m
+                              :when (and (contains? allow k) (scalar? v))]
+                          [k v])))]
+    (merge (safe provenance-keys (or ctx {}))
+           (safe scorer-meta-keys (or scorer-meta {})))))
+
+;; ----------------------------------------------------------------- audit
 
 (def ^:private redacted
   "Keys that must never reach the journal, checked rather than remembered.
 
-  A native pointer is meaningless once the process exits and is a liability
-  while it runs; a state blob is tens of megabytes of KV cache per entry; the
-  raw context is the prompt, which is large, often duplicated, and not what a
-  decision record is for. The journal answers 'what was decided, among what, on
-  what evidence' — not 'what did the machine look like'."
-  #{:handle :ptr :pointer :state :blob :logits :tokens :context :prompt :session :model})
-
-(defn auditable
-  "The journal-shaped record of one decision.
-
-  Everything a later reader needs to check the decision without re-running it:
-  the domain that was offered, every score, the margin, what trusted policy did
-  with them, and which model produced them. Nothing else.
-
-  The scrub is a belt-and-braces pass over the candidate maps rather than a
-  select-keys, because candidates are constructed by cells and a future cell
-  will carry something new on them. A leak here is silent and permanent — it is
-  an append-only journal — so the safe direction is to drop unknown large keys
-  rather than to trust every future caller to have read this docstring."
-  [{:keys [ranked outcome domain-check model-id n-offered]}]
-  {:n-offered   n-offered
-   :n-scored    (count ranked)
-   :domain      (mapv (fn [c] (-> c
-                                  (select-keys [:id :rank :score :n-tokens])
-                                  (update :score #(when % (double %)))))
-                      ranked)
-   :domain-check (or domain-check :ok)
-   :decision    (:decision outcome)
-   :selected    (:selected outcome)
-   :would-have-selected (:would-have-selected outcome)
-   :reason      (:reason outcome)
-   :margin      (when (:margin outcome) (double (:margin outcome)))
-   ;; :model-id, not :model -- `redacted` claims :model, and a record that
-   ;; tripped its own leak check would make the check useless. This is a
-   ;; descriptive string ("qwen35 0.8B Q4_0"), never a handle.
-   :model-id    model-id})
+  A native pointer is meaningless once the process exits and a liability while
+  it runs; a state blob is tens of megabytes of KV cache; the raw context is the
+  prompt, which is large, often duplicated, and not what a decision record is
+  for."
+  #{:handle :ptr :pointer :state :blob :logits :tokens :context :prompt
+    :session :model :scorer :conn})
 
 (defn leaks?
-  "Whether a record carries anything the journal must not hold.
+  "Which forbidden keys a record would carry into the journal, or nil.
 
   Exposed so a test can assert the property directly rather than eyeballing a
   sample, and so the cell can refuse to write rather than write and regret it."
@@ -202,42 +348,155 @@
   (let [ks (atom #{})]
     (letfn [(walk [x]
               (cond
-                (map? x) (do (doseq [[k v] x]
-                               (when (contains? redacted (keyword (name k)))
-                                 (swap! ks conj k))
-                               (walk v)))
+                (map? x) (doseq [[k v] x]
+                           (when (and (keyword? k) (contains? redacted (keyword (name k))))
+                             (swap! ks conj k))
+                           (walk v))
                 (sequential? x) (doseq [y x] (walk y))
                 :else nil))]
       (walk record))
     (when (seq @ks) @ks)))
 
-;; ----------------------------------------------------------------- run
+(defn- domain-entry
+  "One candidate as the journal holds it: semantic id, evidence, and the STATUS
+  of that evidence. Never the tokens themselves -- `:n-tokens` is the encoding
+  fact worth keeping, the vector is not."
+  [c status]
+  {:id (:id c)
+   :score (when (and (= :ok status) (:score c)) (double (:score c)))
+   :rank (when (= :ok status) (:rank c))
+   :n-tokens (or (:n-tokens c) (some-> (:tokens c) count))
+   :scoring-status status})
+
+(defn auditable
+  "The journal-shaped record of one decision.
+
+  Carries EVERY candidate trusted code authorized, including those whose score
+  was missing or invalid, plus the ones policy rejected before scoring. That is
+  the difference between answering \"what did trusted code permit and what
+  evidence arrived\" and answering \"what survived rank\"."
+  [{:keys [domain ranked outcome domain-check score-check prov]}]
+  (let [offered (:domain/candidates domain)
+        ranked-by-id (into {} (map (juxt :id identity) ranked))
+        missing (set (:missing score-check))
+        invalid (set (:invalid score-check))
+        entries (mapv (fn [c]
+                        (let [id (:id c)
+                              status (cond (contains? invalid id) :invalid
+                                           (contains? missing id) :missing
+                                           (contains? ranked-by-id id) :ok
+                                           :else :unscored)]
+                          (domain-entry (or (ranked-by-id id) c) status)))
+                      offered)]
+    {:n-offered   (count offered)
+     :n-scored    (count (filter #(= :ok (:scoring-status %)) entries))
+     :domain      entries
+     :rejected    (vec (:domain/rejected domain))
+     :domain-check (or domain-check :ok)
+     :score-check  (when score-check
+                     {:reason (:reason score-check)
+                      :missing (vec (:missing score-check))
+                      :invalid (vec (:invalid score-check))
+                      :extra (vec (:extra score-check))})
+     :decision    (:decision outcome)
+     :selected    (:selected outcome)
+     :would-have-selected (:would-have-selected outcome)
+     :reason      (:reason outcome)
+     :margin      (when (:margin outcome) (double (:margin outcome)))
+     :provenance  prov}))
+
+(defn durable
+  "The record as it should be WRITTEN, with qualified keywords preserved.
+
+  clojure.data.json serialises a namespaced keyword as its NAME alone, so
+  :reason/incomplete-scores lands in SQLite as \"incomplete-scores\" and
+  :domain/no-legality-source as \"no-legality-source\". The qualifier is the
+  half that says which vocabulary the value belongs to, and a replay-grade
+  record should not quietly drop it -- today the bare names happen to be unique
+  across :reason/* and :domain/*, which is luck rather than a property.
+
+  Applied at the durability boundary only. In-process the record keeps real
+  keywords, because that is what callers dispatch on."
+  [record]
+  (letfn [(conv [x]
+            (cond
+              (and (keyword? x) (namespace x)) (str (namespace x) "/" (name x))
+              (map? x) (into {} (map (fn [[k v]] [k (conv v)]) x))
+              (sequential? x) (mapv conv x)
+              :else x))]
+    (conv record)))
+
+;; ------------------------------------------------------------------- run
 
 (defn decide
-  "One closed-domain decision, end to end, given a scorer.
+  "One authorized closed-domain decision, end to end.
 
-  Pure except for calling `scorer`, which is the whole point of the seam: every
-  branch below is reachable in a test with a scorer that returns a literal map,
-  and none of them needs a model.
+  Pure except for calling `scorer`. Never throws for a bad domain, a bad score
+  map or a failing scorer: a controller that dies because its advisor died is
+  worse than one that declines, so every failure becomes a recorded deferral
+  with a reason and the full offered domain intact.
 
-  Never throws for a bad domain or a failing scorer. A controller that dies
-  because its advisor died is worse than one that declines, so a scorer
-  exception becomes a deferral with the message attached."
-  [{:keys [scorer context candidates policy model-id]}]
-  (let [violation (legal-domain? candidates (or policy {}))]
-    (if violation
-      (auditable {:ranked [] :n-offered (count candidates)
-                  :domain-check violation :model-id model-id
-                  :outcome {:decision :defer :reason :reason/illegal-domain}})
-      (let [{:keys [scores error]}
-            (try (scorer context candidates)
-                 (catch Throwable e {:error (or (ex-message e) (str e))}))]
-        (if error
-          (auditable {:ranked [] :n-offered (count candidates)
-                      :model-id model-id
+  Takes a DecisionDomain from `authorize`, not a bare candidate list. There is
+  no arity that accepts a vocabulary."
+  [{:keys [scorer domain policy context prov-ctx]}]
+  (let [policy (or policy {})
+        dp (domain-problem domain policy)]
+    (if dp
+      (auditable {:domain (if (map? domain) domain {}) :ranked []
+                  :domain-check dp
+                  :prov (provenance prov-ctx nil)
+                  :outcome {:decision :defer :reason :reason/unauthorized-domain}})
+      (let [cands (:domain/candidates domain)
+            result (try (scorer context cands)
+                        (catch Throwable e {::threw (or (ex-message e) (str e))}))]
+        (if (::threw result)
+          (auditable {:domain domain :ranked []
+                      :prov (provenance prov-ctx nil)
                       :outcome {:decision :defer :reason :reason/scorer-failed}})
-          (let [ranked (rank candidates scores)
-                outcome (select ranked (or policy {}))]
-            (auditable {:ranked ranked :outcome outcome
-                        :n-offered (count candidates)
-                        :model-id model-id})))))))
+          (let [prov (provenance prov-ctx (:meta result))
+                sp (score-problem domain result)]
+            (if sp
+              ;; Fail closed. The domain is preserved with per-candidate status
+              ;; so the record shows exactly which evidence was missing or bad.
+              (auditable {:domain domain :ranked [] :score-check sp :prov prov
+                          :outcome {:decision :defer :reason (:reason sp)}})
+              (let [ranked (rank cands (:scores result))
+                    outcome (select ranked policy)]
+                (auditable {:domain domain :ranked ranked :prov prov
+                            :outcome outcome})))))))))
+
+;; -------------------------------------------------- action encoding (#8)
+
+(defn verify-encodings
+  "Check that each action's model-facing encoding really is one distinct token.
+
+  `tokenize` is injected -- (fn [text] -> [token-ids]) -- so this is testable
+  with no model, and the canary passes the real tokenizer.
+
+  Tokenizes the WHOLE encoding. The canary previously did (take 1 (tokenize ...)),
+  which guaranteed n_tokens == 1 by truncation and therefore proved nothing
+  about the encoding: it only proved a first token exists. If \" ROLLBACK\" is
+  two tokens the answer is a different encoding, not a shorter read of this one.
+
+  Returns {:ok? bool :encodings [...] :problems [...]}, never throws."
+  [actions tokenize]
+  (let [encoded (mapv (fn [{:keys [id text]}]
+                        (let [toks (try (vec (tokenize text)) (catch Throwable _ nil))]
+                          {:id id :text text :tokens toks
+                           :n-tokens (count (or toks []))}))
+                      actions)
+        by-token (group-by #(first (:tokens %)) (filter #(= 1 (:n-tokens %)) encoded))
+        problems (vec (concat
+                       (for [e encoded :when (nil? (:tokens e))]
+                         {:id (:id e) :problem :encoding/tokenize-failed})
+                       (for [e encoded :when (and (:tokens e) (zero? (:n-tokens e)))]
+                         {:id (:id e) :problem :encoding/empty})
+                       (for [e encoded :when (< 1 (:n-tokens e))]
+                         {:id (:id e) :problem :encoding/multi-token
+                          :n-tokens (:n-tokens e)})
+                       (for [[tok es] by-token :when (< 1 (count es))]
+                         {:problem :encoding/aliased :token tok
+                          :ids (mapv :id es)})))]
+    {:ok? (empty? problems)
+     :encodings encoded
+     :problems problems}))

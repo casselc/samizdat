@@ -3,35 +3,34 @@
 ;;
 ;; CLOSED-DOMAIN DECISIONS as cells.
 ;;
-;; The mechanism is samizdat.decide: legality of a domain, ranking, the trusted
-;; selection rule, and the journal-shaped record. None of it knows when to fire
-;; or what the options are. That is this layer's business, which is why the
-;; action vocabulary below is here and editable at runtime rather than compiled
-;; into src/.
+;; The mechanism is samizdat.decide: domain authorization, the scorer-evidence
+;; contract, ranking, the trusted selection rule, provenance and the journal
+;; record. None of it knows when to fire, which actions exist, or what is legal.
+;; That is this layer's business, which is why the vocabulary and the legality
+;; rule are here and editable at runtime rather than compiled into src/.
 ;;
-;; The shape being proved:
+;;     trusted state -> authorized DecisionDomain -> scoring
+;;                   -> trusted selection -> journal
 ;;
-;;     trusted state -> finite legal domain -> scoring -> trusted selection
-;;                                                             -> journal
+;; A model only ever ORDERS a set trusted code authorized. It cannot name an
+;; action, cannot widen the set, and emits no text that is acted on.
 ;;
-;; A model only ever ORDERS a list that trusted code wrote down. It cannot name
-;; an option, cannot widen the set, and emits no text that is acted on. The
-;; worst a broken or hostile scorer achieves is a bad ordering of options that
-;; were all already legal -- and even then the margin rule declines rather than
-;; acts. That bound is the entire reason to prefer this over generation for a
-;; decision that is genuinely closed.
+;; TWO THINGS THAT ARE DELIBERATELY NOT DEFAULTED.
 ;;
-;; The scorer is OPTIONAL and arrives in the DATA map as :decide/scorer, not on
-;; the ctx. That is deliberate. manifests/ctx-keys is the contract every driver
-;; must satisfy, asserted from both ends -- compile refuses a cell requiring a
-;; key not in the set, and beam-test asserts production actually provides every
-;; key in it. Putting a scorer there would oblige every driver to carry a key
-;; only this capability uses, which is a change to the base for the benefit of
-;; one workflow. A scorer is per-decision input, so it travels as data.
+;; Legality has no default. An earlier version used (constantly true) when no
+;; rule was supplied, which made "nobody wrote a rule" indistinguishable from
+;; "everything is permitted here". A caller that means the latter says so with
+;; :decide/all-legal? and the record shows that it said so.
 ;;
-;; When it is absent every decision defers with :reason/no-scorer. samizdat must
-;; not acquire a hard runtime dependency on an inference engine, a native
-;; library or model weights in order to run.
+;; The scorer is TRANSIENT. It arrives in the data map as :decide/scorer and is
+;; never journalled; what is journalled is :decide/scorer-id, the binding's
+;; identity. A resumable workflow persists the identity and reconstructs the
+;; function -- serialising a closure or a native session into durable run state
+;; is not a thing this can be allowed to grow into.
+;;
+;; The scorer is also OPTIONAL: with none bound, every decision defers with
+;; :reason/scorer-failed. samizdat must not acquire a hard runtime dependency on
+;; an inference engine, a native library or model weights in order to run.
 
 (ns cells.decide
   (:require [mycelium.cell :as cell]
@@ -42,96 +41,157 @@
 (defn- policy
   "The selection policy, read from gates.edn every time rather than captured.
 
-  Read per call so that editing gates.edn through the ordinary mutation path
-  changes the very next decision, which is the standing rule for this layer. A
-  policy captured at load time would need a restart to move, and a threshold
-  that needs a restart is a constant in code wearing a data costume."
+  Read per call so editing gates.edn through the ordinary mutation path changes
+  the very next decision, which is the standing rule for this layer. A policy
+  captured at load time would need a restart to move, and a threshold that needs
+  a restart is a constant in code wearing a data costume."
   []
   {:min-margin          (gates/threshold :decide-min-margin)
    :max-candidates      (gates/threshold :decide-max-candidates)
    :require-comparable? (gates/threshold :decide-require-comparable)})
 
+(defn- policy-revision
+  "A short digest of the policy values that actually applied.
+
+  Recorded so a decision can be compared against the rule that produced it
+  rather than against whatever gates.edn says today. Cheap and stable: the
+  values are three scalars, and a changed threshold changes the digest."
+  [p]
+  (format "%08x"
+          (bit-and (hash [(:min-margin p) (:max-candidates p)
+                          (:require-comparable? p)])
+                   0xffffffff)))
+
+(def ^:private default-vocabulary
+  "The default controller action set.
+
+  Single-token encodings are the preferred v0 controller ABI: they need no
+  candidate evaluation, come from one base distribution, and are exactly
+  comparable under the validated jolt-llama path. The :tokens here are a
+  PLACEHOLDER -- a real binding attaches encodings verified against its own
+  tokenizer with decide/verify-encodings, because a token id means nothing
+  without the model that produced it."
+  [{:id :hold     :text " HOLD"}
+   {:id :scale    :text " SCALE"}
+   {:id :rollback :text " ROLLBACK"}
+   {:id :restart  :text " RESTART"}
+   {:id :page     :text " PAGE"}])
+
 (cell/defcell :decide/domain
-  {:doc "Build the finite legal domain from trusted state.
+  {:doc "Authorize a DecisionDomain from trusted state.
 
-        The vocabulary lives here, in resources, because WHICH actions are
-        legal is behaviour. A run that needs a different vocabulary edits this
-        cell; nothing rebuilds.
+        The vocabulary and the legality rule live here, in resources, because
+        WHICH actions exist and WHICH are permitted is behaviour.
 
-        Legality is decided BEFORE scoring and without consulting any model:
-        the options are filtered by what the run's own state permits. A model
-        that scores an option highly cannot thereby make it legal, because it
-        never sees an option that was not."
+        Legality must be explicit. Supply :decide/legal? (a predicate) with
+        :decide/legality-source and :decide/legality-revision, or say
+        :decide/all-legal? true for a domain genuinely unconstrained in this
+        state. Supplying neither produces an unauthorized domain, which
+        :decide/score refuses -- rather than quietly permitting everything.
+
+        Authorization happens BEFORE and WITHOUT any model. A model that scores
+        an action highly cannot thereby make it legal, because it never sees an
+        action that was not."
    :pure true
    :requires []}
   (fn [_ data]
-    (let [{:keys [decide/vocabulary decide/legal?]} data
-          vocab (or vocabulary
-                    ;; the default controller vocabulary. Single-token ids on
-                    ;; purpose: equal-length candidates are exactly comparable,
-                    ;; and one token per action is the cheapest case there is --
-                    ;; it needs no evaluation at all, only a read of the base
-                    ;; distribution.
-                    [{:id :hold     :text " HOLD"}
-                     {:id :scale    :text " SCALE"}
-                     {:id :rollback :text " ROLLBACK"}
-                     {:id :restart  :text " RESTART"}
-                     {:id :page     :text " PAGE"}])
-          allow (or legal? (constantly true))]
-      (assoc data :decide/candidates (filterv allow vocab)))))
+    (let [{:keys [decide/vocabulary decide/legal? decide/all-legal?
+                  decide/legality-source decide/legality-revision
+                  decide/domain-id decide/domain-revision decide/state-coord
+                  decide/authority]} data
+          vocab (or vocabulary default-vocabulary)
+          legality (cond
+                     legal? (decide/legality (or legality-source :cell/legal-pred)
+                                             (or legality-revision "unversioned")
+                                             legal?)
+                     all-legal? (decide/all-legal)
+                     :else nil)]
+      (assoc data :decide/authorized
+             (if legality
+               (decide/authorize vocab {:legality legality
+                                        :id (or domain-id :decide/default)
+                                        :revision (or domain-revision "v1")
+                                        :state-coord state-coord
+                                        :authority authority})
+               ;; no legality evidence: an explicitly unauthorized domain, which
+               ;; decide refuses with :domain/no-legality-source
+               {:domain/candidates (vec vocab)})))))
 
 (cell/defcell :decide/score
-  {:doc "Score the domain, apply trusted selection, and journal the decision.
+  {:doc "Score the authorized domain, apply trusted selection, journal it.
 
         Never throws and never fails a turn. A controller whose advisor is down
-        must still be able to proceed by declining, so a missing scorer, an
-        illegal domain and an exploding scorer all arrive at the same place: a
-        recorded deferral with a reason.
+        must still be able to proceed by declining, so an unauthorized domain,
+        a missing scorer, incomplete or malformed evidence and an exploding
+        scorer all arrive at the same place: a recorded deferral with a reason
+        specific enough to act on.
 
-        What is journalled is the DECISION, not the machine: the domain that
-        was offered, every score, the margin, what policy did with them, and
-        which model produced them. Never a native handle, a state blob, the
-        logits, the token vectors or the prompt. The record is checked against
-        that rule before it is written rather than after, because an
-        append-only journal has no second chance."
+        What is journalled is the DECISION and its coordinates: every candidate
+        trusted code authorized with the status of its evidence, what policy did
+        and why, and enough provenance to re-derive the situation. Never a
+        native handle, a state blob, the logits, the token vectors, the prompt,
+        or the scorer itself. The record is checked against that rule BEFORE it
+        is written, because an append-only journal has no second chance."
    :effects [:db]
    :requires [:conn :run-id]}
   (fn [{:keys [conn run-id]}
-       {:keys [decide/candidates decide/context decide/scorer decide/model-id]
+       {:keys [decide/authorized decide/context decide/scorer decide/scorer-id
+               decide/model-coord decide/decision-id branch turn]
         :as data}]
-    (let [record (if-not scorer
-                   {:n-offered (count candidates) :n-scored 0
-                    :decision :defer :reason :reason/no-scorer
-                    :selected nil :margin nil :domain []
-                    :domain-check :ok :model-id nil}
-                   (decide/decide {:scorer scorer
-                                   :context context
-                                   :candidates candidates
-                                   :policy (policy)
-                                   :model-id model-id}))
+    (let [p (policy)
+          prov-ctx (merge {:run-id run-id
+                           :branch-id (:id branch)
+                           :turn turn
+                           :decision-id decision-id
+                           :domain-id (:domain/id authorized)
+                           :domain-revision (:domain/revision authorized)
+                           :state-coord (:domain/state-coord authorized)
+                           :authority (:domain/authority authorized)
+                           :legality-source (:domain/legality-source authorized)
+                           :legality-revision (:domain/legality-revision authorized)
+                           :policy-revision (policy-revision p)
+                           :min-margin (:min-margin p)
+                           :require-comparable? (:require-comparable? p)
+                           :scorer-id scorer-id}
+                          ;; model artifact coordinates, resolved once by the
+                          ;; binding and passed through as scalars
+                          (select-keys (or model-coord {})
+                                       [:model-id :model-sha256 :model-repo
+                                        :model-revision :model-file
+                                        :tokenizer-family :jolt-llama-sha
+                                        :llama-cpp-sha :native-abi]))
+          record (decide/decide {:scorer (or scorer (fn [_ _] (throw (ex-info "no scorer bound" {}))))
+                                 :domain authorized
+                                 :context context
+                                 :policy p
+                                 :prov-ctx prov-ctx})
           leaked (decide/leaks? record)
           ;; A record that would leak is replaced, not written and apologised
           ;; for. The offending keys are named so the cell that introduced them
           ;; is findable, which a dropped record would not be.
           safe (if leaked
                  {:decision :defer :reason :reason/record-would-leak
-                  :leaked-keys (vec leaked) :n-offered (count candidates)}
+                  :leaked-keys (vec leaked)
+                  :n-offered (count (:domain/candidates authorized))}
                  record)]
       ;; note! forwards its 4th argument to emit! as OPTIONS, so the payload
       ;; goes under :data. Passing the record bare stores an empty object --
       ;; silently, since emit! does (or data {}).
-      (journal/note! conn run-id :decide {:data safe})
+      ;; `durable` keeps qualified keywords intact: data.json would otherwise
+      ;; write :reason/incomplete-scores as "incomplete-scores" and drop the
+      ;; half of the value that says which vocabulary it came from.
+      (journal/note! conn run-id :decide {:data (decide/durable safe)})
       (assoc data :decide/record safe :decide/decision (:decision safe)))))
 
 (cell/defcell :decide/apply
   {:doc "Carry a decision into the data map, or carry the deferral.
 
-        Separate from :decide/score so that the record is written BEFORE
-        anything acts on it. A manifest that drops this cell still journals the
-        decision; a manifest that drops the journal cannot reach this one. That
-        ordering is what the :must-precede invariant in the manifest enforces,
-        and it is the difference between an auditable decision and an
-        audited-afterwards one."
+        Separate from :decide/score so the record is written BEFORE anything
+        acts on it. A manifest that drops this cell still journals the decision;
+        a manifest that drops the journal cannot reach this one. The manifest's
+        :must-precede invariant enforces that ordering at compile time, which is
+        the difference between an auditable decision and an audited-afterwards
+        one."
    :pure true
    :requires []}
   (fn [_ {:keys [decide/record] :as data}]
