@@ -52,16 +52,35 @@
                (if deploy-age-min (str deploy-age-min) "none"))
        (format "  needs_human_authority: %s\n" (if needs-human? "yes" "no"))))
 
-(defn context-for [state]
-  (str "CONTROLLER POLICY v1\n"
-       "Choose exactly one action: hold, scale, rollback, restart, page.\n"
-       "  hold     - nothing to do\n"
-       "  scale    - add capacity for demand\n"
-       "  rollback - undo a recent deploy that caused a regression\n"
-       "  restart  - cycle an unhealthy process\n"
-       "  page     - escalate to a human\n\n"
-       (render state)
-       "\nACTION:"))
+(def ^:private descriptions
+  {:hold     "nothing to do"
+   :scale    "add capacity for demand"
+   :rollback "undo a recent deploy that caused a regression"
+   :restart  "cycle an unhealthy process"
+   :page     "escalate to a human"})
+
+(defn context-for
+  "The model-facing prompt. `order` is the order the actions are LISTED, which
+  is presentational and must not change the answer -- but measurably does, so
+  it is a parameter rather than a constant. See dev/canary/decide_diagnostics."
+  ([state] (context-for state actions))
+  ([state order]
+   (str "CONTROLLER POLICY v1\n"
+        "Choose exactly one action: "
+        (str/join ", " (map name order)) ".\n"
+        (apply str (for [a order]
+                     (format "  %-8s - %s\n" (name a) (descriptions a))))
+        "\n"
+        (render state)
+        "\nACTION:")))
+
+(defn rotations
+  "The n cyclic rotations of the action list. Counterbalancing over these gives
+  every action the first slot exactly once, which is what removes the
+  first-position advantage rather than merely randomising it."
+  [order]
+  (mapv (fn [i] (vec (concat (drop i order) (take i order))))
+        (range (count order))))
 
 ;; -------------------------------------------------------------- baselines
 
@@ -120,7 +139,8 @@
                                          {:legality (decide/all-legal)
                                           :id :eval/controller :revision "v0"
                                           :state-coord (str "fixture:" (name id))})
-                ctx {:text (context-for state) :expected-for-context expected}
+                ctx {:text (context-for state) :expected-for-context expected
+                     :state-for-context state}
                 rec (decide/decide {:scorer scorer :domain domain :policy policy
                                     :context ctx
                                     :prov-ctx {:scorer-id scorer-name}})]
@@ -246,19 +266,41 @@
                   (println "  ABORTING the model run: unverified encodings would\n"
                            "  measure fragments, not actions. See issue #8.")
                   (let [encodings (into {} (map (juxt :id :tokens) (:encodings enc)))
+                        raw-score
+                        (fn [ctx-text cands]
+                          (let [toks ((resolve 'jolt.llama/tokenize) m ctx-text)]
+                            ((resolve 'jolt.llama/clear!) s)
+                            ((resolve 'jolt.llama/eval!) s toks)
+                            (let [st ((resolve 'jolt.llama/save-state) s)
+                                  scored ((resolve 'jolt.llama/score-candidates)
+                                          s (mapv (fn [c] (assoc c :tokens (get encodings (:id c)))) cands)
+                                          {:state st})]
+                              (into {} (map (juxt :id :logprob-sum) (:candidates scored))))))
                         scorer (fn [ctx cands]
-                                 (let [toks ((resolve 'jolt.llama/tokenize) m (:text ctx))]
-                                   ((resolve 'jolt.llama/clear!) s)
-                                   ((resolve 'jolt.llama/eval!) s toks)
-                                   (let [st ((resolve 'jolt.llama/save-state) s)
-                                         scored ((resolve 'jolt.llama/score-candidates)
-                                                 s (mapv (fn [c] (assoc c :tokens (get encodings (:id c)))) cands)
-                                                 {:state st})]
-                                     {:scores (into {} (map (juxt :id :logprob-sum) (:candidates scored)))
-                                      :meta {:convention (:convention scored)
-                                             :homogeneous? (:homogeneous? scored)
-                                             :scorer-id "jolt-llama/score-candidates@v0"}})))]
-                    (report (evaluate "D Qwen3.5-0.8B base" scorer policy)))))
+                                 {:scores (raw-score (:text ctx) cands)
+                                  :meta {:scorer-id "jolt-llama/score-candidates@v0"}})
+                        ;; COUNTERBALANCED: score under every cyclic rotation of
+                        ;; the listed order and average. The diagnostic showed
+                        ;; that permuting a purely presentational detail changes
+                        ;; the selected action, so a single fixed order measures
+                        ;; position bias and decision quality together. Averaging
+                        ;; over rotations gives each action the first slot once
+                        ;; and cancels that advantage.
+                        cb-scorer (fn [ctx cands]
+                                    (let [st (:state-for-context ctx)
+                                          runs (map #(raw-score (context-for st %) cands)
+                                                    (rotations actions))]
+                                      {:scores (into {} (for [c cands
+                                                              :let [id (:id c)]]
+                                                          [id (/ (reduce + (map #(double (get % id)) runs))
+                                                                 (double (count runs)))]))
+                                       :meta {:scorer-id "jolt-llama/counterbalanced@v0"}}))]
+                    (report (evaluate "D Qwen3.5-0.8B base" scorer policy))
+                    (println "  (single fixed action order -- confounded with position bias)")
+                    (println)
+                    (report (evaluate "D' Qwen3.5 counterbalanced" cb-scorer policy))
+                    (println "  (averaged over all 5 cyclic orders; position advantage cancelled)")
+                    (println))))
               (finally (close! s))))
           (finally (close! m)))))
 
