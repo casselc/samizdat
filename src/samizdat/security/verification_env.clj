@@ -225,6 +225,12 @@
                         :caps :drop-all
                         :limits resource-limits
                         :verifier [verifier-exec-name verifier-fixed-args]
+                        ;; The RULE, not the resolved path: a path would make
+                        ;; this name machine-specific, and the coordinate is
+                        ;; what a second repository checks. The bind set now
+                        ;; depends on where the verifier lives, so the policy
+                        ;; that decides it belongs in the name.
+                        :verifier-bind :exec-file-when-outside-usr
                         :workspace workspace-policy
                         :home-caches home-cache-names
                         :child-env (child-env)}))))
@@ -329,6 +335,35 @@
   (or (abs-bin verifier-exec-name)
       (let [own (str (fs/cwd) "/bin/" verifier-exec-name)]
         (when (fs/executable? own) own))))
+
+(defn- verifier-exec-bind
+  "The [src dest] ro-bind for the verifier EXECUTABLE ITSELF, when it lives
+  outside the already-bound /usr.
+
+  resolve-verifier returns an absolute host path taken from the controller's
+  PATH, and the stage binds /usr, a private /home carrying only the dependency
+  caches, and a checkout root when the verifier is a checkout-launched bin/jolt.
+  A verifier that is none of those -- a standalone binary in a user prefix such
+  as ~/.local/bin, which is what an install into a user-owned prefix produces --
+  resolved to a path that did not exist inside the namespace, and the lane died
+  at exec:
+
+      prlimit: failed to execute /home/chuck/.local/bin/jolt:
+               No such file or directory
+
+  Every assertion in the sandbox suite then failed for the same reason: the
+  child never ran, so the hostile attacks it was supposed to be blocked from
+  performing produced no output to check.
+
+  Binds the FILE, not its directory. A bin directory in a user prefix holds
+  other host binaries, and none of them is the pinned verifier; exposing the
+  one executable the policy already names is not a widening of what the
+  sandbox can reach. Read-only like every other bind here.
+
+  Returns nil for a verifier under /usr, which the usr binds already cover."
+  [exec]
+  (when (and exec (not (str/starts-with? (str exec) "/usr/")))
+    [(str exec) (str exec)]))
 
 (defn- verifier-root
   "The checkout root when the resolved verifier is a checkout-launched jolt
@@ -666,11 +701,26 @@
                                   [[(str "/" dir) (str "/" dir)]]))))
                            merged-usr-dirs)
         cache-binds (home-cache-binds stage)
-        verifier-binds (when-let [vroot (some-> exec verifier-root)]
+        vroot (some-> exec verifier-root)
+        verifier-binds (when vroot
                          (fs/create-dirs (str stage vroot))
-                         [[vroot vroot]])]
+                         [[vroot vroot]])
+        ;; A verifier outside /usr and outside its own checkout root needs its
+        ;; executable bound, or the namespace has no such file to exec.
+        ;;
+        ;; The whole stage is mounted --ro-bind at /, so bwrap cannot create the
+        ;; mountpoint for a FILE bind the way it can for a directory: it reports
+        ;; "Can't create file at ...: Read-only file system". An empty
+        ;; placeholder is staged at the same path for the bind to land on.
+        exec-bind (when-not vroot
+                    (when-let [pair (verifier-exec-bind exec)]
+                      (let [dest (str stage (first pair))]
+                        (fs/create-dirs (str (some-> (fs/path dest) .getParent)))
+                        (spit dest "")
+                        [pair])))]
     (copy-workspace! root (str stage "/workspace"))
-    {:ro-binds (vec (concat usr-binds layout-binds cache-binds verifier-binds))}))
+    {:ro-binds (vec (concat usr-binds layout-binds cache-binds verifier-binds
+                            exec-bind))}))
 
 (defn- sandbox-argv
   "The FULL controller argv for one sandboxed verification: bwrap's pinned
