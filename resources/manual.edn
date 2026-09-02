@@ -223,12 +223,24 @@
  {:group "Deciding among options you already wrote down"
   :entries
   [{:name samizdat.decide/decide
-    :summary "One closed-domain decision end to end: check the domain is legal, score it, apply the trusted selection rule, and return the journal-shaped record. Never throws; a broken scorer becomes a deferral."}
-   {:name samizdat.decide/legal-domain?
-    :summary "Whether a candidate set may be scored at all, answering with WHICH rule it broke rather than true/false — the refusal is journalled."}
+    :summary "One authorized closed-domain decision end to end: score it, apply the trusted selection rule, and return the journal-shaped record. Never throws; a malformed or partial scorer result becomes a recorded deferral."}
+   {:name samizdat.decide/authorize
+    :summary "Project a vocabulary through a trusted legality source into a DecisionDomain. The only way to get something `decide` will act on — there is no arity that takes a bare list of actions."}
+   {:name samizdat.decide/all-legal
+    :summary "A NAMED legality source that permits everything. For a domain genuinely unconstrained in this state; saying nothing at all is refused instead."}
+   {:name samizdat.decide/legality
+    :summary "A trusted legality source: a predicate plus the source and revision to audit it by."}
+   {:name samizdat.decide/domain-problem
+    :summary "Why a DecisionDomain may not be scored, naming WHICH rule it broke rather than answering true/false — the refusal is journalled."}
+   {:name samizdat.decide/score-problem
+    :summary "Why a scorer's result may not be used: which candidates went unscored, which scores were not finite numbers, and which ids the domain never offered. Never throws."}
    {:name samizdat.decide/select
-    :summary "The trusted selection rule. The model does not decide here: a thin margin, an incomparable domain or a missing score all defer rather than guess."}
+    :summary "The trusted selection rule. The model does not decide here: a thin margin, an incomparable domain or absent evidence all defer rather than guess."}
    {:name samizdat.decide/comparable?
-    :summary "Whether these candidates' scores may be compared to each other at all. Equal token lengths only — measured, not assumed. See jolt-llama docs/EXACTNESS.md."}
+    :summary "Whether these candidates' scores may be compared at all. Equal token lengths only — measured, not assumed. See jolt-llama docs/EXACTNESS.md."}
+   {:name samizdat.decide/verify-encodings
+    :summary "Check that each action's model-facing encoding really is one distinct token, by tokenizing the WHOLE encoding. Truncating to one token measures a fragment."}
    {:name samizdat.decide/leaks?
-    :summary "Which forbidden keys a record would carry into the journal — pointers, state blobs, logits, tokens, prompts. Nil means safe to write."}]}]
+    :summary "Which forbidden keys a record would carry into the journal — pointers, state blobs, logits, tokens, prompts, scorers. Nil means safe to write."}
+   {:name samizdat.decide/durable
+    :summary "The record as it should be WRITTEN, with qualified keywords preserved: data.json would otherwise drop a keyword's namespace on the way into SQLite."}]}]
