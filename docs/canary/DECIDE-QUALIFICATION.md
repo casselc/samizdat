@@ -87,6 +87,52 @@ The integrity test caught four rows I had authored as controls or
 counterfactuals which the rule labelled the other way; `:role` is now derived
 from whether the label actually moved.
 
+## Diagnosing the failure, and a confound in my own harness
+
+"Unqualified" is a verdict, not a diagnosis, and the two point at very
+different work: a model that *cannot* do this needs training, a model that is
+not *conditioning* needs a better framing first. `dev/canary/decide_diagnostics.clj`
+separates them.
+
+**A. Null prior.** Scored with the policy but no state:
+
+    prior ranking: [:hold :scale :restart :page :rollback]
+
+**B. Conditioning.** Across the 37 fixtures, only **1/37** rankings match that
+prior and the mean |score − prior| is **1.62**. So the model responds strongly
+to the *presence* of state — it is not simply reciting a prior. But it produces
+only **3 distinct rankings** across 37 different states.
+
+**C. Position bias — the finding.** Permuting only the order the actions are
+*listed* in the prompt, on one identical service state:
+
+    listed [hold scale rollback restart page] -> top = scale
+    listed [scale hold rollback restart page] -> top = scale
+    listed [page restart rollback scale hold] -> top = page
+    listed [rollback page hold scale restart] -> top = rollback
+
+A purely presentational detail changes the selected action.
+
+**That confounded my own qualification numbers.** The harness used one fixed
+order for all 37 fixtures, so 13.5% measured position bias and decision quality
+together. Corrected by counterbalancing over all five cyclic rotations, which
+gives every action the first slot exactly once:
+
+| | fixed order | counterbalanced |
+| --- | --- | --- |
+| chose | `{:scale 36, :hold 1}` | `{:restart 37}` |
+| top-1 | 13.5% | 16.2% |
+| counterfactual | 15.4% | 23.1% |
+
+Removing the bias **changes which constant the model lands on** — and it is
+still a constant, now 37/37. The apparent variation in the original run was
+position-bias noise, not signal.
+
+The verdict therefore survives the correction and is better supported: the
+failure is **not** a prompt artifact that rewording would rescue. The model
+emits one action regardless of the service state, and which action that is
+depends on where it sits in the list.
+
 ## #3 — the runtime guard decision: **deferred, with evidence**
 
 Outcome (B) from the issue's own list: *evidence does not yet justify a runtime
