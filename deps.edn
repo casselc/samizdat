@@ -97,11 +97,16 @@
                     :extra-deps
                     {casselc/jolt-llama
                      {:git/url "https://github.com/casselc/jolt-llama.git"
-                      ;; the PROMOTED coordinate: jolt-llama v0 safety
-                      ;; hardening, gate passed. The ORIGINAL canary evidence
-                      ;; was produced against 6ec88472 and is not rewritten;
-                      ;; docs/canary/EMBEDDED-DECISION.md records both.
-                      :git/sha "c668dbdd8443af4004ab6fea281a18e9ea954621"}}}
+                      ;; The FINAL jolt-llama coordinate: v0 gate/oracle
+                      ;; correction. Single-token candidate scoring is the
+                      ;; promoted surface, which is exactly the ABI this
+                      ;; controller uses; multi-token scoring is experimental
+                      ;; there and is not used here.
+                      ;;
+                      ;; Earlier canary evidence was produced against 6ec88472
+                      ;; and then c668dbdd, and is not rewritten;
+                      ;; docs/canary/EMBEDDED-DECISION.md records the lineage.
+                      :git/sha "64a4823ead83c52c23705c782cb4167f4514b712"}}}
 
            :test {:extra-paths ["test" "gui"]
                   :main-opts ["-m" "samizdat.test-runner"]}
