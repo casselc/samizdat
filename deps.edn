@@ -106,7 +106,7 @@
                       ;; Earlier canary evidence was produced against 6ec88472
                       ;; and then c668dbdd, and is not rewritten;
                       ;; docs/canary/EMBEDDED-DECISION.md records the lineage.
-                      :git/sha "64a4823ead83c52c23705c782cb4167f4514b712"}}}
+                      :git/sha "e0f646fd9e0427513082797b0562e95bbdade6ca"}}}
 
            :test {:extra-paths ["test" "gui"]
                   :main-opts ["-m" "samizdat.test-runner"]}
