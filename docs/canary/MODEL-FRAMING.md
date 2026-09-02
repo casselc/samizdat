@@ -52,10 +52,37 @@ correction below, and treat them only as a like-for-like comparison across rows.
 | 2B | **no-think, counterbal.** | **54.1%** | 46.2% | 58.8% | 27.0% |
 | 27B | **no-think, fixed order** | **56.8%** | 30.8% | 76.5% | 40.5% |
 
-The 27B row has **not** been re-measured under the corrected relational metrics
-and is the only row still reported solely on the old ones. Its top-1 (56.8%,
-fixed order) is comparable; its 30.8% is not comparable with the 2B's relational
-7.7% below. Re-running it is an open thread.
+### Re-measured: every row on the same metrics
+
+The 27B has since been re-run under the relational metrics, so the two scorers
+that clear the top-1 baseline can finally be compared on the column that matters.
+
+| scorer (no-think) | top-1 | ctrl invariance (correct) | c/f change (correct) | wrong+confident |
+| --- | ---: | ---: | ---: | ---: |
+| B majority `:hold` | 37.8% | 100% (41.2%) | 0% (0%) | 62.2% |
+| 2B counterbalanced | 54.1% | 70.6% (52.9%) | 53.8% (**7.7%**) | 27.0% |
+| 27B fixed order | 56.8% | 70.6% (64.7%) | 61.5% (**7.7%**) | 40.5% |
+| 27B counterbalanced | 54.1% | 82.4% (70.6%) | 69.2% (**15.4%**) | 29.7% |
+| C rule | 100% | 100% (100%) | 100% (100%) | 0% |
+
+**Thirty times the parameters buys almost nothing on the column that matters.**
+The 2B and the 27B reach the same top-1 (54.1%) and, counterbalanced, the 27B
+gets 2 of 13 counterfactuals right against the 2B's 1 — 15.4% versus 7.7%, one
+extra row. Against a 0% floor that is a real difference and a tiny one; against
+the rule's 100% it is not a controller.
+
+Both models are far better at *invariance* (70–82%) than at *responsiveness*
+(8–15% correct). They are good at leaving the answer alone and bad at knowing
+when it should move, which is exactly the shape a constant-ish scorer has and
+exactly the wrong shape for a controller.
+
+Counterbalancing helps the 27B on every relational column while costing 2.7
+points of top-1 — more evidence that a fixed action order rewards whichever
+action is listed first rather than measuring a decision.
+
+The `wrong + confident` column is the operational risk: the 27B acts and is
+wrong on 30–40% of fixtures, where the 0.8B was too unconfident to act at all.
+A bigger model is not a safer one here.
 
 **Correction, after fixing the metrics.** The line above originally read "the 2B
 clears the bar", citing 46.2% "counterfactual accuracy" against the majority's
