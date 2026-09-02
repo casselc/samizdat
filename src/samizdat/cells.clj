@@ -105,6 +105,7 @@
   these and wins, and in a source checkout the dir scan reads the very same
   files, so a shipped cell edited in place is picked up from disk."
   ["cells/beam.clj" "cells/board.clj" "cells/compaction.clj" "cells/critic.clj"
+   "cells/decide.clj"
    "cells/decompose.clj"
    "cells/feature.clj" "cells/loop.clj" "cells/probe.clj" "cells/repair.clj"
    "cells/oversight.clj"

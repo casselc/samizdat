@@ -1,0 +1,46 @@
+;; The CLOSED-DOMAIN DECISION canary.
+;;
+;; Deliberately the smallest workflow in this tree. It exists to prove one
+;; shape end to end, not to be a controller:
+;;
+;;     trusted state -> finite legal domain -> scoring -> trusted selection
+;;                                                             -> journal
+;;
+;; Three nodes and no model call in the generation sense. The scorer ORDERS a
+;; list that :decide/domain wrote down; it never names an option and never
+;; returns text that is acted on. A run with no scorer configured still
+;; traverses every node and records a deferral, which is why this manifest is
+;; safe to reach on a machine with no inference engine present.
+;;
+;; Not wired into any turn loop. A capability no manifest reaches is a library
+;; entry (AGENTS.md), and this manifest is what makes the capability reachable
+;; and testable without asserting that any existing workflow should be using it
+;; yet. Wiring it into `loop` or `orchestrator` is a separate decision with its
+;; own evidence, and making it here as a side effect of building the canary is
+;; exactly the kind of scope creep the canary was scoped against.
+{:description "Score a closed set of legal actions and record the decision. Trusted code builds the domain and makes the selection; the model only orders what it is given. Defers rather than guessing when the margin is thin, when the candidates are not comparable, or when no scorer is present."
+
+ :cells {:start  :decide/domain
+         :score  :decide/score
+         :apply  :decide/apply}
+
+ :edges {:start :score
+         :score :apply
+         :apply :end}
+
+ ;; No :dispatches. Every path through this workflow is the same path: a
+ ;; deferral is a RESULT, not a route. Branching on the decision here would
+ ;; push policy into the topology, where a later edit could drop the journal
+ ;; edge for one branch and leave the other auditable.
+
+ :invariants
+ [{:type :must-precede :cell :score :before :apply :enforced true
+   :protects "The decision is journalled before anything acts on it. Reversed,
+              the record would be written after the effect it is supposed to
+              authorise, which is an audit trail that cannot fail closed."}
+
+  {:type :must-precede :cell :start :before :score :enforced true
+   :protects "Nothing is scored that was not first established as a legal
+              domain. This is the property the whole shape rests on: the model
+              can only ever order options that trusted code already accepted,
+              so a bad score cannot widen what is possible."}]}
