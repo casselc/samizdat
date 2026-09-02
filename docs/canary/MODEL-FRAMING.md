@@ -48,11 +48,29 @@ Baselines for reference: majority `:hold` = 37.8% top-1 / 38.5% counterfactual.
 | 2B | **no-think, counterbal.** | **54.1%** | **46.2%** | 58.8% | 27.0% |
 | 27B | **no-think, fixed order** | **56.8%** | 30.8% | 76.5% | 40.5% |
 
-**The 2B clears the bar once asked properly** — 54.1% vs 37.8%, and 46.2% vs
-38.5% on counterfactuals, which is the column that separates deciding from
-guessing the majority class. The 0.8B does not, at either framing: it is
-genuinely unqualified, which is the one part of the original conclusion that
-survives.
+**Correction, after fixing the metrics.** The line above originally read "the 2B
+clears the bar", citing 46.2% "counterfactual accuracy" against the majority's
+38.5%. Those were *per-role accuracy*, not responsiveness: they measured how
+often a counterfactual row was labelled correctly, never whether the scorer
+CHANGED its answer between a pivot and its counterfactual. Review caught it and
+the relational metrics now compare each sibling with its group pivot:
+
+| 2B, counterbalanced | |
+| --- | ---: |
+| top-1 | 54.1% (majority 37.8%) |
+| control invariance | 70.6% (correct 52.9%) |
+| counterfactual **change rate** | 53.8% |
+| **correct** counterfactual responsiveness | **7.7%** |
+
+The top-1 gain over the majority baseline is real, but it comes from control
+rows — the easy cases where the answer should stay put. On the rows where the
+action *should* change, the 2B changes about half the time and is **correct
+7.7% of the time**, against a 0% floor for any constant scorer.
+
+So the honest reading is narrower than "clears the bar": framing was a genuine
+confound and correcting it moved top-1 from 18.9% to 54.1%, but the model still
+does not reliably respond to the state changes that ought to change the action.
+The 0.8B remains unqualified at either framing.
 
 So the earlier verdict was wrong, and wrong for a reason worth keeping: I
 measured a model without first checking it was answering the question.

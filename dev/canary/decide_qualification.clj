@@ -137,17 +137,42 @@
     {:scores (into {} (map (fn [c] [(:id c) (if (= action (:id c)) 0.0 -10.0)]) cands))}))
 
 (defn rule-scorer
-  "Baseline C: the trusted rule that assigned the labels.
+  "Baseline C: the trusted rule, RUN against each fixture's state.
 
-  A ceiling by construction -- it scores 100% because it IS the labelling
-  function -- and it is here to prove the harness measures what it claims, not
-  to flatter the rule. A harness on which the labelling rule does not score
-  perfectly has a bug in the harness."
+  It used to read :expected-for-context -- the answer -- straight out of the
+  scorer context and ignore its label-fn argument entirely. Scoring 100% that
+  way is tautological: it proved only that the harness can copy a value from
+  one map to another. It did NOT establish that the mechanical rule, the frozen
+  labels, the state projection and the harness still agree, which is the only
+  reason to have a baseline C at all.
+
+  Now it derives the action from the fixture's explicit state fields, exactly
+  as the label generator does. If it scores below 100% the frozen artifact and
+  the rule have drifted apart, and that is a finding rather than a formality."
   [label-fn]
   (fn [ctx cands]
-    (let [want (:expected-for-context ctx)]
+    (let [want (label-fn (:state-for-context ctx))]
       {:scores (into {} (map (fn [c] [(:id c) (if (= want (:id c)) 0.0 -10.0)]) cands))
        :meta {:scorer-id "rule@v0"}})))
+
+(defn label
+  "The mechanical labelling rule, kept identical to dev/canary/gen_fixtures.clj.
+
+  Duplicated deliberately rather than required across the dev namespaces: the
+  frozen artifact must not move when this file is edited, and the integrity
+  test asserts this rule still reproduces every frozen label. A divergence
+  shows up as baseline C falling below 100%."
+  [{:keys [needs-human? deploy-age-min p95-ms budget-ms err-rate
+           restarts saturation]}]
+  (cond
+    needs-human?                                              :page
+    (and deploy-age-min (< deploy-age-min 30)
+         (or (> p95-ms budget-ms) (> err-rate 0.05)))         :rollback
+    (and (> restarts 2) (<= p95-ms budget-ms) (<= err-rate 0.05)) :restart
+    (> err-rate 0.05)                                         :page
+    (and (> saturation 0.85) (<= err-rate 0.01)
+         (<= p95-ms (* 1.5 budget-ms)))                       :scale
+    :else                                                     :hold))
 
 ;; ---------------------------------------------------------------- metrics
 
@@ -164,6 +189,32 @@
       (let [others (keep :score (vals (dissoc by-id expected)))]
         (when (seq others)
           (/ (count (filter #(> want %) others)) (double (count others))))))))
+
+(defn- rel-rate
+  "A relational rate over sibling rows, each compared with its group's pivot.
+
+    :invariant           the sibling got the same prediction as the pivot
+    :correct-invariant   ... and both predictions were correct
+    :responsive          the sibling got a DIFFERENT prediction than the pivot
+    :correct-responsive  ... and both predictions were correct
+
+  A constant scorer scores 100% invariance and 0% change rate; the trusted rule
+  scores 100% on both correctness variants. Those two shapes are what the
+  metric exists to tell apart, and per-role accuracy could not."
+  [siblings pivot-of kind]
+  (let [pairs (keep (fn [r] (when-let [p (pivot-of (:group r))] [r p])) siblings)]
+    (when (seq pairs)
+      (/ (count (filter (fn [[r p]]
+                          (let [same? (= (:top1 r) (:top1 p))
+                                both-right? (and (= (:expected r) (:top1 r))
+                                                 (= (:expected p) (:top1 p)))]
+                            (case kind
+                              :invariant          same?
+                              :correct-invariant  (and same? both-right?)
+                              :responsive         (not same?)
+                              :correct-responsive (and (not same?) both-right?))))
+                        pairs))
+         (double (count pairs))))))
 
 (defn evaluate
   "Run one scorer over every fixture and compute the metrics of §20."
@@ -188,6 +239,8 @@
              :pairwise (pairwise-accuracy rec expected)}))
         rows (vec rows)
         n (count rows)
+        pivot-of (into {} (for [[g rs] (group-by :group rows)]
+                            [g (first (filter #(= :pivot (:role %)) rs))]))
         acted (filter #(= :act (:decision %)) rows)
         deferred (filter #(= :defer (:decision %)) rows)
         correct-top1 (filter #(= (:expected %) (:top1 %)) rows)
@@ -206,6 +259,16 @@
      :correct-defer-rate (when (seq deferred)
                            (/ (count correct-defer) (double (count deferred))))
      :wrong-confident-rate (/ (count wrong-act) (double n))
+     ;; RELATIONAL, comparing each sibling to its group's PIVOT. The earlier
+     ;; versions of these were ordinary per-role accuracy and were labelled
+     ;; "responsiveness" and "invariance", which they were not: a scorer can be
+     ;; accurate on counterfactual rows while never CHANGING its answer between
+     ;; a pivot and its counterfactual, and that is the thing being measured.
+     :control-invariance (rel-rate controls pivot-of :invariant)
+     :correct-control-invariance (rel-rate controls pivot-of :correct-invariant)
+     :counterfactual-change (rel-rate counters pivot-of :responsive)
+     :correct-counterfactual (rel-rate counters pivot-of :correct-responsive)
+     ;; kept, but no longer called responsiveness or invariance
      :counterfactual-acc (when (seq counters)
                            (/ (count (filter #(= (:expected %) (:top1 %)) counters))
                               (double (count counters))))
@@ -228,10 +291,12 @@
   (println (format "%-22s n=%d" (:scorer r) (:n r)))
   (println (format "  top-1 correct        %s" (pct (:top1-acc r))))
   (println (format "  pairwise ordering    %s" (pct (:pairwise-acc r))))
-  (println (format "  counterfactual acc   %s   <- must MOVE when the label moves"
-                   (pct (:counterfactual-acc r))))
-  (println (format "  matched-control acc  %s   <- must STAY when it should not"
-                   (pct (:control-acc r))))
+  (println (format "  control invariance   %s  (correct %s)  <- same answer as its pivot"
+                   (pct (:control-invariance r)) (pct (:correct-control-invariance r))))
+  (println (format "  counterfactual change%s  (correct %s)  <- DIFFERENT from its pivot"
+                   (pct (:counterfactual-change r)) (pct (:correct-counterfactual r))))
+  (println (format "  per-role acc c/f %s  ctrl %s   (plain accuracy, not relational)"
+                   (pct (:counterfactual-acc r)) (pct (:control-acc r))))
   (println (format "  defer rate           %s  (correct deferrals %s)"
                    (pct (:defer-rate r)) (pct (:correct-defer-rate r))))
   (println (format "  wrong + confident    %s   <- the dangerous cell"
@@ -294,7 +359,7 @@
     (println)
     (println "=== baselines (no model) ===")
     (println)
-    (report (evaluate "C rule (labelling fn)" (rule-scorer nil) policy))
+    (report (evaluate "C rule (labelling fn)" (rule-scorer label) policy))
     (report (evaluate "B majority (:hold)" (constant-scorer :hold) policy))
     (report (evaluate "B constant (:page)" (constant-scorer :page) policy))
     (report (evaluate "A random (seeded)" (random-scorer 20260902) policy))
