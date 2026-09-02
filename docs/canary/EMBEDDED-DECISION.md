@@ -179,24 +179,19 @@ produces the same 13 failures from the same 13 tests. Environmental, not ours.
 * No change to `manifests/ctx-keys`, the journal schema, or journal authority
   semantics. The decision is written with the existing `note!` seam.
 
-## Follow-ups, and where they are recorded
+## Follow-ups
 
-AGENTS.md is unambiguous that beads is the only tracker and that work decided
-against becomes a bead with its reason. `bd` is not installed on this machine,
-so these could not be filed. They are listed here rather than dropped, and they
-should be moved into beads by someone who has the tool:
+AGENTS.md makes beads the only tracker. `bd` is not installed on the machine
+this work ran on, so these were filed as issues on the fork instead and should
+be moved into beads by someone who has the tool.
 
-* **Merge `upstream/main` (`1465b8a`, memory retirement).** Conflicts in 7
-  files: `docs/RFCS/README.md`, `resources/cells/beam.clj`,
-  `resources/cells/loop.clj`, `resources/manual.edn`,
-  `src/samizdat/agent/beam.clj`, `src/samizdat/workflow.clj`, and
-  `src/samizdat/watch.clj` (deleted upstream, modified here). Deliberately not
-  attempted as a side effect of needing an FFI fix.
-* **Decide whether any turn workflow should reach `decide`.** It is currently
-  reachable only through its own manifest.
-* **Measure sensitivity on a real domain before relying on this.** The current
-  measurement says a 0.8B base model does not rank this decision usefully; the
-  shape is only worth using where the scorer demonstrably carries signal.
-* **The margin guard does not catch confident insensitivity.** A second guard
-  keyed on whether the ranking responds to state at all would, and the canary
-  already computes exactly that number.
+* [casselc/samizdat#2](https://github.com/casselc/samizdat/issues/2) — decide
+  whether to merge `upstream/main` (`1465b8a`, memory retirement). Conflicts in
+  7 files including a `watch.clj` deleted upstream and modified here.
+* [casselc/samizdat#3](https://github.com/casselc/samizdat/issues/3) — the
+  margin guard does not catch a confidently insensitive scorer. It guards
+  ambiguity; a model can be uninformative and certain at once, and this one is.
+* [casselc/samizdat#4](https://github.com/casselc/samizdat/issues/4) — measure
+  scorer sensitivity on a real domain before relying on this shape.
+* [casselc/samizdat#5](https://github.com/casselc/samizdat/issues/5) — decide
+  whether any turn workflow should reach `decide`. Blocked on #4.
