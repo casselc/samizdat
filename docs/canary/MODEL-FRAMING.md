@@ -89,8 +89,9 @@ logprob comparison, under which `:rollback` is structurally excluded for
 the 2B (never argmax on any fixture). 8 of the 37 fixtures, including 3
 of the 13 counterfactual rows, were therefore unwinnable by the 2B by
 construction — its correct-counterfactual ceiling was 76.9%, not 100%. The
-27B is not excluded: it selects rollback once in 37 (correctly) and gets 1
-of the 8 rollback rows. (A first draft of this caveat said "for either
+27B is not excluded: it ranks rollback first on 1 fixture in fixed order
+and 2 counterbalanced, all of them rows that expect rollback, so it wins 1
+to 2 of the 8 (and acts on 1 — the other falls under the margin floor). (A first draft of this caveat said "for either
 model"; that was written before the 27B was re-run with the exclusion
 check, and the rows show it was wrong.) The relational numbers stand as
 measured; what they measure is narrower than this section implied.
