@@ -25,11 +25,14 @@
 
 (ns canary.decide-qualification
   (:require [clojure.string :as str]
+            [clojure.pprint]
             [samizdat.decide :as decide]))
 
 (def fixtures (read-string (slurp "resources/decide-eval/v0.edn")))
 
 (def actions [:hold :scale :rollback :restart :page])
+
+(def ^:private policy {:min-margin 0.5 :require-comparable? true})
 
 ;; --------------------------------------------------------- state rendering
 
@@ -51,6 +54,29 @@
        (format "  minutes_since_deploy: %s\n"
                (if deploy-age-min (str deploy-age-min) "none"))
        (format "  needs_human_authority: %s\n" (if needs-human? "yes" "no"))))
+
+(defn render-null
+  "A CONTENT-FREE state: the field labels every fixture shows the model, with
+  no values. Scoring the actions against this measures each action's surface
+  form prior -- how much the model would emit that token with nothing to go
+  on. Raw logprob comparison lets that prior dominate: on the 2B, rollback's
+  best score over all 37 fixtures sat below hold's worst, so it could never
+  win, whatever the state said (Holtzman et al. 2021, 'surface form
+  competition'; Zhao et al. 2021, contextual calibration).
+
+  Two fillers are used and averaged. They were fixed BEFORE any calibrated
+  number was seen and are not to be tuned against the fixtures."
+  [filler]
+  (str "SERVICE STATE\n"
+       (format "  latency_p95_ms: %s (budget %s)\n" filler filler)
+       (format "  error_rate: %s\n" filler)
+       (format "  saturation: %s\n" filler)
+       (format "  cpu_pct: %s\n  mem_pct: %s\n" filler filler)
+       (format "  process_restarts_recent: %s\n" filler)
+       (format "  minutes_since_deploy: %s\n" filler)
+       (format "  needs_human_authority: %s\n" filler)))
+
+(def null-fillers ["N/A" "unknown"])
 
 (def ^:private descriptions
   {:hold     "nothing to do"
@@ -83,24 +109,29 @@
        (apply str (for [a order]
                     (format "  %-8s - %s\n" (name a) (descriptions a))))))
 
+(defn context-for-text
+  "context-for over an already-rendered state block, so a content-free block
+  goes through EXACTLY the framing a real state does."
+  [state-text order]
+  (case framing
+    :completion
+    (str (policy-block order) "\n" state-text "\nACTION:")
+
+    :chat-nothink
+    (str "<|im_start|>system\n"
+         "You are a service controller. Answer with exactly one action word.\n"
+         "<|im_end|>\n"
+         "<|im_start|>user\n"
+         (policy-block order) "\n" state-text
+         "\nWhich action?<|im_end|>\n"
+         "<|im_start|>assistant\n<think>\n\n</think>\n\n")))
+
 (defn context-for
   "The model-facing prompt. `order` is the order the actions are LISTED, which
   is presentational and must not change the answer -- but measurably does, so
   it is a parameter rather than a constant."
   ([state] (context-for state actions))
-  ([state order]
-   (case framing
-     :completion
-     (str (policy-block order) "\n" (render state) "\nACTION:")
-
-     :chat-nothink
-     (str "<|im_start|>system\n"
-          "You are a service controller. Answer with exactly one action word.\n"
-          "<|im_end|>\n"
-          "<|im_start|>user\n"
-          (policy-block order) "\n" (render state)
-          "\nWhich action?<|im_end|>\n"
-          "<|im_start|>assistant\n<think>\n\n</think>\n\n"))))
+  ([state order] (context-for-text (render state) order)))
 
 (def action-text
   "The model-facing encoding per framing. After \"ACTION:\" the natural
@@ -236,7 +267,14 @@
              :would (:would-have-selected rec)
              :margin (:margin rec)
              :top1 (or (:selected rec) (:would-have-selected rec))
-             :pairwise (pairwise-accuracy rec expected)}))
+             :pairwise (pairwise-accuracy rec expected)
+             ;; The per-candidate evidence, kept so a threshold sweep or a
+             ;; comparison against a later scorer is an OFFLINE analysis of a
+             ;; frozen file rather than another model run. domain-entry already
+             ;; excludes the token vectors; the prompt text is deliberately not
+             ;; here either -- :id names the fixture and v0.edn is its authority.
+             :reason (:reason rec)
+             :domain (:domain rec)}))
         rows (vec rows)
         n (count rows)
         pivot-of (into {} (for [[g rs] (group-by :group rows)]
@@ -283,11 +321,54 @@
                         [f (/ (count (filter #(= (:expected %) (:top1 %)) fs))
                               (double (count fs)))]))
      :selected-distribution (frequencies (map :top1 rows))
+     ;; An action that is never the argmax over the whole fixture set cannot
+     ;; be chosen by this scorer for ANY state. Every fixture expecting it is
+     ;; unwinnable, and that is a property of the scoring convention, not of
+     ;; the decision. This was visible in the chose-line for a full session
+     ;; without being seen; a gate has to be mechanical.
+     :never-chosen (vec (remove (set (map :top1 rows)) actions))
      :rows rows}))
+
+(def ^:private collected
+  "Every evaluate result of this run, in report order. Aggregates are what a
+  human reads; the ROWS are what a later analysis needs, and until now they
+  were computed and thrown away (issue #4, section 19)."
+  (atom []))
+
+(def ^:private run-meta (atom {}))
+
+(defn write-rows!
+  "Freeze this run's per-row evidence to EDN.
+
+  Written so that a pre-training baseline stays comparable to a later run: the
+  coordinate goes in the file, because rows without the model, framing and
+  policy that produced them cannot be compared to anything. The model PATH is
+  deliberately reduced to a basename -- an absolute local path is not evidence
+  and must not reach a commit."
+  [path]
+  (let [payload (assoc @run-meta
+                       :schema :samizdat.decide-eval/rows-v1
+                       :written-at-ms (System/currentTimeMillis)
+                       :fixture-set {:path "resources/decide-eval/v0.edn"
+                                     :n (count fixtures)
+                                     :note "git is the authority for its content"}
+                       :actions actions
+                       :framing framing
+                       :policy policy
+                       :scorers (mapv (fn [r]
+                                        {:scorer (:scorer r)
+                                         :aggregates (dissoc r :rows :scorer)
+                                         :rows (:rows r)})
+                                      @collected))]
+    (spit path (with-out-str (clojure.pprint/pprint payload)))
+    (println (format "rows written: %s (%d scorers, %d rows)"
+                     path (count @collected)
+                     (reduce + (map #(count (:rows %)) @collected))))))
 
 (defn- pct [x] (if x (format "%5.1f%%" (* 100.0 x)) "    -"))
 
 (defn report [r]
+  (swap! collected conj r)
   (println (format "%-22s n=%d" (:scorer r) (:n r)))
   (println (format "  top-1 correct        %s" (pct (:top1-acc r))))
   (println (format "  pairwise ordering    %s" (pct (:pairwise-acc r))))
@@ -307,6 +388,9 @@
                              (double (:margin-min r)) (double (:margin-max r)))
                      "-")))
   (println (format "  chose                %s" (pr-str (:selected-distribution r))))
+  (when (seq (:never-chosen r))
+    (println (format "  STRUCTURALLY EXCLUDED %s  <- never argmax on any fixture; every row expecting it is unwinnable"
+                     (pr-str (:never-chosen r)))))
   (println (format "  by family            %s"
                    (str/join "  " (for [[f a] (:by-family r)]
                                     (format "%s=%s" (name f) (str/trim (pct a)))))))
@@ -316,8 +400,6 @@
 ;; The real-model scorer is built INLINE in -main against a resolved
 ;; jolt.llama, so this namespace loads and the baselines run on a machine with
 ;; no inference engine, no native library and no model weights.
-
-(def ^:private policy {:min-margin 0.5 :require-comparable? true})
 
 (def reasoning-budget
   "Tokens of bounded reasoning to allow before scoring, 0 to disable.
@@ -357,6 +439,7 @@
                      (count (filter #(= :counter (:role %)) fixtures))
                      (count (filter #(= :control (:role %)) fixtures))))
     (println)
+    (reset! run-meta {:model nil :reasoning-budget reasoning-budget})
     (println "=== baselines (no model) ===")
     (println)
     (report (evaluate "C rule (labelling fn)" (rule-scorer label) policy))
@@ -379,6 +462,13 @@
               (let [tk (fn [t] (tokenize m t {:add-special? false}))
                     enc (decide/verify-encodings
                          (mapv (fn [a] {:id a :text (action-text a)}) actions) tk)]
+                (swap! run-meta assoc :model
+                       {:desc (:desc m)
+                        ;; basename only: an absolute local path is not evidence
+                        :file (last (str/split path #"/"))
+                        :encodings (mapv #(select-keys % [:id :text :n-tokens])
+                                         (:encodings enc))
+                        :encodings-verified? (:ok? enc)})
                 (println (format "=== model: %s   framing: %s ===" (:desc m) (name framing)))
                 (println)
                 (doseq [e (:encodings enc)]
@@ -448,7 +538,40 @@
                                                               :let [id (:id c)]]
                                                           [id (/ (reduce + (map #(double (get % id)) runs))
                                                                  (double (count runs)))]))
-                                       :meta {:scorer-id "jolt-llama/counterbalanced@v0"}}))]
+                                       :meta {:scorer-id "jolt-llama/counterbalanced@v0"}}))
+                        ;; CALIBRATED: subtract each action's content-free
+                        ;; score, per rotation, so a rare surface form is not
+                        ;; penalised for being rare. The null is scored under
+                        ;; each rotation because position bias moves it too.
+                        ;; Computed once per model: 5 rotations x 2 fillers.
+                        null-baseline
+                        (into {} (for [order (rotations actions)]
+                                   [order (let [runs (map #(raw-score (context-for-text (render-null %) order)
+                                                                      (mapv (fn [a] {:id a}) actions))
+                                                          null-fillers)]
+                                            (into {} (for [a actions]
+                                                       [a (/ (reduce + (map #(double (get % a)) runs))
+                                                             (double (count runs)))])))]))
+                        _ (do (println "  content-free baseline per action (mean over rotations):")
+                              (doseq [a actions]
+                                (println (format "    %-9s %7.3f" (name a)
+                                                 (/ (reduce + (map #(get % a) (vals null-baseline)))
+                                                    (double (count null-baseline))))))
+                              (println))
+                        cal-scorer (fn [ctx cands]
+                                     (let [st (:state-for-context ctx)
+                                           runs (map (fn [order]
+                                                       (let [raw (raw-score (context-for st order) cands)
+                                                             base (get null-baseline order)]
+                                                         (into {} (for [c cands :let [id (:id c)]]
+                                                                    [id (- (double (get raw id))
+                                                                           (double (get base id)))]))))
+                                                     (rotations actions))]
+                                       {:scores (into {} (for [c cands
+                                                               :let [id (:id c)]]
+                                                           [id (/ (reduce + (map #(get % id) runs))
+                                                                  (double (count runs)))]))
+                                        :meta {:scorer-id "jolt-llama/counterbalanced-calibrated@v0"}}))]
                     (report (evaluate (str "D " (:desc m) " base") scorer policy))
                     (println "  (single fixed action order -- confounded with position bias)")
                     (println)
@@ -459,10 +582,16 @@
                       (println)
                       (report (evaluate (str "D'' " (:desc m) " +reasoning") think-scorer policy)))
                     (println "  (averaged over all 5 cyclic orders; position advantage cancelled)")
+                    (println)
+                    (report (evaluate (str "D* " (:desc m) " counterbal.+calib.") cal-scorer policy))
+                    (println "  (counterbalanced AND content-free baseline subtracted per action)")
                     (println))))
               (finally (close! s))))
           (finally (close! m)))))
 
+    (write-rows! (or (System/getenv "JOLT_QUAL_ROWS")
+                     "docs/canary/qualification-rows.edn"))
+    (println)
     (println "Reading: baseline C is the labelling rule and MUST score 100% --")
     (println "anything less is a bug in the harness, not a result. Baseline B is")
     (println "what a scorer with no signal degenerates into: perfect on matched")
