@@ -154,19 +154,23 @@ Fixed-order and counterbalanced rows reproduce MODEL-FRAMING's numbers
 bit-for-bit (the jolt-llama gate makes that a check, not a hope).
 
 **The gate does not fire on the 27B.** `never-chosen []` for all three
-scorers. Rollback is *suppressed*, not excluded: it ranks last in 30 of 37
-fixtures (28 counterbalanced), is selected once in 37 (`regress-both`,
-correctly), and wins 1 of the 8 rows that expect it. Its best raw score
-(-0.141) clears hold's worst (-5.612), so a state exists in which it can
-win, which is the whole difference from the 2B. The earlier note in
+scorers. Rollback is *suppressed*, not excluded: counterbalanced it ranks
+last in 28 of 37 fixtures, is top-1 on 2 (both of them rows that expect
+it), and is actually acted on once (`regress-both`, correctly) — the other
+deferred under the margin floor. Its best raw score (-0.141) clears hold's
+worst (-5.612), so a state exists in which it can win, which is the whole
+difference from the 2B. The earlier note in
 MODEL-FRAMING that said "for either model" was written before this run and
 is corrected there.
 
-| 27B scorer | top-1 | ctrl inv (correct) | c/f change (correct) | wrong+conf | rollback: chosen / correct-of-8 | `chose` |
+| 27B scorer | top-1 | ctrl inv (correct) | c/f change (correct) | wrong+conf | rollback rows won: top-1 (acted) of 8 | `chose` (acted) |
 |---|---|---|---|---|---|---|
-| D  fixed order | 56.8% | 70.6% (64.7%) | 61.5% (7.7%) | 40.5% | 1 / 1 | hold 18, scale 10, restart 4, page 4, rollback 1 |
-| D' counterbalanced | 54.1% | 82.4% (70.6%) | 69.2% (15.4%) | 29.7% | 1 / 1 | hold 21, scale 8, page 4, restart 2, rollback 2 |
-| D* + content-free calibration | 51.4% | 64.7% (52.9%) | 46.2% (15.4%) | 40.5% | 3 / 3 | scale 21, restart 5, rollback 4, page 4, hold 3 |
+| D  fixed order | 56.8% | 70.6% (64.7%) | 61.5% (7.7%) | 40.5% | 1 (1) | hold 18, scale 10, restart 4, page 4, rollback 1 |
+| D' counterbalanced | 54.1% | 82.4% (70.6%) | 69.2% (15.4%) | 29.7% | 2 (1) | hold 21, scale 8, page 4, restart 2, rollback 2 |
+| D* + content-free calibration | 51.4% | 64.7% (52.9%) | 46.2% (15.4%) | 40.5% | 4 (3) | scale 21, restart 5, rollback 4, page 4, hold 3 |
+
+The two rollback columns differ because `chose` counts only rows the margin
+policy let through; top-1 counts the ranking regardless of defer.
 
 The content-free baseline is the tell:
 
@@ -178,13 +182,15 @@ The content-free baseline is the tell:
 
 A state with every value replaced by `unknown` is the *strongest* hold
 signal the 27B ever sees (p ≈ 0.998). Subtracting it hands every other
-action ~7–10 nats and leaves hold with nothing, so D* chooses hold 3 times
-against 14 expected and scale 21 times against 4. It does recover 3 of the
-8 rollback rows — the signal that was invisible under raw comparison is
-real — but it buys those 3 with 11 lost elsewhere and returns the dangerous
-cell to 40.5%. Same mechanism as the 2B, same verdict: the premise of
-contextual calibration (a content-free input is uninformative) is false
-for structured state.
+action ~7–10 nats and leaves hold with nothing, so D* acts on hold 3 times
+against 14 expected and on scale 21 times against 4. It does double
+rollback recall (2 of 8 rows won by top-1, to 4 of 8) — the signal that was
+invisible under raw comparison is real — but the trade is a wash and then
+some: row by row against D' it gains 7 and loses 8 (net top-1 20 → 19
+correct), takes the healthy family from 100% to 33.3%, and returns the
+dangerous cell to 40.5%. Same mechanism as the 2B, same verdict: the
+premise of contextual calibration (a content-free input is uninformative)
+is false for structured state.
 
 Margin sweep on the 27B rows (faithful at 0.5 for all three): D' precision
 reaches 81% only at 56.8% coverage (t=1.75), and the dangerous cell first
