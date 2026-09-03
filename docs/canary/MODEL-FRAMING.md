@@ -84,6 +84,18 @@ The `wrong + confident` column is the operational risk: the 27B acts and is
 wrong on 30–40% of fixtures, where the 0.8B was too unconfident to act at all.
 A bigger model is not a safer one here.
 
+**Caveat added later:** every model row in this table was scored by raw
+logprob comparison, under which `:rollback` is structurally excluded for
+the 2B (never argmax on any fixture). 8 of the 37 fixtures, including 3
+of the 13 counterfactual rows, were therefore unwinnable by the 2B by
+construction — its correct-counterfactual ceiling was 76.9%, not 100%. The
+27B is not excluded: it selects rollback once in 37 (correctly) and gets 1
+of the 8 rollback rows. (A first draft of this caveat said "for either
+model"; that was written before the 27B was re-run with the exclusion
+check, and the rows show it was wrong.) The relational numbers stand as
+measured; what they measure is narrower than this section implied.
+`docs/canary/SURFACE-FORM.md`.
+
 **Correction, after fixing the metrics.** The line above originally read "the 2B
 clears the bar", citing 46.2% "counterfactual accuracy" against the majority's
 38.5%. Those were *per-role accuracy*, not responsiveness: they measured how
@@ -160,6 +172,14 @@ means, not a tokenizer detail, and the probe must not make it quietly.
   for the 2B. The remaining honest blockers are the wrong-and-confident rate
   (27% for the 2B counterbalanced) and the absence of a safe `:defer` path in
   any concrete workflow.
+
+  **Retracted — see `docs/canary/SURFACE-FORM.md`.** The 2B never selects
+  `:rollback` for any of the 37 fixtures: under raw logprob comparison the
+  token's prior puts its best score below `:hold`'s worst. Eight fixtures
+  expect it. A scorer that cannot emit one of its actions is unqualified
+  regardless of top-1, and the standard calibration makes it worse. The
+  blocker holds. The `chose` line above — `{:hold 13, :scale 10, :restart 11,
+  :page 3}` — showed this all along.
 * **#8** — extend the encoding contract: a chosen encoding must be a *spelling*
   of the action, and a synonym substitution must be surfaced as a semantic
   decision rather than accepted as a search result.
