@@ -79,10 +79,10 @@ partially instrumented application.
 
 The established Samizdat seams retain
 `samizdat.instrumentation/compatibility-id`,
-`35b01fddd20fa9e6d77678eadc2a2bcc6fb9ac2d`. The new graph/execution contract
+`5bcf270fced63507e70ce10baa1b580c1b42a5c6`. The new graph/execution contract
 uses the separately published exact source revision
 `samizdat.instrumentation/mycelium-compatibility-id`,
-`dd13b4b933d3db80a319d2c7b27af4ee6767fca5`, which introduced the reviewed
+`8dad4c353ab5d6be417dabd497b6886d72e65f00`, which introduced the reviewed
 v1 join points.
 Consumers depend on these neutral identity vars instead of depending on one
 another or duplicating either literal.

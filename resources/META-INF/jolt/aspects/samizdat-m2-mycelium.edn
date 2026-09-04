@@ -1,7 +1,7 @@
 {:schema 1
  :library {:id yogthos/samizdat
            ;; Exact reviewed source revision that introduced these join points.
-           :version "dd13b4b933d3db80a319d2c7b27af4ee6767fca5"}
+           :version "8dad4c353ab5d6be417dabd497b6886d72e65f00"}
  :aspects
  [{:id :mycelium.workflow/lifecycle
    :match {:entry mycelium.execution/workflow-event!
