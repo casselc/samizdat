@@ -80,10 +80,10 @@ partially instrumented application.
 The established Samizdat seams retain
 `samizdat.instrumentation/compatibility-id`,
 `35b01fddd20fa9e6d77678eadc2a2bcc6fb9ac2d`. The new graph/execution contract
-uses the separately published semantic id
+uses the separately published exact source revision
 `samizdat.instrumentation/mycelium-compatibility-id`,
-`samizdat-mycelium-graph-v1`: no older commit contains those join points, so
-pinning their manifest to the old source revision would be false provenance.
+`dd13b4b933d3db80a319d2c7b27af4ee6767fca5`, which introduced the reviewed
+v1 join points.
 Consumers depend on these neutral identity vars instead of depending on one
 another or duplicating either literal.
 No aspect manifest is selected by a normal `jolt` run or build, so the plain
