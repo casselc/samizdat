@@ -589,6 +589,50 @@
    "CREATE INDEX IF NOT EXISTS idx_knowledge_lineage ON knowledge(lineage_id)"
    "CREATE INDEX IF NOT EXISTS idx_knowledge_current ON knowledge(current)"])
 
+(def ^:private v21
+  ;; A closed-domain decision is a DURABLE fact about the run, not a free-form
+  ;; note (ADR-001: the events table is a pruned tail buffer with a per-run
+  ;; cursor, never a projection source; ADR-002 §5: the ExperienceRecord ties
+  ;; its coordinates to a decisions row). `samizdat.decide` recorded through
+  ;; `note!` into events, which the retention pass may drop; a projection
+  ;; that needs every decision a run made would then be reading a window.
+  ;;
+  ;; One row per decision. The scalar columns are what a projection joins and
+  ;; filters on -- the coordinate, the domain, the state version it was
+  ;; derived at, what policy did and why, and whether the apply step found it
+  ;; fresh. The full auditable record (every offered candidate with its
+  ;; evidence status, the rejected set with reasons, the provenance) rides in
+  ;; `record` as JSON with qualified keywords preserved (decide/durable).
+  ;; Nothing that decide/leaks? forbids ever reaches this table: the cell
+  ;; checks before it writes.
+  ["CREATE TABLE IF NOT EXISTS decisions (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      run_id TEXT NOT NULL,
+      branch_id TEXT,
+      turn INTEGER,
+      decision_id TEXT,
+      domain_id TEXT,
+      domain_revision TEXT,
+      manifest TEXT,
+      state_version INTEGER,
+      policy_revision TEXT,
+      decision TEXT NOT NULL,
+      reason TEXT,
+      selected TEXT,
+      would_have_selected TEXT,
+      margin REAL,
+      entropy REAL,
+      n_offered INTEGER,
+      n_scored INTEGER,
+      scorer_id TEXT,
+      model_state_id TEXT,
+      revalidated INTEGER NOT NULL DEFAULT 0,
+      revalidation TEXT,
+      record TEXT NOT NULL,
+      created_at TEXT NOT NULL)"
+   "CREATE INDEX IF NOT EXISTS idx_decisions_run ON decisions(run_id, id)"
+   "CREATE INDEX IF NOT EXISTS idx_decisions_branch ON decisions(run_id, branch_id, turn)"])
+
 (def migrations
   "Ordered. Index 0 is migration 1; PRAGMA user_version holds the count applied."
-  [v1 v2 v3 v4 v5 v6 v7 v8 v9 v10 v11 v12 v13 v14 v15 v16 v17 v18 v19 v20])
+  [v1 v2 v3 v4 v5 v6 v7 v8 v9 v10 v11 v12 v13 v14 v15 v16 v17 v18 v19 v20 v21])

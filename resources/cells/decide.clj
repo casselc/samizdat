@@ -93,7 +93,7 @@
         an action highly cannot thereby make it legal, because it never sees an
         action that was not."
    :pure true
-   :requires []
+   :requires [:run-id]
    ;; Every input is optional: the canary starts from an empty data map and a
    ;; caller that supplies nothing gets an explicitly unauthorized domain,
    ;; which :decide/score refuses. The one thing this cell promises downstream
@@ -107,27 +107,52 @@
             [:decide/domain-id {:optional true} :any]
             [:decide/domain-revision {:optional true} :any]
             [:decide/state-coord {:optional true} :any]
-            [:decide/authority {:optional true} :any]]
+            [:decide/authority {:optional true} :any]
+            ;; the coordinate the domain is derived FROM (ADR-002 §1): given
+            ;; whole, or assembled from the run's own keys when present
+            [:decide/based-on {:optional true} :map]
+            [:decide/manifest {:optional true} :any]
+            [:decide/state-version {:optional true} :any]
+            [:decide/graph-revision {:optional true} :any]
+            [:branch {:optional true} :any]
+            [:turn {:optional true} :any]]
    :output [:map [:decide/authorized :map]]}
-  (fn [_ data]
-    (let [{:keys [decide/vocabulary decide/legal? decide/all-legal?
-                  decide/legality-source decide/legality-revision
-                  decide/domain-id decide/domain-revision decide/state-coord
-                  decide/authority]} data
-          vocab (or vocabulary default-vocabulary)
+  (fn [{:keys [run-id]}
+       {:keys [decide/vocabulary decide/legal? decide/all-legal?
+               decide/legality-source decide/legality-revision
+               decide/domain-id decide/domain-revision decide/state-coord
+               decide/authority decide/based-on decide/manifest
+               decide/state-version decide/graph-revision branch turn]
+        :as data}]
+    (let [vocab (or vocabulary default-vocabulary)
           legality (cond
                      legal? (decide/legality (or legality-source :cell/legal-pred)
                                              (or legality-revision "unversioned")
                                              legal?)
                      all-legal? (decide/all-legal)
-                     :else nil)]
+                     :else nil)
+          ;; Only the coordinate parts that were actually supplied. A domain
+          ;; with no :state/version cannot later be revalidated as fresh, and
+          ;; that is the correct reading of a caller that did not say which
+          ;; state it derived the domain from.
+          based-on (or based-on
+                       (let [m (cond-> {}
+                                 run-id (assoc :run/id run-id)
+                                 (:id branch) (assoc :branch/id (:id branch))
+                                 turn (assoc :turn turn)
+                                 manifest (assoc :manifest manifest)
+                                 graph-revision (assoc :graph/revision graph-revision)
+                                 state-version (assoc :state/version state-version))]
+                         (when (seq m) m)))]
       (assoc data :decide/authorized
              (if legality
                (decide/authorize vocab {:legality legality
                                         :id (or domain-id :decide/default)
                                         :revision (or domain-revision "v1")
                                         :state-coord state-coord
-                                        :authority authority})
+                                        :authority authority
+                                        :based-on based-on
+                                        :policy-revision (policy-revision (policy))})
                ;; no legality evidence: an explicitly unauthorized domain, which
                ;; decide refuses with :domain/no-legality-source
                {:domain/candidates (vec vocab)})))))
@@ -162,7 +187,8 @@
             [:decide/decision-id {:optional true} :any]
             [:branch {:optional true} :any]
             [:turn {:optional true} :any]]
-   :output [:map [:decide/record :map] [:decide/decision :keyword]]}
+   :output [:map [:decide/record :map] [:decide/decision :keyword]
+            [:decide/decision-row {:optional true} :any]]}
   (fn [{:keys [conn run-id]}
        {:keys [decide/authorized decide/context decide/scorer decide/scorer-id
                decide/model-coord decide/decision-id branch turn]
@@ -203,14 +229,19 @@
                   :leaked-keys (vec leaked)
                   :n-offered (count (:domain/candidates authorized))}
                  record)]
-      ;; note! forwards its 4th argument to emit! as OPTIONS, so the payload
-      ;; goes under :data. Passing the record bare stores an empty object --
-      ;; silently, since emit! does (or data {}).
-      ;; `durable` keeps qualified keywords intact: data.json would otherwise
-      ;; write :reason/incomplete-scores as "incomplete-scores" and drop the
-      ;; half of the value that says which vocabulary it came from.
-      (journal/note! conn run-id :decide {:data (decide/durable safe)})
-      (assoc data :decide/record safe :decide/decision (:decision safe)))))
+      ;; The durable row (migration v21, ADR-001): the decision is a fact about
+      ;; the run, not a tail-buffer note. `durable` keeps qualified keywords
+      ;; intact: data.json would otherwise write :reason/incomplete-scores as
+      ;; "incomplete-scores" and drop the half of the value that says which
+      ;; vocabulary it came from. record-decision! also emits the :decide event
+      ;; for anything watching live.
+      (let [row (journal/record-decision! conn run-id
+                                          {:branch-id (:id branch) :turn turn
+                                           :decision-id decision-id
+                                           :manifest (:manifest (:domain/based-on authorized))}
+                                          (decide/durable safe))]
+        (assoc data :decide/record safe :decide/decision (:decision safe)
+               :decide/decision-row row)))))
 
 (cell/defcell :decide/apply
   {:doc "Carry a decision into the data map, or carry the deferral.
@@ -220,16 +251,41 @@
         a manifest that drops the journal cannot reach this one. The manifest's
         :must-precede invariant enforces that ordering at compile time, which is
         the difference between an auditable decision and an audited-afterwards
-        one."
-   :pure true
-   :requires []
-   :input  [:map [:decide/record :map]]
+        one.
+
+        A model selection is not a committed transition (ADR-001 invariant 4).
+        When the caller supplies the CURRENT state as :decide/current
+        ({:state/version :authority :budget-ok? :invariants-ok?}), the kernel
+        re-derives freshness here, immediately before apply (decide/revalidate):
+        a domain derived at another state version, under another authority,
+        past its budget or against an invariant is not applied, and the record
+        says which. Without :decide/current the decision is applied as scored
+        and the record says :revalidated? false -- honest, and the older
+        contract. The durable row is updated when there is one."
+   :effects [:db]
+   :requires [:conn]
+   :input  [:map [:decide/record :map]
+            [:decide/authorized {:optional true} :map]
+            [:decide/current {:optional true} :map]
+            [:decide/decision-row {:optional true} :any]]
    ;; :decide/action is nil on a deferral, so :any rather than :keyword; the
    ;; reason is only present when there is one.
    :output [:map [:decide/action :any]
-            [:decide/deferred-reason {:optional true} :any]]}
-  (fn [_ {:keys [decide/record] :as data}]
-    (if (= :act (:decision record))
-      (assoc data :decide/action (:selected record))
-      (assoc data :decide/action nil
-             :decide/deferred-reason (:reason record)))))
+            [:decide/applied? :boolean]
+            [:decide/deferred-reason {:optional true} :any]
+            [:decide/revalidation {:optional true} :any]]}
+  (fn [{:keys [conn]}
+       {:keys [decide/record decide/authorized decide/current decide/decision-row] :as data}]
+    (let [record' (if current
+                    (decide/revalidate record (or authorized {}) current)
+                    (assoc record :revalidated? false))]
+      (when (and conn decision-row current)
+        (journal/decision-revalidated! conn decision-row record'))
+      (if (= :act (:decision record'))
+        (assoc data :decide/record record'
+               :decide/action (:selected record') :decide/applied? true
+               :decide/revalidation (:revalidation record'))
+        (assoc data :decide/record record'
+               :decide/action nil :decide/applied? false
+               :decide/deferred-reason (:reason record')
+               :decide/revalidation (:revalidation record'))))))

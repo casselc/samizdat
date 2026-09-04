@@ -1,0 +1,41 @@
+{:schema 1
+ :library {:id yogthos/samizdat
+           ;; Compatibility id for the instrumentable M2 semantic surface.
+           ;; Resource-only commits may advance without changing this contract.
+           :version "5bcf270fced63507e70ce10baa1b580c1b42a5c6"}
+ ;; The closed-domain decision surface (docs/adr/ADR-002 section 5 in the
+ ;; bootstrap repository): the five join points an experience consumer needs
+ ;; to tie a DecisionDomain, its scoring, the apply-time revalidation, a gate
+ ;; settlement and an artifact to one ExperienceRecord. Inert here: a plain
+ ;; build carries no advice, and a provider that binds these roles must
+ ;; shape every payload to ids, counts and outcomes (no prompt, tokens,
+ ;; scores per candidate, claim text, or native state).
+ ;;
+ ;; The sixth role of the same contract, :samizdat/state-restore, sits on the
+ ;; inference runtime's load-state! and is not a join point of this library.
+ :aspects
+ [{:id :samizdat.decide/decision-domain
+   :match {:entry samizdat.decide/authorize
+           :arity 2}
+   :advice-role :samizdat/decision-domain
+   :expect {:matches 1}}
+  {:id :samizdat.decide/candidate-score
+   :match {:entry samizdat.decide/decide
+           :arity 1}
+   :advice-role :samizdat/candidate-score
+   :expect {:matches 1}}
+  {:id :samizdat.decide/transition
+   :match {:entry samizdat.decide/revalidate
+           :arity 3}
+   :advice-role :samizdat/transition
+   :expect {:matches 1}}
+  {:id :samizdat.store.journal/verification
+   :match {:entry samizdat.store.journal/settle-gate!
+           :arity 4}
+   :advice-role :samizdat/verification
+   :expect {:matches 1}}
+  {:id :samizdat.store.journal/artifact
+   :match {:entry samizdat.store.journal/record-artifact!
+           :arity 3}
+   :advice-role :samizdat/artifact
+   :expect {:matches 1}}]}

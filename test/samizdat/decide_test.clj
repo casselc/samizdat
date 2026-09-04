@@ -452,3 +452,164 @@
       (is (= "reason/incomplete-scores" (g :reason)))
       (testing "all three offered candidates are still in the durable record"
         (is (= 3 (count (g :domain))))))))
+
+;; ------------------------------------------------ ADR-002: the contracts
+
+(deftest the-domain-carries-where-it-came-from-and-the-policy-that-selects
+  (let [d (decide/authorize vocabulary
+                            {:legality (decide/all-legal) :id :d :revision "v1"
+                             :based-on {:run/id "r1" :branch/id "B1" :turn 7
+                                        :manifest :loop :state/version 41}
+                             :policy-revision "abc123"})
+        r (decide/decide {:scorer (scorer-returning good-scores) :domain d :policy policy})]
+    (is (= 41 (get-in d [:domain/based-on :state/version])))
+    (is (= "abc123" (:domain/policy-revision d)))
+    (testing "and the record carries both, so a later reader can tell this domain from a lookalike"
+      (is (= :loop (get-in r [:based-on :manifest])))
+      (is (= "abc123" (:policy-revision r))))))
+
+(deftest rejection-keeps-the-reason-not-only-the-id
+  (let [legality (decide/legality :test-rule "r1" (fn [c] (not= :rollback (:id c))))
+        d (domain-of legality)]
+    (is (= [:rollback] (:domain/rejected d)))
+    (is (= [{:id :rollback :reason :rejected/not-legal}] (:domain/rejected-with-reason d)))))
+
+(deftest an-op-outside-the-closed-vocabulary-is-refused
+  (let [bad (decide/authorize [{:id :hold :op :steer :target :stuck :tokens [1]}
+                               {:id :wat :op :launch-missiles :tokens [2]}]
+                              {:legality (decide/all-legal) :id :d :revision "v1"})
+        ok (decide/authorize [{:id :hold :op :steer :target :stuck :tokens [1]}
+                              {:id :cull :op :cull :tokens [2]}]
+                             {:legality (decide/all-legal) :id :d :revision "v1"})]
+    (is (= :domain/unknown-op (decide/domain-problem bad {})))
+    (is (nil? (decide/domain-problem ok {})))
+    (testing "a candidate with no :op is a bare id and stays valid"
+      (is (nil? (decide/domain-problem (domain-of) {}))))
+    (testing "every op the contract names is in the set"
+      (is (= #{:continue :steer :block :complete :cull :spare :branch :escalate :defer}
+             decide/ops)))))
+
+(deftest evidence-about-another-domain-is-refused-before-it-is-read
+  (let [stale (fn [_ _] {:evaluated-domain-id :some-other-domain :scores good-scores})
+        r (run stale)]
+    (is (= :defer (:decision r)))
+    (is (= :reason/stale-domain (:reason r)))
+    (is (= :some-other-domain (get-in r [:score-check :evaluated-domain-id]))
+        "the record names which domain the scorer thought it was answering about"))
+  (testing "a result naming THIS domain is accepted"
+    (let [fresh (fn [_ _] {:evaluated-domain-id :test-domain :scores good-scores})
+          r (run fresh)]
+      (is (= :act (:decision r))))))
+
+(deftest entropy-is-recorded-beside-the-margin
+  (let [r (run (scorer-returning good-scores))]
+    (is (number? (:entropy r)))
+    (is (< 0.0 (:entropy r) (Math/log 3.0)) "between certainty and uniform over three"))
+  (testing "a uniform distribution has maximal entropy and a single candidate none"
+    (let [three (decide/rank [{:id :a :tokens [1]} {:id :b :tokens [1]} {:id :c :tokens [1]}]
+                             {:a -1.0 :b -1.0 :c -1.0})]
+      (is (< (Math/abs (- (Math/log 3.0) (decide/entropy three))) 1e-9))
+      (is (nil? (decide/entropy (decide/rank [{:id :a :tokens [1]}] {:a -1.0})))))))
+
+(deftest the-model-state-id-reaches-provenance-and-the-state-does-not
+  (let [scorer (fn [_ _] {:scores good-scores
+                          :meta {:model-state-id "ms-9" :scorer-id "s"
+                                 :state (byte-array 4) :handle 12345}})
+        r (run scorer)]
+    (is (= "ms-9" (get-in r [:provenance :model-state-id])))
+    (is (nil? (decide/leaks? r)) "the allowlist dropped :state and :handle")))
+
+(deftest revalidation-demotes-a-stale-act-to-a-deferral
+  (let [d (decide/authorize vocabulary
+                            {:legality (decide/all-legal) :id :d :revision "v1"
+                             :authority :ops
+                             :based-on {:run/id "r1" :turn 7 :state/version 41}})
+        r (decide/decide {:scorer (scorer-returning good-scores) :domain d :policy policy})]
+    (is (= :act (:decision r)))
+    (testing "fresh: same version, same authority, budget and invariants hold"
+      (let [v (decide/revalidate r d {:state/version 41 :authority :ops})]
+        (is (:revalidated? v))
+        (is (= :fresh (get-in v [:revalidation :outcome])))
+        (is (= :act (:decision v)))
+        (is (= :hold (:selected v)))))
+    (testing "the state moved on: not applied, and the record says what would have been"
+      (let [v (decide/revalidate r d {:state/version 42 :authority :ops})]
+        (is (= :defer (:decision v)))
+        (is (= :reason/stale-revision (:reason v)))
+        (is (= :stale-revision (get-in v [:revalidation :outcome])))
+        (is (nil? (:selected v)))
+        (is (= :hold (:would-have-selected v)))))
+    (testing "the authority changed"
+      (is (= :reason/authority-changed
+             (:reason (decide/revalidate r d {:state/version 41 :authority :someone-else})))))
+    (testing "the budget no longer admits it"
+      (is (= :reason/budget-exceeded
+             (:reason (decide/revalidate r d {:state/version 41 :authority :ops :budget-ok? false})))))
+    (testing "an invariant is violated"
+      (is (= :reason/invariant-violated
+             (:reason (decide/revalidate r d {:state/version 41 :authority :ops :invariants-ok? false})))))
+    (testing "a domain of unknown origin cannot be shown fresh"
+      (let [d0 (domain-of)
+            r0 (decide/decide {:scorer (scorer-returning good-scores) :domain d0 :policy policy})]
+        (is (= :stale-revision (get-in (decide/revalidate r0 d0 {:state/version 41}) [:revalidation :outcome])))))
+    (testing "a deferral stays a deferral, with the revalidation recorded"
+      (let [dr (decide/decide {:scorer (scorer-returning {:hold -1.0 :scale -1.01 :rollback -4.0})
+                               :domain d :policy policy})
+            v (decide/revalidate dr d {:state/version 41 :authority :ops})]
+        (is (= :defer (:decision v)))
+        (is (= :reason/below-margin (:reason v)))
+        (is (= :fresh (get-in v [:revalidation :outcome])))))))
+
+(deftest a-model-state-ref-carries-identity-and-never-the-state
+  (let [ref {:model-state/id "ms-1" :model/coordinate "qwen3.5-0.8b" :model/revision "sha"
+             :model/representation :gguf-q8 :runtime/backend :jolt-llama :runtime/revision "r"
+             :training-abi/version "v0" :graph/revision 3 :state/version 41
+             :prefix-token-hash "abc" :prefix-token-count 512
+             :native-state/hash "def" :native-state/bytes 1048576 :blob/ref "blob://1"}]
+    (is (nil? (decide/model-state-ref-problem ref)))
+    (is (= :model-state/missing-field (decide/model-state-ref-problem (dissoc ref :blob/ref))))
+    (is (= :model-state/carries-state (decide/model-state-ref-problem (assoc ref :state (byte-array 1)))))
+    (is (= :model-state/bad-token-count (decide/model-state-ref-problem (assoc ref :prefix-token-count "512"))))
+    (is (= :model-state/not-a-map (decide/model-state-ref-problem nil)))))
+
+(deftest a-decision-is-a-durable-row-and-the-apply-step-updates-it
+  (cells/load-cells!)
+  (let [c (db/open! ":memory:")
+        rid (runs/start-run! c {:problem "p"})
+        handler (fn [id] (:handler (cell/get-cell id)))]
+    (try
+      (let [ctx {:conn c :run-id rid}
+            data ((handler :decide/domain) ctx
+                  {:decide/vocabulary vocabulary :decide/all-legal? true
+                   :decide/authority :ops :decide/manifest :loop :decide/state-version 41
+                   :branch {:id "B1"} :turn 7})
+            scored ((handler :decide/score) ctx (assoc data :decide/scorer (scorer-returning good-scores)
+                                                      :decide/scorer-id "test"))
+            rows (journal/decisions c rid)]
+        (is (= 41 (get-in data [:decide/authorized :domain/based-on :state/version])))
+        (is (= 1 (count rows)))
+        (is (= "act" (:decision (first rows))))
+        (is (= 41 (:state_version (first rows))))
+        (is (= "loop" (:manifest (first rows))))
+        (is (= "hold" (:selected (first rows))))
+        (is (= 0 (:revalidated (first rows))))
+        (is (= 3 (get-in (first rows) [:record :n-offered])))
+        (testing "apply with the state moved on: nothing applied, the row says why"
+          (let [applied ((handler :decide/apply) ctx (assoc scored :decide/current {:state/version 42 :authority :ops}))
+                row (first (journal/decisions c rid))]
+            (is (false? (:decide/applied? applied)))
+            (is (nil? (:decide/action applied)))
+            (is (= :reason/stale-revision (:decide/deferred-reason applied)))
+            (is (= 1 (:revalidated row)))
+            (is (= "defer" (:decision row)))
+            (is (= "hold" (:would_have_selected row)))))
+        (testing "apply with the same state: applied, fresh"
+          (let [applied ((handler :decide/apply) ctx (assoc scored :decide/current {:state/version 41 :authority :ops}))]
+            (is (true? (:decide/applied? applied)))
+            (is (= :hold (:decide/action applied)))
+            (is (= :fresh (get-in applied [:decide/revalidation :outcome])))))
+        (testing "apply without the current state: applied as scored, marked unrevalidated"
+          (let [applied ((handler :decide/apply) ctx scored)]
+            (is (true? (:decide/applied? applied)))
+            (is (false? (get-in applied [:decide/record :revalidated?]))))))
+      (finally (db/close c)))))

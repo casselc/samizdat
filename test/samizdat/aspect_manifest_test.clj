@@ -15,7 +15,8 @@
   ["META-INF/jolt/aspects/samizdat-m2-core.edn"
    "META-INF/jolt/aspects/samizdat-m2-embed.edn"
    "META-INF/jolt/aspects/samizdat-m2-http.edn"
-   "META-INF/jolt/aspects/samizdat-m2-mycelium.edn"])
+   "META-INF/jolt/aspects/samizdat-m2-mycelium.edn"
+   "META-INF/jolt/aspects/samizdat-m2-experience.edn"])
 
 (defn- qualified-symbol? [value]
   (and (symbol? value) (some? (namespace value))))
@@ -485,3 +486,43 @@
     (is (= #{:schema :graph-id :execution-id :kind :phase}
            (set (keys (second @events)))))
     (is (not (re-find #"private failure|hidden" (pr-str (second @events)))))))
+
+(deftest experience-join-points-match-exact-source-boundaries
+  ;; The closed-domain decision surface (ADR-002 section 5): every aspect
+  ;; names a var that exists at that arity, the roles are the five the
+  ;; contract publishes, and the ids do not collide with the other manifests.
+  (let [read-manifest #(some-> % io/resource slurp edn/read-string)
+        experience (read-manifest "META-INF/jolt/aspects/samizdat-m2-experience.edn")
+        others (mapcat (comp :aspects read-manifest)
+                       ["META-INF/jolt/aspects/samizdat-m2-core.edn"
+                        "META-INF/jolt/aspects/samizdat-m2-embed.edn"
+                        "META-INF/jolt/aspects/samizdat-m2-http.edn"
+                        "META-INF/jolt/aspects/samizdat-m2-mycelium.edn"])
+        by-id (into {} (map (juxt :id identity)) (:aspects experience))
+        match #(get-in by-id [% :match])
+        role #(get-in by-id [% :advice-role])]
+    (is (= 5 (count (:aspects experience))))
+    (is (not-any? (set (keys by-id)) (map :id others))
+        "experience aspect ids are distinct from every other manifest's")
+    (is (= #{:samizdat/decision-domain :samizdat/candidate-score :samizdat/transition
+             :samizdat/verification :samizdat/artifact}
+           (set (map :advice-role (:aspects experience)))))
+    (is (= {:entry 'samizdat.decide/authorize :arity 2}
+           (match :samizdat.decide/decision-domain)))
+    (is (= :samizdat/decision-domain (role :samizdat.decide/decision-domain)))
+    (is (= {:entry 'samizdat.decide/decide :arity 1}
+           (match :samizdat.decide/candidate-score)))
+    (is (= {:entry 'samizdat.decide/revalidate :arity 3}
+           (match :samizdat.decide/transition)))
+    (is (= {:entry 'samizdat.store.journal/settle-gate! :arity 4}
+           (match :samizdat.store.journal/verification)))
+    (is (= {:entry 'samizdat.store.journal/record-artifact! :arity 3}
+           (match :samizdat.store.journal/artifact)))
+    (testing "every entry resolves to a var whose arglists include the declared arity"
+      (doseq [{:keys [match]} (:aspects experience)]
+        (let [v (do (require (symbol (namespace (:entry match))))
+                    (resolve (:entry match)))
+              arities (set (map count (:arglists (meta v))))]
+          (is (some? v) (str (:entry match) " resolves"))
+          (is (contains? arities (:arity match))
+              (str (:entry match) " has arity " (:arity match))))))))

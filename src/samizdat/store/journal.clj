@@ -457,6 +457,71 @@
   [conn run-id kind data]
   (emit! conn run-id kind data))
 
+;; --- decisions (ADR-001, ADR-002) ------------------------------------------
+
+(defn record-decision!
+  "One closed-domain decision as a durable row (migration v21), plus the
+  event that announces it. `record` is the auditable record from
+  samizdat.decide, already checked for leaks by the caller and passed
+  through decide/durable so qualified keywords survive JSON. Returns the
+  decisions row id, which the apply step updates with its revalidation."
+  [conn run-id {:keys [branch-id turn decision-id manifest] :as coords} record]
+  (let [based-on (:based-on record)
+        prov (:provenance record)
+        ;; a keyword column keeps its qualifier (:reason/stale-revision ->
+        ;; "reason/stale-revision"), the way decide/durable writes the record
+        col (fn [x] (cond (nil? x) nil
+                          (keyword? x) (subs (str x) 1)
+                          :else (str x)))
+        id (db/with-writer
+             (db/execute! conn
+                          ["INSERT INTO decisions (run_id, branch_id, turn, decision_id, domain_id,
+                                                   domain_revision, manifest, state_version,
+                                                   policy_revision, decision, reason, selected,
+                                                   would_have_selected, margin, entropy, n_offered,
+                                                   n_scored, scorer_id, model_state_id, revalidated,
+                                                   revalidation, record, created_at)
+                            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+                           run-id branch-id turn (col decision-id)
+                           (col (:domain-id prov)) (col (:domain-revision prov))
+                           (col (or manifest (:manifest based-on)))
+                           (:state/version based-on)
+                           (col (or (:policy-revision record) (:policy-revision prov)))
+                           (col (:decision record)) (col (:reason record))
+                           (col (:selected record)) (col (:would-have-selected record))
+                           (:margin record) (:entropy record)
+                           (:n-offered record) (:n-scored record)
+                           (col (:scorer-id prov)) (col (:model-state-id prov))
+                           (if (:revalidated? record) 1 0)
+                           (some-> (:revalidation record) js)
+                           (js record) (db/now)])
+             (db/last-insert-id conn))]
+    ;; The event carries the whole record as the note used to, so a live
+    ;; watcher and the tail endpoint see what the row holds; the row is the
+    ;; durable copy.
+    (emit! conn run-id :decide {:branch-id branch-id :turn turn
+                                :data (assoc record :row id)})
+    id))
+
+(defn decision-revalidated!
+  "Record what the apply step found when it re-derived freshness."
+  [conn row-id {:keys [decision reason selected would-have-selected revalidation]}]
+  (let [col (fn [x] (cond (nil? x) nil (keyword? x) (subs (str x) 1) :else (str x)))]
+    (db/with-writer
+      (db/execute! conn
+                   ["UPDATE decisions SET revalidated = 1, revalidation = ?, decision = ?, reason = ?,
+                                          selected = ?, would_have_selected = ? WHERE id = ?"
+                    (js revalidation) (col decision) (col reason)
+                    (col selected) (col would-have-selected) row-id]))))
+
+(defn decisions
+  "Every decision of a run, oldest first, with the record parsed back."
+  [conn run-id]
+  (mapv (fn [row]
+          (assoc row :record (try (json/read-str (str (:record row)) :key-fn keyword)
+                                  (catch Throwable _ nil))))
+        (db/fetch conn ["SELECT * FROM decisions WHERE run_id = ? ORDER BY id" run-id])))
+
 (defn last-note
   "The data of the most recent `kind` note on this run, parsed back from JSON,
   or nil.

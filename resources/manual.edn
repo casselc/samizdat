@@ -162,6 +162,14 @@
     :summary "One authorized closed-domain decision end to end: score it, apply the trusted selection rule, and return the journal-shaped record. Never throws; a malformed or partial scorer result becomes a recorded deferral."}
    {:name samizdat.decide/authorize
     :summary "Project a vocabulary through a trusted legality source into a DecisionDomain. The only way to get something `decide` will act on — there is no arity that takes a bare list of actions."}
+   {:name samizdat.decide/revalidate
+    :summary "Re-derive a scored decision's freshness against the CURRENT state immediately before apply (ADR-002 §3): the ledger's state version against the version the domain was derived at, the authority, the budget, the invariants. Anything but :fresh demotes an :act to a :defer with a reason and keeps what would have been applied. The :decide/apply cell calls it when the caller supplies :decide/current."}
+   {:name samizdat.decide/entropy
+    :summary "Shannon entropy of the distribution the scores induce over the ranked candidates, recorded beside the margin: how concentrated the whole distribution is, where the margin is only how far ahead the winner is."}
+   {:name samizdat.decide/ops
+    :summary "The closed operation vocabulary a candidate's :op may name (:continue :steer :block :complete :cull :spare :branch :escalate :defer). Gate names, cells, tasks and seeds are targets of an op, never ops; a candidate naming any other op is refused by domain-problem with :domain/unknown-op."}
+   {:name samizdat.decide/model-state-ref-problem
+    :summary "Why a ModelStateRef (ADR-002 §4) may not be recorded, or nil: a ref must carry every identifying field of a native model state (coordinate, revision, representation, runtime, training ABI, graph revision, state version, prefix hash and count, content hash and byte count, blob ref) and must not carry the state itself."}
    {:name samizdat.decide/all-legal
     :summary "A NAMED legality source that permits everything. For a domain genuinely unconstrained in this state; saying nothing at all is refused instead."}
    {:name samizdat.decide/legality

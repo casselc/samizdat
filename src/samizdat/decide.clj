@@ -102,19 +102,44 @@
 
   The candidates that survive are the only ones a scorer ever sees, which is
   what makes \"the model cannot widen authority\" a structural property rather
-  than a convention."
-  [vocabulary {:keys [legality id revision state-coord authority]}]
+  than a convention.
+
+  `:based-on` is the coordinate the domain was derived FROM — run, branch,
+  turn, manifest, graph revision and the ledger's state version at the
+  boundary — and `:policy-revision` the policy that will select over it. Both
+  are carried verbatim onto the domain so a later revalidation (`revalidate`)
+  and a later reader can tell a domain derived from THIS state from one that
+  merely looks like it. Neither is required to authorize: a caller with no
+  coordinate gets a domain that cannot be revalidated as fresh, which is the
+  honest reading of a domain of unknown origin."
+  [vocabulary {:keys [legality id revision state-coord authority based-on policy-revision]}]
   (let [pred (:legality/pred legality)
         vocab (vec vocabulary)
         keep? (fn [c] (boolean (pred c)))]
-    {:domain/id                id
-     :domain/revision          revision
-     :domain/state-coord       state-coord
-     :domain/authority         authority
-     :domain/legality-source   (:legality/source legality)
-     :domain/legality-revision (:legality/revision legality)
-     :domain/candidates        (filterv keep? vocab)
-     :domain/rejected          (mapv :id (remove keep? vocab))}))
+    (cond-> {:domain/id                id
+             :domain/revision          revision
+             :domain/state-coord       state-coord
+             :domain/authority         authority
+             :domain/legality-source   (:legality/source legality)
+             :domain/legality-revision (:legality/revision legality)
+             :domain/candidates        (filterv keep? vocab)
+             ;; the id AND the reason, so an auditor sees why an action was
+             ;; refused rather than only that it was
+             :domain/rejected          (mapv :id (remove keep? vocab))
+             :domain/rejected-with-reason (mapv (fn [c] {:id (:id c)
+                                                         :reason (or (:rejection-reason c)
+                                                                     :rejected/not-legal)})
+                                                (remove keep? vocab))}
+      based-on        (assoc :domain/based-on based-on)
+      policy-revision (assoc :domain/policy-revision policy-revision))))
+
+(def ops
+  "The closed operation vocabulary a candidate's `:op` may name (ADR-002 §1).
+  Gate names, cells, tasks and seeds are TARGETS of an op, never ops. A
+  candidate that names an op outside this set is refused by `domain-problem`;
+  a candidate with no `:op` is a bare id, which earlier vocabularies used and
+  which stays valid."
+  #{:continue :steer :block :complete :cull :spare :branch :escalate :defer})
 
 (defn domain-problem
   "Why this DecisionDomain may not be scored, or nil.
@@ -133,6 +158,11 @@
       (not (every? :id cands))                 :domain/missing-id
       (not= (count cands)
             (count (distinct (map :id cands)))) :domain/duplicate-id
+      ;; an :op outside the closed vocabulary is a candidate naming an
+      ;; operation trusted code never defined; a candidate with no :op is a
+      ;; bare id and stays valid
+      (some #(and (contains? % :op) (not (contains? ops (:op %)))) cands)
+      :domain/unknown-op
       :else nil)))
 
 ;; ---------------------------------------------------------- score contract
@@ -167,12 +197,23 @@
   Extra ids FAIL CLOSED rather than being ignored. A scorer answering about
   options that were never authorized is not a scorer that can be trusted about
   the ones that were -- most likely it is bound to a stale domain, which is the
-  case where quietly proceeding is worst."
+  case where quietly proceeding is worst.
+
+  A result that names the domain it evaluated (`:evaluated-domain-id`, ADR-002
+  §2) and names a DIFFERENT one is refused as :reason/stale-domain before
+  anything is read from it: the scorer answered about another state. A result
+  that names no domain is accepted as before; the record then says nothing
+  about which domain the evidence was for, which is the older, weaker contract."
   [domain result]
   (let [ids (map :id (:domain/candidates domain))
         scores (:scores result)]
     (cond
       (not (map? result)) {:reason :reason/no-scores}
+      (and (contains? result :evaluated-domain-id)
+           (not= (:evaluated-domain-id result) (:domain/id domain)))
+      {:reason :reason/stale-domain
+       :evaluated-domain-id (:evaluated-domain-id result)
+       :domain-id (:domain/id domain)}
       (not (map? scores)) {:reason :reason/no-scores}
       (empty? scores)     {:reason :reason/no-scores}
       :else
@@ -264,6 +305,99 @@
       {:decision :act :reason :reason/clear-winner :margin m
        :selected (:id (first ranked))})))
 
+;; ------------------------------------------------ evidence summaries (ADR-002 §2)
+
+(defn entropy
+  "Shannon entropy, in nats, of the distribution the scores induce over the
+  ranked candidates: scores are log-probabilities (or any log-space
+  evidence), softmaxed with the max subtracted for stability. nil for fewer
+  than two candidates.
+
+  Recorded beside the margin because they answer different questions: the
+  margin is how far ahead the winner is, the entropy is how concentrated the
+  whole distribution is. A margin can be wide with the mass spread over the
+  losers, and that shape is what a later calibration reads."
+  [ranked]
+  (when (< 1 (count ranked))
+    (let [xs (map (comp double :score) ranked)
+          m (reduce max xs)
+          ws (map #(Math/exp (- % m)) xs)
+          z (reduce + ws)]
+      (- (reduce + (map (fn [w] (let [p (/ w z)] (if (pos? p) (* p (Math/log p)) 0.0))) ws))))))
+
+;; ------------------------------------------------ revalidation (ADR-002 §3)
+
+(defn revalidate
+  "Re-derive freshness against the CURRENT state immediately before apply.
+
+  A model selection is not a committed transition (ADR-001 invariant 4). The
+  kernel checks, at apply time, that the state the domain was derived from is
+  still the state, that the authority is unchanged, that the budget still
+  admits the action and that no invariant is violated; anything else demotes
+  an :act to a :defer with a reason and keeps what would have been applied.
+
+  `now` is what the caller knows at apply time:
+
+    {:state/version   the ledger's current state version
+     :authority       the current authority, compared with the domain's
+     :budget-ok?      whether the budget still admits the selection (default true)
+     :invariants-ok?  whether the invariants hold (default true)}
+
+  The domain's `:domain/based-on :state/version` is the version the domain was
+  derived at. A domain with no such version cannot be shown fresh and is
+  treated as :stale-revision — a domain of unknown origin is not applied."
+  [outcome domain {:keys [budget-ok? invariants-ok?] :or {budget-ok? true invariants-ok? true} :as now}]
+  (let [derived (get-in domain [:domain/based-on :state/version])
+        version (:state/version now)
+        verdict (cond
+                  (or (nil? derived) (nil? version) (not= derived version)) :stale-revision
+                  (and (contains? now :authority)
+                       (not= (:authority now) (:domain/authority domain)))    :authority-changed
+                  (not budget-ok?)                                            :budget-exceeded
+                  (not invariants-ok?)                                        :invariant-violated
+                  :else                                                       :fresh)
+        reason {:stale-revision :reason/stale-revision
+                :authority-changed :reason/authority-changed
+                :budget-exceeded :reason/budget-exceeded
+                :invariant-violated :reason/invariant-violated}
+        out (assoc outcome :revalidated? true
+                   :revalidation {:state/version version :derived-at derived :outcome verdict})]
+    (if (and (= :act (:decision outcome)) (not= :fresh verdict))
+      (assoc out :decision :defer
+             :reason (get reason verdict)
+             :would-have-selected (:selected outcome)
+             :selected nil)
+      out)))
+
+;; ------------------------------------------------ model state (ADR-002 §4)
+
+(def ^:private model-state-ref-required
+  [:model-state/id :model/coordinate :model/revision :model/representation
+   :runtime/backend :runtime/revision :training-abi/version
+   :graph/revision :state/version :prefix-token-hash :prefix-token-count
+   :native-state/hash :native-state/bytes :blob/ref])
+
+(defn model-state-ref-problem
+  "Why a ModelStateRef may not be recorded, or nil.
+
+  The ledger holds identity, provenance, the prefix hash and the content hash
+  of a native state; the bytes live outside it (ADR-001 invariant 5). So the
+  ref must carry every identifying field and must NOT carry the state itself:
+  a ref with a :state, :blob, :bytes or :handle key is the blob wearing a ref's
+  name, and is refused."
+  [ref]
+  (cond
+    (not (map? ref)) :model-state/not-a-map
+    (some #(not (contains? ref %)) model-state-ref-required)
+    :model-state/missing-field
+    (some #(contains? ref %) [:state :blob :bytes :handle :ptr :pointer :logits :tokens])
+    :model-state/carries-state
+    (not (integer? (:prefix-token-count ref))) :model-state/bad-token-count
+    (not (integer? (:native-state/bytes ref))) :model-state/bad-byte-count
+    (not (string? (:prefix-token-hash ref)))   :model-state/bad-prefix-hash
+    (not (string? (:native-state/hash ref)))   :model-state/bad-state-hash
+    :else nil))
+
 ;; ------------------------------------------------------------ provenance
 
 (def ^:private provenance-keys
@@ -285,6 +419,9 @@
     ;; the model as an ARTIFACT, not a description
     :model-id :model-sha256 :model-repo :model-revision :model-file
     :tokenizer-family
+    ;; the native state the scorer restored (ADR-002 §2), by id only —
+    ;; never the state
+    :model-state-id
     ;; the runtime under it
     :jolt-llama-sha :llama-cpp-sha :native-abi
     ;; observation, when it happens to be available
@@ -298,7 +435,8 @@
   authorized or which policy applied."
   #{:convention :homogeneous? :latency-ms :inference-epoch :trace-id :span-id
     :scorer-id :model-id :model-sha256 :model-repo :model-revision :model-file
-    :tokenizer-family :jolt-llama-sha :llama-cpp-sha :native-abi})
+    :tokenizer-family :jolt-llama-sha :llama-cpp-sha :native-abi
+    :model-state-id})
 
 (defn- scalar?
   "Whether a value is small and inert enough to journal.
@@ -377,6 +515,7 @@
   evidence arrived\" and answering \"what survived rank\"."
   [{:keys [domain ranked outcome domain-check score-check prov]}]
   (let [offered (:domain/candidates domain)
+        ent (entropy ranked)
         ranked-by-id (into {} (map (juxt :id identity) ranked))
         missing (set (:missing score-check))
         invalid (set (:invalid score-check))
@@ -392,12 +531,23 @@
      :n-scored    (count (filter #(= :ok (:scoring-status %)) entries))
      :domain      entries
      :rejected    (vec (:domain/rejected domain))
+     :rejected-with-reason (vec (:domain/rejected-with-reason domain))
+     ;; the coordinate the domain was derived from and the policy that
+     ;; selected over it (ADR-002 §1); nil on a domain that carried none
+     :based-on    (:domain/based-on domain)
+     :policy-revision (:domain/policy-revision domain)
+     ;; how concentrated the evidence was, beside how far ahead the winner
+     :entropy     ent
      :domain-check (or domain-check :ok)
      :score-check  (when score-check
-                     {:reason (:reason score-check)
-                      :missing (vec (:missing score-check))
-                      :invalid (vec (:invalid score-check))
-                      :extra (vec (:extra score-check))})
+                     (cond-> {:reason (:reason score-check)
+                              :missing (vec (:missing score-check))
+                              :invalid (vec (:invalid score-check))
+                              :extra (vec (:extra score-check))}
+                       ;; which domain the scorer thought it was answering about
+                       (contains? score-check :evaluated-domain-id)
+                       (assoc :evaluated-domain-id (:evaluated-domain-id score-check)
+                              :domain-id (:domain-id score-check))))
      :decision    (:decision outcome)
      :selected    (:selected outcome)
      :would-have-selected (:would-have-selected outcome)
