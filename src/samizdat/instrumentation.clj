@@ -3,7 +3,7 @@
 
 (def compatibility-id
   "Compatibility id for the currently published semantic join points."
-  "5bcf270fced63507e70ce10baa1b580c1b42a5c6")
+  "71f24e427649a82db96576694f6967c171e72453")
 
 (def mycelium-compatibility-id
   "Semantic compatibility id for the provider-neutral graph and execution

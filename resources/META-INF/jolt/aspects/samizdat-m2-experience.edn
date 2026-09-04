@@ -2,7 +2,7 @@
  :library {:id yogthos/samizdat
            ;; Compatibility id for the instrumentable M2 semantic surface.
            ;; Resource-only commits may advance without changing this contract.
-           :version "5bcf270fced63507e70ce10baa1b580c1b42a5c6"}
+           :version "71f24e427649a82db96576694f6967c171e72453"}
  ;; The closed-domain decision surface (docs/adr/ADR-002 section 5 in the
  ;; bootstrap repository): the five join points an experience consumer needs
  ;; to tie a DecisionDomain, its scoring, the apply-time revalidation, a gate

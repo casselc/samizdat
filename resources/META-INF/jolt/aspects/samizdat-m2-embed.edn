@@ -1,6 +1,6 @@
 {:schema 1
  :library {:id yogthos/samizdat
-           :version "5bcf270fced63507e70ce10baa1b580c1b42a5c6"}
+           :version "71f24e427649a82db96576694f6967c171e72453"}
  :aspects
  [{:id :samizdat.embed/beam-run
    :match {:entry samizdat.agent.beam/run!
