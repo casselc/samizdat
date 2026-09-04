@@ -4,6 +4,7 @@
             [clojure.string :as str]
             [malli.core :as m]
             [mycelium.cell :as cell]
+            [mycelium.execution :as execution]
             [mycelium.resilience :as resilience]
             [mycelium.schema :as schema]
             [mycelium.validation :as v]
@@ -78,6 +79,102 @@
 
 ;; ===== Edge compilation =====
 
+(defn edge-ref
+  "Portable identity for one workflow edge.
+
+   The source node, manifest dispatch label, and target node are all semantic
+   names from the workflow definition. Mycelium's predicate wrapper reports
+   this reference after selection without changing Maestro's dispatch-pair
+   shape or exposing predicate input."
+  [source label target]
+  [source label target])
+
+(defn edge-key
+  "Returns the portable edge key selected by a Mycelium predicate wrapper."
+  [edge-reference]
+  edge-reference)
+
+(defn selected-edge
+  "The bounded semantic edge-decision seam.
+
+   Called only after a Mycelium dispatch predicate succeeds. It receives and
+   returns the portable edge reference alone; generic Maestro dispatches never
+   cross this boundary."
+  [edge-reference]
+  (when (and execution/*execution-id*
+             (or (nil? execution/*execution-active?*)
+                 @execution/*execution-active?*)
+             (not (execution/*execution-cancelled?*)))
+    (execution/edge-event! {:schema 1
+                            :execution-id execution/*execution-id*
+                            :edge-key edge-reference}))
+  edge-reference)
+
+(defn- wrap-edge-predicate [predicate edge-reference]
+  (if (ifn? predicate)
+    (fn [data]
+      (let [result (predicate data)]
+        (when result
+          (selected-edge edge-reference))
+        result))
+    `(fn [data#]
+       (let [result# (~predicate data#)]
+         (when result#
+           (mycelium.workflow/selected-edge ~edge-reference))
+         result#))))
+
+(defn- stable-order [values]
+  (sort-by pr-str values))
+
+(defn- hex-encode [bytes]
+  (apply str (map #(format "%02x" %) bytes)))
+
+(defn- artifact-id [artifact]
+  (str "sha256:"
+       (-> (java.security.MessageDigest/getInstance "SHA-256")
+           (.digest (.getBytes (pr-str artifact) "UTF-8"))
+           hex-encode)))
+
+(declare normalize-workflow)
+
+(defn graph-artifact
+  "Projects a workflow definition into deterministic, executable-code-free
+   graph metadata.
+
+   Nodes and edges are vectors in stable semantic-name order.  `:entry` and
+   `:terminals` identify the actual cells at those boundaries; edges retain
+   the pseudo terminal target (`:end`, `:error`, or `:halt`) so their identity
+   is exact.  Dispatch predicates and provider/runtime values are deliberately
+   absent."
+  [raw-workflow]
+  (let [{:keys [cells edges joins]} (normalize-workflow raw-workflow)
+        node->cell (merge
+                    (into {} (map (fn [[node ref]]
+                                    [node (:id (normalize-cell-ref node ref))]))
+                          cells)
+                    (into {} (map (fn [[node _]] [node :mycelium/join])) joins))
+        edge-records
+        (mapcat (fn [[source targets]]
+                  (if (map? targets)
+                    (for [[label target] (stable-order targets)]
+                      {:edge-key (edge-ref source label target)
+                       :source source :label label :target target})
+                    [{:edge-key (edge-ref source :always targets)
+                      :source source :label :always :target targets}]))
+                (stable-order edges))
+        terminal-nodes (set (keep (fn [{:keys [source target]}]
+                                    (when (contains? #{:end :error :halt} target)
+                                      source))
+                                  edge-records))
+        boundary (fn [node] {:node node :cell (get node->cell node)})]
+    (let [artifact {:schema 1
+                    :entry (when (contains? node->cell :start) (boundary :start))
+                    :terminals (mapv boundary (stable-order terminal-nodes))
+                    :nodes (mapv (fn [[node cell-id]] {:node node :cell cell-id})
+                                 (stable-order node->cell))
+                    :edges (vec (sort-by (comp pr-str :edge-key) edge-records))}]
+      (assoc artifact :graph-id (artifact-id artifact)))))
+
 (defn compile-edges
   "Compiles edge definitions into Maestro dispatch pairs.
    If edges is a keyword → unconditional dispatch to that target.
@@ -87,8 +184,8 @@
   [edges dispatch-vec]
   (if (keyword? edges)
     [[(resolve-state-id edges) (constantly true)]]
-    (let [;; Partition into non-default and default, then concat so :default is last
-          {defaults true others false} (group-by #(= :default (first %)) dispatch-vec)
+    (let [{defaults true others false}
+          (group-by #(= :default (first %)) dispatch-vec)
           ordered (concat others defaults)]
       (mapv (fn [[label pred]]
               (let [target (get edges label)]
@@ -96,6 +193,26 @@
                   (throw (ex-info (str "No edge target for dispatch label " label)
                                   {:label label})))
                 [(resolve-state-id target) pred]))
+            ordered))))
+
+(defn- compile-instrumented-edges
+  "Internal Mycelium compilation path. Retains Maestro dispatch pairs while
+   wrapping predicates with the selected-edge semantic event seam."
+  [source edges dispatch-vec]
+  (if (keyword? edges)
+    [[(resolve-state-id edges)
+      (wrap-edge-predicate (constantly true)
+                           (edge-ref source :always edges))]]
+    (let [{defaults true others false}
+          (group-by #(= :default (first %)) dispatch-vec)
+          ordered (concat others defaults)]
+      (mapv (fn [[label pred]]
+              (let [target (get edges label)]
+                (when-not target
+                  (throw (ex-info (str "No edge target for dispatch label " label)
+                                  {:label label})))
+                [(resolve-state-id target)
+                 (wrap-edge-predicate pred (edge-ref source label target))]))
             ordered))))
 
 ;; ===== Schema key utilities =====
@@ -849,6 +966,30 @@
             (or dispatches-map {})
             cell->handler)))
 
+(def ^:private normalized-key ::normalized)
+
+(defn normalize-workflow
+  "Normalizes the graph-bearing parts of a workflow exactly once.
+
+   Pipeline shorthand and error-group routing are compile-time graph
+   transformations. The returned value is marked in metadata so validation,
+   compilation, and graph projection can safely share the identical normalized
+   definition without expanding either transformation twice."
+  [raw-workflow]
+  (if (-> raw-workflow meta normalized-key)
+    raw-workflow
+    (let [workflow (expand-pipeline raw-workflow)
+          error-groups (or (:error-groups workflow) {})
+          edges (if (seq error-groups)
+                  (expand-error-group-edges (:edges workflow) error-groups)
+                  (:edges workflow))
+          dispatches (if (seq error-groups)
+                       (inject-error-group-dispatches
+                        (:dispatches workflow) error-groups edges)
+                       (:dispatches workflow))]
+      (with-meta (assoc workflow :edges edges :dispatches dispatches)
+        (assoc (meta workflow) normalized-key true)))))
+
 (defn- wrap-handler-with-error-catch
   "Wraps a cell handler with try/catch. On error, returns data with
    :mycelium/error {:cell cell-name, :message msg}.
@@ -995,19 +1136,12 @@
   ([raw-workflow]
    (validate-workflow raw-workflow {}))
   ([raw-workflow opts]
-   (let [{:keys [cells edges dispatches joins input-schema]}
-         (expand-pipeline raw-workflow)]
+   (let [{:keys [cells edges dispatches joins input-schema] :as workflow}
+         (normalize-workflow raw-workflow)]
      (validate-cells-exist! cells)
-     (let [error-groups (or (:error-groups raw-workflow) {})
+     (let [error-groups (or (:error-groups workflow) {})
            _            (when (seq error-groups)
-                          (validate-error-groups! error-groups cells))
-           edges        (if (seq error-groups)
-                          (expand-error-group-edges edges error-groups)
-                          edges)
-           dispatches   (if (seq error-groups)
-                          (inject-error-group-dispatches
-                           dispatches error-groups edges)
-                          dispatches)]
+                          (validate-error-groups! error-groups cells))]
        (validate-default-edges! edges)
        (let [cell-ids        (cells->ids cells)
              resolved        (resolve-cells cell-ids opts)
@@ -1019,7 +1153,7 @@
              valid-names     (set/union edge-cell-names join-names)]
          (when input-schema
            (v/validate-malli-schema! input-schema "input-schema" opts))
-         (when-let [resilience (:resilience raw-workflow)]
+         (when-let [resilience (:resilience workflow)]
            (resilience/validate-resilience! resilience cell-ids))
          (when (seq joins-map)
            (validate-join-defs! joins-map cell-ids edges)
@@ -1036,16 +1170,16 @@
                        with-defaults edges cell-ids)
                       join-dispatches)]
            (v/validate-dispatch-coverage! edges effective-dispatches))
-         (when-let [transforms (:transforms raw-workflow)]
+         (when-let [transforms (:transforms workflow)]
            (validate-transforms! transforms cells edges opts))
          (let [resolved-transforms
-               (some-> (:transforms raw-workflow)
+               (some-> (:transforms workflow)
                        (resolve-transforms opts))]
            (validate-schema-chain!
             edges resolved joins-map resolved-transforms))
-         (when-let [timeouts (:timeouts raw-workflow)]
+         (when-let [timeouts (:timeouts workflow)]
            (validate-timeouts! timeouts cells edges))
-         (when-let [constraints (:constraints raw-workflow)]
+         (when-let [constraints (:constraints workflow)]
            (validate-constraints! constraints edges))
          resolved)))))
 
@@ -1280,16 +1414,9 @@
   ([workflow] (compile-workflow workflow {}))
   ([raw-workflow opts]
    (let [{:keys [cells edges dispatches joins] :as workflow}
-         (expand-pipeline raw-workflow)
+         (normalize-workflow raw-workflow)
          resolved (validate-workflow workflow opts)
-         ;; Expand error groups before other processing.
          error-groups (or (:error-groups workflow) {})
-           edges        (if (seq error-groups)
-                          (expand-error-group-edges edges error-groups)
-                          edges)
-           dispatches   (if (seq error-groups)
-                          (inject-error-group-dispatches dispatches error-groups edges)
-                          dispatches)
            ;; Normalize cells to {name → cell-id} for compilation
            cell-ids (cells->ids cells)
            cell-params (cells->params cells)
@@ -1388,7 +1515,7 @@
                                            [state-id
                                             (merge
                                              {:handler    (:handler cell)
-                                              :dispatches (compile-edges edge-def dispatch-vec)}
+                                              :dispatches (compile-instrumented-edges cell-name edge-def dispatch-vec)}
                                              (when (:async? cell)
                                                {:async? true}))]))))
                                cell-ids)
@@ -1401,7 +1528,7 @@
                                             dispatch-vec (get effective-dispatches join-name)]
                                         [state-id
                                          {:handler    (:handler join-cell)
-                                          :dispatches (compile-edges edge-def dispatch-vec)}])))
+                                          :dispatches (compile-instrumented-edges join-name edge-def dispatch-vec)}])))
                                joins-map)
          fsm-states (merge fsm-cell-states fsm-join-states)
          ;; Build transform maps from :transforms

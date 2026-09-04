@@ -172,15 +172,17 @@
                :duration-ms (elapsed-ms start-time)})
       (assoc :current-state-id ::error :error error)))
 
-(defn- run-sync
+(defn- run-sync*
   "Synchronous FSM execution using loop/recur.
    Used when no async handlers are present."
   [fsm-map max-trace subscriptions pre post resources current-state-id trace data]
   (let [initial (make-initial-fsm fsm-map max-trace subscriptions post resources
                                   current-state-id trace data)]
-    (loop [{:keys [data current-state-id last-state-id opts] :as fsm} (pre initial resources)]
+    (loop [{:keys [data current-state-id last-state-id opts] :as fsm}
+           (pre initial resources)]
       (let [{:keys [handler dispatches]} (get-in fsm [:fsm current-state-id])
-            fsm (assoc-in fsm [:opts :subscriptions] (run-subscriptions! data (:subscriptions opts)))]
+            fsm (assoc-in fsm [:opts :subscriptions]
+                          (run-subscriptions! data (:subscriptions opts)))]
         (cond
           (= ::end current-state-id)
           (handler resources fsm)
@@ -210,18 +212,27 @@
               (recur (pre err resources))
               (recur (pre @next-state resources)))))))))
 
-(defn- execute-async
+(defn- run-sync
+  [fsm-map max-trace subscriptions pre post around-execute resources
+   current-state-id trace data]
+  (around-execute
+   #(run-sync* fsm-map max-trace subscriptions pre post resources
+               current-state-id trace data)
+   (constantly false)))
+
+(defn- execute-async-body
   "Async FSM execution. Drives the step loop on its own thread and parks on a
    per-step promise until the handler invokes its callback, so handlers may
    complete synchronously or from another thread — stack-safe either way.
-   Returns a deref-able future; an error raised by the FSM rethrows on deref."
+   An error raised by the FSM is propagated to its caller."
   [fsm-map max-trace subscriptions pre post resources current-state-id trace data]
-  (future
-    (let [initial (make-initial-fsm fsm-map max-trace subscriptions post resources
-                                    current-state-id trace data)]
-      (loop [{:keys [data current-state-id last-state-id opts] :as fsm} (pre initial resources)]
+  (let [initial (make-initial-fsm fsm-map max-trace subscriptions post resources
+                                  current-state-id trace data)]
+    (loop [{:keys [data current-state-id last-state-id opts] :as fsm}
+           (pre initial resources)]
         (let [{:keys [handler dispatches]} (get-in fsm [:fsm current-state-id])
-              fsm (assoc-in fsm [:opts :subscriptions] (run-subscriptions! data (:subscriptions opts)))]
+              fsm (assoc-in fsm [:opts :subscriptions]
+                            (run-subscriptions! data (:subscriptions opts)))]
           (cond
             (= ::end current-state-id)
             (handler resources fsm)
@@ -250,7 +261,20 @@
                 (handler resources data callback error-callback)
                 (catch Throwable e
                   (deliver step (error-fsm fsm max-trace current-state-id start-time e))))
-              (recur (pre @step resources)))))))))
+              (recur (pre @step resources))))))))
+
+(defn- execute-async
+  [fsm-map max-trace subscriptions pre post around-execute resources
+   current-state-id trace data]
+  (let [self (promise)
+        task (future
+               (let [task @self]
+                 (around-execute
+                  #(execute-async-body fsm-map max-trace subscriptions pre post resources
+                                       current-state-id trace data)
+                  #(future-cancelled? task))))]
+    (deliver self task)
+    task))
 
 (defn run
   "Executes the FSM spec compiled using compile.
@@ -262,10 +286,11 @@
    (run fsm resources {}))
   ([{fsm-map :fsm
      has-async? :has-async?
-     {:keys [max-trace subscriptions pre post]
+     {:keys [max-trace subscriptions pre post around-execute]
       :or {max-trace 1000
            pre (fn [fsm _resources] fsm)
-           post (fn [fsm _resources] fsm)}} :opts}
+           post (fn [fsm _resources] fsm)
+           around-execute (fn [run _cancelled?] (run))}} :opts}
     resources
     {trace :trace
      data :data
@@ -278,9 +303,9 @@
                   (:async? state)
                   has-async?)]
      (if async?
-       (execute-async fsm-map max-trace subscriptions pre post resources
+       (execute-async fsm-map max-trace subscriptions pre post around-execute resources
                       current-state-id trace data)
-       (run-sync fsm-map max-trace subscriptions pre post resources
+       (run-sync fsm-map max-trace subscriptions pre post around-execute resources
                  current-state-id trace data)))))
 
 (defn run-async
@@ -291,12 +316,10 @@
   ([fsm resources]
    (run-async fsm resources {}))
   ([fsm resources state]
-   (let [async? (if (contains? state :async?)
-                  (:async? state)
-                  (:has-async? fsm))]
-     (if async?
-       (run fsm resources state)
-       (future (run fsm resources state))))))
+   ;; Drive both sync- and async-handler machines through the same owned
+   ;; execution future. Besides avoiding a needless wrapper future, this keeps
+   ;; cancellation identity available to :around-execute hooks.
+   (run fsm resources (assoc state :async? true))))
 
 (defn- bfs
   "Breadth-first search from start nodes using adjacency map.

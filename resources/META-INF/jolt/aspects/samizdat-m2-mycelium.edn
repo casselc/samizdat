@@ -1,0 +1,16 @@
+{:schema 1
+ :library {:id yogthos/samizdat
+           ;; Semantic contract id. No commit before this slice contains these
+           ;; join points, so an older source SHA would be false provenance.
+           :version "samizdat-mycelium-graph-v1"}
+ :aspects
+ [{:id :mycelium.workflow/lifecycle
+   :match {:entry mycelium.execution/workflow-event!
+           :arity 1}
+   :advice-role :mycelium/workflow
+   :expect {:matches 1}}
+  {:id :mycelium.workflow/edge-decision
+   :match {:entry mycelium.execution/edge-event!
+           :arity 1}
+   :advice-role :mycelium/edge-decision
+   :expect {:matches 1}}]}

@@ -3,6 +3,7 @@
    Re-exports key functions from internal namespaces."
   (:require [mycelium.cell :as cell]
             [mycelium.dev :as dev]
+            [mycelium.execution :as execution]
             [mycelium.schema :as schema]
             [mycelium.workflow :as workflow]
             [mycelium.compose :as compose]
@@ -32,6 +33,14 @@
   "Compiles a workflow definition into a Maestro FSM.
    See mycelium.workflow/compile-workflow."
   workflow/compile-workflow)
+
+(def graph-artifact
+  "Deterministic provider-neutral metadata for a workflow definition."
+  workflow/graph-artifact)
+
+(def edge-key
+  "Portable identity for a selected Mycelium edge reference."
+  workflow/edge-key)
 
 ;; --- Composition ---
 
@@ -71,10 +80,14 @@
      :malli/registry — local Malli registry captured during compilation"
   ([workflow-def] (pre-compile workflow-def {}))
   ([workflow-def opts]
-   (let [compiled-fsm (compile-workflow workflow-def opts)
-         input-schema-raw (:input-schema workflow-def)
+   (let [normalized (workflow/normalize-workflow workflow-def)
+         compiled-fsm (compile-workflow normalized opts)
+         graph (graph-artifact normalized)
+         input-schema-raw (:input-schema normalized)
          input-schema-compiled (schema/compile-schema input-schema-raw opts)]
      {:compiled-fsm         compiled-fsm
+      :graph                graph
+      :graph-id             (:graph-id graph)
       :input-schema-raw     input-schema-raw
       :input-schema-compiled input-schema-compiled})))
 
@@ -90,11 +103,6 @@
 
 ;; --- Execution ---
 
-(defn- deref-if-promise
-  "Derefs an async maestro result (a future) to a plain value; returns sync results as-is."
-  [result]
-  (if (future? result) @result result))
-
 (defn- extract-result
   "Extracts the data map from an FSM run result.
    Normal end: result is already the data map (from default-on-end).
@@ -104,33 +112,32 @@
     (:data result)
     result))
 
+(defn- execute-compiled
+  [compiled-workflow resources initial-data kind]
+  (if-let [input-error (check-input-schema compiled-workflow initial-data)]
+    {:mycelium/input-error input-error}
+    (extract-result
+     (execution/run-sync compiled-workflow resources {:data initial-data} kind))))
+
 (defn run-compiled
   "Runs a pre-compiled workflow. Zero compilation overhead per call.
    Use `pre-compile` to create the compiled workflow at startup.
    If the workflow halts, returns data with :mycelium/halt and :mycelium/resume keys."
   ([compiled-workflow resources initial-data]
-   (if-let [input-error (check-input-schema compiled-workflow initial-data)]
-     {:mycelium/input-error input-error}
-     (extract-result
-      (deref-if-promise
-       (fsm/run (:compiled-fsm compiled-workflow) resources {:data initial-data})))))
+   (execute-compiled compiled-workflow resources initial-data :sync))
   ([compiled-workflow resources initial-data opts]
-   (if-let [input-error (check-input-schema compiled-workflow initial-data)]
-     {:mycelium/input-error input-error}
-     (extract-result
-      (deref-if-promise
-       (fsm/run (:compiled-fsm compiled-workflow) resources {:data initial-data}))))))
+   (execute-compiled compiled-workflow resources initial-data :sync)))
 
 (defn run-compiled-async
   "Like run-compiled but returns a future."
   ([compiled-workflow resources initial-data]
    (if-let [input-error (check-input-schema compiled-workflow initial-data)]
      (future {:mycelium/input-error input-error})
-     (fsm/run-async (:compiled-fsm compiled-workflow) resources {:data initial-data})))
+     (execution/run-async compiled-workflow resources {:data initial-data} :async)))
   ([compiled-workflow resources initial-data opts]
    (if-let [input-error (check-input-schema compiled-workflow initial-data)]
      (future {:mycelium/input-error input-error})
-     (fsm/run-async (:compiled-fsm compiled-workflow) resources {:data initial-data}))))
+     (execution/run-async compiled-workflow resources {:data initial-data} :async))))
 
 (defn resume-compiled
   "Resumes a halted workflow from where it left off.
@@ -150,11 +157,10 @@
      (let [data (cond-> (dissoc halted-result :mycelium/halt :mycelium/resume)
                   merge-data (merge merge-data))]
        (extract-result
-        (deref-if-promise
-         (fsm/run (:compiled-fsm compiled-workflow)
-                  resources
-                  {:current-state-id resume-state
-                   :data data})))))))
+        (execution/run-sync compiled-workflow resources
+                            {:current-state-id resume-state
+                             :data data}
+                            :resume))))))
 
 (defn run-workflow
   "Convenience function: compiles and runs a workflow in one step.

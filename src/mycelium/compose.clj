@@ -2,9 +2,9 @@
   "Hierarchical composition: wrapping workflows as cells for nesting."
   (:require [malli.core :as m]
             [mycelium.cell :as cell]
+            [mycelium.execution :as execution]
             [mycelium.schema :as schema]
-            [mycelium.workflow :as wf]
-            [maestro.core :as fsm]))
+            [mycelium.workflow :as wf]))
 
 (defn- get-map-entries
   "Extracts top-level entries from a resolved Malli :map schema.
@@ -127,8 +127,9 @@
   ([cell-id workflow schema-map]
    (workflow->cell cell-id workflow schema-map {}))
   ([cell-id workflow schema-map opts]
-   (let [compiled (wf/compile-workflow
-                   workflow
+   (let [normalized (wf/normalize-workflow workflow)
+         compiled-fsm (wf/compile-workflow
+                   normalized
                    (merge opts
                           {:on-error
                            (fn [_ fsm-state]
@@ -144,10 +145,13 @@
                              (-> (:data fsm-state)
                                  (assoc :mycelium/child-trace
                                         (:trace fsm-state))))}))
+         graph (wf/graph-artifact normalized)
+         compiled {:compiled-fsm compiled-fsm
+                   :graph graph
+                   :graph-id (:graph-id graph)}
          handler (fn [resources data]
                    (try
-                     (let [result (fsm/run compiled resources {:data data})]
-                       (if (future? result) @result result))
+                     (execution/run-sync compiled resources {:data data} :composed)
                      (catch Exception e
                        (assoc data :mycelium/error (ex-message e)))))]
      (merge (aggregate-effects workflow)
