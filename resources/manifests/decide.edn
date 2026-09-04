@@ -20,6 +20,30 @@
 ;; exactly the kind of scope creep the canary was scoped against.
 {:description "Score a closed set of legal actions and record the decision. Trusted code builds the domain and makes the selection; the model only orders what it is given. Defers rather than guessing when the margin is thin, when the candidates are not comparable, or when no scorer is present."
 
+ :input-schema
+ ;; What a driver hands this manifest to start a run. Every key is optional:
+ ;; a caller that supplies no vocabulary gets the default action set, and one
+ ;; that supplies no legality evidence gets an unauthorized domain that
+ ;; :decide/score refuses and journals. The scorer is a transient binding
+ ;; (never journalled), so it is :any here and absent from every record.
+ [:map
+  [:decide/vocabulary {:optional true} [:sequential :map]]
+  [:decide/legal? {:optional true} :any]
+  [:decide/all-legal? {:optional true} :boolean]
+  [:decide/legality-source {:optional true} :any]
+  [:decide/legality-revision {:optional true} :any]
+  [:decide/domain-id {:optional true} :any]
+  [:decide/domain-revision {:optional true} :any]
+  [:decide/state-coord {:optional true} :any]
+  [:decide/authority {:optional true} :any]
+  [:decide/context {:optional true} :any]
+  [:decide/scorer {:optional true} :any]
+  [:decide/scorer-id {:optional true} :any]
+  [:decide/model-coord {:optional true} :any]
+  [:decide/decision-id {:optional true} :any]
+  [:branch {:optional true} :map]
+  [:turn {:optional true} :int]]
+
  :cells {:start  :decide/domain
          :score  :decide/score
          :apply  :decide/apply}

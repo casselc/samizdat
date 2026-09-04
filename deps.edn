@@ -31,9 +31,12 @@
 
         ;; OpenSSL/SecureRandom shims. http-client pulls this in too; jolt.deps
         ;; reconciles the duplicate libssl/libcrypto natives to a single load.
+        ;; 44da69b (v0.0.5) declares MessageDigest/Mac/Cipher through
+        ;; :jolt/provides, which jolt 0.8.1 requires (RFC 0014); mycelium.workflow
+        ;; hashes with MessageDigest without requiring jolt.crypto first.
         jolt-lang/jolt-crypto
         {:git/url "https://github.com/jolt-lang/jolt-crypto"
-         :git/sha "584a4d32094f0a72613d028deb944de00cd9fc11"}
+         :git/sha "44da69bad08a2fd7631bd4061e3fb53938dafff6"}
 
          org.clojure/data.json
          {:git/url "https://github.com/clojure/data.json"
@@ -60,9 +63,14 @@
         ;; logging anything without this dep throws at the first log call.
         ;; bc85090 brings DateTimeFormatterBuilder.appendFraction (PR #7/#8),
         ;; which malli.transform's date formatter needs at namespace load.
+        ;; 91cef5b (v0.0.8) adds the :jolt/provides declaration (RFC 0014):
+        ;; jolt 0.8.1 no longer carries the class-to-library map itself, so an
+        ;; older pin raises "No matching ctor found for class
+        ;; java.time.format.DateTimeFormatterBuilder" the moment malli.transform
+        ;; loads before anything has required jolt.time.
         jolt-lang/time
         {:git/url "https://github.com/jolt-lang/time"
-         :git/sha "bc85090dae95d103ba04f4ea9687945cf46fb19e"}}
+         :git/sha "91cef5b692c624806ea92ba280200162314cdb52"}}
 
  ;; The vendored HTTP server (src/ring_chez/adapter.clj) binds BSD sockets
  ;; through the running process's own libc symbols, so they must be loaded

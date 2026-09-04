@@ -265,13 +265,17 @@
   :input-schema is that this table and the manifests agree; the test below is
   what makes disagreeing fail here rather than six cells into a run.
 
-  Four shapes, because there are four kinds of entry point: the loop family
+  Five shapes, because there are five kinds of entry point: the loop family
   (every driver that advances a branch), the beam's own scheduler round, the
-  oversight stream, and the repair ladder."
+  oversight stream, the repair ladder, and the closed-domain decision canary."
   (let [branch {:id "B1" :problem "p" :messages []}]
     {:beam      {:branches [] :turn 1}
      :oversight {:oversight/carry nil}
      :repair    {:body "{}"}
+     ;; the closed-domain canary: a vocabulary and explicit legality, no branch
+     :decide    {:decide/vocabulary [{:id :hold :text " HOLD"}
+                                     {:id :scale :text " SCALE"}]
+                 :decide/all-legal? true}
      :default   {:branch branch :turn 1}}))
 
 (defn- entry-for [nm]

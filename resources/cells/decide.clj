@@ -93,7 +93,22 @@
         an action highly cannot thereby make it legal, because it never sees an
         action that was not."
    :pure true
-   :requires []}
+   :requires []
+   ;; Every input is optional: the canary starts from an empty data map and a
+   ;; caller that supplies nothing gets an explicitly unauthorized domain,
+   ;; which :decide/score refuses. The one thing this cell promises downstream
+   ;; is the domain itself.
+   :input  [:map
+            [:decide/vocabulary {:optional true} :any]
+            [:decide/legal? {:optional true} :any]
+            [:decide/all-legal? {:optional true} :boolean]
+            [:decide/legality-source {:optional true} :any]
+            [:decide/legality-revision {:optional true} :any]
+            [:decide/domain-id {:optional true} :any]
+            [:decide/domain-revision {:optional true} :any]
+            [:decide/state-coord {:optional true} :any]
+            [:decide/authority {:optional true} :any]]
+   :output [:map [:decide/authorized :map]]}
   (fn [_ data]
     (let [{:keys [decide/vocabulary decide/legal? decide/all-legal?
                   decide/legality-source decide/legality-revision
@@ -133,7 +148,21 @@
         or the scorer itself. The record is checked against that rule BEFORE it
         is written, because an append-only journal has no second chance."
    :effects [:db]
-   :requires [:conn :run-id]}
+   :requires [:conn :run-id]
+   ;; The domain is the one required input, and it is what :decide/domain
+   ;; leaves behind; the scorer and its coordinates are transient bindings the
+   ;; caller may or may not supply. The record and the decision keyword are
+   ;; what :decide/apply reads.
+   :input  [:map
+            [:decide/authorized :map]
+            [:decide/context {:optional true} :any]
+            [:decide/scorer {:optional true} :any]
+            [:decide/scorer-id {:optional true} :any]
+            [:decide/model-coord {:optional true} :any]
+            [:decide/decision-id {:optional true} :any]
+            [:branch {:optional true} :any]
+            [:turn {:optional true} :any]]
+   :output [:map [:decide/record :map] [:decide/decision :keyword]]}
   (fn [{:keys [conn run-id]}
        {:keys [decide/authorized decide/context decide/scorer decide/scorer-id
                decide/model-coord decide/decision-id branch turn]
@@ -193,7 +222,12 @@
         the difference between an auditable decision and an audited-afterwards
         one."
    :pure true
-   :requires []}
+   :requires []
+   :input  [:map [:decide/record :map]]
+   ;; :decide/action is nil on a deferral, so :any rather than :keyword; the
+   ;; reason is only present when there is one.
+   :output [:map [:decide/action :any]
+            [:decide/deferred-reason {:optional true} :any]]}
   (fn [_ {:keys [decide/record] :as data}]
     (if (= :act (:decision record))
       (assoc data :decide/action (:selected record))
