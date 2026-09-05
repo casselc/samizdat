@@ -17,11 +17,16 @@
          :git/tag "v0.0.6"
          :git/sha "177b1ce4e529ffe052e6a1b7b103ed924de535f6"}
 
-        ;; durable sessions: jdbc.core over the system libsqlite3 via jolt.ffi
-        jolt-lang/db
-        {:git/url "https://github.com/jolt-lang/db"
-         :git/tag "v0.4.0"
-         :git/sha "d85f391ca521da389b935c38f3d78b30eaa23208"}
+        ;; durable sessions: jdbc.core over the system libsqlite3 via jolt.ffi.
+        ;; casselc/db is the one db line every sibling (jolt-chdb,
+        ;; jolt-otel-clickhouse) pins; 6d6fff9 merges upstream jolt-lang/db
+        ;; v0.4.0 (d85f391, the #15 java.sql surface) into it, so it is a
+        ;; superset of the previous pin. The key matches jolt-chdb's so the
+        ;; resolver sees ONE db candidate when both are on the path, instead of
+        ;; two libraries carrying the same namespaces.
+        io.github.casselc/db
+        {:git/url "https://github.com/casselc/db.git"
+         :git/sha "6d6fff9d17888c5a67b85674076dec962ee5dde7"}
 
         ;; nREPL middleware (sessions, interruptible eval, completion, lookup) so
         ;; an editor can drive the running harness. See core/start-nrepl!.
