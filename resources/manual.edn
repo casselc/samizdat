@@ -163,7 +163,7 @@
    {:name samizdat.decide/authorize
     :summary "Project a vocabulary through a trusted legality source into a DecisionDomain. The only way to get something `decide` will act on — there is no arity that takes a bare list of actions."}
    {:name samizdat.decide/revalidate
-    :summary "Re-derive a scored decision's freshness against the CURRENT state immediately before apply (ADR-002 §3): the ledger's state version against the version the domain was derived at, the authority, the budget, the invariants. Anything but :fresh demotes an :act to a :defer with a reason and keeps what would have been applied. The :decide/apply cell calls it when the caller supplies :decide/current."}
+    :summary "Re-derive a scored decision's freshness against the CURRENT state immediately before apply (ADR-002 §3): the ledger's state version against the version the domain was derived at, the authority, the budget, the invariants. Anything but :fresh demotes an :act to a :defer with a reason and keeps what would have been applied. The :decide/apply cell calls it when the caller supplies :decide/current, and WITHOUT :decide/current the cell does not apply an :act at all (it defers with :reason/unrevalidated) unless the caller says :decide/allow-unrevalidated? true, which a fixture or a canary with no live state may, and which the record and the durable row then carry as :unrevalidated-allowed?."}
    {:name samizdat.decide/entropy
     :summary "Shannon entropy of the distribution the scores induce over the ranked candidates, recorded beside the margin: how concentrated the whole distribution is, where the margin is only how far ahead the winner is."}
    {:name samizdat.decide/ops

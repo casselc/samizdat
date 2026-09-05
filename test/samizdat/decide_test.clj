@@ -608,8 +608,26 @@
             (is (true? (:decide/applied? applied)))
             (is (= :hold (:decide/action applied)))
             (is (= :fresh (get-in applied [:decide/revalidation :outcome])))))
-        (testing "apply without the current state: applied as scored, marked unrevalidated"
-          (let [applied ((handler :decide/apply) ctx scored)]
+        (testing "apply without the current state: NOT applied; the row says why"
+          (let [applied ((handler :decide/apply) ctx scored)
+                row (first (journal/decisions c rid))]
+            (is (false? (:decide/applied? applied)))
+            (is (nil? (:decide/action applied)))
+            (is (= :reason/unrevalidated (:decide/deferred-reason applied)))
+            (is (false? (get-in applied [:decide/record :revalidated?])))
+            (is (= :hold (get-in applied [:decide/record :would-have-selected])))
+            (is (= 0 (:revalidated row)))
+            (is (= "defer" (:decision row)))
+            (is (= "reason/unrevalidated" (:reason row)))))
+        (testing "apply without the current state but explicitly allowed (a fixture, a canary):
+                  applied as scored, and the record and the row both say it was never checked"
+          (let [applied ((handler :decide/apply) ctx (assoc scored :decide/allow-unrevalidated? true))
+                row (first (journal/decisions c rid))]
             (is (true? (:decide/applied? applied)))
-            (is (false? (get-in applied [:decide/record :revalidated?]))))))
+            (is (= :hold (:decide/action applied)))
+            (is (false? (get-in applied [:decide/record :revalidated?])))
+            (is (true? (get-in applied [:decide/record :unrevalidated-allowed?])))
+            (is (= 0 (:revalidated row)))
+            (is (= "act" (:decision row)))
+            (is (.contains (str (:revalidation row)) "unrevalidated-allowed")))))
       (finally (db/close c)))))

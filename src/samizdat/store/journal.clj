@@ -504,14 +504,21 @@
     id))
 
 (defn decision-revalidated!
-  "Record what the apply step found when it re-derived freshness."
-  [conn row-id {:keys [decision reason selected would-have-selected revalidation]}]
-  (let [col (fn [x] (cond (nil? x) nil (keyword? x) (subs (str x) 1) :else (str x)))]
+  "Record what the apply step did with the decision: what it found when it
+  re-derived freshness, or that it could not (`:revalidated?` false) and
+  what it did about that -- a demotion to :reason/unrevalidated, or an
+  explicitly allowed unrevalidated apply, which the record carries as
+  `:unrevalidated-allowed?` and the row keeps in its revalidation column."
+  [conn row-id {:keys [decision reason selected would-have-selected revalidation
+                       revalidated? unrevalidated-allowed?]}]
+  (let [col (fn [x] (cond (nil? x) nil (keyword? x) (subs (str x) 1) :else (str x)))
+        reval (or revalidation
+                  (when unrevalidated-allowed? {:outcome :unrevalidated-allowed}))]
     (db/with-writer
       (db/execute! conn
-                   ["UPDATE decisions SET revalidated = 1, revalidation = ?, decision = ?, reason = ?,
+                   ["UPDATE decisions SET revalidated = ?, revalidation = ?, decision = ?, reason = ?,
                                           selected = ?, would_have_selected = ? WHERE id = ?"
-                    (js revalidation) (col decision) (col reason)
+                    (if revalidated? 1 0) (when reval (js reval)) (col decision) (col reason)
                     (col selected) (col would-have-selected) row-id]))))
 
 (defn decisions

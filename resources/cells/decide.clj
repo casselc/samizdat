@@ -259,14 +259,24 @@
         re-derives freshness here, immediately before apply (decide/revalidate):
         a domain derived at another state version, under another authority,
         past its budget or against an invariant is not applied, and the record
-        says which. Without :decide/current the decision is applied as scored
-        and the record says :revalidated? false -- honest, and the older
-        contract. The durable row is updated when there is one."
+        says which.
+
+        Revalidation is MANDATORY on the production path. Without
+        :decide/current nothing is known about freshness, so an :act is NOT
+        applied: it is demoted to a :defer with :reason/unrevalidated, the
+        selection kept as :would-have-selected, and the record says
+        :revalidated? false. A fixture, a canary or an offline replay that
+        has no live state to check against says so explicitly with
+        :decide/allow-unrevalidated? true, and then the decision is applied as
+        scored with :revalidated? false and :unrevalidated-allowed? true on
+        the record -- visible in the durable row, never the default. The
+        durable row is updated when there is one."
    :effects [:db]
    :requires [:conn]
    :input  [:map [:decide/record :map]
             [:decide/authorized {:optional true} :map]
             [:decide/current {:optional true} :map]
+            [:decide/allow-unrevalidated? {:optional true} :boolean]
             [:decide/decision-row {:optional true} :any]]
    ;; :decide/action is nil on a deferral, so :any rather than :keyword; the
    ;; reason is only present when there is one.
@@ -275,11 +285,24 @@
             [:decide/deferred-reason {:optional true} :any]
             [:decide/revalidation {:optional true} :any]]}
   (fn [{:keys [conn]}
-       {:keys [decide/record decide/authorized decide/current decide/decision-row] :as data}]
-    (let [record' (if current
+       {:keys [decide/record decide/authorized decide/current decide/decision-row
+               decide/allow-unrevalidated?] :as data}]
+    (let [record' (cond
+                    current
                     (decide/revalidate record (or authorized {}) current)
+
+                    allow-unrevalidated?
+                    (assoc record :revalidated? false :unrevalidated-allowed? true)
+
+                    ;; nothing to check against: an :act is not applied
+                    (= :act (:decision record))
+                    (assoc record :revalidated? false
+                           :decision :defer :reason :reason/unrevalidated
+                           :would-have-selected (:selected record) :selected nil)
+
+                    :else
                     (assoc record :revalidated? false))]
-      (when (and conn decision-row current)
+      (when (and conn decision-row)
         (journal/decision-revalidated! conn decision-row record'))
       (if (= :act (:decision record'))
         (assoc data :decide/record record'
