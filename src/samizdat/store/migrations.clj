@@ -633,6 +633,65 @@
    "CREATE INDEX IF NOT EXISTS idx_decisions_run ON decisions(run_id, id)"
    "CREATE INDEX IF NOT EXISTS idx_decisions_branch ON decisions(run_id, branch_id, turn)"])
 
+(def ^:private v22
+  ;; Decision lifecycle for offline decision comparison (issue #11, first
+  ;; slice; the outcome pilot is the first consumer). Three identities:
+  ;;
+  ;;   pilot_cases      one immutable decision situation (a checkpoint and the
+  ;;                    observation built from it), reused across evaluations;
+  ;;   pilot_decisions  the CURRENT state of one scoring/selection attempt on a
+  ;;                    case under one evaluation, with a revision counter that
+  ;;                    every transition must present (compare-and-set);
+  ;;   decision_events  the append-only lifecycle, one row per transition, in
+  ;;                    a durable sequence. event_id is the idempotency key a
+  ;;                    retried writer re-presents; the second write of the
+  ;;                    same event_id changes nothing.
+  ;;
+  ;; A lifecycle event and the pilot_decisions update that reflects it are
+  ;; written in one transaction (samizdat.store.lifecycle/transition!), so a
+  ;; reader following event_seq and a reader of current state cannot disagree.
+  ;; pilot_leases is the single-writer dispatch lease: an effect may be
+  ;; dispatched only by the holder, and only against the revision it read.
+  ;; Nothing here is a change feed for the existing `decisions` table: those
+  ;; rows predate lifecycle capture and no events are invented for them.
+  ["CREATE TABLE IF NOT EXISTS pilot_cases (
+      case_id         TEXT PRIMARY KEY,
+      scenario_id     TEXT NOT NULL,
+      checkpoint_id   TEXT NOT NULL,
+      observation_ref TEXT,
+      domain_ref      TEXT,
+      spec            TEXT NOT NULL,
+      created_at      TEXT NOT NULL)"
+   "CREATE TABLE IF NOT EXISTS pilot_decisions (
+      decision_id     TEXT PRIMARY KEY,
+      case_id         TEXT NOT NULL,
+      evaluation_id   TEXT NOT NULL,
+      state           TEXT NOT NULL,
+      revision        INTEGER NOT NULL,
+      action_id       TEXT,
+      action_params   TEXT,
+      origin          TEXT,
+      last_event_seq  INTEGER,
+      created_at      TEXT NOT NULL,
+      updated_at      TEXT NOT NULL)"
+   "CREATE INDEX IF NOT EXISTS idx_pilot_decisions_case ON pilot_decisions(case_id, evaluation_id)"
+   "CREATE TABLE IF NOT EXISTS decision_events (
+      event_seq       INTEGER PRIMARY KEY AUTOINCREMENT,
+      event_id        TEXT NOT NULL UNIQUE,
+      decision_id     TEXT NOT NULL,
+      event_type      TEXT NOT NULL,
+      schema_version  INTEGER NOT NULL,
+      revision        INTEGER NOT NULL,
+      payload         TEXT NOT NULL,
+      created_at      TEXT NOT NULL)"
+   "CREATE INDEX IF NOT EXISTS idx_decision_events_decision ON decision_events(decision_id, event_seq)"
+   "CREATE TABLE IF NOT EXISTS pilot_leases (
+      scope           TEXT PRIMARY KEY,
+      holder          TEXT NOT NULL,
+      revision        INTEGER NOT NULL,
+      acquired_at     TEXT NOT NULL,
+      expires_at      TEXT NOT NULL)"])
+
 (def migrations
   "Ordered. Index 0 is migration 1; PRAGMA user_version holds the count applied."
-  [v1 v2 v3 v4 v5 v6 v7 v8 v9 v10 v11 v12 v13 v14 v15 v16 v17 v18 v19 v20 v21])
+  [v1 v2 v3 v4 v5 v6 v7 v8 v9 v10 v11 v12 v13 v14 v15 v16 v17 v18 v19 v20 v21 v22])

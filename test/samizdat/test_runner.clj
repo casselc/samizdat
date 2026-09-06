@@ -136,6 +136,7 @@
             [samizdat.prompt-test]
             [samizdat.server-test]
             [samizdat.adapter-test]
+            [samizdat.lifecycle-test]
             [samizdat.proc-test]
             [samizdat.board-bt-test]
             [samizdat.finalization-test]
@@ -280,6 +281,7 @@
     samizdat.prompt-test
     samizdat.server-test
     samizdat.adapter-test
+    samizdat.lifecycle-test
     samizdat.proc-test
     samizdat.gui-api-test
     samizdat.gui-ops-test
