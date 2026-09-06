@@ -37,7 +37,8 @@
   A returned action is not a completed effect and a worker's claim of
   completion is not an outcome: the states keep `dispatched`, `completed`,
   `failed` and `interrupted` apart from `evaluated`, which only the evaluator
-  writes. `interrupted` is terminal-but-unusable on purpose: an effect whose
+  writes (and may supersede with `outcome-reevaluated`, keeping every verdict).
+  `interrupted` is terminal-but-unusable on purpose: an effect whose
   end was not observed cannot be told from success by inspection later.
 
   Dispatch is fenced by a single-writer lease per scope (`acquire-lease!`).
@@ -73,7 +74,10 @@
    "failed"       {"outcome-evaluated" "evaluated"}
    "interrupted"  {"outcome-evaluated" "evaluated"}
    "rejected"     {}
-   "evaluated"    {}})
+   ;; An evaluation can be superseded (the evaluator's check changed) but the
+   ;; earlier verdict stays in the event log: re-evaluation is append-only and
+   ;; never leaves `evaluated`.
+   "evaluated"    {"outcome-reevaluated" "evaluated"}})
 
 (def lease-fenced
   "Event types only the dispatch-lease holder for the decision's case may

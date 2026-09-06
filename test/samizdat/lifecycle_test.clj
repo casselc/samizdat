@@ -82,7 +82,25 @@
     (testing "only the evaluator's event leaves a terminal execution state"
       (is (= "evaluated" (get-in lc/transitions ["completed" "outcome-evaluated"])))
       (is (= "evaluated" (get-in lc/transitions ["interrupted" "outcome-evaluated"])))
-      (is (empty? (get lc/transitions "evaluated"))))))
+      (is (= {"outcome-reevaluated" "evaluated"} (get lc/transitions "evaluated"))
+          "the only successor of evaluated is a superseding evaluation, which stays evaluated"))))
+
+(deftest a-superseding-evaluation-keeps-the-earlier-verdict
+  (with-db [c]
+    (propose! c "d1")
+    (doseq [[i ev] (map-indexed vector ["action-forced" "action-authorized"])]
+      (is (= :applied (:status (lc/transition! c {:decision-id "d1" :event-id (str "d1/" ev) :event-type ev :revision (inc i)})))))
+    (lc/acquire-lease! c "case-1" "orch-A" 60000)
+    (doseq [[i ev] (map-indexed vector ["dispatch-intent" "action-dispatched" "action-completed"])]
+      (is (= :applied (:status (lc/transition! c {:decision-id "d1" :event-id (str "d1/" ev) :event-type ev
+                                                  :revision (+ 3 i) :lease-holder "orch-A"})))))
+    (is (= :applied (:status (lc/transition! c {:decision-id "d1" :event-id "d1/eval-1" :event-type "outcome-evaluated"
+                                                :revision 6 :payload {:verified true}}))))
+    (is (= :applied (:status (lc/transition! c {:decision-id "d1" :event-id "d1/eval-2" :event-type "outcome-reevaluated"
+                                                :revision 7 :payload {:verified false :supersedes "d1/eval-1"}}))))
+    (is (= "evaluated" (:state (lc/decision c "d1"))))
+    (let [evs (filter #(#{"outcome-evaluated" "outcome-reevaluated"} (:event_type %)) (lc/decision-events c))]
+      (is (= ["outcome-evaluated" "outcome-reevaluated"] (map :event_type evs)) "both verdicts remain, in order"))))
 
 (deftest dispatch-is-fenced-by-the-lease
   (with-db [c]
