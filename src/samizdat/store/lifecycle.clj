@@ -50,7 +50,8 @@
             ;; it has to load before jdbc.core (see samizdat.store.db).
             [db.jdbc]
             [jdbc.core :as jdbc]
-            [samizdat.store.db :as db]))
+            [samizdat.store.db :as db]
+            [samizdat.telemetry.hook :as hook]))
 
 (def schema-version
   "Payload schema of decision_events rows written by this namespace."
@@ -111,7 +112,7 @@
   spec is a no-op (`:existing`); a different spec under the same id throws,
   because a case is the identity other records hang from."
   [conn {:keys [case-id scenario-id checkpoint-id observation-ref domain-ref spec]}]
-  (in-tx conn
+  (hook/observe! :upsert-case {:case-id case-id :scenario-id scenario-id :checkpoint-id checkpoint-id} (fn [] (in-tx conn
     (if-let [row (jdbc/fetch-one conn ["SELECT spec FROM pilot_cases WHERE case_id = ?" case-id])]
       (if (= (str (:spec row)) (js spec))
         {:status :existing :case-id case-id}
@@ -122,7 +123,7 @@
                                 VALUES (?, ?, ?, ?, ?, ?, ?)"
                                case-id scenario-id checkpoint-id observation-ref domain-ref
                                (js spec) (db/now)])
-          {:status :created :case-id case-id}))))
+          {:status :created :case-id case-id}))))))
 
 (defn case-by-id [conn case-id]
   (some-> (db/fetch-one conn ["SELECT * FROM pilot_cases WHERE case_id = ?" case-id])
@@ -137,7 +138,7 @@
   with a bumped revision, so the previous holder's fenced writes fail as
   stale rather than interleave."
   [conn scope holder ttl-ms]
-  (in-tx conn
+  (hook/observe! :acquire-lease {:scope scope :holder holder :ttl-ms ttl-ms} (fn [] (in-tx conn
     (let [now (java.time.Instant/now)
           expires (str (.plusMillis now ttl-ms))
           row (jdbc/fetch-one conn ["SELECT * FROM pilot_leases WHERE scope = ?" scope])]
@@ -159,12 +160,12 @@
 
         :else
         {:status :held :holder (:holder row) :revision (:revision row)
-         :expires-at (:expires_at row)}))))
+         :expires-at (:expires_at row)}))))))
 
 (defn release-lease! [conn scope holder]
-  (in-tx conn
+  (hook/observe! :release-lease {:scope scope :holder holder} (fn [] (in-tx conn
     (jdbc/execute! conn ["DELETE FROM pilot_leases WHERE scope = ? AND holder = ?" scope holder])
-    {:status :released}))
+    {:status :released}))))
 
 (defn- lease-ok? [conn scope holder]
   (when-let [row (jdbc/fetch-one conn ["SELECT holder, expires_at FROM pilot_leases WHERE scope = ?" scope])]
@@ -176,8 +177,9 @@
 (defn decision
   "Current state of one decision, or nil."
   [conn decision-id]
-  (some-> (db/fetch-one conn ["SELECT * FROM pilot_decisions WHERE decision_id = ?" decision-id])
-          (update :action_params read-json)))
+  (hook/observe! :decision {:decision-id decision-id}
+    (fn [] (some-> (db/fetch-one conn ["SELECT * FROM pilot_decisions WHERE decision_id = ?" decision-id])
+             (update :action_params read-json)))))
 
 (defn transition!
   "Append one lifecycle event and move the decision, atomically. See the
@@ -191,7 +193,9 @@
                 case-id evaluation-id action-id action-params origin]}]
   (when (str/blank? event-id) (throw (ex-info "event-id is required" {})))
   (when (nil? revision) (throw (ex-info "revision is required" {:decision-id decision-id})))
-  (in-tx conn
+  (hook/observe! :transition {:decision-id decision-id :event-id event-id :event-type event-type
+                              :revision revision :case-id case-id :evaluation-id evaluation-id
+                              :action-id action-id :origin origin} (fn [] (in-tx conn
     (if-let [dup (jdbc/fetch-one conn ["SELECT event_seq, revision FROM decision_events WHERE event_id = ?" event-id])]
       {:status :duplicate :event-seq (:event_seq dup) :revision (:revision dup)}
       (let [row   (jdbc/fetch-one conn ["SELECT * FROM pilot_decisions WHERE decision_id = ?" decision-id])
@@ -234,7 +238,7 @@
                                           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
                                          decision-id case-id evaluation-id next rev action-id
                                          (some-> action-params js) origin seq now now])))
-              {:status :applied :event-seq seq :revision rev :state next})))))))
+              {:status :applied :event-seq seq :revision rev :state next})))))))))
 
 (defn decision-events
   "Bounded read of the lifecycle by durable sequence: rows with

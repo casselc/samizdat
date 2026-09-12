@@ -118,6 +118,43 @@
 
            :test {:extra-paths ["test" "gui"]
                   :main-opts ["-m" "samizdat.test-runner"]}
+
+           ;; OpenTelemetry export for the decision pilots (docs/telemetry.md).
+           ;; Optional and build-selected: the stock build never loads
+           ;; casselc/otel; samizdat.telemetry.hook is an inert seam until
+           ;; samizdat.telemetry.otel is loaded under this alias. Needs Jolt
+           ;; 0.8.3 (otel's own toolchain pin); only casselc/otel is added —
+           ;; jolt-otel-clickhouse is deliberately NOT a dependency here
+           ;; because its jolt-chdb pin resolves casselc/db over this
+           ;; project's jolt-lang/db. Typed-column compilation therefore runs
+           ;; outside this repository from the rendered manifest.
+           :telemetry {:extra-paths ["telemetry"]
+                       :extra-deps
+                       {casselc/otel
+                        {:git/url "https://github.com/casselc/otel.git"
+                         ;; oscope 74263599's selection; the one internally
+                         ;; consistent otel/joc/jolt-chdb set as of 2026-09-12.
+                         :git/sha "87d3ac1a9b26ec6c0bf0c44d3b5aff4c66ccb5a0"}
+                        ;; otel brings casselc/http-client 9cb5801, a linear
+                        ;; descendant of the jolt-lang/http-client v0.0.6
+                        ;; pinned above, and both ship the jolt.http.*
+                        ;; namespaces. Two providers of one namespace is a
+                        ;; silent mix, so under this alias the root coordinate
+                        ;; is moved to the SAME descendant revision: one
+                        ;; provider, the one otel was qualified with. (v0.0.6
+                        ;; itself does not compile under Jolt 0.8.3's analyzer:
+                        ;; jolt/http/net.clj:181 recurs across try.)
+                        jolt-lang/http-client
+                        {:git/url "https://github.com/casselc/http-client.git"
+                         :git/sha "9cb5801e8c5929387715aa6713c33b2c21fd9a2a"}
+                        ;; Likewise jolt-crypto: 5effcc8 is the descendant of
+                        ;; 44da69b that otel/http-client 9cb5801 pin.
+                        jolt-lang/jolt-crypto
+                        {:git/url "https://github.com/jolt-lang/jolt-crypto"
+                         :git/sha "5effcc89a3258499a79a2a3d69edad9e7800d1bf"}}}
+           ;; The otel-dependent tests; always combined: jolt -M:telemetry:telemetry-test
+           :telemetry-test {:extra-paths ["telemetry-test" "test"]
+                            :main-opts ["-m" "samizdat.telemetry.test-runner"]}
            ;; command-line nREPL client, plus the test tree, so the live
            ;; process can run the suite over nREPL without paying startup:
            ;;   (require 'samizdat.test-runner :reload-all)
@@ -173,4 +210,11 @@
           ;; {:rc 14}) — provenance A-3. `;` not `&&` so a hardened
           ;; environment where 1024 exceeds the hard limit still runs.
           test  "(ulimit -n 1024 2>/dev/null; jolt -M:test)"
+         ;; Render the telemetry contract (attribute manifest, Langfuse
+         ;; mapping, typed-column fragments) as canonical JSON for consumers:
+         ;;   jolt telemetry-manifest OUT-DIR
+         telemetry-manifest {:doc "render the telemetry contract as JSON into OUT-DIR"
+                             :main-opts ["-m" "samizdat.telemetry.contract"]}
+         ;; The telemetry tests need the otel dependency, hence the alias.
+         telemetry-test "(ulimit -n 1024 2>/dev/null; jolt -M:telemetry:telemetry-test)"
          gui   "jolt -M:gui"}}
