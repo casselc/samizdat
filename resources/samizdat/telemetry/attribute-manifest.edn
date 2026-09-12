@@ -1,0 +1,250 @@
+;; Samizdat telemetry attribute manifest — the one semantic contract every
+;; emitter (Jolt wrappers, the Python pilot adapter, the historical importer)
+;; and every rendering (JSON for Python, typed-column fragments for
+;; jolt-otel-clickhouse, the Langfuse attribute mapping) is generated from.
+;;
+;; Per attribute:
+;;   :key        canonical OTel attribute key, string
+;;   :type       :string | :boolean | :int64 | :double
+;;   :group      documentation grouping only
+;;   :domain     closed value set (strings) when the attribute is an enum
+;;   :authority  who owns the truth of the value — telemetry never decides it:
+;;               :journal (Samizdat store), :evidence (a preserved evidence
+;;               record), :runtime (measured by the emitting process),
+;;               :import (labels the importer adds), :telemetry (versions)
+;;   :promote?   member of the closed set of typed ClickHouse columns; only
+;;               :string/:boolean/:int64 may be promoted, doubles never are
+;;   :langfuse   :trace-metadata | :observation-metadata | :usage | :session
+;;               | :type | :model | :none
+;;   :missing    what an ABSENT key means: :unavailable (the fact exists but
+;;               was not measurable — emitters also set samizdat.value.basis)
+;;               or :not-applicable (absence is ordinary)
+;;
+;; False, zero, negative and empty-string values are real values and are
+;; always emitted; only nil is "absent".
+{:schema "samizdat-telemetry/1"
+ :mapping-version "samizdat-langfuse-mapping/1"
+ :fallback-prefix "samizdat.x."
+ :observation-kinds ["agent" "generation" "tool" "evaluator" "span"]
+ :session-keys ["samizdat.family.id" "samizdat.run.id"]
+ :max-promoted 16
+ :attributes
+ [;; --- identities -------------------------------------------------------
+  {:key "samizdat.run.id" :type :string :group :identity :authority :journal
+   :promote? false :langfuse :trace-metadata :missing :unavailable}
+  {:key "samizdat.experiment" :type :string :group :identity :authority :journal
+   :promote? false :langfuse :trace-metadata :missing :unavailable}
+  {:key "samizdat.execution.id" :type :string :group :identity :authority :journal
+   :promote? false :langfuse :trace-metadata :missing :unavailable}
+  {:key "samizdat.execution.kind" :type :string :group :identity :authority :journal
+   :domain ["parent" "continuation" "synthetic" "import" "lifecycle"]
+   :promote? true :langfuse :trace-metadata :missing :unavailable}
+  {:key "samizdat.family.id" :type :string :group :identity :authority :journal
+   :promote? false :langfuse :session :missing :not-applicable}
+  {:key "samizdat.parent.execution.id" :type :string :group :identity :authority :journal
+   :promote? false :langfuse :trace-metadata :missing :not-applicable}
+  {:key "samizdat.boundary.turn" :type :int64 :group :identity :authority :journal
+   :promote? false :langfuse :trace-metadata :missing :not-applicable}
+  {:key "samizdat.boundary.call" :type :int64 :group :identity :authority :journal
+   :promote? false :langfuse :trace-metadata :missing :not-applicable}
+  {:key "samizdat.checkpoint.id" :type :string :group :identity :authority :journal
+   :promote? false :langfuse :trace-metadata :missing :not-applicable}
+  {:key "samizdat.checkpoint.digest" :type :string :group :identity :authority :journal
+   :promote? false :langfuse :trace-metadata :missing :not-applicable}
+  {:key "samizdat.alternative.id" :type :string :group :identity :authority :journal
+   :promote? false :langfuse :trace-metadata :missing :not-applicable}
+  {:key "samizdat.alternative.policy" :type :string :group :identity :authority :journal
+   :promote? false :langfuse :trace-metadata :missing :not-applicable}
+  {:key "samizdat.seed" :type :int64 :group :identity :authority :journal
+   :promote? false :langfuse :trace-metadata :missing :not-applicable}
+
+  ;; --- evaluator --------------------------------------------------------
+  {:key "samizdat.evaluator.id" :type :string :group :evaluator :authority :evidence
+   :promote? true :langfuse :observation-metadata :missing :unavailable}
+  {:key "samizdat.evaluator.bundle_sha256" :type :string :group :evaluator :authority :evidence
+   :promote? false :langfuse :observation-metadata :missing :unavailable}
+  {:key "samizdat.evaluator.status" :type :string :group :evaluator :authority :evidence
+   :domain ["passed" "failed" "not-run" "no-result" "infra-error"]
+   :promote? true :langfuse :observation-metadata :missing :unavailable}
+  {:key "samizdat.evaluator.exit" :type :int64 :group :evaluator :authority :evidence
+   :promote? false :langfuse :observation-metadata :missing :unavailable}
+  {:key "samizdat.evaluator.checks" :type :int64 :group :evaluator :authority :evidence
+   :promote? false :langfuse :observation-metadata :missing :unavailable}
+  {:key "samizdat.evaluator.failed_count" :type :int64 :group :evaluator :authority :evidence
+   :promote? false :langfuse :observation-metadata :missing :unavailable}
+  {:key "samizdat.evaluator.purpose" :type :string :group :evaluator :authority :journal
+   :domain ["research" "operational"]
+   :promote? true :langfuse :observation-metadata :missing :unavailable}
+
+  ;; --- outcome facts (each one distinct; none implies another) ----------
+  {:key "samizdat.worker.claim" :type :string :group :outcome :authority :journal
+   :promote? false :langfuse :trace-metadata :missing :not-applicable}
+  {:key "samizdat.worker.claimed" :type :boolean :group :outcome :authority :journal
+   :promote? true :langfuse :trace-metadata :missing :unavailable}
+  {:key "samizdat.protocol.correct" :type :boolean :group :outcome :authority :evidence
+   :promote? true :langfuse :trace-metadata :missing :unavailable}
+  {:key "samizdat.infra.error" :type :boolean :group :outcome :authority :evidence
+   :promote? true :langfuse :trace-metadata :missing :unavailable}
+  {:key "samizdat.task.complete" :type :boolean :group :outcome :authority :evidence
+   :promote? true :langfuse :trace-metadata :missing :unavailable}
+  {:key "samizdat.completion.rule" :type :string :group :outcome :authority :evidence
+   :promote? false :langfuse :trace-metadata :missing :unavailable}
+  {:key "samizdat.suite.passed" :type :boolean :group :outcome :authority :evidence
+   :promote? false :langfuse :trace-metadata :missing :unavailable}
+  {:key "samizdat.terminal.status" :type :string :group :outcome :authority :journal
+   :promote? false :langfuse :trace-metadata :missing :unavailable}
+  {:key "samizdat.terminal.reason" :type :string :group :outcome :authority :journal
+   :promote? false :langfuse :trace-metadata :missing :not-applicable}
+
+  ;; --- feedback delivery ------------------------------------------------
+  {:key "samizdat.feedback.delivered" :type :boolean :group :feedback :authority :journal
+   :promote? true :langfuse :observation-metadata :missing :unavailable}
+  {:key "samizdat.feedback.status" :type :string :group :feedback :authority :evidence
+   :promote? false :langfuse :observation-metadata :missing :not-applicable}
+  {:key "samizdat.feedback.sha256" :type :string :group :feedback :authority :journal
+   :promote? false :langfuse :observation-metadata :missing :not-applicable}
+  {:key "samizdat.feedback.bytes" :type :int64 :group :feedback :authority :journal
+   :promote? false :langfuse :observation-metadata :missing :not-applicable}
+  {:key "samizdat.feedback.projection" :type :string :group :feedback :authority :journal
+   :promote? false :langfuse :observation-metadata :missing :not-applicable}
+  {:key "samizdat.feedback.policy" :type :string :group :feedback :authority :journal
+   :promote? false :langfuse :observation-metadata :missing :not-applicable}
+
+  ;; --- usage ------------------------------------------------------------
+  {:key "gen_ai.request.model" :type :string :group :usage :authority :runtime
+   :promote? false :langfuse :model :missing :not-applicable}
+  {:key "gen_ai.usage.input_tokens" :type :int64 :group :usage :authority :runtime
+   :promote? false :langfuse :usage :missing :unavailable}
+  {:key "gen_ai.usage.output_tokens" :type :int64 :group :usage :authority :runtime
+   :promote? true :langfuse :usage :missing :unavailable}
+  {:key "samizdat.usage.requests" :type :int64 :group :usage :authority :journal
+   :promote? false :langfuse :trace-metadata :missing :unavailable}
+  {:key "samizdat.usage.tool_calls" :type :int64 :group :usage :authority :journal
+   :promote? false :langfuse :trace-metadata :missing :unavailable}
+  {:key "samizdat.request.seconds" :type :double :group :usage :authority :runtime
+   :promote? false :langfuse :observation-metadata :missing :not-applicable}
+  {:key "samizdat.tool.name" :type :string :group :usage :authority :runtime
+   :promote? false :langfuse :observation-metadata :missing :not-applicable}
+  {:key "samizdat.tool.output_chars" :type :int64 :group :usage :authority :runtime
+   :promote? false :langfuse :observation-metadata :missing :not-applicable}
+  {:key "samizdat.tool.seconds" :type :double :group :usage :authority :runtime
+   :promote? false :langfuse :observation-metadata :missing :not-applicable}
+
+  ;; --- budgets (signed: a negative remainder is an overrun, not an error) -
+  {:key "samizdat.budget.turns.granted" :type :int64 :group :budget :authority :journal
+   :promote? false :langfuse :trace-metadata :missing :unavailable}
+  {:key "samizdat.budget.turns.used" :type :int64 :group :budget :authority :journal
+   :promote? false :langfuse :trace-metadata :missing :unavailable}
+  {:key "samizdat.budget.turns.remaining" :type :int64 :group :budget :authority :journal
+   :promote? true :langfuse :trace-metadata :missing :unavailable}
+  {:key "samizdat.budget.requests.granted" :type :int64 :group :budget :authority :journal
+   :promote? false :langfuse :trace-metadata :missing :not-applicable}
+  {:key "samizdat.budget.requests.used" :type :int64 :group :budget :authority :journal
+   :promote? false :langfuse :trace-metadata :missing :not-applicable}
+  {:key "samizdat.budget.requests.remaining" :type :int64 :group :budget :authority :journal
+   :promote? false :langfuse :trace-metadata :missing :not-applicable}
+  {:key "samizdat.budget.completion_tokens.granted" :type :int64 :group :budget :authority :journal
+   :promote? false :langfuse :trace-metadata :missing :not-applicable}
+  {:key "samizdat.budget.completion_tokens.used" :type :int64 :group :budget :authority :journal
+   :promote? false :langfuse :trace-metadata :missing :not-applicable}
+  {:key "samizdat.budget.completion_tokens.remaining" :type :int64 :group :budget :authority :journal
+   :promote? false :langfuse :trace-metadata :missing :not-applicable}
+  {:key "samizdat.budget.wall.granted_ms" :type :int64 :group :budget :authority :journal
+   :promote? false :langfuse :trace-metadata :missing :unavailable}
+  {:key "samizdat.budget.wall.used_ms" :type :int64 :group :budget :authority :journal
+   :promote? false :langfuse :trace-metadata :missing :unavailable}
+  {:key "samizdat.budget.wall.remaining_ms" :type :int64 :group :budget :authority :journal
+   :promote? true :langfuse :trace-metadata :missing :unavailable}
+
+  ;; --- costs, separately scoped -----------------------------------------
+  {:key "samizdat.cost.scope" :type :string :group :cost :authority :journal
+   :domain ["worker" "operational-action" "research"]
+   :promote? false :langfuse :observation-metadata :missing :unavailable}
+  {:key "samizdat.cost.wall_elapsed_s" :type :double :group :cost :authority :journal
+   :promote? false :langfuse :trace-metadata :missing :unavailable}
+  {:key "samizdat.cost.wall_charged_s" :type :double :group :cost :authority :journal
+   :promote? false :langfuse :trace-metadata :missing :unavailable}
+  {:key "samizdat.cost.wall_credited_s" :type :double :group :cost :authority :journal
+   :promote? false :langfuse :trace-metadata :missing :unavailable}
+  {:key "samizdat.cost.action_charged_s" :type :double :group :cost :authority :journal
+   :promote? false :langfuse :trace-metadata :missing :not-applicable}
+  {:key "samizdat.cost.research_s" :type :double :group :cost :authority :journal
+   :promote? false :langfuse :trace-metadata :missing :not-applicable}
+
+  ;; --- trigger / boundary summaries -------------------------------------
+  {:key "samizdat.trigger.observations" :type :int64 :group :trigger :authority :journal
+   :promote? false :langfuse :observation-metadata :missing :unavailable}
+  {:key "samizdat.trigger.boundaries" :type :int64 :group :trigger :authority :journal
+   :promote? false :langfuse :observation-metadata :missing :unavailable}
+  {:key "samizdat.trigger.baseline" :type :int64 :group :trigger :authority :journal
+   :promote? false :langfuse :observation-metadata :missing :unavailable}
+  {:key "samizdat.trigger.probed" :type :int64 :group :trigger :authority :journal
+   :promote? false :langfuse :observation-metadata :missing :unavailable}
+  {:key "samizdat.trigger.probed_at_boundary" :type :int64 :group :trigger :authority :journal
+   :promote? false :langfuse :observation-metadata :missing :unavailable}
+  {:key "samizdat.trigger.suppressed" :type :int64 :group :trigger :authority :journal
+   :promote? false :langfuse :observation-metadata :missing :unavailable}
+  {:key "samizdat.trigger.eligible" :type :int64 :group :trigger :authority :journal
+   :promote? false :langfuse :observation-metadata :missing :unavailable}
+  {:key "samizdat.trigger.kind" :type :string :group :trigger :authority :runtime
+   :domain ["observation" "trigger" "capture" "baseline"]
+   :promote? false :langfuse :observation-metadata :missing :not-applicable}
+  {:key "samizdat.gate.name" :type :string :group :trigger :authority :journal
+   :promote? false :langfuse :observation-metadata :missing :not-applicable}
+  {:key "samizdat.gate.passed" :type :boolean :group :trigger :authority :journal
+   :promote? false :langfuse :observation-metadata :missing :not-applicable}
+  {:key "samizdat.states.observed" :type :int64 :group :trigger :authority :journal
+   :promote? false :langfuse :observation-metadata :missing :not-applicable}
+
+  ;; --- lifecycle store seams (samizdat.store.lifecycle) -----------------
+  {:key "samizdat.lifecycle.op" :type :string :group :lifecycle :authority :runtime
+   :domain ["upsert-case" "transition" "acquire-lease" "release-lease" "decision"]
+   :promote? false :langfuse :observation-metadata :missing :not-applicable}
+  {:key "samizdat.lifecycle.status" :type :string :group :lifecycle :authority :journal
+   :promote? false :langfuse :observation-metadata :missing :not-applicable}
+  {:key "samizdat.lifecycle.case_id" :type :string :group :lifecycle :authority :journal
+   :promote? false :langfuse :observation-metadata :missing :not-applicable}
+  {:key "samizdat.lifecycle.decision_id" :type :string :group :lifecycle :authority :journal
+   :promote? false :langfuse :observation-metadata :missing :not-applicable}
+  {:key "samizdat.lifecycle.event_type" :type :string :group :lifecycle :authority :journal
+   :promote? false :langfuse :observation-metadata :missing :not-applicable}
+  {:key "samizdat.lifecycle.revision" :type :int64 :group :lifecycle :authority :journal
+   :promote? false :langfuse :observation-metadata :missing :not-applicable}
+  {:key "samizdat.lifecycle.state" :type :string :group :lifecycle :authority :journal
+   :promote? false :langfuse :observation-metadata :missing :not-applicable}
+
+  ;; --- provenance -------------------------------------------------------
+  {:key "samizdat.observation.mode" :type :string :group :provenance :authority :telemetry
+   :domain ["live" "historical-import" "synthetic"]
+   :promote? true :langfuse :trace-metadata :missing :unavailable}
+  {:key "samizdat.value.basis" :type :string :group :provenance :authority :telemetry
+   :domain ["measured" "reconstructed" "unavailable"]
+   :promote? true :langfuse :observation-metadata :missing :unavailable}
+  {:key "samizdat.time.basis" :type :string :group :provenance :authority :telemetry
+   :domain ["measured" "reconstructed" "unavailable"]
+   :promote? false :langfuse :observation-metadata :missing :unavailable}
+  {:key "samizdat.import.id" :type :string :group :provenance :authority :import
+   :promote? false :langfuse :trace-metadata :missing :not-applicable}
+  {:key "samizdat.import.source_commit" :type :string :group :provenance :authority :import
+   :promote? false :langfuse :trace-metadata :missing :not-applicable}
+  {:key "samizdat.import.artifact_sha256" :type :string :group :provenance :authority :import
+   :promote? false :langfuse :trace-metadata :missing :not-applicable}
+  {:key "samizdat.import.mapping_version" :type :string :group :provenance :authority :import
+   :promote? false :langfuse :trace-metadata :missing :not-applicable}
+  {:key "samizdat.import.executed_at" :type :string :group :provenance :authority :import
+   :promote? false :langfuse :trace-metadata :missing :not-applicable}
+
+  ;; --- versions ---------------------------------------------------------
+  {:key "samizdat.telemetry.schema" :type :string :group :version :authority :telemetry
+   :promote? false :langfuse :trace-metadata :missing :unavailable}
+  {:key "samizdat.config.schema" :type :string :group :version :authority :telemetry
+   :promote? false :langfuse :trace-metadata :missing :not-applicable}
+  {:key "samizdat.harness" :type :string :group :version :authority :journal
+   :promote? false :langfuse :trace-metadata :missing :not-applicable}
+  {:key "samizdat.implementation.identity" :type :string :group :version :authority :journal
+   :promote? false :langfuse :trace-metadata :missing :unavailable}
+
+  ;; --- observation kind (drives langfuse.observation.type) -------------
+  {:key "samizdat.observation.kind" :type :string :group :kind :authority :telemetry
+   :domain ["agent" "generation" "tool" "evaluator" "span"]
+   :promote? false :langfuse :type :missing :unavailable}]}
