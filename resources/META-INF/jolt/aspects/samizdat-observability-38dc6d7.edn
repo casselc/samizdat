@@ -1,0 +1,29 @@
+{:schema 1
+ :library {:id yogthos/samizdat
+           ;; The commit whose samizdat.store.lifecycle these selectors were
+           ;; verified against (agent/onbox/outcome-pilot-v1 head). Advice for
+           ;; these seams is samizdat.telemetry.otel/lifecycle-observer, the
+           ;; same function the source-mode hook installs; a woven build
+           ;; advises the entry directly instead of going through the hook.
+           :version "38dc6d7a"}
+ :aspects
+ [{:id :samizdat.store.lifecycle/upsert-case
+   :match {:entry samizdat.store.lifecycle/upsert-case! :arity 2}
+   :advice-role :samizdat.telemetry/lifecycle
+   :expect {:matches 1}}
+  {:id :samizdat.store.lifecycle/acquire-lease
+   :match {:entry samizdat.store.lifecycle/acquire-lease! :arity 4}
+   :advice-role :samizdat.telemetry/lifecycle
+   :expect {:matches 1}}
+  {:id :samizdat.store.lifecycle/release-lease
+   :match {:entry samizdat.store.lifecycle/release-lease! :arity 3}
+   :advice-role :samizdat.telemetry/lifecycle
+   :expect {:matches 1}}
+  {:id :samizdat.store.lifecycle/decision
+   :match {:entry samizdat.store.lifecycle/decision :arity 2}
+   :advice-role :samizdat.telemetry/lifecycle
+   :expect {:matches 1}}
+  {:id :samizdat.store.lifecycle/transition
+   :match {:entry samizdat.store.lifecycle/transition! :arity 2}
+   :advice-role :samizdat.telemetry/lifecycle
+   :expect {:matches 1}}]}
