@@ -243,6 +243,14 @@
    :promote? false :langfuse :trace-metadata :missing :not-applicable}
   {:key "samizdat.implementation.identity" :type :string :group :version :authority :journal
    :promote? false :langfuse :trace-metadata :missing :unavailable}
+  ;; A woven build's advice sees the weaver's identities only (no arguments,
+  ;; no result); these say which aspect site produced a lifecycle span.
+  {:key "samizdat.aspect.id" :type :string :group :version :authority :telemetry
+   :promote? false :langfuse :observation-metadata :missing :not-applicable}
+  {:key "samizdat.aspect.site_id" :type :string :group :version :authority :telemetry
+   :promote? false :langfuse :observation-metadata :missing :not-applicable}
+  {:key "samizdat.aspect.build_identity" :type :string :group :version :authority :telemetry
+   :promote? false :langfuse :trace-metadata :missing :not-applicable}
 
   ;; --- observation kind (drives langfuse.observation.type) -------------
   {:key "samizdat.observation.kind" :type :string :group :kind :authority :telemetry
