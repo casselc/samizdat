@@ -47,30 +47,34 @@
 (def missing-semantics #{:unavailable :not-applicable})
 (def authorities #{:journal :evidence :runtime :import :telemetry})
 
-(defn- fail [msg data]
-  (throw (ex-info (str "telemetry manifest: " msg) (assoc data :samizdat.telemetry/error true))))
+(defn- manifest-error
+  "The exception for a manifest that does not validate; every message is a
+  developer-facing stack-trace string and is raised under `throw` at the call
+  site so samizdat.base-test sees it as such."
+  [msg data]
+  (ex-info (str "telemetry manifest: " msg) (assoc data :samizdat.telemetry/error true)))
 
 (defn- validate-attribute [{:keys [key type domain authority promote? langfuse missing] :as a}]
   (when-not (and (string? key) (not (str/blank? key)))
-    (fail "attribute key must be a non-blank string" {:attribute a}))
+    (throw (manifest-error "attribute key must be a non-blank string" {:attribute a})))
   (when-not (contains? types type)
-    (fail "attribute type is not supported" {:key key :type type}))
+    (throw (manifest-error "attribute type is not supported" {:key key :type type})))
   (when-not (contains? authorities authority)
-    (fail "attribute authority is not recognised" {:key key :authority authority}))
+    (throw (manifest-error "attribute authority is not recognised" {:key key :authority authority})))
   (when-not (boolean? promote?)
-    (fail ":promote? must be true or false" {:key key}))
+    (throw (manifest-error ":promote? must be true or false" {:key key})))
   (when (and promote? (not (contains? promotable-types type)))
-    (fail "only string, boolean and int64 attributes may be promoted" {:key key :type type}))
+    (throw (manifest-error "only string, boolean and int64 attributes may be promoted" {:key key :type type})))
   (when-not (contains? langfuse-targets langfuse)
-    (fail "langfuse target is not recognised" {:key key :langfuse langfuse}))
+    (throw (manifest-error "langfuse target is not recognised" {:key key :langfuse langfuse})))
   (when-not (contains? missing-semantics missing)
-    (fail "missing semantics not recognised" {:key key :missing missing}))
+    (throw (manifest-error "missing semantics not recognised" {:key key :missing missing})))
   (when (some? domain)
     (when-not (and (vector? domain) (seq domain) (every? string? domain)
                    (= (count domain) (count (set domain))))
-      (fail "domain must be a non-empty vector of distinct strings" {:key key}))
+      (throw (manifest-error "domain must be a non-empty vector of distinct strings" {:key key})))
     (when-not (= :string type)
-      (fail "only string attributes may declare a domain" {:key key})))
+      (throw (manifest-error "only string attributes may declare a domain" {:key key}))))
   a)
 
 (defn validate
@@ -79,38 +83,38 @@
   [{:keys [schema mapping-version attributes observation-kinds session-keys
            fallback-prefix max-promoted] :as manifest}]
   (when-not (= "samizdat-telemetry/1" schema)
-    (fail "unsupported schema" {:schema schema}))
-  (when-not (string? mapping-version) (fail "mapping-version must be a string" {}))
+    (throw (manifest-error "unsupported schema" {:schema schema})))
+  (when-not (string? mapping-version) (throw (manifest-error "mapping-version must be a string" {})))
   (when-not (and (string? fallback-prefix) (str/ends-with? fallback-prefix "."))
-    (fail "fallback-prefix must end with a dot" {:fallback-prefix fallback-prefix}))
+    (throw (manifest-error "fallback-prefix must end with a dot" {:fallback-prefix fallback-prefix})))
   (when-not (and (vector? attributes) (seq attributes))
-    (fail "attributes must be a non-empty vector" {}))
+    (throw (manifest-error "attributes must be a non-empty vector" {})))
   (run! validate-attribute attributes)
   (let [keys* (mapv :key attributes)
         dupes (->> (frequencies keys*) (filter (fn [[_ n]] (> n 1))) (map first) sort vec)]
-    (when (seq dupes) (fail "duplicate attribute keys" {:keys dupes}))
+    (when (seq dupes) (throw (manifest-error "duplicate attribute keys" {:keys dupes})))
     (when (some #(str/starts-with? % fallback-prefix) keys*)
-      (fail "no declared attribute may live under the fallback prefix" {}))
+      (throw (manifest-error "no declared attribute may live under the fallback prefix" {})))
     (let [promoted (filterv :promote? attributes)]
       (when-not (and (integer? max-promoted) (pos? max-promoted))
-        (fail "max-promoted must be a positive integer" {}))
+        (throw (manifest-error "max-promoted must be a positive integer" {})))
       (when (> (count promoted) max-promoted)
-        (fail "too many promoted attributes" {:count (count promoted) :max max-promoted})))
+        (throw (manifest-error "too many promoted attributes" {:count (count promoted) :max max-promoted}))))
     (let [kind (first (filter #(= "samizdat.observation.kind" (:key %)) attributes))]
       (when-not (and kind (= :type (:langfuse kind)) (= observation-kinds (:domain kind)))
-        (fail "samizdat.observation.kind must be the :type-targeted attribute whose domain is :observation-kinds" {})))
+        (throw (manifest-error "samizdat.observation.kind must be the :type-targeted attribute whose domain is :observation-kinds" {}))))
     (let [by-key (into {} (map (juxt :key identity)) attributes)]
       (when-not (and (vector? session-keys) (seq session-keys))
-        (fail "session-keys must be a non-empty vector" {}))
+        (throw (manifest-error "session-keys must be a non-empty vector" {})))
       (doseq [k session-keys]
         (when-not (= :string (:type (get by-key k)))
-          (fail "session key must be a declared string attribute" {:key k})))))
+          (throw (manifest-error "session key must be a declared string attribute" {:key k}))))))
   manifest)
 
 (defn load-manifest
   "Read and validate the manifest resource (or an explicit EDN string)."
   ([] (let [r (io/resource resource-path)]
-        (when-not r (fail "manifest resource not found" {:resource resource-path}))
+        (when-not r (throw (manifest-error "manifest resource not found" {:resource resource-path})))
         (load-manifest (slurp r))))
   ([edn-string] (validate (edn/read-string edn-string))))
 
@@ -187,7 +191,8 @@
 ;; --- Langfuse mapping ---------------------------------------------------
 
 (defn- short-name [k]
-  (-> k (str/replace #"^samizdat\." "") (str/replace "." "_")))
+  (let [prefix "samizdat."]
+    (str/replace (if (str/starts-with? k prefix) (subs k (count prefix)) k) "." "_")))
 
 (defn langfuse-mapping
   "Derived, never hand-written: how each canonical attribute is mirrored for
