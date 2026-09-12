@@ -335,9 +335,9 @@
   (us/body :prompt "system")
   (us/save! :prompt "mine" "project tuning" "because")
   (us/save! :prompt "mine" "newer tuning" "more")
-  (us/record-run-outcome! true)
-  (us/record-run-outcome! true)
-  (us/record-run-outcome! false)
+  (us/record-run-outcome! :shipped)
+  (us/record-run-outcome! :shipped)
+  (us/record-run-outcome! :failed)
   (let [rows (store/versions *conn* :prompt "mine")]
     (is (= [0 2] (mapv :success_count rows))
         "only the version that was CURRENT is credited, not its ancestors")
@@ -352,7 +352,35 @@
       (is (re-find #"2 green" (:result r)) (str (:result r)))))
   (testing "unbound it is a quiet no-op, like every other unbound write"
     (us/unbind!)
-    (is (nil? (us/record-run-outcome! true)))))
+    (is (nil? (us/record-run-outcome! :shipped)))))
+
+(deftest a-crash-does-not-count-against-the-versions-that-were-current
+  ;; karamazov-a6mj.1. beam.clj's catch path stamped every Throwable escaping
+  ;; run-rounds as a failed run, so a provider outage taught the next
+  ;; supervisor that the current tuning fails runs. The standing a version
+  ;; carries is evidence about the tuning; a run the harness could not finish
+  ;; is evidence about the harness. It is still recorded — a reader deciding
+  ;; whether to keep a version should see 3 green / 0 failed / 4 crashed and
+  ;; not mistake it for 3 / 4 / 0 — but under its own count.
+  (us/bind! *conn*)
+  (us/save! :prompt "mine" "project tuning" "because")
+  (us/record-run-outcome! :shipped)
+  (us/record-run-outcome! :error)
+  (us/record-run-outcome! :error)
+  (let [[row] (store/versions *conn* :prompt "mine")]
+    (is (= 1 (:success_count row)))
+    (is (= 0 (:failure_count row)) "a crash is not a failed run")
+    (is (= 2 (:error_count row)) "but it is not forgotten either"))
+  (testing "the versions listing shows all three"
+    (let [r (tools/run-tool {:tool-name "prompt"
+                             :branch (state/new-branch {:id "B1" :problem "p"})
+                             :conn *conn*
+                             :args {:action "versions" :name "mine"}})]
+      (is (re-find #"1 green run" (:result r)) (str (:result r)))
+      (is (re-find #"2 crashed" (:result r)) (str (:result r)))
+      (is (not (re-find #"failed" (:result r))) (str (:result r)))))
+  (testing "an outcome outside the vocabulary is refused rather than miscounted"
+    (is (thrown? Exception (us/record-run-outcome! :maybe)))))
 
 (deftest the-cell-tool-complains-usefully-about-a-missing-argument
   (us/bind! *conn*)
@@ -869,7 +897,7 @@
   (store/save! *conn* :prompt "system" "v3" "project" "and again")
   (store/revert! *conn* :prompt "system" 2 "v3 made the model hedge")
   (store/save! *conn* :cell "loop" "c2" "project" "a cell edit")
-  (store/record-run-outcome! *conn* true)
+  (store/record-run-outcome! *conn* :shipped)
   (let [d (store/drift *conn* {})
         by-kind (into {} (map (juxt :kind identity)) d)]
     (is (= #{"prompt" "cell"} (set (keys by-kind))) "seeded rows are not drift")

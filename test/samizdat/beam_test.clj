@@ -21,7 +21,10 @@
             [samizdat.store.interventions :as interventions]
             [samizdat.store.journal :as journal]
             [samizdat.agent.resume :as resume]
+            [samizdat.store.knowledge :as knowledge]
             [samizdat.store.runs :as runs]
+            [samizdat.store.userspace :as store]
+            [samizdat.userspace :as us]
             [samizdat.workflow :as workflow]))
 
 (use-fixtures :once (fn [f] (cells/load-cells!) (f)))
@@ -178,6 +181,33 @@
       (is (= "failed" (:status (runs/get-run c rid)))
           "a crash that leaves no trace is indistinguishable from a slow round")
       (finally (db/close c)))))
+
+(deftest a-crash-is-recorded-as-a-crash-not-as-the-workflow-failing
+  ;; karamazov-a6mj.1. run!'s catch path wrote :shipped? false to the workflow
+  ;; record and a failed run onto userspace standing, so a provider outage
+  ;; taught select that the manifest fails here and taught the next supervisor
+  ;; that the current tuning fails runs. Both must still learn that a run
+  ;; happened (blt.38: five crashes showing "no runs" taught nothing) — under
+  ;; the outcome that says what it was.
+  (let [c (db/open! ":memory:")]
+    (try
+      (us/bind! c)
+      (us/save! :prompt "mine" "a tuning" "because")
+      (with-redefs [beam/run-rounds (fn [_ctx _branches _turn]
+                                      (throw (ex-info "provider fell over" {})))
+                    llm/chat (fn [& _] {:content "" :finish-reason "stop"})]
+        (is (thrown-with-msg?
+             Exception #"provider fell over"
+             (beam/run! {:conn c :config {:run {:loop "loop"}} :llm-adapter :a
+                         :llm-config {:max-tokens 100} :problem "p" :max-turns 3}))))
+      (let [r (first (filter #(= "loop" (:workflow %)) (knowledge/workflow-record c)))]
+        (is (some? r) "the crash is on the record")
+        (is (= 0 (:failed r)) "but not as the workflow failing the task")
+        (is (= 1 (:errors r))))
+      (let [[row] (store/versions c :prompt "mine")]
+        (is (= 0 (:failure_count row)))
+        (is (= 1 (:error_count row))))
+      (finally (us/unbind!) (db/close c)))))
 
 (deftest teardown-sees-the-branches-as-they-stood-when-the-round-died
   ;; A thrown manifest hands nothing back, so the driver keeps its own window.

@@ -128,7 +128,7 @@ Every loader in the base comes through here instead of `io/resource`.
 | `(save! kind name body rationale?)` | Append a version, with why. Returns the new version number, or `nil` when unbound. |
 | `(revert! kind name version rationale?)` | Re-append an older body as the newest, recorded as `revert to vN: reason`. |
 | `(versions kind name)` / `(names kind)` | History of one (version, when, why, standing); catalogue of a kind. |
-| `(record-run-outcome! shipped?)` | Stamp a run's ending onto the project-authored versions current for it. |
+| `(record-run-outcome! outcome)` | Stamp a run's ending — `:shipped`, `:failed` or `:error` (`samizdat.store.outcomes`) — onto the project-authored versions current for it. A crash is `:error`, counted apart: it is evidence about the harness, not the version. |
 | `(seed-all! kind template-names)` | Seed each named template, return `{name body}` for the kind. |
 | `(invalidate!)` | Drop the read cache. |
 
@@ -147,8 +147,10 @@ was stored.
 
 **Contract — the history explains itself.** Every version row can carry a
 `rationale` (the commit message of self-modification) and accrues *standing* —
-how many runs ended shipped or not while it was the current version of its
-name; only `project`-sourced rows accrue it. The store keeps the rationale
+how many runs ended shipped, failed, or crashed while it was the current
+version of its name; only `project`-sourced rows accrue it. A crash is its own
+count, never a failed run: a provider outage says nothing about the tuning
+that was current, and folding it in taught a later supervisor the opposite. The store keeps the rationale
 optional so seeding and mechanical writes stay honest (`nil`, never invented
 text); the mutation tools are what demand one from the agent, and a revert
 always records that it was a revert and to what. This exists because a live

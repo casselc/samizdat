@@ -476,7 +476,8 @@
   this purpose and nothing has ever read (karamazov-mpd, ylte.2)."
   [conn run-id]
   (let [rows (db/fetch conn ["SELECT kind, name, version, rationale,
-                                    success_count, failure_count, length(body) AS body_len
+                                    success_count, failure_count, error_count,
+                                    length(body) AS body_len
                              FROM userspace WHERE source = 'project'
                              ORDER BY kind, name, version"])
         ;; The factory seed for each name, to size the edit against the
@@ -490,7 +491,10 @@
                     {:kind (:kind r) :name (:name r) :version (:version r)
                      :rationale (:rationale r)
                      :revert? (str/starts-with? (str (:rationale r)) "revert to v")
-                     :standing [(:success_count r) (:failure_count r)]
+                     ;; [green failed crashed] — the third is a run the
+                     ;; harness could not finish, kept apart because it is
+                     ;; not the version's doing (karamazov-a6mj.1).
+                     :standing [(:success_count r) (:failure_count r) (:error_count r)]
                      :chars-vs-seed (when-let [b (get seed [(:kind r) (:name r)])]
                                       (- (:body_len r) b))})
                   rows)

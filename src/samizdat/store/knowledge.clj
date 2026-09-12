@@ -39,7 +39,8 @@
             [samizdat.lexicon :as lexicon]
             [samizdat.memory :as memory]
             [samizdat.store.db :as db]
-            [samizdat.store.journal :as journal]))
+            [samizdat.store.journal :as journal]
+            [samizdat.store.outcomes :as outcomes]))
 
 (defn- new-id
   "Six hex chars, same scheme as tasks — readable in a transcript, cheap
@@ -184,14 +185,19 @@
   measures whether reading it HELPED. A memory nobody reports on is not
   penalised: an empty record contributes nothing either way, because most
   memories are never reported on and treating silence as failure would decay
-  the whole store toward the few that happen to get graded."
-  [conn id worked?]
-  (db/with-writer
-    (db/execute! conn
-                 [(if worked?
-                    "UPDATE knowledge SET success_count = success_count + 1 WHERE id = ?"
-                    "UPDATE knowledge SET failure_count = failure_count + 1 WHERE id = ?")
-                  id])))
+  the whole store toward the few that happen to get graded.
+
+  `outcome` is a boolean (worked or not — the memory-level report the
+  `outcome` tool and the reflection pass make) or one of
+  `outcomes/outcomes`, which is how a run's ending reaches a workflow's row
+  and is the only way to say :error."
+  [conn id outcome]
+  (let [col (if (boolean? outcome)
+              (if outcome "success_count" "failure_count")
+              (outcomes/column outcome))]
+    (db/with-writer
+      (db/execute! conn
+                   [(str "UPDATE knowledge SET " col " = " col " + 1 WHERE id = ?") id]))))
 
 (defn recall
   "Memories matching `query`, most worth reading first.
@@ -405,12 +411,13 @@
            (db/execute! conn
                         ["UPDATE knowledge
                             SET corroborations = ?, use_count = ?, last_used_at = ?,
-                                success_count = ?, failure_count = ?, last_run_id = ?,
-                                idle_runs = ?
+                                success_count = ?, failure_count = ?, error_count = ?,
+                                last_run_id = ?, idle_runs = ?
                           WHERE id = ?"
                          (or (:corroborations row) 1) (or (:use_count row) 0)
                          (:last_used_at row)
                          (or (:success_count row) 0) (or (:failure_count row) 0)
+                         (or (:error_count row) 0)
                          (:last_run_id row) (or (:idle_runs row) 0) new-id])
            (db/execute! conn
                         ["UPDATE knowledge SET current = 0, retired_at = ?, retired_reason = ?
@@ -859,8 +866,18 @@
   next time. A run cannot learn that within itself — it only ever sees its own
   attempt — so it has to be written down for the next one.
 
+  `:outcome` is one of `outcomes/outcomes`. :error is a run the harness could not
+  finish — the beam's catch path — and it is recorded under its own count:
+  a crash filed as :failed taught the chooser that the manifest fails this
+  project from evidence about the harness (karamazov-a6mj.1). An outcome
+  outside the vocabulary is refused (thrown by `outcomes/column`) before the
+  best-effort catch, so a caller with a typo hears about it in tests rather
+  than miscounting in production — the throw happens before any write.
+
   Best effort: a failure to record how a run went must not change how it went."
-  [conn {:keys [workflow run-id shipped?]}]
+  [conn {:keys [workflow run-id outcome]}]
+  ;; Validated OUTSIDE the best-effort catch, on purpose: see the docstring.
+  (outcomes/column outcome)
   (try
     (when-not (str/blank? (str workflow))
       (let [key (str "workflow:" workflow)
@@ -870,7 +887,7 @@
                  (remember! conn {:content (fact :workflow workflow)
                                   :kind "procedural" :run-id run-id
                                   :pattern-key key :confidence 0.5}))]
-        (record-outcome! conn id (boolean shipped?))
+        (record-outcome! conn id outcome)
         id))
     (catch Throwable e
       (log/warn "recording the workflow outcome failed:" (ex-message e))
@@ -878,18 +895,26 @@
 
 (defn workflow-record
   "What this project knows about how each workflow has gone: a seq of
-  {:workflow :shipped :failed :runs}, best first.
+  {:workflow :shipped :failed :errors :runs}, best first.
+
+  :runs is the FINISHED runs — shipped + failed — because that is the
+  denominator the chooser's ratio is honest over. :errors is beside it, not
+  in it: a run the harness could not finish says nothing about whether the
+  workflow would have shipped, and folding it in either way misstates the
+  rate. A reader is shown both.
 
   Read by samizdat.agent.select, so a run choosing how to drive itself sees
   the evidence rather than only the problem text."
   [conn]
-  (->> (db/fetch conn ["SELECT pattern_key, success_count, failure_count, corroborations
+  (->> (db/fetch conn ["SELECT pattern_key, success_count, failure_count, error_count,
+                               corroborations
                           FROM knowledge WHERE pattern_key LIKE 'workflow:%' AND current = 1"])
        (keep (fn [r]
                (when-let [nm (second (str/split (str (:pattern_key r)) #":" 2))]
                  {:workflow nm
                   :shipped (or (:success_count r) 0)
                   :failed (or (:failure_count r) 0)
+                  :errors (or (:error_count r) 0)
                   :runs (+ (or (:success_count r) 0) (or (:failure_count r) 0))})))
        (sort-by (juxt (comp - :shipped) :failed))
        vec))

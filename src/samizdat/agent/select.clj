@@ -65,15 +65,30 @@
 
   Only workflows still on the menu, and only those with a run behind them: a
   line saying nothing has been tried is a line that costs tokens to say
-  nothing."
+  nothing.
+
+  A crash is a run behind it, and it is reported as a crash — beside the
+  shipped-of-finished ratio, never inside it. `loop — shipped 1 of 2 runs (2
+  crashed)` and `loop — shipped 1 of 4 runs` are different facts, and the
+  second was what a provider outage used to write (karamazov-a6mj.1). A
+  workflow that has only ever crashed says so rather than `0 of 0`.
+
+  The wording is prompts/workflow-history.md; the counts that are zero are
+  handed to it as nil so its conditionals read them as absent."
   [conn cands]
-  (let [on-menu (set (map :name cands))]
+  (let [on-menu (set (map :name cands))
+        some-pos (fn [n] (when (pos? n) n))]
     (->> (knowledge/workflow-record conn)
          (filter #(contains? on-menu (:workflow %)))
-         (filter #(pos? (:runs %)))
-         (mapv (fn [{:keys [workflow shipped runs]}]
-                 (str workflow " — shipped " shipped " of " runs
-                      (if (= 1 runs) " run" " runs") " on this project"))))))
+         (filter #(or (pos? (:runs %)) (pos? (:errors %))))
+         (mapv (fn [{:keys [workflow shipped runs errors]}]
+                 (str/trim
+                  (prompt/render "workflow-history"
+                                 {:workflow workflow
+                                  :shipped shipped
+                                  :runs (some-pos runs)
+                                  :plural (not= 1 runs)
+                                  :errors (some-pos errors)})))))))
 
 (defn build-prompt
   "The user message the chooser reads: the problem, the menu, and how each
