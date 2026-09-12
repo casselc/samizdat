@@ -55,6 +55,7 @@
             [samizdat.agent.verify :as verify]
             [samizdat.server :as server]
             [samizdat.session :as session]
+            [samizdat.stats :as stats]
             [samizdat.store.db :as db]
             [samizdat.store.journal :as journal]
             [samizdat.store.knowledge :as knowledge]
@@ -1021,20 +1022,77 @@
                        (some-> (:fitness row) (->> (format "%.2f")))))))
   (rows out))
 
-(defn summarize
-  "Per arm: n, ship rate, green rate, and the median of each numeric column.
+(defn passed?
+  "Whether one row is a PASS, and by whose reckoning: the operator's, when
+  the task carried acceptance criteria and the rig decided them
+  (:acceptance :accepted?); the loop's own :completed otherwise. nil for a
+  row that decided nothing — a rig error, or criteria the rig could not run
+  — which stays out of every count below rather than landing on either
+  side. Returns [pass? :acceptance|:loop|nil]."
+  [row]
+  (let [acc (get-in row [:acceptance :accepted?])]
+    (cond
+      (boolean? acc) [acc :acceptance]
+      (= :rig-error (:status row)) [nil nil]
+      (nil? (:status row)) [nil nil]
+      :else [(= :completed (:status row)) :loop])))
 
-  MEDIAN, not mean, and no significance test. With the run counts this rig can
-  afford, an accept/reject turning on one or two runs is a search trace and not
-  a result — the paper says so of its own 20-episode splits and it is truer
-  here. Report the spread; let a person read it."
+(defn reliability
+  "The pass statistics of one arm's rows (karamazov-a6mj.5): k passes of n
+  decided rows, the 95% credible interval on the rate, P(in the Goldilocks
+  zone), pass@k and pass^k for a few k, and which column decided
+  (:acceptance when every decided row had criteria, :loop when none did,
+  :mixed otherwise — a mixed arm is comparing two different questions and
+  the summary says so rather than adding them up quietly)."
+  [rows]
+  (let [decided (keep (fn [r] (let [[p by] (passed? r)] (when (some? p) {:pass? p :by by}))) rows)
+        n (count decided)
+        k (count (filter :pass? decided))
+        bys (set (map :by decided))]
+    {:n n :k k
+     :undecided (- (count rows) n)
+     :by (cond (empty? bys) nil (= 1 (count bys)) (first bys) :else :mixed)
+     :rate (when (pos? n) (/ (double k) n))
+     :interval (when (pos? n) (mapv #(/ (Math/round (* 1000.0 %)) 1000.0) (stats/cred-int k n)))
+     :p-goldilocks (when (pos? n) (/ (Math/round (* 1000.0 (stats/prob-in-zone k n))) 1000.0))
+     :pass-at-k (when (pos? n)
+                  (into {} (for [kk [1 3 5] :when (<= kk n)]
+                             [kk (/ (Math/round (* 1000.0 (stats/pass-at-k n k kk))) 1000.0)])))
+     :pass-power-k (when (pos? n)
+                     (into {} (for [kk [1 3 5]]
+                                [kk (/ (Math/round (* 1000.0 (stats/pass-power-k n k kk))) 1000.0)])))}))
+
+(defn summarize
+  "Per arm: n, ship rate, green rate, acceptance, the reliability statistics
+  and the median of each numeric column; and, across arms, P(A > B) on the
+  pass rate for every pair.
+
+  MEDIAN, not mean, and no significance test — but a POSTERIOR. With the run
+  counts this rig can afford, an accept/reject turning on one or two runs is a
+  search trace and not a result; the paper says so of its own 20-episode
+  splits and it is truer here. That is right about p-values and wrong about a
+  posterior: a 95% credible interval on 2 of 3 is honest about being
+  [0.18, 0.96], which is the point (thinkingbox's eval_utils, karamazov-a6mj.5).
+  Report the interval, not a verdict; let a person read it. Rig-error rows and
+  rows nobody decided are out of n — they are neither pass nor fail."
   [rows]
   (let [med (fn [xs] (let [v (vec (sort (remove nil? xs)))
                            c (count v)]
-                       (when (pos? c) (nth v (quot c 2)))))]
-    (into {}
-          (for [[arm rs] (group-by :arm rows)]
+                       (when (pos? c) (nth v (quot c 2)))))
+        by-arm (group-by :arm rows)
+        rel (into {} (for [[arm rs] by-arm] [arm (reliability rs)]))
+        arms (vec (sort-by str (keys by-arm)))
+        p-better (into {}
+                       (for [a arms b arms
+                             :when (not= a b)
+                             :let [ra (rel a) rb (rel b)]
+                             :when (and (pos? (:n ra)) (pos? (:n rb)))]
+                         [[a b] (/ (Math/round (* 1000.0 (stats/prob-a-gt-b (:k ra) (:n ra) (:k rb) (:n rb))))
+                                   1000.0)]))]
+    (cond-> (into {}
+          (for [[arm rs] by-arm]
             [arm {:n (count rs)
+                  :reliability (rel arm)
                   :shipped (count (filter #(= :completed (:status %)) rs))
                   :green (count (filter :green? rs))
                   ;; The operator's verdict, from the rig's own reading of
@@ -1059,7 +1117,12 @@
                            :turns-to-first-artifact (med (map :turns-to-first-artifact rs))}
                   :spread {:turns [(med (map :turns rs))
                                    (apply min (or (seq (keep :turns rs)) [nil]))
-                                   (apply max (or (seq (keep :turns rs)) [nil]))]}}]))))
+                                   (apply max (or (seq (keep :turns rs)) [nil]))]}}]))
+      ;; Pairwise, on the same rows the arms' own :reliability reads — and
+      ;; only where both arms decided something. Read it with the :by of
+      ;; each arm: two arms decided by different columns are not comparable
+      ;; and this does not pretend otherwise.
+      (seq p-better) (assoc :p-better p-better))))
 
 (defn recurring-edits
   "Across a sweep: which loop fixes the supervisor arrives at INDEPENDENTLY.

@@ -72,6 +72,7 @@
             [samizdat.collab-test]
             [samizdat.acceptance-test]
             [samizdat.select-test]
+            [samizdat.stats-test]
             [samizdat.session-test]
             [samizdat.reflect-test]
             [samizdat.reflex-test]
@@ -255,6 +256,7 @@
     samizdat.collab-test
     samizdat.acceptance-test
     samizdat.select-test
+    samizdat.stats-test
     samizdat.session-test
     samizdat.reflect-test
     samizdat.reflex-test
