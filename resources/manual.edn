@@ -307,4 +307,15 @@
     :summary "The fraction of a change's mass held by functions over the complexity limit — mass(f) = cc * sqrt(sloc)."}
    {:name samizdat.metrics/review
     :summary "Structured code-quality findings for the changed sources, or none — what the diff critics merge into their verdict."}]}
+
+ {:group "Acceptance criteria: the operator's definition of done"
+  :entries
+  [{:name samizdat.agent.acceptance/normalize
+    :summary "config :run :acceptance as criteria: a vector of {:name :check \"<shell cmd>\"} (pass = exit 0 in the project root) or {:name :judge \"<one narrow yes/no question>\"} (put to the critic role). Written by the OPERATOR in .samizdat/config.edn before the run — the file the run may not write (karamazov-kvw) — so unlike the suite the run authors, it cannot be weakened from inside. A malformed entry refuses system start rather than being skipped."}
+   {:name samizdat.agent.acceptance/check
+    :summary "Run criteria with an injected shell and judge; one {:name :kind :passed? :output} per criterion, in order. :passed? nil is undecided (not run, or a judge with no verdict) and does not block — fail-open like every judge here. `done` runs the :check criteria (model-free, like the rest of that gate); :feature/verify runs both kinds as Gate 2's other half. Results are journalled per criterion under :acceptance with :at done|verify."}
+   {:name samizdat.agent.acceptance/refusal
+    :summary "What the branch reads when criteria failed: each by name with the failure's own words, and what was met. prompts/acceptance-failed.md."}
+   {:name samizdat.agent.judge/parse-yesno
+    :summary "true / false / nil from a narrow judge reply — the first word of the first line, else of the last. The shape prompts/acceptance-judge.md asks for; change both together."}]}
 ]

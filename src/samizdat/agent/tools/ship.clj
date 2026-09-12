@@ -6,6 +6,7 @@
   claim-evidence gates those methods share (answer-tokens,
   uncovered-tokens, engages-problem? and friends)."
   (:require [clojure.string :as str]
+            [samizdat.agent.acceptance :as acceptance]
             [samizdat.agent.files :as files]
             [samizdat.agent.gitdiff :as gitdiff]
             [samizdat.agent.gates :as gates]
@@ -496,7 +497,26 @@
                        :changed changed :require-test? require-test?
                        :contracted-tests contracted-tests
                        :unfilled unfilled :stub-file stub-file})
-        block (or block verify-block)]
+        block (or block verify-block)
+        ;; THE ACCEPTANCE RUNG (karamazov-a6mj.2): criteria the OPERATOR
+        ;; wrote before the run, in .samizdat/config.edn — which the run
+        ;; cannot write — checked over the tree as it stands. Only the :check
+        ;; criteria run here: this gate is model-free like every other rung
+        ;; in it, and the :judge criteria wait for the critic role at
+        ;; :feature/verify. Not paid for when an earlier rung already
+        ;; refused, on ship-verify's economy — the answer is going back
+        ;; anyway. system/start! validated the spec, so normalize cannot
+        ;; throw here on a spec that let the system come up.
+        criteria (when-not advisory?
+                   (acceptance/normalize (get-in ctx [:config :run :acceptance])))
+        acceptance (when (and (seq criteria) (nil? block))
+                     (acceptance/check
+                      criteria
+                      {:kinds #{:check}
+                       :run-check #(verify/run-verify
+                                    (:root ctx) %
+                                    (get-in ctx [:config :run :verify-timeout-ms]))}))
+        block (or block (some-> acceptance acceptance/refusal))]
     ;; Journalled whether the tests RAN or not. A rung that was configured on
     ;; and then did nothing used to leave no trace at all — the note fired only
     ;; when there was a result — so a run that shipped unverified looked
@@ -531,6 +551,23 @@
                                       (empty? changed) :nothing-changed
                                       (nil? cmd) :no-test-among-changed
                                       :else :pre-checks-decided)})}))
+    ;; Per criterion, whichever way it went: the table is what a reader of
+    ;; the run — and the arena's measure — sees of the operator's definition
+    ;; of done, and a criterion not run here says so ("not run") rather than
+    ;; reading as met.
+    (when (and acceptance (:conn ctx) (:run-id ctx))
+      (journal/note! (:conn ctx) (:run-id ctx) :acceptance
+                     {:branch-id (:id branch) :turn (:turn ctx)
+                      :data {:at "done"
+                             :passed? (acceptance/all-passed? acceptance)
+                             ;; Bounded like every judgement the harness
+                             ;; journals (karamazov-3htz): a check's output
+                             ;; is a test log, and a test log can be long.
+                             :results (mapv #(update % :output
+                                                     (fn [o] (util/truncate-middle
+                                                              (str o)
+                                                              (:reply-chars (gates/threshold :verdict-record)))))
+                                            acceptance)}}))
     ;; Journalled whether or not anything blocked, so the run record still
     ;; shows what the lexical check saw even though words no longer decide.
     (when-let [words (and (:conn ctx) (:run-id ctx)

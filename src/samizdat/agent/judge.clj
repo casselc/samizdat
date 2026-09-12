@@ -115,6 +115,36 @@
               verdict-rules)
         verdict-default)))
 
+(defn parse-yesno
+  "A narrow yes/no verdict from a judge reply: true, false, or nil when the
+  reply commits to neither (karamazov-a6mj.2).
+
+  The first word of the first non-blank line decides; failing that, the last
+  line's first word, because a judge that reasons first and answers last is
+  the other natural shape. Anything else is nil — undecided — and the caller
+  treats undecided as fail-open, like every judge here: a judge that cannot
+  answer must not be able to refuse a ship on its own. Reasoning blocks are
+  stripped first (`usable`), for the reason its docstring gives."
+  [reply]
+  (let [lines (->> (str/split-lines (usable reply)) (remove str/blank?) vec)
+        word (fn [line] (some-> (re-find #"^\s*\W*([A-Za-z]+)" (str line)) second str/lower-case))
+        read (fn [w] (case w "yes" true "no" false nil))]
+    (when (seq lines)
+      (let [head (read (word (first lines)))]
+        (if (some? head) head (read (word (peek lines))))))))
+
+(defn yesno-prompt
+  "The user message for one acceptance question — prompts/acceptance-judge.md
+  over the question, the answer the branch wants to ship, the run's evidence
+  block and its diff. Asks for YES or NO first, which is the shape
+  `parse-yesno` reads; change both together."
+  [{:keys [question answer evidence diff]}]
+  (prompt/render "acceptance-judge"
+                 {:question (str question)
+                  :answer (str answer)
+                  :evidence (not-empty (str evidence))
+                  :diff (not-empty (str diff))}))
+
 (defn findings
   "The FINDINGS section of a judge reply, verbatim, trimmed — or nil when it
   named none. What the critique passes back to the branch below the verdict."

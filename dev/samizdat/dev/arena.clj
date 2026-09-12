@@ -50,7 +50,9 @@
             [clojure.pprint]
             [clojure.java.io :as io]
             [clojure.string :as str]
+            [samizdat.agent.acceptance :as acceptance]
             [samizdat.agent.beam :as beam]
+            [samizdat.agent.verify :as verify]
             [samizdat.server :as server]
             [samizdat.session :as session]
             [samizdat.store.db :as db]
@@ -615,6 +617,13 @@
      :gates (into {} (for [g tally]
                        [(:gate g) (select-keys g [:fired :met :met_late :unmet :open])]))
      :tools (frequencies (keep :tool_name turns))
+     ;; What the RUN saw of its acceptance criteria — each `done` and each
+     ;; verify stage, per criterion. Beside the rig's own reading on the row
+     ;; (:acceptance), so a criterion the run believed met and the rig found
+     ;; unmet is visible as exactly that.
+     :acceptance-notes (mapv (fn [n] {:at (:at n) :passed? (:passed? n)
+                                      :results (mapv #(select-keys % [:name :passed?]) (:results n))})
+                             (journal/notes conn run-id :acceptance))
      :edits (edits conn run-id)}))
 
 ;;; --------------------------------------------------------------- one run
@@ -651,6 +660,25 @@
 
 
 
+(defn rig-acceptance
+  "The rig's reading of `spec`'s :check criteria over `root`, once the child
+  is dead: {:results [{:name :kind :passed? :output}] :accepted? bool}, or
+  nil when the task carries none. `:accepted?` is nil when no criterion was
+  decided (a spec of judges only), so a column of nils reads as \"not
+  measured\" rather than as a pass. Output is clipped: a row is a summary,
+  the recording holds the log."
+  [root spec timeout-ms]
+  (when-let [criteria (seq (acceptance/normalize spec))]
+    (let [results (acceptance/check (vec criteria)
+                                    {:kinds #{:check}
+                                     :run-check #(verify/run-verify root % timeout-ms)})
+          decided (remove #(nil? (:passed? %)) results)]
+      {:results (mapv #(update % :output (fn [o] (->> (str/split-lines (str o))
+                                                       (take-last 8)
+                                                       (str/join "\n"))))
+                      results)
+       :accepted? (when (seq decided) (every? :passed? decided))})))
+
 (def ^:private child-main
   "The form the child process evaluates. Reads its params from `:in`, runs, and
   writes the row to `:out` as EDN.
@@ -679,7 +707,16 @@
                                         ;; watching a sweep at 3am.
                                         (:max-revisions-hard in)
                                         (assoc :max-revisions-hard
-                                               (:max-revisions-hard in)))
+                                               (:max-revisions-hard in))
+                                        ;; THE OPERATOR'S DEFINITION OF DONE
+                                        ;; (karamazov-a6mj.2), as run config
+                                        ;; rather than a file in the
+                                        ;; worktree: `done` checks it, and
+                                        ;; the run cannot reach it to weaken
+                                        ;; it. start! refuses a malformed
+                                        ;; spec, which reads as :rig-error.
+                                        (seq (:acceptance in))
+                                        (assoc :acceptance (:acceptance in)))
                                  :http {:port (:http-port in)}})
                  (try
                    (session/reset!)
@@ -731,6 +768,11 @@
     :stall-ms         — how long the child may journal nothing before it is
                         called wedged
     :verify-timeout-ms
+    :acceptance       — the task's acceptance criteria (acceptance/normalize's
+                        input): handed to the child as :run :acceptance, and
+                        the :check ones run AGAIN by the rig over the worktree
+                        once the child is dead — the reading nothing in the
+                        run could have touched
     :keep?            — leave the worktree behind for inspection
     :recordings       — directory to keep each run's database (and log) in
     :carry-db         — this ARM's accumulated memory, seeded in before the
@@ -766,7 +808,7 @@
   report arm A as better."
   [{:keys [repo sha arm problem max-turns beam-width token-budget dest
            max-revisions-hard verify-timeout-ms keep? http-port timeout-ms
-           stall-ms recordings carry-db]
+           stall-ms recordings carry-db acceptance]
     :or {verify-timeout-ms 600000 http-port 3997 timeout-ms 3600000
          stall-ms 1800000}}]
   (let [started (System/currentTimeMillis)
@@ -805,6 +847,7 @@
                           :max-turns max-turns :beam-width beam-width
                           :token-budget token-budget
                           :max-revisions-hard max-revisions-hard
+                          :acceptance acceptance
                           :http-port http-port
                           :setup (:setup arm)}))
       (let [pb (doto (ProcessBuilder.
@@ -868,6 +911,13 @@
           (let [row (edn/read-string (slurp out-f))]
             (merge {:arm (:name arm) :sha sha
                     :green? (suite-green? root (:verify-cmd row) verify-timeout-ms)
+                    ;; THE RIG'S OWN READING of the operator's criteria, over
+                    ;; the worktree the run left, after the run is dead.
+                    ;; :check only — the rig is model-free — and this is the
+                    ;; success column a sweep is read by when a task carries
+                    ;; criteria: the loop's :completed says the loop was
+                    ;; satisfied, this says the operator would be.
+                    :acceptance (rig-acceptance root acceptance verify-timeout-ms)
                     :wall-ms (- (System/currentTimeMillis) started)
                     :budget budget
                     ;; Both ends, because a sweep that started quiet and ended
@@ -975,6 +1025,13 @@
             [arm {:n (count rs)
                   :shipped (count (filter #(= :completed (:status %)) rs))
                   :green (count (filter :green? rs))
+                  ;; The operator's verdict, from the rig's own reading of
+                  ;; the task's :check criteria over the finished worktree
+                  ;; (karamazov-a6mj.2). Three numbers rather than one,
+                  ;; because a row with no criteria and a row that failed
+                  ;; them must not add up the same way.
+                  :accepted (count (filter #(true? (get-in % [:acceptance :accepted?])) rs))
+                  :rejected (count (filter #(false? (get-in % [:acceptance :accepted?])) rs))
                   :rig-errors (count (filter #(= :rig-error (:status %)) rs))
                   ;; HOW EACH RUN ENDED, and it is the first thing to read.
                   ;; A sweep whose runs the rig ended is not measuring the
@@ -1043,9 +1100,14 @@
   ([] (tasks "dev/samizdat/dev/arena_tasks.edn"))
   ([path]
    (let [t (edn/read-string (slurp (str (System/getProperty "user.dir") "/" path)))
-         std (:standing-requirements t)]
+         std (:standing-requirements t)
+         ;; The criteria every task carries, ahead of its own, for the same
+         ;; reason the standing requirements are appended in one place.
+         standing (vec (:standing-acceptance t))]
      (assoc t :tasks
-            (mapv #(assoc % :problem (str (:problem %) "\n\n" std)) (:tasks t))))))
+            (mapv #(assoc % :problem (str (:problem %) "\n\n" std)
+                          :acceptance (into standing (:acceptance %)))
+                  (:tasks t))))))
 
 (defn sweep-tasks!
   "The reference sweep: every task x every arm x n, one row per run.
@@ -1104,7 +1166,8 @@
                                     (select-keys task [:max-turns :timeout-ms
                                                        :stall-ms :beam-width
                                                        :token-budget
-                                                       :max-revisions-hard])))
+                                                       :max-revisions-hard
+                                                       :acceptance])))
               ;; :budget comes back on the row from run-once!, which is the
               ;; one place that knows every default that was applied. Writing
               ;; a second copy here re-derived it from the task and the opts
@@ -1114,10 +1177,11 @@
               row (assoc row :task (:id task) :difficulty (:difficulty task) :n k
                          :memory? (boolean carry))]
           (append-row! out row)
-          (println (format "[%d/%d] %-16s %-9s n=%d  %-11s by=%-7s green=%-5s turns=%-4s tok=%-9s edits=%s  %.1fmin"
+          (println (format "[%d/%d] %-16s %-9s n=%d  %-11s by=%-7s green=%-5s acc=%-5s turns=%-4s tok=%-9s edits=%s  %.1fmin"
                            (inc i) total (name (:id task)) (name (:name arm)) k
                            (str (:status row)) (str (name (or (:ended-by row) :?)))
                            (str (:green? row))
+                           (str (get-in row [:acceptance :accepted?] "-"))
                            (str (:turns row)) (str (:tokens row))
                            (str (count (:saves (:edits row))))
                            (/ (or (:wall-ms row) 0) 60000.0)))

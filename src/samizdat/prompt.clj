@@ -43,7 +43,7 @@
   Used by the `prompt` tool to list what a project can edit. Reading one still
   goes through the userspace seam, which is what decides whether the project's
   version or the template answers."
-  ["architect" "ask-tool" "assembly" "branch-cap"
+  ["acceptance-failed" "acceptance-judge" "architect" "ask-tool" "assembly" "branch-cap"
    "branch-out" "cell-shadowed" "cell-tool" "clojure-syntax"
    "compaction-marker" "compaction-summary" "context-empty" "critic"
    "critic-system" "crossover" "cull-reprieve" "digest"
