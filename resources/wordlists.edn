@@ -282,6 +282,22 @@
  #{"you " "your " "you'll" "you can" "you should" "you may" "you might"
    "let me know"}
 
+ :asks-the-reader
+ ;; The done-asks-the-reader ship rung (karamazov-a6mj.3; thinkingbox's rule
+ ;; that a final message may not both close and ask). Phrases that make the
+ ;; LAST line of an answer a request to whoever reads it: a question with a
+ ;; second-person subject, an offer of more work, a request for confirmation
+ ;; or information. Checked on the last non-blank line only — a rhetorical
+ ;; question the answer goes on to answer, or the `?` operator in prose, is
+ ;; not a request — and a question form fires only WITH one of these, so a
+ ;; sentence like "Is the clamp right? I checked: yes" is left alone. Word
+ ;; starts, like the completeness lists: "you" matches "you'd" and not "bayou".
+ ;; Do not widen it on a hunch; measure a miss first, then add the phrase that
+ ;; carried it.
+ #{"you " "your " "you'd" "you'll" "do you" "would you" "shall i" "should i"
+   "want me to" "like me to" "let me know" "please confirm" "please provide"
+   "please let" "please tell" "which one" "which did you" "what would you"}
+
  :html-strip
  ;; Turning a fetched page into readable text (karamazov-fn68.2). Ordered
  ;; [pattern replacement] pairs applied in sequence: script and style dropped

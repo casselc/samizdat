@@ -716,7 +716,16 @@
                                         ;; it. start! refuses a malformed
                                         ;; spec, which reads as :rig-error.
                                         (seq (:acceptance in))
-                                        (assoc :acceptance (:acceptance in)))
+                                        (assoc :acceptance (:acceptance in))
+                                        ;; What the user knows that the
+                                        ;; problem does not say, for
+                                        ;; ask_human's simulated user
+                                        ;; (karamazov-a6mj.3). A task that
+                                        ;; withholds a fact here and puts it
+                                        ;; in the context is a task that
+                                        ;; tests asking.
+                                        (:user-context in)
+                                        (assoc :user-context (:user-context in)))
                                  :http {:port (:http-port in)}})
                  (try
                    (session/reset!)
@@ -773,6 +782,8 @@
                         the :check ones run AGAIN by the rig over the worktree
                         once the child is dead — the reading nothing in the
                         run could have touched
+    :user-context     — what the user knows that the problem does not say;
+                        :run :user-context in the child, answering ask_human
     :keep?            — leave the worktree behind for inspection
     :recordings       — directory to keep each run's database (and log) in
     :carry-db         — this ARM's accumulated memory, seeded in before the
@@ -808,7 +819,7 @@
   report arm A as better."
   [{:keys [repo sha arm problem max-turns beam-width token-budget dest
            max-revisions-hard verify-timeout-ms keep? http-port timeout-ms
-           stall-ms recordings carry-db acceptance]
+           stall-ms recordings carry-db acceptance user-context]
     :or {verify-timeout-ms 600000 http-port 3997 timeout-ms 3600000
          stall-ms 1800000}}]
   (let [started (System/currentTimeMillis)
@@ -848,6 +859,7 @@
                           :token-budget token-budget
                           :max-revisions-hard max-revisions-hard
                           :acceptance acceptance
+                          :user-context user-context
                           :http-port http-port
                           :setup (:setup arm)}))
       (let [pb (doto (ProcessBuilder.
@@ -1167,7 +1179,7 @@
                                                        :stall-ms :beam-width
                                                        :token-budget
                                                        :max-revisions-hard
-                                                       :acceptance])))
+                                                       :acceptance :user-context])))
               ;; :budget comes back on the row from run-once!, which is the
               ;; one place that knows every default that was applied. Writing
               ;; a second copy here re-derived it from the task and the opts

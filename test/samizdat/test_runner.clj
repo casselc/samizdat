@@ -145,6 +145,7 @@
             [samizdat.fork-test]
             [samizdat.probe-test]
             [samizdat.manual-test]
+            [samizdat.user-sim-test]
             [samizdat.userspace-test]
             [samizdat.beam-test]
             [samizdat.kanban-test]
@@ -327,6 +328,7 @@
     samizdat.fork-test
     samizdat.probe-test
     samizdat.manual-test
+    samizdat.user-sim-test
     samizdat.userspace-test
     samizdat.beam-test
     samizdat.kanban-test

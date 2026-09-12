@@ -74,6 +74,8 @@
 (def ^:private completeness-blocked
   (util/generation-cache lexicon/gen
                          #(lexicon/wordlist :completeness-blocked)))
+(def ^:private asks-the-reader-phrases
+  (util/generation-cache lexicon/gen #(lexicon/wordlist :asks-the-reader)))
 
 (defn- word-starting-with?
   "Whether `needle` occurs in `haystack` at the START of a word.
@@ -155,6 +157,38 @@
                     (not-any? #(word-starting-with? s %) second-p)
                     (not-any? #(word-starting-with? s %) blocked))))
            (str/split (str answer) #"[.!?\n]+")))))
+
+(defn asks-the-reader?
+  "Whether the answer ENDS by asking its reader something — a question to the
+  user, an offer of more work, a request for confirmation — which is the one
+  ending `done` cannot be (karamazov-a6mj.3; thinkingbox's <DONE> rule: a
+  final message may not both close and ask). A run with a question left is a
+  run that should ask it — `ask_human`, answered by a person or by the
+  simulated user — and then finish, not ship the question as the result.
+
+  THE LAST NON-BLANK LINE ONLY, and a phrase from wordlists :asks-the-reader
+  on it: the line is a question mark away from a request, but a bare `?` is
+  not enough. `Why did it fail? The port was taken.` is prose that answers
+  itself; `Is the clamp right? I checked: yes` the same; the `?` operator
+  appears in explanations of code. What makes a request is the second person
+  or the offer, and those are the list. Checked at word starts for the
+  reason unfinished-claim? gives (`bayou` is not `you`). A line with a
+  request phrase but no question mark still fires when the phrase is itself
+  the request (`let me know`, `please confirm`)."
+  [answer]
+  (let [line (some->> (str/split-lines (str answer))
+                      (map str/trim)
+                      (remove str/blank?)
+                      last)
+        s (when line (str " " (str/lower-case line) " "))
+        phrases (asks-the-reader-phrases)
+        hit (when s (some #(when (word-starting-with? s %) %) phrases))]
+    (boolean
+     (and hit
+          (or (str/ends-with? (str line) "?")
+              ;; the imperative requests carry no question mark
+              (str/starts-with? hit "please")
+              (= "let me know" hit))))))
 
 (defn answer-tokens
   "Substantive tokens from a proposed answer: numbers and words that are not

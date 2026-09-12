@@ -2524,6 +2524,23 @@
      :message-form (str "This answer shares no substantive term with the problem"
                         " statement. Whatever it establishes, it is not an answer to"
                         " the question that was asked.")}
+    ;; karamazov-a6mj.3, thinkingbox's <DONE> rule: a final message may not
+    ;; both close the conversation and ask something of the person reading
+    ;; it. An answer whose last line is a question to the reader, an offer
+    ;; of more work or a request for confirmation is a run that has a
+    ;; question left, not a result. The predicate is last-line-only and
+    ;; phrase-anchored (wordlists :asks-the-reader) so prose that asks and
+    ;; answers itself is left alone.
+    {:name :asks-the-reader
+     :when (asks-the-reader? answer)
+     :message-form (str "This answer ends by asking its reader something — a"
+                        " question, an offer, a request to confirm. `done` closes"
+                        " the run; nobody answers what it asks. If the question"
+                        " matters to the result, ask it now with `ask_human` (a"
+                        " person answers when one is attached, the run's user"
+                        " context otherwise) and finish once you know. If it does"
+                        " not, decide it, say which way you went, and call `done`"
+                        " with the result and no question in it.")}
     ;; karamazov-g86, dirge completeness_gate.rs: the silent-exhaustion tell.
     ;; One sentence in the model's own voice planning more work means the run
     ;; is stopping halfway and saying so. The detection conjunction and its

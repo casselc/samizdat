@@ -318,4 +318,11 @@
     :summary "What the branch reads when criteria failed: each by name with the failure's own words, and what was met. prompts/acceptance-failed.md."}
    {:name samizdat.agent.judge/parse-yesno
     :summary "true / false / nil from a narrow judge reply — the first word of the first line, else of the last. The shape prompts/acceptance-judge.md asks for; change both together."}]}
+
+ {:group "The simulated user: asking instead of guessing"
+  :entries
+  [{:name samizdat.agent.tools.ask/user-prompt
+    :summary "The one message the :user role answers when ask_human is called with nobody attached and config :run :user-context set: the operator's ground truth, the visible transcript, the questions, and the rules — answer only from the context, copy entities verbatim, say \"I don't know\" where it is silent, never do the assistant's work (prompts/user-simulator.md). The :user role's model under :run :role-models, else the branch's own. A configured person (gates.edn :approval :mode :block) always outranks it. The exchange is journalled under :simulated-user and billed as a side call, and the branch is told the answer is simulated."}
+   {:name samizdat.agent.tools.ship/asks-the-reader?
+    :summary "The :asks-the-reader ship rung's predicate: the answer's LAST non-blank line is a request to whoever reads it — a question with a second-person subject, an offer of more work, a request to confirm — by wordlists.edn :asks-the-reader at word starts. `done` closes the run, so a question left in the answer is a question nobody answers; the refusal names ask_human. Last line only and phrase-anchored, so prose that asks and answers itself, or the `?` operator, does not fire."}]}
 ]

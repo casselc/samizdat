@@ -232,6 +232,26 @@ caught the same omission (karamazov-dsfx) a round — ~90 turns, ~1.5M tokens �
 later. A malformed spec refuses `system/start!` rather than wedging every
 branch at `done` on a message about the operator's file.
 
+### The simulated user
+
+`ask_human` has three answers. A person, when one is configured
+(`gates.edn :approval :mode :block`). Otherwise, when the operator supplied
+`:run :user-context` — what the user knows that the problem does not say —
+the **:user role**: a model answering from that context and the visible
+transcript alone, copying entities verbatim, saying `I don't know` where the
+context is silent, refusing to do the assistant's work
+(`prompts/user-simulator.md`; thinkingbox's user-LLM). Otherwise the
+standing refusal: decide it yourself and say so. The branch is told when the
+answer is simulated; the exchange is journalled under `:simulated-user` and
+billed as a side call (karamazov-a6mj.3).
+
+What it buys: an underspecified task can be written to test *asking* — the
+fact goes in the context and not the problem, and the run either asks and
+gets it or guesses and fails the criterion. Its counterpart at the other end
+is the `:asks-the-reader` ship rung: an answer whose last line asks its reader
+something is a run with a question left, and `done` refuses it naming
+`ask_human`.
+
 ## Protocol
 
 ```

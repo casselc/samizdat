@@ -33,13 +33,83 @@
   :neutral, never :success. Asking establishes nothing: reporting progress
   would clear the branch's consecutive-failure count and buy it turns for
   having had a question, which is the well-formed-but-useless call the
-  progress guards exist to catch. The wording is prompts/ask-tool.md."
+  progress guards exist to catch. The wording is prompts/ask-tool.md.
+
+  THE SIMULATED USER (karamazov-a6mj.3). With nobody attached, `decide it
+  yourself` was the only answer, so every underspecified task was resolved by
+  guessing and a run could never be asked to ask. When the operator supplies
+  `:run :user-context` — the ground truth a user would know — and no person
+  is configured, the question goes to the :user role instead: a model
+  answering ONLY from that context, copying entities verbatim, saying `I
+  don't know` where the context is silent, never doing the assistant's work
+  (thinkingbox's user-LLM, prompts/user-simulator.md). A person, when one is
+  configured (:approval :mode :block), always outranks it. The branch is told
+  a simulated user answered; the journal records the exchange under
+  :simulated-user and bills the call as a side call."
   (:require [clojure.string :as str]
+            [clojure.tools.logging :as log]
             [samizdat.agent.tools.base :as base]
             [samizdat.approval :as approval]
-            [samizdat.prompt :as prompt]))
+            [samizdat.config :as config]
+            [samizdat.llm.client :as llm]
+            [samizdat.llm.message :as message]
+            [samizdat.llm.registry :as registry]
+            [samizdat.prompt :as prompt]
+            [samizdat.store.journal :as journal]))
 
 (defn- msg [ctx] (prompt/render "ask-tool" ctx))
+
+;; --- the simulated user -----------------------------------------------------
+
+(defn- transcript
+  "The branch's conversation as the user model reads it: the visible turns,
+  role-labelled, system messages and tool results left out. The user was
+  not shown the tool traffic and should not answer from it."
+  [messages]
+  (->> messages
+       (filter #(contains? #{"user" "assistant"} (str (:role %))))
+       (map #(str (:role %) ": " (message/strip-think-blocks (str (:content %)))))
+       (str/join "\n\n")))
+
+(defn user-prompt
+  "The one user message the :user role answers — prompts/user-simulator.md
+  over the operator's context, the transcript and the questions. Pure, so
+  the rules the template states are testable."
+  [{:keys [context transcript questions]}]
+  (prompt/render "user-simulator"
+                 {:context (str context)
+                  :transcript (if (str/blank? (str transcript)) "(nothing yet)" (str transcript))
+                  :questions (mapv (fn [q] (update q :options #(not-empty (vec %)))) questions)
+                  :several (> (count questions) 1)}))
+
+(defn- user-model
+  "The adapter and config the simulated user runs on: the :user role's when
+  config :run :role-models assigns one (config/role-llm, the same resolver
+  as every role), else the branch's own."
+  [{:keys [config llm-adapter llm-config]}]
+  (if-let [llm (config/role-llm config llm-config :user)]
+    {:adapter (registry/adapter-for (:provider llm)) :config llm :role :user}
+    {:adapter llm-adapter :config llm-config :role :branch}))
+
+(defn- simulate!
+  "Put `questions` to the simulated user. Returns the answer text, or throws
+  — the caller decides what an unreachable user means for the branch."
+  [{:keys [branch conn run-id] :as ctx} context questions]
+  (let [{:keys [adapter config role]} (user-model ctx)
+        prompt (user-prompt {:context context
+                             :transcript (transcript (:messages branch))
+                             :questions questions})
+        reply (llm/chat adapter config [{:role "user" :content prompt}])
+        answer (str/trim (message/strip-think-blocks (str (:content reply))))]
+    (when (and conn run-id)
+      (journal/note! conn run-id :simulated-user
+                     {:branch-id (:id branch)
+                      :data {:questions (mapv #(select-keys % [:question :options]) questions)
+                             :answer answer :role role :model (:model config)}})
+      (journal/record-side-call! conn run-id {:branch-id (:id branch) :turn (:turn branch)
+                                              :kind :simulated-user :role role
+                                              :model (:model config) :usage (:usage reply)}))
+    answer))
 
 (defn- normalize
   "The questions as a vector of maps, whatever shape the model sent.
@@ -80,10 +150,31 @@
 
 (defmethod base/run-tool "ask_human" [{:keys [branch run-id branch-id] :as ctx}]
   (let [questions (normalize (base/arg ctx :questions))
-        {:keys [mode wait-ms on-timeout]} (approval/policy)]
+        {:keys [mode wait-ms on-timeout]} (approval/policy)
+        context (not-empty (str/trim (str (get-in ctx [:config :run :user-context]))))]
     (cond
       (empty? questions)
       (base/malformed branch (msg {:needs-questions true}))
+
+      ;; Nobody configured, but the operator said what the user knows: the
+      ;; simulated user answers. `ok`, like a person's answer, and labelled
+      ;; as simulated so the branch cannot report "the user confirmed X"
+      ;; about a context the operator wrote down.
+      (and (not= :block mode) context)
+      (try
+        (let [answer (simulate! ctx context questions)]
+          ;; One reply to all the questions, the way a person answers a
+          ;; message with several — `answered` pairs answers by position and
+          ;; would show the rest as unanswered.
+          (base/ok branch (str (str/join "\n" (map :question questions))
+                               "\n→ " answer
+                               (msg {:simulated true}))))
+        (catch Throwable e
+          (log/warn "ask_human: the simulated user failed:" (ex-message e))
+          ;; unavailable, on base's reasoning: an outside capability that
+          ;; could not be reached is not the branch's fault. The branch is
+          ;; back where it would be with no context at all.
+          (base/ok branch (msg {:simulator-down true :error (ex-message e)}))))
 
       (not= :block mode)
       ;; Not a failure and not a refusal of the branch's reasoning: there is

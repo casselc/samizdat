@@ -73,7 +73,7 @@
    "task-claimed" "task-current" "task-none" "task-reflection"
    "task-reflection-input" "task-required" "task-tests" "team-worker"
    "thinking-runaway" "trajectory-judge" "turn-deadline" "uncertain-effect"
-   "verify-hollow" "verify-red" "verify-timeout" "verify-unknown"
+   "user-simulator" "verify-hollow" "verify-red" "verify-timeout" "verify-unknown"
    "watch-intervention" "webfetch-tool" "websearch-tool" "wind-down" "workflow-history"
    "workflow-select"
    "workflow-select-system"])
