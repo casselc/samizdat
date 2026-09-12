@@ -518,19 +518,11 @@
 (defn- rfc-work-items
   "The concrete tasks an RFC breaks into: the bullet lines under its
   '## Work items' heading, marker stripped. Empty when the RFC names none —
-  then the epic is worked as one task rather than decomposed."
+  then the epic is worked as one task rather than decomposed. The same
+  reader epic-review's rubric uses for '## Acceptance criteria'
+  (judge/section-bullets), so the two sections are read one way."
   [rfc]
-  (let [lines (str/split-lines (str rfc))
-        section (->> lines
-                     (drop-while #(not (re-find #"(?i)^#+\s*work items\b" %)))
-                     rest
-                     (take-while #(not (re-find #"^#+\s" %))))]
-    (into []
-          (comp (map str/trim)
-                (filter #(re-find #"^[-*+]\s" %))
-                (map #(str/replace % #"^[-*+]\s+" ""))
-                (remove str/blank?))
-          section)))
+  (judge/section-bullets rfc #"(?i)^#+\s*work items\b"))
 
 (cell/defcell :board/triage
   {:doc "Decide how this claimed task enters construction: :skip straight to
@@ -836,11 +828,27 @@
                                           :usage (:usage r)})
                             (catch Throwable _ nil))
                        (:content r)))
+              answer "All of the RFC's work items were implemented."
+              evidence (judge/evidence rows)
               reviewed (try (judge/review
                              {:chat chat :requirement rfc
-                              :evidence (judge/evidence rows) :diff diff
-                              :answer "All of the RFC's work items were implemented."})
+                              :evidence evidence :diff diff :answer answer})
                             (catch Throwable _ nil))
+              ;; THE RUBRIC (karamazov-a6mj.4): the RFC's own acceptance
+              ;; criteria, one narrow yes/no each, scored as thinkingbox's
+              ;; RubricJudge scores them, against gates.edn :rubric
+              ;; :threshold. Beside the two-pass review, not instead of it:
+              ;; the review finds defects the author did not think to list,
+              ;; the rubric checks the list the author DID write. nil when
+              ;; the RFC lists no criteria, and fail-open on a throw.
+              criteria (judge/parse-criteria rfc)
+              rubric (when (seq criteria)
+                       (try (judge/review-rubric
+                             {:chat (fn [content] (chat :rubric content))
+                              :criteria criteria :answer answer
+                              :diff diff :evidence evidence
+                              :threshold (:threshold (gates/threshold :rubric))})
+                            (catch Throwable _ nil)))
               qf (try (metrics/review
                        (files/read-sources root (gitdiff/changed-files root baseline))
                        (gates/threshold :code-quality))
@@ -848,9 +856,14 @@
               quality (when (seq qf) (prompt/render "metrics-findings" {:findings qf}))
               all (not-empty (str/join "\n\n"
                                        (remove str/blank?
-                                               [(str (:findings reviewed)) (str quality)])))
-              blocking (when all (try (judge/blocking-findings (str "FINDINGS:\n" all))
-                                      (catch Throwable _ nil)))
+                                               [(str (:findings reviewed))
+                                                (str (:findings rubric))
+                                                (str quality)])))
+              blocking (or (when all (try (judge/blocking-findings (str "FINDINGS:\n" all))
+                                          (catch Throwable _ nil)))
+                           ;; a reward under the threshold blocks whatever
+                           ;; severity tags the lines carry
+                           (and rubric (not (:pass? rubric))))
               attempt (inc (count (filter #(= task (:task %))
                                           (journal/notes conn run-id :epic-review))))
               spent? (>= attempt (max-review-attempts))
@@ -869,7 +882,16 @@
           (journal/note! conn run-id :epic-review
                          {:data {:task task :attempt attempt :decision (name decision)
                                  :verdict (some-> reviewed :verdict)
-                                 :findings (judge/for-the-record :reply-chars all)}})
+                                 :findings (judge/for-the-record :reply-chars all)
+                                 ;; Per criterion, so a reader — and a
+                                 ;; supervisor asking which KIND of criterion
+                                 ;; its tuning keeps missing — sees the
+                                 ;; ratings and not only the total.
+                                 :rubric (when rubric
+                                           {:reward (:reward rubric) :pass (:pass? rubric)
+                                            :threshold (:threshold (gates/threshold :rubric))
+                                            :ratings (mapv #(select-keys % [:criterion :kind :weight :rating])
+                                                           (:ratings rubric))})}})
           (assoc data :board/epic-decision decision)))
       (fn [d]
         (try (tasks/close! conn task) (catch Throwable _ nil))

@@ -87,7 +87,7 @@ karamazov-dq1r). See "The plan phase" below.
 | `dcritic` | `:board/design-review` | The PLAN critic — `judge/review-plan`, the same two-pass verify the diff critic uses, on the plan against the requirement. `:ok` to `approve`; `:revise` back to `design`, bounded by `:max-design-attempts`, fail-open. A blank plan is sent back once, then fails open. |
 | `approve` | `:board/approve` | The gate before construction. Headless the critic already decided, so this persists the plan as the task's contract (`tasks.plan`) and passes through; attended (`:approval :mode :block`) it also asks the person. `:go` to `work` for a lightweight plan, `:decompose` for an RFC (stamped `plan_kind` "rfc"), `:rework` back to `design`. |
 | `decompose` | `:board/decompose` | Break an approved RFC into the child tasks its "## Work items" named, under the epic, and release the epic's claim so the board works the children (they skip their own RFC). `:decomposed` to `next`; `:single` to `work` when the RFC named no items. Records the epic's pre-construction baseline for `epic-review`. |
-| `epic-review` | `:board/epic-review` | The END-OF-PHASE critic: once an RFC epic's children have all landed, validate the whole diff (from the epic baseline) against the RFC — `judge/review` with the RFC as the requirement, plus the code-quality metrics over everything touched. `:pass` closes the epic; a blocking gap spawns one fix child under it, bounded by `:board-review-attempts` and fail-open. This is what makes the RFC the acceptance contract. |
+| `epic-review` | `:board/epic-review` | The END-OF-PHASE critic: once an RFC epic's children have all landed, validate the whole diff (from the epic baseline) against the RFC — `judge/review` with the RFC as the requirement, the **rubric** over the RFC's own acceptance criteria (`judge/review-rubric`: one narrow yes/no per bullet, scored as thinkingbox's RubricJudge, against `gates.edn :rubric :threshold`), plus the code-quality metrics over everything touched. `:pass` closes the epic; a blocking gap — a finding, or a reward under the threshold — spawns one fix child under it naming the failed criteria, bounded by `:board-review-attempts` and fail-open. This is what makes the RFC the acceptance contract. |
 | `work` | `:board/work` | Run the implementor sub-loop (`worker` manifest, `:implementor` role model) on the claimed task until a terminal verdict. A re-attempt runs on `<bid>r<attempt>` with the critic's findings appended to the task's problem. |
 | `review` | `:board/review` | The critic on **this task's diff**: deterministic checks first, then the judge (`judge/critic-prompt` over the diff since `:board/baseline`). `:pass` closes the task; `:revise` sends it back to the same owner with the findings; `:give-up` (owner never landed, or `:board-review-attempts` spent) **releases** the task back to the board open. Fail-open: a judge that errors or throws ships — a broken gate must not end the run. |
 | `finish` | `:board/finish` | Nested (the default — the board as the feature loop's implement stage) it only summarizes: what landed and what is left goes UP, to the supervisor, whose job is to figure out why a task did not land and adjust the loop — another round with the findings, a strategy SWITCH, an `EXTEND: <n>` budget raise. Standalone, `:completed` only when something landed **and** nothing is left; anything else ends `:abandoned`, honestly — but a standalone board has no supervisor, which is exactly why the feature loop is the default. |
@@ -110,6 +110,19 @@ close. `tasks.plan` was write-only before this; now construction reads it (a
 child is handed its epic's RFC to build within) and `epic-review` reads it as the
 contract. A child derived from an RFC does not open its own RFC (`rfc-child?`), so
 the recursion terminates.
+
+The RFC's **acceptance criteria** are read twice over (karamazov-a6mj.4). The
+two-pass review judges the whole diff with one verdict and finds the defects
+the author did not think to list; the rubric checks the list the author DID
+write, one criterion at a time — `judge/parse-criteria` reads the bullets
+(`- text`, `- [3] text`, `- [-2] violation` for a deduction, `- [x0.5]
+violation` for a multiplicative penalty; `prompts/rfc-brief.md` teaches the
+syntax), each becomes one narrow yes/no to the critic, and the ratings score
+to a reward in [0, 1]. Under the threshold is a blocking gap, and the fix
+child's problem names each failed criterion with the judge's own sentence —
+the steering principle's "what failed" for free. The per-criterion ratings
+ride the `:epic-review` note and the export's verdicts projection
+(`:rubric-reward`), the one graded judgement the harness records.
 
 ### The code-quality gate
 

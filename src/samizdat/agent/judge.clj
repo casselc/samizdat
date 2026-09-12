@@ -563,6 +563,121 @@
            :diff plan
            :prompt-fn (fn [_] (plan-prompt {:requirement requirement :plan plan}))}))
 
+;; --- the rubric judge (karamazov-a6mj.4) -------------------------------------
+;;
+;; thinkingbox's RubricJudge: N narrow YES/NO criteria with weights, deduction
+;; and multiplicative penalties, a threshold. One verdict over N criteria is
+;; the multi-part question a judge is bad at; one question per criterion is
+;; what it is good at, and a failure that names the criterion is the steering
+;; principle's "what failed" for free. The RFC brief already asks the owner
+;; for an "## Acceptance criteria" list — this is what makes that list the
+;; contract epic-review judges the whole change by, criterion by criterion.
+
+(defn section-bullets
+  "The bullet lines under the first markdown heading matching `heading-re`,
+  markers stripped, up to the next heading. [] when the section is absent.
+  The one reader behind an RFC's work items and its acceptance criteria."
+  [text heading-re]
+  (let [section (->> (str/split-lines (str text))
+                     (drop-while #(not (re-find heading-re %)))
+                     rest
+                     (take-while #(not (re-find #"^#+\s" %))))]
+    (into []
+          (comp (map str/trim)
+                (filter #(re-find #"^[-*+]\s" %))
+                (map #(str/replace % #"^[-*+]\s+" ""))
+                (remove str/blank?))
+          section)))
+
+(defn parse-criteria
+  "An RFC's acceptance criteria as rubric entries, from the bullets of its
+  \"## Acceptance criteria\" section: `{:criterion :weight :kind}`.
+
+  The marker syntax, taught in prompts/rfc-brief.md and read tolerantly:
+    - text          positive, weight 1
+    - [3] text      positive, weight 3
+    - [-2] text     a DEDUCTION penalty: YES (the violation is observed) costs 2
+    - [x0.5] text   a MULTIPLICATIVE penalty: YES scales the reward by 0.5
+  Anything else in the brackets is left on the text. [] when there is no such
+  section — the rubric then does not run, and the two-pass review alone
+  decides, as before. Which heading names the section is gates.edn :rubric
+  :heading-regex, beside the brief that asks for it."
+  [rfc]
+  (into []
+        (map (fn [line]
+               (if-let [[_ mark rest] (re-matches #"(?s)\[\s*(x?-?[0-9]+(?:\.[0-9]+)?)\s*\]\s*(.+)" line)]
+                 (let [mult? (str/starts-with? mark "x")
+                       n (Double/parseDouble (if mult? (subs mark 1) mark))]
+                   (cond
+                     mult? {:criterion (str/trim rest) :weight (Math/abs n) :kind :multiplicative}
+                     (neg? n) {:criterion (str/trim rest) :weight (- n) :kind :deduction}
+                     :else {:criterion (str/trim rest) :weight n :kind :positive}))
+                 {:criterion line :weight 1.0 :kind :positive})))
+        (section-bullets rfc (re-pattern (:heading-regex (gates/threshold :rubric))))))
+
+(defn rubric-score
+  "The reward for a set of rated criteria — `{:criterion :weight :kind
+  :rating}` with `:rating` true / false / nil — as thinkingbox computes it:
+
+    base   = clamp((Σ earned − Σ deductions) / Σ positive weight, 0, 1)
+    reward = clamp(base × Π (1 − m) over fired multiplicative penalties, 0, 1)
+
+  An UNDECIDED rating (nil — the judge gave no verdict) is left out of both
+  sides rather than read as NO: it neither earns nor costs, and a positive
+  criterion nobody decided is not in the denominator. Nothing decided is
+  `:reward nil`, so the caller fails open the way every judge here does.
+  Returns the parts beside the total so a note can show its arithmetic."
+  [ratings]
+  (let [decided (filter #(boolean? (:rating %)) ratings)
+        pos (filter #(= :positive (:kind %)) decided)
+        positive-weight (reduce + 0.0 (map :weight pos))
+        earned (reduce + 0.0 (map :weight (filter :rating pos)))
+        deductions (reduce + 0.0 (map :weight (filter #(and (= :deduction (:kind %)) (:rating %)) decided)))
+        mults (map :weight (filter #(and (= :multiplicative (:kind %)) (:rating %)) decided))
+        clamp (fn [x] (-> x (max 0.0) (min 1.0)))
+        base (when (pos? positive-weight) (clamp (/ (- earned deductions) positive-weight)))
+        reward (when base (clamp (reduce * base (map #(- 1.0 %) mults))))]
+    {:earned earned :deductions deductions :positive-weight positive-weight
+     :multipliers (vec mults) :base base :reward reward
+     :undecided (count (remove #(boolean? (:rating %)) ratings))}))
+
+(defn review-rubric
+  "Judge `answer` + `diff` + `evidence` against `criteria` (from
+  `parse-criteria`), ONE narrow yes/no call per criterion through `chat`
+  (fn [content] -> reply), and score the ratings. Returns
+  `{:ratings :reward :pass? :findings}` — `:findings` the failed positive
+  criteria and the fired penalties, one line each carrying the judge's own
+  sentence, or nil when there is nothing to say.
+
+  `:pass?` is reward ≥ `threshold`, and TRUE when the reward is nil (nothing
+  decided): a judge that cannot answer must not be able to refuse the ship on
+  its own. A reduce over the criteria, not a mapv — `chat` parks."
+  [{:keys [chat criteria answer diff evidence threshold]}]
+  (let [ratings (reduce (fn [acc {:keys [criterion] :as c}]
+                          (let [reply (try (chat (yesno-prompt {:question criterion :answer answer
+                                                                :diff diff :evidence evidence}))
+                                           (catch Throwable _ nil))]
+                            (conj acc (assoc c :rating (parse-yesno reply)
+                                             :reply (for-the-record :reply-chars (usable reply))))))
+                        [] criteria)
+        score (rubric-score ratings)
+        reward (:reward score)
+        failed (filter (fn [{:keys [kind rating]}]
+                         (or (and (= :positive kind) (false? rating))
+                             (and (not= :positive kind) (true? rating))))
+                       ratings)
+        line (fn [{:keys [criterion kind reply]}]
+               (str "- [rubric] "
+                    (if (= :positive kind) "not met: " "penalty: ")
+                    criterion
+                    (when-let [r (some-> reply str/trim not-empty)]
+                      (str " — " (first (str/split-lines r))))))]
+    {:ratings ratings
+     :score score
+     :reward reward
+     :pass? (or (nil? reward) (>= reward (double threshold)))
+     :findings (when (seq failed) (str/join "\n" (map line failed)))}))
+
 (defn critique-message
   "The single consolidated note injected back into the branch when the judge
   does not pass, so its next turn sees exactly what to fix."

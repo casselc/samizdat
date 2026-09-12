@@ -254,7 +254,8 @@
         events (db/fetch conn ["SELECT id, branch_id, turn, kind, data FROM events
                                  WHERE run_id = ?
                                    AND kind IN ('critic-score', 'cull-spared', 'critic',
-                                                'board-review', 'critique', 'verify')
+                                                'board-review', 'critique', 'epic-review',
+                                                'verify')
                                  ORDER BY id"
                                run-id])
         verifies (into []
@@ -320,6 +321,20 @@
                                    :verdict (some-> (:verdict d) str)
                                    :reason (:reason d)
                                    :findings (:findings d)}
+                         :outcome (round-outcome (:id e)))
+                  "epic-review"
+                  ;; The end-of-phase critic over an RFC epic, with the
+                  ;; rubric's graded reward beside the binary verdict
+                  ;; (karamazov-a6mj.4) — the one judgement here that is a
+                  ;; number rather than a pass/fail, which is what a training
+                  ;; signal wants.
+                  (assoc (base branch-id turn kind)
+                         :situation {:task (:task d) :attempt (:attempt d)}
+                         :verdict {:verdict (some-> (:verdict d) str)
+                                   :decision (some-> (:decision d) str)
+                                   :findings (:findings d)
+                                   :rubric-reward (get-in d [:rubric :reward])
+                                   :rubric-ratings (get-in d [:rubric :ratings])}
                          :outcome (round-outcome (:id e)))))]
     (vec (sort-by (fn [r] (or (:turn r) 0)) (concat gates noted)))))
 

@@ -412,6 +412,76 @@
                 (is (= "done" (:status (tasks/get-task conn (:id t))))
                     "and the epic closed, not by closable-parents! but through the RFC critic")))))))))
 
+(deftest the-rfc-s-acceptance-criteria-are-a-rubric-the-epic-critic-scores
+  ;; karamazov-a6mj.4. The RFC brief asks for acceptance criteria; this is
+  ;; what makes them the contract. Each bullet is put to the critic as one
+  ;; narrow yes/no, the ratings are scored, and a reward under gates.edn
+  ;; :rubric :threshold is a blocking gap whose fix child names the criterion
+  ;; that failed — in the judge's own words.
+  (let [rfc "# RFC: haze\n## Purpose\nfade the horizon.\n## Work items\n- pure flight.haze with tests\n- draw-terrain! blends toward sky\n## Acceptance criteria\n- the far ground blends toward the sky colour\n- [3] no tree is drawn past the ground it stands on\n- [-2] the near field changed appearance"
+        rubric-calls (atom 0)
+        first-round? (atom true)]
+    (with-redefs [llm/chat
+                  (fn [a c messages & rest]
+                    (let [content (str/join " " (map :content messages))]
+                      (cond
+                        ;; the rubric's narrow questions — before judge-call?,
+                        ;; whose heading the yes/no prompt shares
+                        (str/includes? content "Reply with YES or NO")
+                        (do (swap! rubric-calls inc)
+                            {:content (cond
+                                        (str/includes? content "near field") "NO — the near field is untouched."
+                                        (and @first-round? (str/includes? content "past the ground"))
+                                        "NO. tree-radius is still 190.0, so trees stand past the last ground column."
+                                        :else "YES — draw.clj lerps toward sky-color.")
+                             :finish-reason "stop"})
+                        (str/includes? content "reviewing this PLAN")
+                        {:content "VERDICT: COMPLETE" :finish-reason "stop"}
+                        (str/includes? content "candidate findings")
+                        {:content "No issues found." :finish-reason "stop"}
+                        (str/includes? content "as an RFC")
+                        {:content (str "```tool-call\n{\"name\":\"plan\",\"args\":"
+                                       "{\"files\":[\"src/flight/haze.clj\"],"
+                                       "\"tests\":[\"test/flight/haze_test.clj\"],"
+                                       "\"goal\":\"fade the horizon and cover both parts\","
+                                       "\"rfc\":" (pr-str rfc) "}}\n```")
+                         :finish-reason "stop"}
+                        (judge-call? messages)
+                        {:content "VERDICT: COMPLETE" :finish-reason "stop"}
+                        :else
+                        ;; the owner of the FIX child ships too; once it has,
+                        ;; the second epic review sees the gap closed
+                        (let [r (apply ships-its-task a c messages rest)]
+                          (when (str/includes? content "RFC gaps") (reset! first-round? false))
+                          r))))]
+      (let [conn (db/open! ":memory:")]
+        (run-board conn {:problem "Three parts to the flight's feel:\n- distance fade\n- tree clip\n- horizon blend"})
+        (let [rid (:id (first (db/fetch conn ["SELECT id FROM runs"])))
+              notes (journal/notes conn rid :epic-review)
+              epic (first (db/fetch conn ["SELECT id, status FROM tasks WHERE plan_kind = 'rfc'"]))]
+          (is (<= 3 @rubric-calls) "one narrow call per criterion, at least the first round's three")
+          (testing "the first review scored the rubric under the threshold and sent it back"
+            (let [n (first notes)]
+              (is (= "revise" (:decision n)))
+              (is (some? (:rubric n)) "the ratings are on the record")
+              (is (< (double (get-in n [:rubric :reward])) 0.7)
+                  "1 of 4 positive weight earned, no penalty")
+              (is (= [true false false] (mapv :rating (get-in n [:rubric :ratings])))
+                  "each criterion rated on its own")
+              (is (str/includes? (str (:findings n)) "no tree is drawn past the ground"))
+              (is (str/includes? (str (:findings n)) "tree-radius is still 190.0")
+                  "the judge's own sentence rides along")))
+          (testing "the fix child names the failed criterion"
+            (let [fix (first (db/fetch conn ["SELECT title, body FROM tasks WHERE title LIKE 'RFC gaps%'"]))]
+              (is (some? fix))
+              (is (str/includes? (str (:body fix)) "no tree is drawn past the ground"))
+              (is (not (str/includes? (str (:body fix)) "blends toward the sky colour"))
+                  "a met criterion is not a gap")))
+          (testing "once the gap is closed the rubric passes and the epic closes"
+            (is (= "pass" (:decision (last notes))))
+            (is (= 1.0 (double (get-in (last notes) [:rubric :reward]))))
+            (is (= "done" (:status (tasks/get-task conn (:id epic)))))))))))
+
 (deftest rfc-work-items-parses-the-breakdown-section
   (let [work-items @(ns-resolve 'cells.board 'rfc-work-items)]
     (is (= ["build storage" "build handlers" "wire templates"]

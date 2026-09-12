@@ -27,10 +27,24 @@ Write the RFC in markdown with these sections:
   be built, tested and reviewed on its own. Give each a `- ` bullet naming what
   it builds and the test that proves it. These become real child tasks, so make
   each one a single reviewable change, not a layer of the whole.
-- **Acceptance criteria** — what proves the change is done: the tests that must
-  pass, and the code-quality limits (keep cyclomatic complexity, erosion and
-  verbosity within the project's gates — do not ship a few large tangled
-  functions or duplicated blocks).
+- **Acceptance criteria** — what proves the change is done, as a list of
+  bullets, ONE observable outcome per bullet. When every work item has landed,
+  a reviewer puts each bullet to a judge as a single yes/no question against
+  the whole diff and the answer, and scores the list — so write each one as
+  something that can be seen in the diff, the tests or the answer, not as a
+  feeling ("the far ground blends toward the sky colour", "a test pins that
+  consecutive rings stay reachable" — not "the code is clean"). Split anything
+  with an "and" into two bullets. Include the tests that must pass and the
+  code-quality limits (keep cyclomatic complexity, erosion and verbosity
+  within the project's gates — do not ship a few large tangled functions or
+  duplicated blocks).
+
+  A bullet is worth 1 unless marked: `- [3] …` weighs 3; `- [-2] …` is a
+  PENALTY that costs 2 when the judge answers yes, so word it as the violation
+  itself, observable and positive ("the near field changed appearance",
+  never "does not keep the near field unchanged"); `- [x0.5] …` halves the
+  score when it is observed, for a trust-breaking failure such as a deleted
+  or weakened test. Most criteria need no marker.
 
 Then end with a `plan` call whose `rfc` field carries the whole document, and
 whose `files`, `tests` and `goal` name the files the change touches, the tests

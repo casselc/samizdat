@@ -219,6 +219,14 @@
     (journal/note! @conn rid :board-review
                    {:data {:task "t1" :attempt 1 :verdict :complete :decision :pass :landed true}})
     (journal/note! @conn rid :critique {:data {:decision :ship :deterministic false}})
+    (journal/note! @conn rid :epic-review
+                   {:data {:task "t0" :attempt 1 :verdict :complete :decision :pass
+                           :findings ""
+                           :rubric {:reward 0.75 :pass true :threshold 0.7
+                                    :ratings [{:criterion "far ground fades" :kind :positive
+                                               :weight 1.0 :rating true}
+                                              {:criterion "no tree past the ground" :kind :positive
+                                               :weight 3.0 :rating true}]}}})
     (journal/note! @conn rid :verify {:data {:passed shipped? :exit (if shipped? 0 1) :timeout false}})
     ;; The shipping branch finishes with a successful done; the culled one
     ;; with a failed verification — a culled branch never got its done.
@@ -282,7 +290,14 @@
       (is (= "ship" (get-in (of good "critique") [:verdict :decision])))
       (is (true? (get-in (of good "critique") [:outcome :verify-passed?])))
       (is (= "completed" (get-in (of good "critique") [:outcome :run-status])))
-      (is (= "exhausted" (get-in (of bad "critique") [:outcome :run-status]))))))
+      (is (= "exhausted" (get-in (of bad "critique") [:outcome :run-status]))))
+    (testing "an epic review carries the rubric's graded reward beside its verdict (karamazov-a6mj.4)"
+      (let [e (of good "epic-review")]
+        (is (some? e) "the kind is exported")
+        (is (= "pass" (get-in e [:verdict :decision])))
+        (is (= 0.75 (double (get-in e [:verdict :rubric-reward]))))
+        (is (= 2 (count (get-in e [:verdict :rubric-ratings]))))
+        (is (true? (get-in e [:outcome :verify-passed?])))))))
 
 (deftest a-secret-never-reaches-a-verdict
   (judged-run! {:fate :shipped})

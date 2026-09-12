@@ -443,3 +443,113 @@
           "and the note carries the findings it blocked on")
       (is (every? #(seq (str (:branch_id %))) rows)
           "the branch is on the row, where every other per-branch note keeps it"))))
+
+;; --- the rubric judge (karamazov-a6mj.4) ------------------------------------------
+
+(def ^:private rfc-with-criteria
+  "# RFC: haze
+## Purpose
+fade the horizon.
+## Work items
+- pure flight.haze with tests
+## Acceptance criteria
+- the far ground blends toward the sky colour
+- [3] no tree is drawn past the ground it stands on
+- [-2] the near field changed appearance
+- [x0.5] a test was deleted or weakened
+Some trailing prose that is not a bullet.
+## Notes
+- not a criterion, this is another section")
+
+(deftest acceptance-criteria-parse-from-the-rfc-with-weights-and-penalties
+  (let [c (judge/parse-criteria rfc-with-criteria)]
+    (is (= 4 (count c)) "the bullets of that section and no other")
+    (is (= {:criterion "the far ground blends toward the sky colour" :weight 1.0 :kind :positive}
+           (first c))
+        "an unmarked bullet is a positive criterion of weight 1")
+    (is (= {:criterion "no tree is drawn past the ground it stands on" :weight 3.0 :kind :positive}
+           (second c)))
+    (is (= {:criterion "the near field changed appearance" :weight 2.0 :kind :deduction}
+           (nth c 2))
+        "[-N] is a deduction: YES costs N")
+    (is (= {:criterion "a test was deleted or weakened" :weight 0.5 :kind :multiplicative}
+           (nth c 3))
+        "[xM] scales the reward by (1 - M) on YES"))
+  (is (= [] (judge/parse-criteria "# RFC\n## Purpose\nnone"))
+      "an RFC with no such section has no criteria — the rubric does not run")
+  (is (= [] (judge/parse-criteria nil))))
+
+(deftest the-rubric-arithmetic-is-the-documented-one
+  ;; thinkingbox docs/rubrics_judge.md's worked example: 50+30+0 earned of
+  ;; 100, a 15-point deduction, a x0.5 multiplicative penalty -> 0.325.
+  (let [ratings [{:criterion "a" :weight 50.0 :kind :positive :rating true}
+                 {:criterion "b" :weight 30.0 :kind :positive :rating true}
+                 {:criterion "c" :weight 20.0 :kind :positive :rating false}
+                 {:criterion "d" :weight 15.0 :kind :deduction :rating true}
+                 {:criterion "e" :weight 0.5 :kind :multiplicative :rating true}]
+        s (judge/rubric-score ratings)]
+    (is (= 80.0 (:earned s)))
+    (is (= 15.0 (:deductions s)))
+    (is (= 100.0 (:positive-weight s)))
+    (is (< (Math/abs (- 0.65 (:base s))) 1e-9))
+    (is (< (Math/abs (- 0.325 (:reward s))) 1e-9)))
+  (testing "clamped to [0, 1]: deductions cannot go negative"
+    (is (= 0.0 (:reward (judge/rubric-score [{:weight 1.0 :kind :positive :rating false}
+                                              {:weight 5.0 :kind :deduction :rating true}])))))
+  (testing "an undecided rating is left out of both sides, not read as NO"
+    (let [s (judge/rubric-score [{:weight 1.0 :kind :positive :rating true}
+                                 {:weight 1.0 :kind :positive :rating nil}
+                                 {:weight 3.0 :kind :deduction :rating nil}])]
+      (is (= 1.0 (:reward s)))
+      (is (= 2 (:undecided s)) "the undecided positive and the undecided penalty")))
+  (testing "nothing decided is no reward, not zero — fail-open for the caller"
+    (is (nil? (:reward (judge/rubric-score [{:weight 1.0 :kind :positive :rating nil}]))))
+    (is (nil? (:reward (judge/rubric-score []))))))
+
+(deftest a-rubric-review-asks-one-narrow-question-per-criterion
+  (let [asked (atom [])
+        chat (fn [content]
+               (swap! asked conj content)
+               (cond (str/includes? content "blends toward the sky") "YES — draw.clj lerps toward sky-color."
+                     (str/includes? content "past the ground") "NO. tree-radius is still 190."
+                     (str/includes? content "near field") "NO"
+                     (str/includes? content "deleted or weakened") "well, hard to say"
+                     :else "NO"))
+        r (judge/review-rubric {:chat chat
+                                :criteria (judge/parse-criteria rfc-with-criteria)
+                                :answer "faded it" :diff "+ lerp" :evidence "files written: draw.clj"
+                                :threshold 0.7})]
+    (is (= 4 (count @asked)) "one call per criterion, none combined")
+    (is (every? #(str/includes? % "faded it") @asked) "each sees the answer")
+    (is (every? #(re-find #"(?i)YES or NO" %) @asked) "each is the narrow yes/no shape")
+    (is (= [true false false nil] (mapv :rating (:ratings r))))
+    ;; earned 1 of 4 positive weight, no penalty triggered, one undecided
+    (is (< (Math/abs (- 0.25 (:reward r))) 1e-9))
+    (is (false? (:pass? r)))
+    (testing "the findings name the failed criteria with the judge's own words"
+      (is (str/includes? (:findings r) "no tree is drawn past the ground"))
+      (is (str/includes? (:findings r) "tree-radius is still 190"))
+      (is (not (str/includes? (:findings r) "blends toward the sky")) "a met criterion is not a finding")
+      (is (not (str/includes? (:findings r) "deleted or weakened")) "an undecided one is not a finding either"))
+    (testing "a penalty that fired is a finding too"
+      (let [r (judge/review-rubric {:chat (fn [c] (if (str/includes? c "near field") "YES, the fog covers everything" "YES"))
+                                    :criteria (judge/parse-criteria rfc-with-criteria)
+                                    :answer "a" :threshold 0.7})]
+        (is (str/includes? (:findings r) "near field"))
+        (is (< (:reward r) 1.0))))
+    (testing "over the threshold passes and has nothing to say"
+      (let [r (judge/review-rubric {:chat (fn [c] (if (re-find #"near field|deleted" c) "NO" "YES"))
+                                    :criteria (judge/parse-criteria rfc-with-criteria)
+                                    :answer "a" :threshold 0.7})]
+        (is (= 1.0 (:reward r)))
+        (is (true? (:pass? r)))
+        (is (nil? (:findings r)))))
+    (testing "a judge that decides nothing passes — fail-open, and says so"
+      (let [r (judge/review-rubric {:chat (fn [_] "hmm") :criteria (judge/parse-criteria rfc-with-criteria)
+                                    :answer "a" :threshold 0.7})]
+        (is (nil? (:reward r)))
+        (is (true? (:pass? r)))))))
+
+(deftest section-bullets-reads-one-markdown-section
+  (is (= ["a" "b"] (judge/section-bullets "# t\n## Work items\n- a\n* b\nprose\n## Next\n- c" #"(?i)^#+\s*work items\b")))
+  (is (= [] (judge/section-bullets "# t\n## Other\n- c" #"(?i)^#+\s*work items\b"))))

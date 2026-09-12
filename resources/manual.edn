@@ -317,7 +317,11 @@
    {:name samizdat.agent.acceptance/refusal
     :summary "What the branch reads when criteria failed: each by name with the failure's own words, and what was met. prompts/acceptance-failed.md."}
    {:name samizdat.agent.judge/parse-yesno
-    :summary "true / false / nil from a narrow judge reply — the first word of the first line, else of the last. The shape prompts/acceptance-judge.md asks for; change both together."}]}
+    :summary "true / false / nil from a narrow judge reply — the first word of the first line, else of the last. The shape prompts/acceptance-judge.md asks for; change both together."}
+   {:name samizdat.agent.judge/parse-criteria
+    :summary "An RFC's '## Acceptance criteria' bullets as rubric entries {:criterion :weight :kind}: unmarked = positive weight 1, [N] weight N, [-N] a deduction penalty (YES costs N), [xM] a multiplicative penalty (YES scales by 1-M). The syntax prompts/rfc-brief.md teaches. [] when the RFC has no such section, and then epic-review runs the two-pass review alone."}
+   {:name samizdat.agent.judge/review-rubric
+    :summary "One narrow yes/no call per criterion through an injected chat, scored as thinkingbox's RubricJudge: reward = clamp((earned - deductions) / positive weight) x the multipliers, against gates.edn :rubric :threshold. Undecided ratings sit out of both sides; nothing decided is a nil reward and a pass (fail-open). :findings lists the failed criteria and fired penalties with the judge's own sentence — what epic-review's fix child is told. `rubric-score` is the arithmetic alone, testable on ratings."}]}
 
  {:group "The simulated user: asking instead of guessing"
   :entries

@@ -794,6 +794,29 @@
         NOTHING on a clean review, which skips it. Off is a legitimate stance
         for a project that would rather pay one call and read the noise."}
 
+ :rubric
+ {:value {:threshold 0.7
+          ;; Which RFC section holds the criteria — the reader's half of the
+          ;; format prompts/rfc-brief.md asks for; change both together.
+          :heading-regex "(?i)^#+\\s*acceptance criteria\\b"}
+  :kind :threshold :capability-tunable? false
+  :provenance ["karamazov-a6mj.4" "thinkingbox docs/rubrics_judge.md"]
+  :doc "The end-of-phase RUBRIC (karamazov-a6mj.4). When an approved RFC lists
+        acceptance criteria (its '## Acceptance criteria' bullets), epic-review
+        puts each to the critic as ONE narrow yes/no and scores them as
+        thinkingbox's RubricJudge does: positive criteria earn their weight on
+        YES, a [-N] deduction costs N on YES, an [xM] multiplicative penalty
+        scales the reward by (1 - M) on YES, reward = clamp((earned -
+        deductions) / positive weight) x the multipliers. :threshold is the
+        pass mark: reward below it is a blocking gap, and the failed criteria
+        become the fix child's problem text.
+
+        0.7 is thinkingbox's own worked example and a starting point, not a
+        measurement. A judge that decides nothing (every rating undecided)
+        passes — fail-open, like every judge here — and says so in the note.
+        One call PER CRITERION, so an RFC with eight criteria costs eight small
+        calls at the epic's end; the two-pass review still runs beside it."}
+
  :review-severities
  {:value ["critical" "high" "medium" "low"] :kind :threshold
   :capability-tunable? false
@@ -1778,7 +1801,7 @@
           ;; that say "this verdict was wrong" come from. :kinds names which
           ;; journal kinds count as a judgement.
           :verdicts {:kinds ["gate" "critic-score" "cull-spared" "critic"
-                             "board-review" "critique"]}}
+                             "board-review" "critique" "epic-review"]}}
   :kind :policy :capability-tunable? false
   :provenance ["karamazov-5ge3" "karamazov-3htz"]
   :doc "WHICH RUNS ARE WORTH IMITATING, when the journal is exported as
