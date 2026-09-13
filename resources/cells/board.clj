@@ -864,12 +864,23 @@
               ;; the rubric checks the list the author DID write. nil when
               ;; the RFC lists no criteria, and fail-open on a throw.
               criteria (judge/parse-criteria rfc)
+              ;; Under the rubric's OWN diff budget, fetched wide and cut per
+              ;; question after judge/focus-diff puts the question's files
+              ;; first — the branch-sized `diff` above lost the file five
+              ;; criteria were about on the first real epic (karamazov-0way).
+              rubric-cfg (gates/threshold :rubric)
+              rubric-diff (when (seq criteria)
+                            (gitdiff/diff root baseline
+                                          (or (:diff-fetch-chars rubric-cfg)
+                                              (:diff-chars rubric-cfg)
+                                              (gitdiff/max-diff-chars))))
               rubric (when (seq criteria)
                        (try (judge/review-rubric
                              {:chat (fn [content] (chat :rubric content))
                               :criteria criteria :answer answer
-                              :diff diff :evidence evidence
-                              :threshold (:threshold (gates/threshold :rubric))})
+                              :diff rubric-diff :evidence evidence
+                              :diff-chars (:diff-chars rubric-cfg)
+                              :threshold (:threshold rubric-cfg)})
                             (catch Throwable _ nil)))
               qf (try (metrics/review
                        (files/read-sources root (gitdiff/changed-files root baseline))

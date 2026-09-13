@@ -139,12 +139,15 @@
 (defn diff
   "The unified diff of the run's changes since `baseline`, bounded to keep it
   out of a runaway prompt. Empty string when there is nothing to show."
-  [root baseline]
-  (let [cap (max-diff-chars)]
-    (or (when (and root baseline)
-          (some-> (git root "diff" baseline)
-                  (as-> d (if (> (count d) cap)
-                            (str (subs d 0 cap)
-                                 "\n… (diff truncated at " cap " chars)")
-                            d))))
-        "")))
+  ([root baseline] (diff root baseline (max-diff-chars)))
+  ;; `cap` explicit: the epic rubric fetches under its own, larger budget
+  ;; (gates.edn :rubric :diff-fetch-chars) and cuts per question afterwards
+  ;; (karamazov-0way).
+  ([root baseline cap]
+   (or (when (and root baseline)
+         (some-> (git root "diff" baseline)
+                 (as-> d (if (> (count d) (long cap))
+                           (str (subs d 0 (long cap))
+                                "\n… (diff truncated at " cap " chars)")
+                           d))))
+       "")))

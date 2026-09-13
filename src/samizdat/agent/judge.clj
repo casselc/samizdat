@@ -188,13 +188,83 @@
                   (map (fn [r] (str (if (= "failure" (some-> (:category r) name))
                                       "FAILED" "ok")
                                     ": " (one-line (arg r :command) 70))))
-                  distinct)]
+                  distinct)
+        ;; The last test-runner summary a SHELL run printed. "commands run"
+        ;; says a suite was invoked and whether the command exited 0; it
+        ;; cannot say how many tests ran or passed, and the first live rubric
+        ;; rated "total test count >= 83 and green" NO for exactly that
+        ;; reason (karamazov-0way). Shell rows only: a summary line read out
+        ;; of a file is not a run. The pattern is gates.edn :judge-rules.
+        summary (let [re (re-pattern (str (:test-summary-regex (rules))))]
+                  (->> rows
+                       (filter #(= "shell" (:tool_name %)))
+                       (keep #(last (re-seq re (str (:result %)))))
+                       last))]
     (str "tool calls: " (count (keep :tool_name rows))
          "\ntools used: " (str/join ", " (sort (keys by-tool)))
          (when (seq files)
            (str "\nfiles written: " (str/join ", " files)))
          (when (seq cmds)
-           (str "\ncommands run:\n  " (str/join "\n  " cmds))))))
+           (str "\ncommands run:\n  " (str/join "\n  " cmds)))
+         (when summary
+           (str "\nlast test summary: " summary)))))
+
+(defn- diff-chunks
+  "A unified diff split into its per-file chunks at each `diff --git` header.
+  A diff with no header is one chunk; text before the first header is one."
+  [diff]
+  (let [s (str diff)
+        marker "diff --git "
+        starts (loop [from 0 acc []]
+                 (if-let [i (str/index-of s marker from)]
+                   (recur (inc i)
+                          (if (or (zero? i) (= \newline (nth s (dec i))))
+                            (conj acc i)
+                            acc))
+                   acc))]
+    (if (empty? starts)
+      [s]
+      (let [starts (if (zero? (first starts)) starts (into [0] starts))
+            ends (concat (rest starts) [(count s)])]
+        (mapv (fn [a b] (subs s a b)) starts ends)))))
+
+(defn focus-diff
+  "`diff` with its per-file chunks reordered by relevance to `criterion`:
+  files whose path the criterion names first, then files whose hunks
+  mention a symbol it names in backticks, then the rest in git's order.
+  Nothing is dropped — this decides what a later cut falls on.
+
+  The first rubric ever scored on a real epic (run 5f8de58c) rated 8 of 15
+  criteria NO with 'the diff is truncated before windview_test.clj' as the
+  reason: the epic's diff was 20417 chars, the branch budget cut it at
+  12000, and the cut landed on the header of the one file five of the
+  questions were about. A rubric question is narrow, so the evidence it
+  needs is narrow too, and it should be at the front (karamazov-0way)."
+  [diff criterion]
+  (let [chunks (diff-chunks diff)]
+    (if (< (count chunks) 2)
+      (str diff)
+      (let [c (str criterion)
+            paths (re-seq #"[\w./-]+\.[A-Za-z]{1,5}" c)
+            symbols (map second (re-seq #"`([^`]+)`" c))
+            header (fn [chunk] (first (str/split-lines chunk)))
+            score (fn [chunk]
+                    (+ (* 10 (count (filter #(str/includes? (header chunk) %) paths)))
+                       (count (filter #(str/includes? chunk %) symbols))))]
+        (->> chunks
+             (map-indexed (fn [i chunk] [(- (score chunk)) i chunk]))
+             (sort-by (fn [[s i _]] [s i]))
+             (map peek)
+             (apply str))))))
+
+(defn- cap-diff
+  "`diff` cut at `cap` chars with the same marker gitdiff/diff leaves, so the
+  judge is told what it is not seeing. nil cap: as it is."
+  [diff cap]
+  (let [s (str diff)]
+    (if (and cap (> (count s) (long cap)))
+      (str (subs s 0 (long cap)) "\n… (diff truncated at " cap " chars)")
+      s)))
 
 ;; --- deterministic finalization gates (run before the LLM judge) -----------
 
@@ -651,11 +721,21 @@
 
   `:pass?` is reward ≥ `threshold`, and TRUE when the reward is nil (nothing
   decided): a judge that cannot answer must not be able to refuse the ship on
-  its own. A reduce over the criteria, not a mapv — `chat` parks."
-  [{:keys [chat criteria answer diff evidence threshold]}]
+  its own. A reduce over the criteria, not a mapv — `chat` parks.
+
+  `:diff-chars`, when given, is the rubric's OWN diff budget: each question
+  is shown `diff` reordered by relevance to it (focus-diff) and cut there.
+  Pass the diff uncut (or under a generous fetch cap) for that to mean
+  anything — a diff already cut at the branch budget has lost what the
+  reorder would have put first (karamazov-0way). Without it the diff is
+  shown as it came."
+  [{:keys [chat criteria answer diff evidence threshold diff-chars]}]
   (let [ratings (reduce (fn [acc {:keys [criterion] :as c}]
-                          (let [reply (try (chat (yesno-prompt {:question criterion :answer answer
-                                                                :diff diff :evidence evidence}))
+                          (let [shown (if diff-chars
+                                        (cap-diff (focus-diff diff criterion) diff-chars)
+                                        diff)
+                                reply (try (chat (yesno-prompt {:question criterion :answer answer
+                                                                :diff shown :evidence evidence}))
                                            (catch Throwable _ nil))]
                             (conj acc (assoc c :rating (parse-yesno reply)
                                              :reply (for-the-record :reply-chars (usable reply))))))

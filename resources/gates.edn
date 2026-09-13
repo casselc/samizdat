@@ -798,7 +798,18 @@
  {:value {:threshold 0.7
           ;; Which RFC section holds the criteria — the reader's half of the
           ;; format prompts/rfc-brief.md asks for; change both together.
-          :heading-regex "(?i)^#+\\s*acceptance criteria\\b"}
+          :heading-regex "(?i)^#+\\s*acceptance criteria\\b"
+          ;; THE RUBRIC'S OWN DIFF BUDGET. An epic's diff is the sum of its
+          ;; tasks' diffs, and the first rubric scored on a real epic (run
+          ;; 5f8de58c) was shown it under the per-branch :context-budget
+          ;; :diff-chars: 20417 chars cut at 12000, exactly at the header of
+          ;; the file five of the fifteen criteria were about — eight NO
+          ;; ratings for evidence never shown, reward 0.4 (karamazov-0way).
+          ;; :diff-fetch-chars bounds the raw fetch (a runaway diff is still
+          ;; a runaway prompt); each question then sees the diff reordered
+          ;; by relevance to it (judge/focus-diff) and cut at :diff-chars.
+          :diff-chars 40000
+          :diff-fetch-chars 200000}
   :kind :threshold :capability-tunable? false
   :provenance ["karamazov-a6mj.4" "thinkingbox docs/rubrics_judge.md"]
   :doc "The end-of-phase RUBRIC (karamazov-a6mj.4). When an approved RFC lists
@@ -2444,6 +2455,10 @@
    ;; two halves are one decision and belong in one editable place.
    :verdict-line-regex "(?i)\\bVERDICT\\b"
    :findings-regex "(?is)FINDINGS:\\s*(.+)$"
+   ;; The test runner's summary line, as judge/evidence reports the last one
+   ;; a shell run printed — clojure.test's shape here; a project on another
+   ;; runner retunes it like :test-run-regex (karamazov-0way).
+   :test-summary-regex "(?m)^Ran \\d+ tests, \\d+ assertions, \\d+ failures, \\d+ errors\\.?"
    ;; What a second-pass reply says when it cleared every candidate. Paired
    ;; with prompts/judge-verify.md, which asks for exactly this phrase, and
    ;; load-bearing: it is the one signal that separates "the judge checked and

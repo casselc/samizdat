@@ -553,3 +553,68 @@ Some trailing prose that is not a bullet.
 (deftest section-bullets-reads-one-markdown-section
   (is (= ["a" "b"] (judge/section-bullets "# t\n## Work items\n- a\n* b\nprose\n## Next\n- c" #"(?i)^#+\s*work items\b")))
   (is (= [] (judge/section-bullets "# t\n## Other\n- c" #"(?i)^#+\s*work items\b"))))
+
+;; --- karamazov-0way: the rubric judge must be shown the file the question is about
+
+(def ^:private epic-diff
+  (str "diff --git a/PLAN.md b/PLAN.md\n--- a/PLAN.md\n+++ b/PLAN.md\n+wind arrow over the bird\n"
+       "diff --git a/src/flight/game.clj b/src/flight/game.clj\n--- a/src/flight/game.clj\n+++ b/src/flight/game.clj\n"
+       "-(def ring-spacing 70.0)\n+(def ring-spacing 50.0)\n"
+       "diff --git a/test/flight/windview_test.clj b/test/flight/windview_test.clj\n--- a/test/flight/windview_test.clj\n+++ b/test/flight/windview_test.clj\n"
+       "+(deftest arrow-tail-is-the-float-point\n+  (is (= (indicator-arrow pos wind) ...)))\n"))
+
+(deftest focus-diff-puts-the-criterion-s-files-first
+  ;; The first live rubric (run 5f8de58c) scored 0.4: the epic's 20417-char
+  ;; diff was cut at 12000, exactly at windview_test.clj's header, and five
+  ;; criteria about that file were rated NO for evidence never shown. The
+  ;; per-file chunks are ordered by what the question names before any cut.
+  (testing "a path named in the criterion goes first"
+    (let [d (judge/focus-diff epic-diff "The test in test/flight/windview_test.clj pins the arrow")]
+      (is (str/starts-with? d "diff --git a/test/flight/windview_test.clj"))
+      (is (= (count epic-diff) (count d)) "reordered, nothing dropped")))
+  (testing "a backticked symbol the criterion names ranks the file that mentions it"
+    (let [d (judge/focus-diff epic-diff "A test pins that `indicator-arrow`'s tail equals the float point")]
+      (is (str/starts-with? d "diff --git a/test/flight/windview_test.clj")))
+    (let [d (judge/focus-diff epic-diff "`ring-spacing` is 50 so rings stay reachable")]
+      (is (str/starts-with? d "diff --git a/src/flight/game.clj"))))
+  (testing "a criterion naming nothing leaves the diff in git's order"
+    (is (= epic-diff (judge/focus-diff epic-diff "the code is clean"))))
+  (testing "a diff with no file headers is returned as it is"
+    (is (= "+ lerp" (judge/focus-diff "+ lerp" "`lerp` is used")))
+    (is (= "" (judge/focus-diff "" "anything")))))
+
+(deftest the-rubric-judge-sees-the-relevant-hunks-under-its-own-budget
+  (let [seen (atom [])
+        chat (fn [content] (swap! seen conj content) "YES")
+        crit (judge/parse-criteria (str "## Acceptance criteria\n\n"
+                                        "- A test pins `indicator-arrow`'s tail\n"
+                                        "- `ring-spacing` is 50\n"))]
+    (judge/review-rubric {:chat chat :criteria crit :answer "done" :evidence "e"
+                          :diff epic-diff :diff-chars 260 :threshold 0.7})
+    (is (= 2 (count @seen)))
+    (testing "each question is shown its own file first, and the cut falls elsewhere"
+      (is (str/includes? (first @seen) "arrow-tail-is-the-float-point"))
+      (is (str/includes? (second @seen) "ring-spacing 50.0"))
+      (is (every? #(str/includes? % "diff truncated at 260 chars") @seen)
+          "the budget is the rubric's, not the branch's :diff-chars"))
+    (testing "without a budget the diff is passed through whole"
+      (reset! seen [])
+      (judge/review-rubric {:chat chat :criteria crit :answer "done" :diff epic-diff :threshold 0.7})
+      (is (every? #(str/includes? % "PLAN.md") @seen)))))
+
+(deftest evidence-carries-the-last-test-summary-it-saw
+  ;; 'Total test count is >= 83 and the suite is green' was rated NO because
+  ;; the evidence block listed `ok: jolt -M:test` with no output. The last
+  ;; clojure.test summary line a shell run printed is a fact the judge can read.
+  (let [e (judge/evidence [{:tool_name "shell" :args {:command "jolt -M:test"} :category "success"
+                            :result "...\nRan 86 tests, 1436 assertions, 0 failures, 0 errors.\n"}
+                           {:tool_name "shell" :args {:command "jolt -M:test"} :category "success"
+                            :result "Ran 92 tests, 1493 assertions, 0 failures, 0 errors."}
+                           {:tool_name "read_file" :args {:path "x"} :category "neutral"
+                            :result "Ran 999 tests, 0 assertions, 0 failures, 0 errors."}])]
+    (is (str/includes? e "last test summary: Ran 92 tests, 1493 assertions, 0 failures, 0 errors")
+        "the LAST one a shell run printed")
+    (is (not (str/includes? e "999")) "a summary read out of a file is not a run"))
+  (is (not (str/includes? (judge/evidence [{:tool_name "eval" :args {} :category "neutral"}])
+                          "last test summary"))
+      "nothing to say when no run printed one"))
