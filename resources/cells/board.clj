@@ -385,6 +385,17 @@
                :board/outcome nil
                :board/decision nil
                :board/answer nil
+               ;; And its PLAN PHASE: the attempt counter, the plan the critic
+               ;; read, the findings it sent back, and triage's call. These
+               ;; used to survive the claim, so the second task's first design
+               ;; was "attempt 3" — past :max-design-attempts — and
+               ;; design-review failed open on every task after the first;
+               ;; run 9ead0638's RFC had the plan critic active for one child
+               ;; of seven.
+               :board/plan-attempts 0
+               :board/plan-text nil
+               :board/plan-decision nil
+               :board/design-findings nil
                ;; The baseline for THIS task, taken now: the review reads the
                ;; diff its owner produced, not the run's accumulated one.
                :board/baseline (gitdiff/baseline root)

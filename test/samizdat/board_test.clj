@@ -772,6 +772,33 @@
                 (gates/threshold :board-review-attempts))
             "which is what makes the bound span rounds instead of resetting")))))
 
+(deftest the-plan-phase-starts-over-for-every-task
+  ;; :board/next cleared the previous task's outcome, decision and answer but
+  ;; not its PLAN state, so :board/plan-attempts accumulated across the board:
+  ;; the second task's first design was "attempt 3", already past
+  ;; :max-design-attempts, and design-review failed open on it at once — no
+  ;; send-back for a missing plan, blocking findings read as :ok. Run 9ead0638
+  ;; (an RFC with seven children) had the plan critic active for the first
+  ;; child only. Each task is its own plan phase.
+  (with-redefs [llm/chat
+                (fn [a c messages & rest]
+                  (if (judge-call? messages)
+                    {:content "VERDICT: COMPLETE" :finish-reason "stop"}
+                    (apply ships-its-task a c messages rest)))]
+    (let [conn (db/open! ":memory:")]
+      (doseq [t ["storage" "handlers"]]
+        (tasks/create! conn {:title (str t " layer")
+                             :body (str "Add the " t " layer AND its tests AND its docs. Three parts.")}))
+      (run-board conn {})
+      (let [rid (:id (first (db/fetch conn ["SELECT id FROM runs"])))
+            reviews (journal/notes conn rid :design-review)
+            designs (journal/notes conn rid :design)]
+        (testing "each task is sent back once for its blank plan, then fails open"
+          (is (= ["revise" "ok" "revise" "ok"] (mapv #(name (:decision %)) reviews))))
+        (testing "the attempt counter restarts with the task"
+          (is (= [1 2 1 2] (mapv :attempt designs))))
+        (is (= ["done" "done"] (mapv :status (db/fetch conn ["SELECT status FROM tasks ORDER BY id"]))))))))
+
 (deftest claiming-a-task-records-the-attempt-on-the-task-itself
   (with-redefs [llm/chat ships-its-task]
     (let [conn (db/open! ":memory:")
