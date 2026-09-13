@@ -38,7 +38,8 @@
             [jdbc.core :as jdbc]
             [samizdat.store.db :as db]
             [samizdat.store.journal :as journal]
-            [samizdat.lexicon :as lexicon]))
+            [samizdat.lexicon :as lexicon]
+            [samizdat.telemetry.hook :as hook]))
 
 (defn start-run!
   "Open a run and return its id."
@@ -217,6 +218,8 @@
   working the run-level problem. It is what a resume rebuilds the branch's
   opening messages from (karamazov-blt.23)."
   [conn run-id {:keys [branch-id parent-id created-at-turn problem]}]
+  (hook/observe! :branch-open {:run-id run-id :branch-id branch-id :parent-id parent-id
+                               :created-at-turn (or created-at-turn 0) :problem problem} (fn []
   ;; IDEMPOTENT, because a resumed run re-opens branch ids it already has.
   ;; Branch ids are round-scoped by construction (T0, T0v1, T0r1), so after a
   ;; crash and resume the board claims the same task to the same id and the
@@ -237,13 +240,14 @@
                           branch-id run-id parent-id (or created-at-turn 0) problem]))]
     (journal/note! conn run-id (if (pos? n) :branch-opened :branch-rejoined)
                    {:branch-id branch-id :data {:parent parent-id}}))
-  branch-id)
+  branch-id)))
 
 (defn close-branch!
   "Only from 'active' (provenance R2-4): a late close used to overwrite a closed
   branch's status and inactive_reason — the column the cull-honesty work
   exists to keep truthful. Returns rows written."
   [conn run-id branch-id status reason]
+  (hook/observe! :branch-close {:run-id run-id :branch-id branch-id :status status :reason reason} (fn []
   (let [n (db/with-writer
             (db/execute! conn
                          ["UPDATE branches SET status = ?, inactive_reason = ?
@@ -253,7 +257,7 @@
     (when (pos? n)
       (journal/note! conn run-id :branch-closed
                      {:branch-id branch-id :data {:status status :reason reason}}))
-    n))
+    n))))
 
 (defn extend-budget!
   "Raise a run's max_turns. Only ever called with an explicitly requested

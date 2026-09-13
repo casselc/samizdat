@@ -13,7 +13,8 @@ is entitled to state it, whether it is one of the few **promoted typed
 columns**, and how it is mirrored for Langfuse. A dependency-free
 **contract** namespace loads and validates it and renders it as canonical
 JSON for other consumers. A dependency-free, inert **hook** seam sits at the
-five `samizdat.store.lifecycle` boundaries. Under the optional `:telemetry`
+five `samizdat.store.lifecycle` boundaries and the nine harness run seams
+(below). Under the optional `:telemetry`
 alias, `samizdat.telemetry.otel` wraps casselc/otel with semantic helpers,
 installs the hook observer and exports through independently bounded
 pipelines to a local receiver, Langfuse, or both.
@@ -32,7 +33,7 @@ one.
 |---|---|---|
 | **source mode** (stock `jolt -M:test`, `jolt serve`, Jolt ≥ 0.8.0) | `samizdat.telemetry.contract`, `samizdat.telemetry.hook` (both `src/`, no new dependency) | `hook/observe!` calls the thunk directly; the lifecycle functions behave exactly as before (`test/samizdat/lifecycle_test.clj`, `test/samizdat/telemetry/hook_test.clj`). No otel namespace exists on the path. |
 | **alias-enabled** (`jolt -M:telemetry …`, Jolt 0.8.3) | additionally `telemetry/samizdat/telemetry/otel.clj` and casselc/otel `87d3ac1` | `otel/init!` reads `SAMIZDAT_TELEMETRY` and installs the observer; one span per lifecycle seam, semantic wrappers for executions, generations, tools and evaluators. |
-| **woven** (aspect pack `resources/META-INF/jolt/aspects/samizdat-observability-38dc6d7.edn`) | advice `samizdat.telemetry.otel/lifecycle-observer` at the same five entries | Statically validated (`test/samizdat/telemetry/aspect_manifest_test.clj`). Not qualified as a build here — see the bootstrap work product report. |
+| **woven** (aspect packs `resources/META-INF/jolt/aspects/samizdat-observability-38dc6d7.edn`, five lifecycle entries, and `samizdat-observability-run-dad1c65.edn`, the nine harness seams verified against upstream main `dad1c65`) | `samizdat.telemetry.aspect-provider` roles `:samizdat.telemetry/lifecycle` and `:samizdat.telemetry/run` at the same entries | Statically validated against this tree (`test/samizdat/telemetry/aspect_manifest_test.clj`: each entry resolves once at the stated arity). Not qualified as a build here — see the bootstrap work product report. |
 
 Optional aspect behaviour never becomes a runtime dependency: the stock
 build does not require `otel.*`, and the hook is a no-op until something
@@ -58,6 +59,80 @@ value is handed to the Langfuse exporter and nowhere else; diagnostics
 A `TRACEPARENT` (and `TRACESTATE`) environment variable parents the process's
 spans under the caller (`otel/with-inbound-context`), which is how a
 `lifecycle_cli` run lands under the Python execution span.
+
+## Harness run seams (M2)
+
+The same fail-open hook wraps the agent loop, so a `jolt serve` run produces
+one trace per `POST /v1/runs` when the alias is active. Hook kinds, the seam
+each wraps, and the span it becomes:
+
+| hook kind | seam | span / Langfuse type | facts at start → end |
+|---|---|---|---|
+| `:run` | `samizdat.agent.beam/run!` | `run` / agent (trace root) | provider, model, `samizdat.problem.sha256`/`chars`, max_turns, beam_width → `samizdat.run.id`, `.run.status`, `.task.complete` |
+| `:control-loop` | `beam/run-rounds` | `run.rounds` / span | run id, start turn, branch count |
+| `:branch-open` / `:branch-close` | `samizdat.store.runs/open-branch!`, `close-branch!` | `branch.open`, `branch.close` / span | run, branch, parent, created-at turn → status |
+| `:turn` | `beam/advance-branch` | `turn` / span | run, branch, `samizdat.turn` |
+| `:model` | `samizdat.llm.client/chat` (arity 4) | `model.chat` / generation | provider, `gen_ai.request.model`, message count, max_tokens, prefill?, force_tool? → `gen_ai.response.finish_reason`, elapsed ms, content chars, `gen_ai.usage.{input,output,total,cache_hit}_tokens` |
+| `:tool-selection` | `samizdat.agent.infer/absorb` (arity 3) | `tool.selection` / span | turn, response chars → parsed tool, parsed?, said chars |
+| `:tool` | `samizdat.agent.tools/run-tool` | `tool` / tool | branch, `samizdat.tool.name` → category, progress, output chars |
+| `:steer` | `samizdat.agent.arbiter/decide` | `steer` / span | branch, turn → gate, priority, passed-over count |
+
+By default the problem text, prompts, messages, tool arguments, tool output
+and model content never become attributes; only their digests and sizes do
+(`docs/DATA-GOVERNANCE.md`; mapping/2 carries content in synthetic mode
+only). Every run span carries `samizdat.execution.kind = "run"` and
+`samizdat.observation.mode = "live"`; the run id is mirrored to
+`langfuse.trace.metadata.run_id` and used as the session id. The seam list
+matches the inert upstream manifest
+`resources/META-INF/jolt/aspects/samizdat-m2-core.edn`.
+
+### Content override (prompts and outputs on live spans)
+
+`SAMIZDAT_TELEMETRY_CONTENT=on` (the literal `on`; anything else is off)
+opens the content policy for **live** spans, and only those — a historical
+import refuses content whatever the override says, and synthetic mode never
+needed it. It is read once by `otel/init!`, so a running server does not
+change policy mid-run. With it on, every harness seam carries an input and
+an output under the Langfuse observation keys, beside (never instead of) the
+digests and counts. Strings travel verbatim; structures travel as JSON
+(`otel/run-content-in`, `otel/run-content-out`):
+
+| seam | `langfuse.observation.input` | `langfuse.observation.output` |
+|---|---|---|
+| `run` (root; Langfuse v4 shows it as the trace's input/output) | the problem | the answer |
+| `branch.open` | `{branch-id parent-id created-at-turn problem}` | `{branch-id}` |
+| `run.rounds` | `{start-turn branches}` — one summary per branch (id, status, reason, turn/message counts, gate counters, phase) | `{status answer branches}`, the same summaries as the rounds left them |
+| `turn` | the branch summary plus `turn` and `last-message`, the tape entry the turn starts from | the branch summary plus `appended`: only the messages this turn added (the model's reply, the tool's result) — never the whole tape |
+| `model.chat` | the wire messages, as JSON (after `message/prepare`, i.e. exactly what the provider received) | the model's content |
+| `tool.selection` | `{content prefill}`, the reply the parser read | `{parsed signals}`, the call it found (`name`, `args`) and the mechanics signals |
+| `tool` | the model's arguments, as JSON | the result the branch reads |
+| `steer` | the branch summary plus `turn` (what the gates read) | the realised decision — `gate priority message prediction tool window passed-over` (a gate's `effect` fn is dropped) — with `"steered":true`, or `{"steered":false}` when no gate fired |
+| `branch.close` | `{branch-id status reason}` | `{rows closed}` |
+
+What travels is only text the model already saw or produced and the
+harness's own decisions about it: messages after the RFC-003 redaction, tool
+results after `redact-result`, the model's content, steer messages, branch
+reasons. No environment value, endpoint or credential has a path onto a span
+through this override. The seams hand the hook references (the branch map,
+the branch list, the response), and none of it is read unless the override
+is on — a telemetry-enabled build without it does the same work as before.
+
+Each value is clipped to `SAMIZDAT_TELEMETRY_CONTENT_MAX_CHARS` characters
+(default 32768; a clipped span carries `samizdat.content.truncated = true`,
+and the `*_chars`/`sha256` facts always describe the full value). The
+resource of every span states the policy the process ran under,
+`samizdat.telemetry.content = "off" | "on"`, so a trace without prompts is
+distinguishable from one that refused them. With the override on the export
+batch is capped at 8 spans (an explicit `:batch` wins) so one request stays
+under the local receiver's 1 MiB limit, and `init!` logs one WARN line naming
+the destinations the text goes to. Programmatic use: `(otel/init! {:content
+{:enabled? true :max-chars n}})`.
+
+`samizdat.telemetry.serve` is the alias-enabled server entry point:
+`jolt -M:telemetry -m samizdat.telemetry.serve` initialises telemetry from
+the environment, registers `otel/shutdown!` as a shutdown hook and then
+delegates to `samizdat.core/-main`. `HARNESS_*` variables configure the
+harness exactly as for `jolt serve`.
 
 ## Dependencies under the alias
 
@@ -158,4 +233,9 @@ commit that produced them.
   through the hook, observer failure isolation, suppression, TRACEPARENT
   parenting, a throwing destination beside a healthy one, bounded queue
   overflow with per-destination drop counts, bounded exactly-once shutdown,
-  and that exporter errors never reach diagnostics.
+  and that exporter errors never reach diagnostics, plus the nine M2 run
+  seams driven through the hook (one trace, run → rounds → turn → model.chat
+  parentage, Langfuse types, usage keys, absent facts stay absent), and the
+  content override (off by default: the seams' text never travels and no
+  refusal marker appears; on: the three seams' input/output, clipping with
+  its marker, the resource marker, historical-import still refused).

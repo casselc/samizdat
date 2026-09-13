@@ -1,0 +1,50 @@
+{:schema 1
+ :library {:id yogthos/samizdat
+           ;; The upstream main commit these nine harness run seams were
+           ;; verified against (github.com/yogthos/samizdat, 2026-09-12).
+           ;; They are the entries samizdat.telemetry.hook observes in source
+           ;; mode (:run :control-loop :turn :branch-open :branch-close :model
+           ;; :tool-selection :tool :steer); a woven build advises the same
+           ;; entries with samizdat.telemetry.aspect-provider/run-around and
+           ;; carries identity only (:proceed-v1 sees no arguments). The same
+           ;; entries resolve with the same arities on agent/onbox/outcome-pilot-v1
+           ;; (38dc6d7a), which is why test/samizdat/telemetry/aspect_manifest_test.clj
+           ;; can resolve this pack against either tree.
+           :version "dad1c65dac7d08d882c9965a05b2c8b1f39e9d87"}
+ :aspects
+ [{:id :samizdat.agent.beam/run
+   :match {:entry samizdat.agent.beam/run! :arity 1}
+   :advice-role :samizdat.telemetry/run
+   :expect {:matches 1}}
+  {:id :samizdat.agent.beam/control-loop
+   :match {:entry samizdat.agent.beam/run-rounds :arity 3}
+   :advice-role :samizdat.telemetry/run
+   :expect {:matches 1}}
+  {:id :samizdat.agent.beam/turn
+   :match {:entry samizdat.agent.beam/advance-branch :arity 3}
+   :advice-role :samizdat.telemetry/run
+   :expect {:matches 1}}
+  {:id :samizdat.store.runs/branch-open
+   :match {:entry samizdat.store.runs/open-branch! :arity 3}
+   :advice-role :samizdat.telemetry/run
+   :expect {:matches 1}}
+  {:id :samizdat.store.runs/branch-close
+   :match {:entry samizdat.store.runs/close-branch! :arity 5}
+   :advice-role :samizdat.telemetry/run
+   :expect {:matches 1}}
+  {:id :samizdat.llm.client/model
+   :match {:entry samizdat.llm.client/chat :arity 4}
+   :advice-role :samizdat.telemetry/run
+   :expect {:matches 1}}
+  {:id :samizdat.agent.infer/tool-selection
+   :match {:entry samizdat.agent.infer/absorb :arity 3}
+   :advice-role :samizdat.telemetry/run
+   :expect {:matches 1}}
+  {:id :samizdat.agent.tools/tool
+   :match {:entry samizdat.agent.tools/run-tool :arity 1}
+   :advice-role :samizdat.telemetry/run
+   :expect {:matches 1}}
+  {:id :samizdat.agent.arbiter/steer
+   :match {:entry samizdat.agent.arbiter/decide :arity 1}
+   :advice-role :samizdat.telemetry/run
+   :expect {:matches 1}}]}

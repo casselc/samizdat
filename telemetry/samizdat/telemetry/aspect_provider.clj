@@ -16,14 +16,20 @@
 ;;
 ;; SPDX-License-Identifier: GPL-3.0-or-later
 (ns samizdat.telemetry.aspect-provider
-  "Advice provider for resources/META-INF/jolt/aspects/samizdat-observability-38dc6d7.edn.
+  "Advice provider for the two observability packs under
+  resources/META-INF/jolt/aspects/:
 
-  A woven build advises the five samizdat.store.lifecycle entries directly:
-  the :samizdat.telemetry/lifecycle role wraps each join point in one
-  lifecycle.<op> span carrying the aspect id and the weaver's site id. The
-  :proceed-v1 advice sees no arguments and no result, so a woven span carries
-  identity only; the source-mode hook (samizdat.telemetry.hook) is what sees
-  the seam's facts. Both paths use the same tracer, contract and pipelines."
+    samizdat-observability-38dc6d7.edn      five samizdat.store.lifecycle entries
+                                            (role :samizdat.telemetry/lifecycle)
+    samizdat-observability-run-dad1c65.edn  nine harness run seams, verified against
+                                            upstream main dad1c65 (role :samizdat.telemetry/run)
+
+  A woven build advises the entries directly: each role wraps its join point
+  in one span (lifecycle.<op> / seam.<op>) carrying the aspect id and the
+  weaver's site id. The :proceed-v1 advice sees no arguments and no result,
+  so a woven span carries identity only; the source-mode hook
+  (samizdat.telemetry.hook) is what sees the seam's facts. Both paths use the
+  same tracer, contract and pipelines."
   (:require [clojure.string :as str]
             [samizdat.telemetry.otel :as otel]))
 
@@ -44,7 +50,20 @@
     (proceed)
     :ignored-provider-result))
 
+(defn run-around
+  "Around advice for the harness run seams: span seam.<id-name> around proceed,
+  identity only (the source-mode hook carries the seam's facts)."
+  [join-point proceed]
+  (otel/with-observation [sp :span (str "seam." (op-name join-point))
+                          {"samizdat.execution.kind" "run"
+                           "samizdat.aspect.id" (some-> (:id join-point) str)
+                           "samizdat.aspect.site_id" (some-> (:site-id join-point) str)
+                           "samizdat.aspect.build_identity" (some-> (:build-identity join-point) str)}]
+    (proceed)
+    :ignored-provider-result))
+
 (def aspect-provider
   {:schema 1
    :libraries {'yogthos/samizdat "38dc6d7a"}
-   :roles {:samizdat.telemetry/lifecycle 'samizdat.telemetry.aspect-provider/lifecycle-around}})
+   :roles {:samizdat.telemetry/lifecycle 'samizdat.telemetry.aspect-provider/lifecycle-around
+           :samizdat.telemetry/run 'samizdat.telemetry.aspect-provider/run-around}})

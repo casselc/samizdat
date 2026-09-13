@@ -36,9 +36,19 @@
                 handed to the exporter, and never logged, echoed or attached to
                 any span, event or diagnostic.
     dual     -> both, each on its own bounded queue and worker.
+  Content override (SAMIZDAT_TELEMETRY_CONTENT=on): by default no prompt,
+  model output or tool result travels on a live span (docs/DATA-GOVERNANCE.md;
+  mapping/2 carries content in synthetic mode only). The override opens live
+  mode too, marks the resource samizdat.telemetry.content=on, and clips each
+  value to SAMIZDAT_TELEMETRY_CONTENT_MAX_CHARS (default 32768) with
+  samizdat.content.truncated. What travels is only text the model already
+  sees or produced — messages after the RFC-003 redaction, tool results after
+  redact-result, the model's own content — never an env value.
   A process-scoped TRACEPARENT env var parents the root span under the caller
   (a lifecycle_cli process under the Python execution span)."
-  (:require [clojure.string :as str]
+  (:require [clojure.data.json :as json]
+            [clojure.string :as str]
+            [clojure.tools.logging :as log]
             [otel.context :as ctx]
             [otel.exporter.memory :as memory]
             [otel.exporter.otlp :as otlp]
@@ -58,6 +68,60 @@
 
 (def ^{:doc "Current runtime: {:provider :tracer :pipelines :mode :destinations} or nil."}
   runtime (atom nil))
+
+;; --- content override --------------------------------------------------------
+
+(def default-content-max-chars 32768)
+
+(def ^{:doc "{:enabled? bool :max-chars n}; set by init! from the env or its
+  :content option, reset by shutdown!. Off by default."}
+  content-policy (atom {:enabled? false :max-chars default-content-max-chars}))
+
+(defn content-enabled? [] (true? (:enabled? @content-policy)))
+
+(defn parse-content-flag
+  "SAMIZDAT_TELEMETRY_CONTENT: only the literal on (any case) enables."
+  [s]
+  (= "on" (some-> s str/trim str/lower-case)))
+
+(defn- clip
+  "[value truncated?]: `s` cut to the policy's per-value limit."
+  [^String s]
+  (let [n (:max-chars @content-policy)]
+    (if (and (int? n) (pos? n) (> (count s) n))
+      [(subs s 0 n) true]
+      [s false])))
+
+(defn- prune-nils
+  "Structured content without its nil-valued map entries, recursively. In
+  the harness an absent value and nil mean the same thing (no parent, no
+  answer, no inactive reason), so a viewer gains nothing from `null`."
+  [x]
+  (cond (map? x) (into {} (keep (fn [[k v]] (when (some? v) [k (prune-nils v)]))) x)
+        (sequential? x) (mapv prune-nils x)
+        :else x))
+
+(defn- content-text
+  "The string form a viewer gets: strings verbatim, structures as JSON with
+  nil entries pruned (falling back to pr-str for anything JSON cannot encode)."
+  [x]
+  (cond (nil? x) nil
+        (string? x) x
+        :else (try (json/write-str (prune-nils x) :escape-slash false) (catch Throwable _ (pr-str x)))))
+
+(defn content-attrs
+  "The content keys for one span when the override is on, else {}: input
+  and/or output under the Langfuse observation keys, plus the truncation
+  marker when either was clipped. nil values are omitted, never stringified."
+  [{:keys [input output]}]
+  (if-not (content-enabled?)
+    {}
+    (let [[in in-cut] (some-> (content-text input) clip)
+          [out out-cut] (some-> (content-text output) clip)]
+      (cond-> {}
+        in (assoc "langfuse.observation.input" in)
+        out (assoc "langfuse.observation.output" out)
+        (or in-cut out-cut) (assoc "samizdat.content.truncated" true)))))
 
 ;; --- attribute preparation ---------------------------------------------------
 
@@ -106,7 +170,8 @@
                          "samizdat.telemetry.schema" (contract/schema-version))
                   contract/normalize
                   mirror-langfuse)]
-    (contract/apply-content attrs content (get attrs "samizdat.observation.mode"))))
+    (contract/apply-content attrs content (get attrs "samizdat.observation.mode")
+                            (content-enabled?))))
 
 (defn- tracer [] (:tracer @runtime))
 
@@ -128,7 +193,7 @@
         mode (or (get attrs "samizdat.observation.mode")
                  (span-attribute span "samizdat.observation.mode"))
         attrs (contract/apply-content (mirror-langfuse (contract/normalize attrs) kind mode)
-                                      content mode)
+                                      content mode (content-enabled?))
         refused-key contract/content-refused-key
         already (span-attribute span refused-key)
         attrs (if (and already (contains? attrs refused-key))
@@ -221,7 +286,182 @@
                         "samizdat.lifecycle.state" (some-> (:state v) str)}))
       v)))
 
-(defn install! [] (hook/install! lifecycle-observer))
+
+;; --- harness run observer (the M2 seams samizdat-m2-core.edn names) --------
+
+(defn- sha256-hex [^String s]
+  (let [d (.digest (java.security.MessageDigest/getInstance "SHA-256") (.getBytes s "UTF-8"))]
+    (apply str (map #(format "%02x" (bit-and % 0xff)) d))))
+
+(defn- kw-name [x] (cond (keyword? x) (name x) (nil? x) nil :else (str x)))
+
+(def run-kinds
+  "hook kind -> {:kind observation kind, :name span name}. Facts come from the
+  seam's arguments (start) and its return value (end); text does only under
+  the content override (content-attrs): see run-content-in / run-content-out
+  for what each seam offers as its input and output."
+  {:run            {:kind :agent      :name "run"}
+   :control-loop   {:kind :span       :name "run.rounds"}
+   :turn           {:kind :span       :name "turn"}
+   :branch-open    {:kind :span       :name "branch.open"}
+   :branch-close   {:kind :span       :name "branch.close"}
+   :model          {:kind :generation :name "model.chat"}
+   :tool-selection {:kind :span       :name "tool.selection"}
+   :tool           {:kind :tool       :name "tool"}
+   :steer          {:kind :span       :name "steer"}})
+
+(defn- branch-summary
+  "The branch facts a viewer wants beside its transcript: identity, state,
+  and the counters the gates read. Never the tape."
+  [b]
+  (when (map? b)
+    {:id (:id b) :status (:status b) :inactive-reason (:inactive-reason b)
+     :turns (count (:turns b)) :messages (count (:messages b))
+     :consecutive-failures (:consecutive-failures b)
+     :turns-since-progress (:turns-since-progress b)
+     :phase (:phase b)}))
+
+(defn- run-content-in
+  "What each seam offers as the span's input under the content override.
+  Only text the model was given or produced, and the harness's own decisions
+  about it: the problem, the tape, a reply, a tool call, a steer."
+  [kind attrs]
+  (case kind
+    :run {:input (:problem attrs)}
+    :control-loop {:input {:start-turn (:start-turn attrs)
+                           :branches (mapv branch-summary (:branch-list attrs))}}
+    :turn (let [b (:branch attrs)]
+            {:input (assoc (branch-summary b) :turn (:turn attrs)
+                           ;; the message the turn starts from
+                           :last-message (peek (vec (:messages b))))})
+    :branch-open {:input {:branch-id (:branch-id attrs) :parent-id (:parent-id attrs)
+                          :created-at-turn (:created-at-turn attrs) :problem (:problem attrs)}}
+    :branch-close {:input {:branch-id (:branch-id attrs) :status (:status attrs) :reason (:reason attrs)}}
+    :model {:input (:input attrs)}
+    :tool-selection {:input (cond-> {:content (:content attrs)}
+                              (:prefill attrs) (assoc :prefill (:prefill attrs)))}
+    :tool {:input (:input attrs)}
+    :steer {:input (assoc (branch-summary (:branch attrs)) :turn (:turn attrs))}
+    nil))
+
+(defn- run-content-out
+  "What each seam offers as the span's output: its return value, reduced to
+  the text and decisions in it. `attrs` is the start-side map, so a turn can
+  report only the messages it appended."
+  [kind attrs v]
+  (case kind
+    :run (when (map? v) {:output (:answer v)})
+    :control-loop (when (map? v)
+                    {:output {:status (:status v) :answer (:answer v)
+                              :branches (mapv branch-summary (:branches v))}})
+    :turn (when (map? v)
+            (let [before (count (:messages (:branch attrs)))
+                  after (vec (:messages v))]
+              {:output (assoc (branch-summary v)
+                              :appended (if (<= before (count after)) (subvec after before) after))}))
+    :branch-open {:output (when v {:branch-id v})}
+    :branch-close {:output {:rows v :closed (and (number? v) (pos? v))}}
+    :model (when (map? v) {:output (:content v)})
+    :tool-selection (when (map? v) {:output {:parsed (:parsed v) :signals (:signals v)}})
+    :tool (when (map? v) {:output (:result v)})
+    :steer {:output (if (map? v)
+                      ;; the realised decision; a gate's effect may be a fn, which is not text
+                      (into {:steered true} (remove (comp fn? val))
+                            (select-keys v [:gate :priority :message :prediction :tool :effect :window :passed-over]))
+                      ;; no gate fired: say so rather than leave a null gate
+                      {:steered false})}
+    nil))
+
+(defn- run-start-attrs [kind attrs]
+  (let [common {"samizdat.execution.kind" "run"
+                "samizdat.observation.mode" "live"
+                "samizdat.run.id" (:run-id attrs)
+                "samizdat.branch.id" (:branch-id attrs)
+                "samizdat.turn" (:turn attrs)}]
+    (merge common
+           (content-attrs (when (content-enabled?) (run-content-in kind attrs)))
+           (case kind
+             :run {"samizdat.run.provider" (kw-name (:provider attrs))
+                   "gen_ai.request.model" (:model attrs)
+                   "samizdat.run.max_turns" (:max-turns attrs)
+                   "samizdat.run.beam_width" (:beam-width attrs)
+                   "samizdat.problem.sha256" (some-> (:problem attrs) str sha256-hex)
+                   "samizdat.problem.chars" (some-> (:problem attrs) str count)}
+             :control-loop {"samizdat.run.start_turn" (:start-turn attrs)
+                            "samizdat.run.branches" (:branches attrs)}
+             :branch-open {"samizdat.branch.parent_id" (:parent-id attrs)
+                           "samizdat.branch.created_at_turn" (:created-at-turn attrs)}
+             :branch-close {"samizdat.branch.status" (kw-name (:status attrs))}
+             :model {"samizdat.model.provider" (kw-name (:provider attrs))
+                     "gen_ai.request.model" (:model attrs)
+                     "samizdat.model.messages" (:messages attrs)
+                     "samizdat.model.max_tokens" (:max-tokens attrs)
+                     "samizdat.model.prefill" (:prefill attrs)
+                     "samizdat.model.force_tool" (:force-tool attrs)}
+             :tool-selection {"samizdat.model.content_chars" (:content-chars attrs)}
+             :tool {"samizdat.tool.name" (:tool-name attrs)}
+             {}))))
+
+(declare run-end-facts)
+
+(defn- run-end-attrs [kind attrs v]
+  (merge (content-attrs (when (content-enabled?) (run-content-out kind attrs v)))
+         (run-end-facts kind v)))
+
+(defn- run-end-facts [kind v]
+  (case kind
+    :run (when (map? v) {"samizdat.run.id" (:run-id v)
+                         "samizdat.run.status" (kw-name (:status v))
+                         "samizdat.task.complete" (some? (:answer v))})
+    :control-loop (when (map? v) {"samizdat.run.status" (kw-name (:status v))})
+    :turn (when (map? v) {"samizdat.branch.status" (kw-name (:status v))})
+    :model (when (map? v)
+             (let [u (:usage v)]
+               {"gen_ai.response.finish_reason" (:finish-reason v)
+                "samizdat.model.elapsed_ms" (:elapsed-ms v)
+                "samizdat.model.content_chars" (some-> (:content v) str count)
+                "gen_ai.usage.input_tokens" (:prompt-tokens u)
+                "gen_ai.usage.output_tokens" (:completion-tokens u)
+                "gen_ai.usage.total_tokens" (:total-tokens u)
+                "gen_ai.usage.cache_hit_tokens" (:cache-hit-tokens u)}))
+    :tool-selection (when (map? v)
+                      {"samizdat.selection.tool" (some-> (get-in v [:parsed :name]) kw-name)
+                       "samizdat.selection.parsed" (some? (:parsed v))
+                       "samizdat.selection.said_chars" (some-> (:said v) str count)})
+    :tool (when (map? v)
+            {"samizdat.tool.category" (kw-name (:category v))
+             "samizdat.tool.progress" (boolean (:progress? v))
+             "samizdat.tool.output_chars" (some-> (:result v) str count)})
+    :steer {"samizdat.steer.gate" (some-> (:gate v) kw-name)
+            "samizdat.steer.priority" (:priority v)
+            "samizdat.steer.passed_over" (some-> (:passed-over v) count)}
+    nil))
+
+(defn run-observer
+  "One span per harness seam: the root `run` (agent) and its rounds, turns,
+  branch open/close, model calls (generation, with usage), tool selection,
+  tools and steers. Branch turns run in futures, which inherit the dynamic
+  context, so every span parents under the run. Facts only."
+  [kind attrs thunk]
+  (let [{k :kind nm :name} (run-kinds kind)]
+    (with-observation [sp k nm (run-start-attrs kind attrs)]
+      (let [v (thunk)]
+        (when-let [facts (run-end-attrs kind attrs v)]
+          (set-facts! sp facts))
+        ;; The one line that lets an operator find the run in a viewer:
+        ;; identities only, on stderr with the rest of the harness log.
+        (when (and (= :run kind) (map? v))
+          (log/info "telemetry run" (:run-id v) "trace" (:trace-id (trace/span-context-of sp))))
+        v))))
+
+(defn observer
+  "The one function the hook seam receives: lifecycle kinds go to the store
+  observer, harness kinds to the run observer. Unknown kinds just run."
+  [kind attrs thunk]
+  (cond (contains? run-kinds kind) (run-observer kind attrs thunk)
+        :else (lifecycle-observer kind attrs thunk)))
+
+(defn install! [] (hook/install! observer))
 (defn uninstall! [] (hook/uninstall!))
 
 ;; --- SDK setup ---------------------------------------------------------------
@@ -280,8 +520,17 @@
 (defn resource-attributes [{:keys [service-name extra]}]
   (merge {"service.name" (or service-name "samizdat")
           "samizdat.telemetry.schema" (contract/schema-version)
-          "samizdat.import.mapping_version" (contract/mapping-version)}
+          "samizdat.import.mapping_version" (contract/mapping-version)
+          contract/content-marker-key (if (content-enabled?) "on" "off")}
          extra))
+
+(defn content-policy-from-env
+  "The override as the environment states it; :max-chars falls back to the
+  default when unset or not a positive integer."
+  []
+  (let [n (some-> (getenv "SAMIZDAT_TELEMETRY_CONTENT_MAX_CHARS") str/trim not-empty parse-long)]
+    {:enabled? (parse-content-flag (getenv contract/content-override-env))
+     :max-chars (if (and (int? n) (pos? n)) n default-content-max-chars)}))
 
 (defn init!
   "Start the runtime. Returns the runtime map (or nil for :off). Idempotent:
@@ -289,11 +538,19 @@
   :exporters {name exporter}, :batch, :service-name, :extra (resource attrs),
   :host (else LANGFUSE_HOST), :endpoint, :headers-env, :install-hook? (true)."
   ([] (init! {}))
-  ([{:keys [mode install-hook?] :or {install-hook? true} :as opts}]
+  ([{:keys [mode install-hook? content] :or {install-hook? true} :as opts}]
    (or @runtime
        (let [mode (or mode (parse-mode (getenv "SAMIZDAT_TELEMETRY")))]
          (when-not (= :off mode)
-           (let [opts (cond-> opts (nil? (:host opts)) (assoc :host (getenv "LANGFUSE_HOST")))
+           (let [policy (merge {:enabled? false :max-chars default-content-max-chars}
+                               (if (nil? content) (content-policy-from-env) content))
+                 _ (reset! content-policy policy)
+                 ;; With content on, a batch is bounded by value count x clip
+                 ;; size (8 x 2 x 32768 chars = 512 KiB), under the local
+                 ;; receiver's 1 MiB request limit; an explicit :batch wins.
+                 opts (cond-> opts
+                        (nil? (:host opts)) (assoc :host (getenv "LANGFUSE_HOST"))
+                        (:enabled? policy) (update :batch #(merge {:max-export-batch-size 8} %)))
                  dests (destinations mode opts)
                  pipelines (export/independent-batch-pipelines dests)
                  provider (sdk/tracer-provider
@@ -306,6 +563,9 @@
                      :pipelines pipelines
                      :tracer (sdk/get-tracer provider {:name scope-name :version scope-version})}]
              (reset! runtime rt)
+             (when (:enabled? policy)
+               (log/warn "telemetry content override ON: prompts, model outputs and tool results"
+                         "travel to" (pr-str (:destinations rt)) "clipped at" (:max-chars policy) "chars"))
              (when install-hook? (install!))
              rt))))))
 
@@ -327,6 +587,7 @@
               (try (sdk/shutdown! (:provider rt)) (catch Throwable _ nil))
               (export/shutdown-pipelines! (:pipelines rt)))]
       (reset! runtime nil)
+      (reset! content-policy {:enabled? false :max-chars default-content-max-chars})
       r)))
 
 ;; --- inbound context -------------------------------------------------------

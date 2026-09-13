@@ -59,7 +59,8 @@
             [samizdat.llm.fence :as fence]
             [samizdat.llm.message :as message]
             [samizdat.store.journal :as journal]
-            [samizdat.tape :as tape]))
+            [samizdat.tape :as tape]
+            [samizdat.telemetry.hook :as hook]))
 
 ;; --- the tape projection -----------------------------------------------------
 
@@ -238,6 +239,8 @@
   onto a branch does not have to remember to."
   ([tape response] (absorb tape response nil))
   ([{:keys [messages prefill] :as tape} response turn]
+   (hook/observe! :tool-selection {:turn turn :content-chars (count (str (:content response)))
+                                   :content (:content response) :prefill prefill} (fn []
    (let [content (:content response)
          ;; The prefill the request ended with, if any. Without it the response
          ;; starts mid-fence and parses as a no-call — the very failure the
@@ -251,7 +254,7 @@
       :tape (-> tape
                 (assoc :messages (tape/append-assistant
                                   messages said (when turn {:turn turn})))
-                (dissoc :prefill :force-tool))})))
+                (dissoc :prefill :force-tool))})))))
 
 ;; --- the drivers ------------------------------------------------------------
 
