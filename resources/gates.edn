@@ -2534,13 +2534,22 @@
                         "```")}
     {:name :figure-coverage
      :when (and (seq evidence) (seq uncovered-numbers))
+     ;; Says what COVERS a figure, not only that these are uncovered. Run
+     ;; 9ead0638's cloud-wrap owner read "verify these or remove them",
+     ;; grepped its own test file for the coordinates it had quoted, and was
+     ;; refused three times: a read is not an artifact, and nothing had said
+     ;; what one was.
      :message-form (str "Your answer states figures no artifact supports: "
                         (str/join ", " (map (fn [x] (str "`" x "`"))
                                             (take 8 uncovered-numbers)))
                         ".\nA number in an answer has to come from something"
                         " confirmed or measured — that is the difference between a"
-                        " report and a fabricated one. Either verify these or"
-                        " remove them from the answer.")}
+                        " report and a fabricated one. A figure is covered when it"
+                        " appears in the OUTPUT of a test run or an `eval` this"
+                        " branch ran; reading or grepping a file that contains it"
+                        " covers nothing. Test inputs, coordinates, seeds and line"
+                        " numbers belong in the code, not the report — drop them,"
+                        " and keep only the figures your test output shows.")}
     {:name :engages-problem
      :when (and (not (str/blank? (str problem)))
                 (not (engages-problem? problem answer)))

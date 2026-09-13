@@ -2102,7 +2102,15 @@
                                            :evidence [{:claim "count is 40"}]
                                            :uncovered-numbers ["42" "7"]})]
     (is (str/includes? (str figures-msg) "figures no artifact supports"))
-    (is (str/includes? (str figures-msg) "`42`")))
+    (is (str/includes? (str figures-msg) "`42`"))
+    ;; And it says WHAT covers a figure. "Verify these or remove them" sent run
+    ;; 9ead0638's cloud-wrap owner to grep its own test file for the
+    ;; coordinates it had quoted, three refusals running: a read is not an
+    ;; artifact, and the message never said what one was.
+    (is (str/includes? (str figures-msg) "test run")
+        "names the thing that covers a figure")
+    (is (str/includes? (str figures-msg) "input")
+        "and tells the branch that inputs and line numbers belong in the code, not the report"))
   (is (nil? (ship/ship-gate-block {:answer "the count is 40"
                                    :problem "count things"
                                    :evidence [{:claim "count is 40"}]
