@@ -10,6 +10,7 @@
   at the stage that applies them (RFC-012)."
   (:require [clojure.string :as str]
             [clojure.test :refer [deftest testing is use-fixtures]]
+            [samizdat.agent.files :as files]
             [samizdat.agent.gitdiff :as gitdiff]
             [samizdat.agent.judge :as judge]
             [samizdat.agent.state :as ag-state]
@@ -720,3 +721,38 @@
                               :verify/note "tests passed\nacceptance criteria not met:\nFAIL  says what it saw\n  NO — the answer never mentions a screenshot"}))]
     (is (str/includes? g "says what it saw"))
     (is (str/includes? g "never mentions a screenshot"))))
+
+(deftest the-acceptance-judge-is-shown-the-sources-and-a-rubric-sized-diff
+  ;; karamazov-0way's other half. Run 5f8de58c's verify-stage judges failed two
+  ;; operator criteria in their own words for evidence not shown: the diff was
+  ;; cut at the branch budget before the test files, and "the wind is one
+  ;; field" cannot be seen in a diff at all when the sampling predates the
+  ;; run. Each question now sees the diff focused on it under the rubric's
+  ;; budget, and the current sources of the files the run changed.
+  (let [asked (atom [])
+        spec [{:name "one field" :judge "Does every reader call `wind-at`?"}]
+        big-diff (str "diff --git a/PLAN.md b/PLAN.md\n+plan\n"
+                      "diff --git a/src/x.clj b/src/x.clj\n+(defn wind-at [] 1)\n")]
+    (with-redefs [judge/deterministic-block (constantly nil)
+                  judge/parse-verdict (constantly :complete)
+                  judge/blocking-findings (constantly nil)
+                  gitdiff/changed-files (constantly ["src/x.clj" "test/x_test.clj"])
+                  gitdiff/diff (fn [_ _ & _] big-diff)
+                  files/read-sources (constantly {"src/x.clj" "(ns x)\n(defn wind-at [] 1)\n(defn hud [] (wind-at))"})
+                  proc/run (constantly {:exit 0 :out "ok"})
+                  verify/run-verify (fn [_ _ _] {:green? true :output "63 tests, 0 failures"})
+                  llm/chat (let [base (roles-answering-acceptance {:review :pass} "YES")]
+                             (fn [a b messages & more]
+                               (when (some #(str/includes? (str (:content %)) "Reply with YES or NO") messages)
+                                 (swap! asked conj (str/join "\n" (map :content messages))))
+                               (apply base a b messages more)))]
+      (let [conn (db/open! ":memory:")]
+        (run-feature conn {:config {:run {:loop "feature" :subtasks ["alpha"]
+                                          :verify-cmd "run-tests" :acceptance spec
+                                          :max-revisions 1 :max-revisions-hard 1}}})
+        (let [q (first (filter #(str/includes? % "Does every reader call") @asked))]
+          (is (some? q) "the judge criterion was asked")
+          (is (str/includes? q "## Current sources") "the judge sees the tree, not only the diff")
+          (is (str/includes? q "(defn hud [] (wind-at))"))
+          (is (< (str/index-of q "diff --git a/src/x.clj") (str/index-of q "diff --git a/PLAN.md"))
+              "the diff is ordered with the file the question is about first"))))))

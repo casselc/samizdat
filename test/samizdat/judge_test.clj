@@ -618,3 +618,27 @@ Some trailing prose that is not a bullet.
   (is (not (str/includes? (judge/evidence [{:tool_name "eval" :args {} :category "neutral"}])
                           "last test summary"))
       "nothing to say when no run printed one"))
+
+(deftest focus-sources-ranks-the-files-a-criterion-is-about-and-cuts-there
+  ;; The verify-stage judge answered "the wind is one field felt and shown
+  ;; consistently" NO because "the diff contains no change unifying wind
+  ;; sampling" — the sampling predates the run, and a question about the
+  ;; TREE cannot be answered from a diff. The current sources of the files
+  ;; the run changed are the evidence, the one the question names first.
+  (let [srcs {"src/flight/draw.clj" "(ns flight.draw) (defn hud [] (wind/wind-at pos))"
+              "src/flight/game.clj" "(ns flight.game) (def ring-spacing 50.0)"
+              "src/flight/wind.clj" "(ns flight.wind) (defn wind-at [pos] ...)"}
+        out (judge/focus-sources srcs "The wind is one field: every reader calls `wind-at`" nil)]
+    (testing "files mentioning the named symbol come first, in path order among equals"
+      (is (str/starts-with? out "--- src/flight/draw.clj ---"))
+      (is (< (str/index-of out "src/flight/wind.clj") (str/index-of out "src/flight/game.clj"))))
+    (testing "a named path outranks a symbol mention"
+      (is (str/starts-with? (judge/focus-sources srcs "`ring-spacing` in src/flight/game.clj is 50" nil)
+                            "--- src/flight/game.clj ---")))
+    (testing "every source is present when there is no budget"
+      (doseq [p (keys srcs)] (is (str/includes? out p))))
+    (testing "a budget cuts the tail and says so"
+      (let [cut (judge/focus-sources srcs "`wind-at`" 80)]
+        (is (<= (count cut) (+ 80 60)))
+        (is (str/includes? cut "sources truncated at 80 chars"))))
+    (is (nil? (judge/focus-sources {} "anything" 100)) "no sources, no section")))

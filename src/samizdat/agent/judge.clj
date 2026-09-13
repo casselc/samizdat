@@ -138,12 +138,16 @@
   over the question, the answer the branch wants to ship, the run's evidence
   block and its diff. Asks for YES or NO first, which is the shape
   `parse-yesno` reads; change both together."
-  [{:keys [question answer evidence diff]}]
+  [{:keys [question answer evidence diff sources]}]
   (prompt/render "acceptance-judge"
                  {:question (str question)
                   :answer (str answer)
                   :evidence (not-empty (str evidence))
-                  :diff (not-empty (str diff))}))
+                  :diff (not-empty (str diff))
+                  ;; The tree as it stands, for a question the diff cannot
+                  ;; answer (karamazov-0way). Optional: the ship gate and
+                  ;; the plan critic have none to give.
+                  :sources (not-empty (str sources))}))
 
 (defn findings
   "The FINDINGS section of a judge reply, verbatim, trimmed — or nil when it
@@ -228,6 +232,42 @@
             ends (concat (rest starts) [(count s)])]
         (mapv (fn [a b] (subs s a b)) starts ends)))))
 
+(defn- relevance
+  "How much `text` (with `header` naming its file) is about `criterion`: ten
+  per path the criterion names that appears in the header, one per
+  backticked symbol it names that the text mentions. Shared by focus-diff
+  and focus-sources so a question ranks a file the same way in both."
+  [criterion header text]
+  (let [c (str criterion)
+        paths (re-seq #"[\w./-]+\.[A-Za-z]{1,5}" c)
+        symbols (map second (re-seq #"`([^`]+)`" c))]
+    (+ (* 10 (count (filter #(str/includes? (str header) %) paths)))
+       (count (filter #(str/includes? (str text) %) symbols)))))
+
+(defn focus-sources
+  "The current SOURCES of the files a run changed, `{path content}`, as one
+  text block ordered by relevance to `criterion` and cut at `cap` chars (nil
+  for no cut), or nil when there are none.
+
+  A question about the TREE cannot be answered from a diff: run 5f8de58c's
+  verify-stage judge answered 'the wind is one field felt and shown
+  consistently' NO because 'the diff contains no change unifying wind
+  sampling' — the sampling predated the run. The file the question names
+  comes first for the same reason focus-diff puts it first (karamazov-0way)."
+  [sources criterion cap]
+  (when (seq sources)
+    (let [blocks (->> sources
+                      (sort-by key)
+                      (map (fn [[path content]]
+                             [(- (relevance criterion path content)) path
+                              (str "--- " path " ---\n" content)]))
+                      (sort-by (fn [[s p _]] [s p]))
+                      (map peek))
+          text (str/join "\n" blocks)]
+      (if (and cap (> (count text) (long cap)))
+        (str (subs text 0 (long cap)) "\n… (sources truncated at " cap " chars)")
+        text))))
+
 (defn focus-diff
   "`diff` with its per-file chunks reordered by relevance to `criterion`:
   files whose path the criterion names first, then files whose hunks
@@ -244,24 +284,19 @@
   (let [chunks (diff-chunks diff)]
     (if (< (count chunks) 2)
       (str diff)
-      (let [c (str criterion)
-            paths (re-seq #"[\w./-]+\.[A-Za-z]{1,5}" c)
-            symbols (map second (re-seq #"`([^`]+)`" c))
-            header (fn [chunk] (first (str/split-lines chunk)))
-            score (fn [chunk]
-                    (+ (* 10 (count (filter #(str/includes? (header chunk) %) paths)))
-                       (count (filter #(str/includes? chunk %) symbols))))]
+      (let [header (fn [chunk] (first (str/split-lines chunk)))
+            score (fn [chunk] (relevance criterion (header chunk) chunk))]
         (->> chunks
              (map-indexed (fn [i chunk] [(- (score chunk)) i chunk]))
              (sort-by (fn [[s i _]] [s i]))
              (map peek)
              (apply str))))))
 
-(defn- cap-diff
-  "`diff` cut at `cap` chars with the same marker gitdiff/diff leaves, so the
-  judge is told what it is not seeing. nil cap: as it is."
-  [diff cap]
-  (let [s (str diff)]
+(defn focused-diff
+  "focus-diff then cut at `cap` (nil for no cut) — the one call a cell makes
+  to show a question its diff under a budget."
+  [diff criterion cap]
+  (let [s (focus-diff diff criterion)]
     (if (and cap (> (count s) (long cap)))
       (str (subs s 0 (long cap)) "\n… (diff truncated at " cap " chars)")
       s)))
@@ -728,14 +763,19 @@
   Pass the diff uncut (or under a generous fetch cap) for that to mean
   anything — a diff already cut at the branch budget has lost what the
   reorder would have put first (karamazov-0way). Without it the diff is
-  shown as it came."
-  [{:keys [chat criteria answer diff evidence threshold diff-chars]}]
+  shown as it came. `:sources` ({path content}, the files the run changed as
+  they stand) are shown the same way under `:sources-chars`, for a question
+  about the tree rather than the change."
+  [{:keys [chat criteria answer diff evidence threshold diff-chars sources sources-chars]}]
   (let [ratings (reduce (fn [acc {:keys [criterion] :as c}]
                           (let [shown (if diff-chars
-                                        (cap-diff (focus-diff diff criterion) diff-chars)
+                                        (focused-diff diff criterion diff-chars)
                                         diff)
-                                reply (try (chat (yesno-prompt {:question criterion :answer answer
-                                                                :diff shown :evidence evidence}))
+                                reply (try (chat (yesno-prompt
+                                                  {:question criterion :answer answer
+                                                   :diff shown :evidence evidence
+                                                   :sources (focus-sources sources criterion
+                                                                           sources-chars)}))
                                            (catch Throwable _ nil))]
                             (conj acc (assoc c :rating (parse-yesno reply)
                                              :reply (for-the-record :reply-chars (usable reply))))))

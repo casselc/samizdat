@@ -874,17 +874,19 @@
                                           (or (:diff-fetch-chars rubric-cfg)
                                               (:diff-chars rubric-cfg)
                                               (gitdiff/max-diff-chars))))
+              changed (gitdiff/changed-files root baseline)
+              sources (files/read-sources root changed)
               rubric (when (seq criteria)
                        (try (judge/review-rubric
                              {:chat (fn [content] (chat :rubric content))
                               :criteria criteria :answer answer
                               :diff rubric-diff :evidence evidence
                               :diff-chars (:diff-chars rubric-cfg)
+                              :sources sources
+                              :sources-chars (:sources-chars rubric-cfg)
                               :threshold (:threshold rubric-cfg)})
                             (catch Throwable _ nil)))
-              qf (try (metrics/review
-                       (files/read-sources root (gitdiff/changed-files root baseline))
-                       (gates/threshold :code-quality))
+              qf (try (metrics/review sources (gates/threshold :code-quality))
                       (catch Throwable _ nil))
               quality (when (seq qf) (prompt/render "metrics-findings" {:findings qf}))
               all (not-empty (str/join "\n\n"

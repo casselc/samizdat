@@ -809,7 +809,12 @@
           ;; a runaway prompt); each question then sees the diff reordered
           ;; by relevance to it (judge/focus-diff) and cut at :diff-chars.
           :diff-chars 40000
-          :diff-fetch-chars 200000}
+          :diff-fetch-chars 200000
+          ;; And the current sources of the files the run changed, ordered
+          ;; the same way (judge/focus-sources) — a question about the tree
+          ;; ('the wind is one field') is answered from what the code IS,
+          ;; which a diff of what changed cannot show.
+          :sources-chars 30000}
   :kind :threshold :capability-tunable? false
   :provenance ["karamazov-a6mj.4" "thinkingbox docs/rubrics_judge.md"]
   :doc "The end-of-phase RUBRIC (karamazov-a6mj.4). When an approved RFC lists

@@ -437,13 +437,28 @@
   (when-let [criteria (seq (acceptance/normalize (get-in config [:run :acceptance])))]
     (let [{:keys [llm-adapter llm-config]} (wf/role-ctx ctx :critic)
           rows (map parse-args (journal/turns conn run-id))
-          diff (delay (gitdiff/diff root git-baseline))
+          ;; Under the RUBRIC's budgets, not the branch's: fetched wide, then
+          ;; per question the diff is reordered to put the files the question
+          ;; names first and cut there, and the current sources of the files
+          ;; the run changed ride along for a question about the tree. Run
+          ;; 5f8de58c's judges failed two criteria in their own words for
+          ;; evidence not shown — 'the diff is truncated before showing the
+          ;; test-file changes', 'the diff contains no change unifying wind
+          ;; sampling' when the sampling predated the run (karamazov-0way).
+          rubric-cfg (gates/threshold :rubric)
+          diff (delay (gitdiff/diff root git-baseline
+                                    (or (:diff-fetch-chars rubric-cfg)
+                                        (gitdiff/max-diff-chars))))
+          sources (delay (files/read-sources root (gitdiff/changed-files root git-baseline)))
           evidence (delay (judge/evidence rows))
           judge (fn [question]
-                  (let [prompt (judge/yesno-prompt {:question question
-                                                    :answer (:final-answer branch)
-                                                    :evidence @evidence
-                                                    :diff @diff})
+                  (let [prompt (judge/yesno-prompt
+                                {:question question
+                                 :answer (:final-answer branch)
+                                 :evidence @evidence
+                                 :diff (judge/focused-diff @diff question (:diff-chars rubric-cfg))
+                                 :sources (judge/focus-sources @sources question
+                                                               (:sources-chars rubric-cfg))})
                         r (llm/chat llm-adapter llm-config [{:role "user" :content prompt}])]
                     (try (journal/record-side-call!
                           conn run-id {:branch-id (:id branch) :kind :acceptance-judge
