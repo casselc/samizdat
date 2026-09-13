@@ -209,7 +209,27 @@
   text that qualifies the input/output path itself."
   ["langfuse.observation.input" "langfuse.observation.output"])
 
-(def content-allowed-modes #{"synthetic"})
+(def content-allowed-modes
+  "Modes that carry content by default, with no operator action."
+  #{"synthetic"})
+
+(def content-override-modes
+  "Modes an operator may ADDITIONALLY open with the content override
+  (SAMIZDAT_TELEMETRY_CONTENT=on): live runs only. A historical import never
+  carries content whatever the override says — its sources are transcripts
+  the import is forbidden to upload."
+  #{"live"})
+
+(def content-override-env
+  "Environment variable that turns the override on (\"on\"; anything else,
+  or absent, is off). Read once at runtime init, never per span."
+  "SAMIZDAT_TELEMETRY_CONTENT")
+
+(def content-marker-key
+  "Resource attribute stating the policy the process ran under (\"off\" |
+  \"on\"), so a trace carrying prompts is distinguishable from one that
+  refused them by policy rather than by absence."
+  "samizdat.telemetry.content")
 
 (def content-refused-key
   "Fallback attribute naming the content keys that were dropped (key names
@@ -218,9 +238,12 @@
 
 (defn content-allowed?
   "May observation content travel under `mode` (a samizdat.observation.mode
-  value)? Unknown or absent modes refuse."
-  [mode]
-  (contains? content-allowed-modes mode))
+  value)? Unknown or absent modes refuse. With `override?` true the
+  override modes are allowed too; the default policy never needs it."
+  ([mode] (content-allowed? mode false))
+  ([mode override?]
+   (or (contains? content-allowed-modes mode)
+       (and (true? override?) (contains? content-override-modes mode)))))
 
 (defn split-content
   "Separate content keys from `attrs` before normalisation, so a refused
@@ -236,13 +259,15 @@
           (keys attrs)))
 
 (defn apply-content
-  "Add `content` back to normalised `attrs` when `mode` allows it; otherwise
-  drop it and name the refused keys under `content-refused-key`."
-  [attrs content mode]
-  (cond
-    (empty? content) attrs
-    (content-allowed? mode) (merge attrs content)
-    :else (assoc attrs content-refused-key (str/join "," (sort (keys content))))))
+  "Add `content` back to normalised `attrs` when `mode` allows it (under the
+  operator override when `override?`); otherwise drop it and name the
+  refused keys under `content-refused-key`."
+  ([attrs content mode] (apply-content attrs content mode false))
+  ([attrs content mode override?]
+   (cond
+     (empty? content) attrs
+     (content-allowed? mode override?) (merge attrs content)
+     :else (assoc attrs content-refused-key (str/join "," (sort (keys content)))))))
 
 (defn langfuse-mapping
   "Derived, never hand-written: how each canonical attribute is mirrored for
@@ -261,6 +286,9 @@
       :mode-source "samizdat.observation.mode"
       :content-keys content-keys
       :content-allowed-modes (vec (sort content-allowed-modes))
+      :content-override {:env content-override-env
+                         :modes (vec (sort content-override-modes))
+                         :marker content-marker-key}
       :content-refused-key content-refused-key
       :session-id-key "langfuse.session.id"
       :session-sources (vec (:session-keys m))

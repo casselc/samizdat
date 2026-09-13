@@ -126,7 +126,8 @@
     (is (= ["agent" "generation" "tool" "evaluator" "span"] (:observation-types lf)))
     (is (= ["samizdat.family.id" "samizdat.run.id"] (:session-sources lf)))
     (is (= "gen_ai.request.model" (:model-source lf)))
-    (is (= ["gen_ai.usage.input_tokens" "gen_ai.usage.output_tokens"] (:usage-keys lf)))
+    (is (= ["gen_ai.usage.cache_hit_tokens" "gen_ai.usage.input_tokens"
+            "gen_ai.usage.output_tokens" "gen_ai.usage.total_tokens"] (:usage-keys lf)))
     (is (= "langfuse.trace.metadata.execution_kind"
            (get (:trace-metadata lf) "samizdat.execution.kind")))
     (is (= "langfuse.observation.metadata.evaluator_status"
@@ -152,7 +153,11 @@
       (is (= "samizdat.observation.mode" (:mode-source lf)))
       (is (= ["langfuse.observation.input" "langfuse.observation.output"] (:content-keys lf)))
       (is (= ["synthetic"] (:content-allowed-modes lf)))
-      (is (= "samizdat.x.content.refused" (:content-refused-key lf))))))
+      (is (= "samizdat.x.content.refused" (:content-refused-key lf))))
+    (testing "the operator override is declared: live only, env-named, marked"
+      (is (= {:env "SAMIZDAT_TELEMETRY_CONTENT" :modes ["live"] :marker "samizdat.telemetry.content"}
+             (:content-override lf)))
+      (is (= ["off" "on"] (:domain (get (c/attributes m) "samizdat.telemetry.content")))))))
 
 (deftest content-policy-never-stringifies-refused-content
   (let [attrs {"samizdat.run.id" "r1"
@@ -175,6 +180,23 @@
                  (get a "samizdat.x.content.refused")))
           (is (not-any? #(re-find #"SYNTHETIC" (str %)) (vals a))))))
     (is (= (c/normalize m rest) (c/apply-content (c/normalize m rest) {} "live")) "no content, no marker")))
+
+(deftest content-override-opens-live-and-nothing-else
+  (let [content {"langfuse.observation.output" "PROMPT-TEXT"}
+        base {"samizdat.run.id" "r1"}]
+    (is (c/content-allowed? "synthetic"))
+    (is (not (c/content-allowed? "live")))
+    (is (c/content-allowed? "live" true) "the override opens live")
+    (is (c/content-allowed? "synthetic" true))
+    (doseq [mode ["historical-import" nil "bogus"]]
+      (is (not (c/content-allowed? mode true)) (str "override never opens " (pr-str mode))))
+    (is (not (c/content-allowed? "live" "on")) "only boolean true counts as the override")
+    (is (= "PROMPT-TEXT" (get (c/apply-content base content "live" true) "langfuse.observation.output")))
+    (is (= "langfuse.observation.output"
+           (get (c/apply-content base content "live" false) "samizdat.x.content.refused")))
+    (let [a (c/apply-content base content "historical-import" true)]
+      (is (= "langfuse.observation.output" (get a "samizdat.x.content.refused")))
+      (is (not-any? #(re-find #"PROMPT" (str %)) (vals a))))))
 
 (deftest typed-column-fragments-have-the-joc-v3-shape
   (let [frags (c/typed-column-fragments m)]
