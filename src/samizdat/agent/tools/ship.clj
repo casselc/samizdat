@@ -6,6 +6,7 @@
   claim-evidence gates those methods share (answer-tokens,
   uncovered-tokens, engages-problem? and friends)."
   (:require [clojure.string :as str]
+            [samizdat.agent.acceptance :as acceptance]
             [samizdat.agent.files :as files]
             [samizdat.agent.gitdiff :as gitdiff]
             [samizdat.agent.gates :as gates]
@@ -73,6 +74,8 @@
 (def ^:private completeness-blocked
   (util/generation-cache lexicon/gen
                          #(lexicon/wordlist :completeness-blocked)))
+(def ^:private asks-the-reader-phrases
+  (util/generation-cache lexicon/gen #(lexicon/wordlist :asks-the-reader)))
 
 (defn- word-starting-with?
   "Whether `needle` occurs in `haystack` at the START of a word.
@@ -155,6 +158,38 @@
                     (not-any? #(word-starting-with? s %) blocked))))
            (str/split (str answer) #"[.!?\n]+")))))
 
+(defn asks-the-reader?
+  "Whether the answer ENDS by asking its reader something — a question to the
+  user, an offer of more work, a request for confirmation — which is the one
+  ending `done` cannot be (karamazov-a6mj.3; thinkingbox's <DONE> rule: a
+  final message may not both close and ask). A run with a question left is a
+  run that should ask it — `ask_human`, answered by a person or by the
+  simulated user — and then finish, not ship the question as the result.
+
+  THE LAST NON-BLANK LINE ONLY, and a phrase from wordlists :asks-the-reader
+  on it: the line is a question mark away from a request, but a bare `?` is
+  not enough. `Why did it fail? The port was taken.` is prose that answers
+  itself; `Is the clamp right? I checked: yes` the same; the `?` operator
+  appears in explanations of code. What makes a request is the second person
+  or the offer, and those are the list. Checked at word starts for the
+  reason unfinished-claim? gives (`bayou` is not `you`). A line with a
+  request phrase but no question mark still fires when the phrase is itself
+  the request (`let me know`, `please confirm`)."
+  [answer]
+  (let [line (some->> (str/split-lines (str answer))
+                      (map str/trim)
+                      (remove str/blank?)
+                      last)
+        s (when line (str " " (str/lower-case line) " "))
+        phrases (asks-the-reader-phrases)
+        hit (when s (some #(when (word-starting-with? s %) %) phrases))]
+    (boolean
+     (and hit
+          (or (str/ends-with? (str line) "?")
+              ;; the imperative requests carry no question mark
+              (str/starts-with? hit "please")
+              (= "let me know" hit))))))
+
 (defn answer-tokens
   "Substantive tokens from a proposed answer: numbers and words that are not
   stopwords. Numbers matter most — an answer naming a size, a bound, or a
@@ -232,6 +267,33 @@
               prefix (lexicon/tuning :claim-matching :answer-prefix-match-length)]
           (and (>= (count token) long-enough)
                (str/includes? word-text (subs token 0 prefix)))))))
+
+(defn observed-output
+  "What this branch MEASURED, as one artifact-shaped entry for the figure rung,
+  or nil when it measured nothing.
+
+  On a coding run the only artifact anything produces is an accepted done's
+  own answer (see the :artifact below), so the rung used to check a branch's
+  figures against its siblings' answers and its own earlier ones — and never
+  against the test run or `eval` it had just watched. Run 5f8de58c's exercise
+  branch re-derived every figure in a single eval, exactly as the refusal
+  told it to, was refused for all of them, and exhausted (karamazov-3s54).
+
+  The corpus is the results of the branch's :verification-vocabulary calls
+  (gates.edn — eval and shell): an output the harness ran and handed back is
+  a measurement. A read_file or grep result is not — a test file's expected
+  value is an input, which is the fabrication this rung exists to catch — and
+  a refused `done`'s result echoes the answer's own figures, so it must never
+  count either. `turn-rows` are journal/branch-turns rows."
+  [turn-rows]
+  (let [measuring (or (gates/tool-vocab :verification) #{})
+        text (->> turn-rows
+                  (filter #(contains? measuring (str (:tool_name %))))
+                  (map #(str (:result %)))
+                  (remove str/blank?)
+                  (str/join "\n"))]
+    (when (seq text)
+      {:kind :observed :witness text})))
 
 (defn uncovered-tokens
   "Answer tokens no confirmed artifact mentions.
@@ -391,7 +453,14 @@
         ;; consecutive live runs). run-role marks the branch.
         advisory? (boolean (:advisory? branch))
         confirmed (state/confirmed-artifacts branch)
-        own (concat confirmed (state/empirical-artifacts branch))
+        ;; Plus what the branch itself measured — its eval and shell output
+        ;; off the journal. Computed here and banked nowhere: it is evidence
+        ;; for THIS check, not an artifact to share (karamazov-3s54).
+        observed (when (and (:conn ctx) (:run-id ctx))
+                   (observed-output
+                    (journal/branch-turns (:conn ctx) (:run-id ctx) (:id branch))))
+        own (concat confirmed (state/empirical-artifacts branch)
+                    (when observed [observed]))
         ;; And what the rest of the run established: a branch is shown the
         ;; shared-artifact block, so refusing the answer that cites it would
         ;; punish the branch for reading what the harness handed it (vf-b9c).
@@ -496,7 +565,26 @@
                        :changed changed :require-test? require-test?
                        :contracted-tests contracted-tests
                        :unfilled unfilled :stub-file stub-file})
-        block (or block verify-block)]
+        block (or block verify-block)
+        ;; THE ACCEPTANCE RUNG (karamazov-a6mj.2): criteria the OPERATOR
+        ;; wrote before the run, in .samizdat/config.edn — which the run
+        ;; cannot write — checked over the tree as it stands. Only the :check
+        ;; criteria run here: this gate is model-free like every other rung
+        ;; in it, and the :judge criteria wait for the critic role at
+        ;; :feature/verify. Not paid for when an earlier rung already
+        ;; refused, on ship-verify's economy — the answer is going back
+        ;; anyway. system/start! validated the spec, so normalize cannot
+        ;; throw here on a spec that let the system come up.
+        criteria (when-not advisory?
+                   (acceptance/normalize (get-in ctx [:config :run :acceptance])))
+        acceptance (when (and (seq criteria) (nil? block))
+                     (acceptance/check
+                      criteria
+                      {:kinds #{:check}
+                       :run-check #(verify/run-verify
+                                    (:root ctx) %
+                                    (get-in ctx [:config :run :verify-timeout-ms]))}))
+        block (or block (some-> acceptance acceptance/refusal))]
     ;; Journalled whether the tests RAN or not. A rung that was configured on
     ;; and then did nothing used to leave no trace at all — the note fired only
     ;; when there was a result — so a run that shipped unverified looked
@@ -531,6 +619,23 @@
                                       (empty? changed) :nothing-changed
                                       (nil? cmd) :no-test-among-changed
                                       :else :pre-checks-decided)})}))
+    ;; Per criterion, whichever way it went: the table is what a reader of
+    ;; the run — and the arena's measure — sees of the operator's definition
+    ;; of done, and a criterion not run here says so ("not run") rather than
+    ;; reading as met.
+    (when (and acceptance (:conn ctx) (:run-id ctx))
+      (journal/note! (:conn ctx) (:run-id ctx) :acceptance
+                     {:branch-id (:id branch) :turn (:turn ctx)
+                      :data {:at "done"
+                             :passed? (acceptance/all-passed? acceptance)
+                             ;; Bounded like every judgement the harness
+                             ;; journals (karamazov-3htz): a check's output
+                             ;; is a test log, and a test log can be long.
+                             :results (mapv #(update % :output
+                                                     (fn [o] (util/truncate-middle
+                                                              (str o)
+                                                              (:reply-chars (gates/threshold :verdict-record)))))
+                                            acceptance)}}))
     ;; Journalled whether or not anything blocked, so the run record still
     ;; shows what the lexical check saw even though words no longer decide.
     (when-let [words (and (:conn ctx) (:run-id ctx)

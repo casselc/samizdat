@@ -746,7 +746,28 @@
   for the same reason plan is: a skipped or lightweight-planned task has none."
   ["ALTER TABLE tasks ADD COLUMN plan_kind TEXT"])
 
+(def v29
+  "A CRASH IS AN OUTCOME OF ITS OWN (karamazov-a6mj.1).
+
+  Both standing records — a workflow's row in `knowledge` (what select reads
+  to choose how a run drives itself) and a project-authored `userspace`
+  version (what the next supervisor reads before reverting a tuning) — had
+  two buckets, shipped and not. A Throwable escaping the beam's rounds was
+  written into the second, so a provider outage or a jolt bug taught the
+  chooser that the MANIFEST fails this project and taught the supervisor that
+  the current tuning fails runs. That is evidence about the harness filed as
+  evidence about the thing being judged.
+
+  It still has to be written down — five crashes reading as \"no runs\" taught
+  nothing (blt.38) — so it gets a third counter rather than silence. A reader
+  can then tell 3 green / 0 failed / 4 crashed from 3 / 4 / 0.
+
+  Not nullable: a pre-v29 row has had no crash recorded, and zero is the true
+  count."
+  ["ALTER TABLE knowledge ADD COLUMN error_count INTEGER NOT NULL DEFAULT 0"
+   "ALTER TABLE userspace ADD COLUMN error_count INTEGER NOT NULL DEFAULT 0"])
+
 (def migrations
   "Ordered. Index 0 is migration 1; PRAGMA user_version holds the count applied."
   [v1 v2 v3 v4 v5 v6 v7 v8 v9 v10 v11 v12 v13 v14 v15 v16 v17 v18 v19 v20 v21 v22 v23 v24
-   v25 v26 v27 v28])
+   v25 v26 v27 v28 v29])

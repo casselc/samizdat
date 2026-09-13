@@ -2084,8 +2084,8 @@
   ;; predicate/message closures fired on the computed evidence. Adding a rung
   ;; is a data edit; the evidence computation stays in src.
   (let [rungs (gates/threshold :ship-gates)]
-    (is (= 4 (count rungs)))
-    (is (= [:answer-exists :figure-coverage :engages-problem :completeness]
+    (is (= 5 (count rungs)))
+    (is (= [:answer-exists :figure-coverage :engages-problem :asks-the-reader :completeness]
            (mapv :name rungs))))
   ;; Asserts the SKELETON, not the sentence: two live runs did the work,
   ;; passed their tests, closed their task, then spent every remaining turn
@@ -2102,7 +2102,15 @@
                                            :evidence [{:claim "count is 40"}]
                                            :uncovered-numbers ["42" "7"]})]
     (is (str/includes? (str figures-msg) "figures no artifact supports"))
-    (is (str/includes? (str figures-msg) "`42`")))
+    (is (str/includes? (str figures-msg) "`42`"))
+    ;; And it says WHAT covers a figure. "Verify these or remove them" sent run
+    ;; 9ead0638's cloud-wrap owner to grep its own test file for the
+    ;; coordinates it had quoted, three refusals running: a read is not an
+    ;; artifact, and the message never said what one was.
+    (is (str/includes? (str figures-msg) "test run")
+        "names the thing that covers a figure")
+    (is (str/includes? (str figures-msg) "input")
+        "and tells the branch that inputs and line numbers belong in the code, not the report"))
   (is (nil? (ship/ship-gate-block {:answer "the count is 40"
                                    :problem "count things"
                                    :evidence [{:claim "count is 40"}]
@@ -2637,3 +2645,92 @@
     (is (empty? (filter #(= "slow" (:gate %))
                         (journal/retirement-candidates c {:min-runs 3 :limit 8})))
         "met-late is a window to widen, not a gate to delete")))
+
+(deftest the-wind-down-rungs-ask-a-planning-branch-for-its-plan
+  ;; karamazov-ee72. The design step is a worker loop whose deliverable is a
+  ;; `plan` call, and every wind-down rung told it to SHIP: turn-budget said
+  ;; "land what you can verify", wind-down said ship, and last-call FORCED a
+  ;; done via native tool_choice — which the nothing-changed rung then refused,
+  ;; because an RFC is not a diff. Three runs, every design step, its whole cap.
+  (let [planning (fn [turns] (branch-with :planning? true :turns (vec (repeat turns {}))))]
+    (testing "in the last turns the force is a plan call, not a done"
+      (let [d (arbiter/decide {:branch (planning 9) :max-turns 10})]
+        (is (= :plan-last-call (:gate d)))
+        (is (= "plan" (:name (arbiter/force-tool-for d)))
+            "plan is the planning branch's terminal tool, so it is the one forced")
+        (is (str/includes? (:message d) "`plan`"))
+        (is (not (str/includes? (:message d) "done")))
+        (is (not-any? #{:last-call :wind-down}
+                      (map :gate (arbiter/eligible {:branch (planning 9) :max-turns 10})))
+            "the ship rungs stay silent on a branch that has nothing to ship")))
+    (testing "past the wind-down fraction the soft steer asks for the plan"
+      (let [elig (map :gate (arbiter/eligible {:branch (planning 34) :max-turns 40}))]
+        (is (some #{:plan-wind-down} elig))
+        (is (not-any? #{:wind-down} elig))))
+    (testing "the turn-budget notice names the plan, not landing"
+      (let [msg ((:message (gates/by-name :turn-budget)) {:branch (planning 5) :max-turns 10})]
+        (is (str/includes? msg "`plan`"))
+        (is (not (str/includes? msg "Land what you can verify")))
+        (is (str/includes? ((:message (gates/by-name :turn-budget))
+                            {:branch (branch-with :turns (vec (repeat 5 {}))) :max-turns 10})
+                           "Land what you can verify")
+            "a building branch reads the notice it always did")))
+    (testing "a building branch is steered exactly as before"
+      (is (= :last-call (:gate (arbiter/decide {:branch (branch-with :turns (vec (repeat 39 {})))
+                                                :max-turns 40}))))
+      (is (not-any? #{:plan-last-call :plan-wind-down}
+                    (map :gate (arbiter/eligible {:branch (branch-with :turns (vec (repeat 39 {})))
+                                                  :max-turns 40})))))
+    (testing "the planning rungs settle on the plan call and plan is forceable"
+      (is (= #{"plan"} (get (gates/tool-vocab :settle-called) :plan-last-call)))
+      (is (= #{"plan"} (get (gates/tool-vocab :settle-called) :plan-wind-down)))
+      (is (= "plan" (:name (get-in (gates/config) [:forceable-tools "plan"]))))
+      (is (contains? (set (get-in (gates/config) [:forceable-tools "plan" :parameters :required]))
+                     "files")))
+    (testing "a spent planning branch is not steered — the step is over"
+      (let [done (assoc (planning 9) :status :done :final-answer "plan")]
+        (is (not-any? #{:plan-last-call :plan-wind-down}
+                      (map :gate (arbiter/eligible {:branch done :max-turns 10}))))))))
+
+(deftest figures-are-covered-by-what-this-branch-measured
+  ;; karamazov-3s54. On a coding run the only artifact anything produces is
+  ;; an accepted done's own answer, so the figure rung checked a branch's
+  ;; numbers against its siblings' answers and never against the test run or
+  ;; eval it had just watched. Run 5f8de58c's exercise branch re-derived every
+  ;; figure in one eval, as the refusal told it to, was refused for all of
+  ;; them, and exhausted. What the branch MEASURED — the output of its own
+  ;; eval and shell calls — is the evidence the rung reads now.
+  (let [c (db/open! ":memory:")
+        rid (runs/start-run! c {:problem "pin the wind arrow"})
+        b (state/new-branch {:id "T4" :problem "pin the wind arrow"})
+        record! (fn [turn tool result]
+                  (journal/record-turn! c rid {:branch-id "T4" :turn turn :tool-name tool
+                                               :args "{}" :result result :category :neutral}))
+        ship (fn [answer]
+               (tools/run-tool {:branch b :tool-name "done" :turn 9 :conn c :run-id rid
+                                :root "/tmp" :git-baseline "HEAD"
+                                :config {:run {:verify-cmd "jolt -M:test"}}
+                                :args {:answer answer}}))
+        refused-for (fn [r] (second (re-find #"figures no artifact supports: ([^\n]*)" (str (:result r)))))]
+    (record! 1 "shell" "Ran 92 tests, 1493 assertions, 0 failures, 0 errors.")
+    (record! 2 "eval" "=> {:width 1024 :height 640}")
+    (record! 3 "read_file" "test/x_test.clj:\n(is (= 77 (count rings)))")
+    (record! 4 "done" "`done` refused.\n\nYour answer states figures no artifact supports: `55`.")
+    (with-redefs [gitdiff/changed-files (fn [_ _] ["src/x.clj" "test/x_test.clj"])
+                  verify/run-verify (fn [_ _ _] {:green? true :output "Ran 92 tests"})]
+      (testing "figures this branch's own test run and eval printed are covered"
+        (let [r (ship "pinned the wind arrow: 92 tests and 1493 assertions green, the shot is 1024 by 640")]
+          (is (nil? (refused-for r)) (str "refused: " (:result r)))))
+      (testing "a figure only a file READ showed is not — a read is not a measurement"
+        (let [r (ship "pinned the wind arrow: the course has 77 rings, 92 tests green")]
+          (is (= "`77`." (refused-for r)) "77 came from reading the test file; 92 from running it")))
+      (testing "a refused done's own echo of a figure covers nothing"
+        (is (= "`55`." (refused-for (ship "pinned the wind arrow in 55 frames"))))))
+    (testing "the observed corpus is the verification vocabulary, read off the branch's turns"
+      (let [rows (journal/branch-turns c rid "T4")
+            obs (ship/observed-output rows)]
+        (is (str/includes? (:witness obs) "1493"))
+        (is (str/includes? (:witness obs) "1024"))
+        (is (not (str/includes? (:witness obs) "77")))
+        (is (not (str/includes? (:witness obs) "55")))
+        (is (nil? (ship/observed-output [])) "nothing measured, nothing to add")))))

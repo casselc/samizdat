@@ -22,6 +22,7 @@
             [clojure.string :as str]
             [mycelium.cell :as cell]
             [mycelium.core :as myc]
+            [samizdat.agent.acceptance :as acceptance]
             [samizdat.agent.files :as files]
             [samizdat.agent.gates :as gates]
             [samizdat.agent.gitdiff :as gitdiff]
@@ -30,6 +31,7 @@
             [samizdat.metrics :as metrics]
             [samizdat.agent.state :as state]
             [samizdat.agent.tools :as tools]
+            [samizdat.agent.verify :as verify]
             [samizdat.cancel :as cancel]
             [samizdat.engine.proc :as proc]
             [samizdat.llm.client :as llm]
@@ -422,26 +424,99 @@
 (defn- tail [s n]
   (->> (str/split-lines (str s)) (remove str/blank?) (take-last n) (str/join "\n")))
 
+(defn- accept!
+  "The operator's acceptance criteria (config :run :acceptance), both kinds,
+  over the tree as it stands — Gate 2's other half (karamazov-a6mj.2). The
+  :check criteria run in the shell; the :judge criteria are put to the
+  CRITIC role as one narrow yes/no each, with the answer the round shipped,
+  the run's evidence block and its diff. Returns the per-criterion results,
+  or nil when the run has no criteria. Journalled per criterion under
+  :acceptance with :at \"verify\", beside the ship gate's own :at \"done\"
+  notes, so a reader can see which criterion was decided where."
+  [{:keys [conn run-id root config git-baseline] :as ctx} {:keys [branch]}]
+  (when-let [criteria (seq (acceptance/normalize (get-in config [:run :acceptance])))]
+    (let [{:keys [llm-adapter llm-config]} (wf/role-ctx ctx :critic)
+          rows (map parse-args (journal/turns conn run-id))
+          ;; Under the RUBRIC's budgets, not the branch's: fetched wide, then
+          ;; per question the diff is reordered to put the files the question
+          ;; names first and cut there, and the current sources of the files
+          ;; the run changed ride along for a question about the tree. Run
+          ;; 5f8de58c's judges failed two criteria in their own words for
+          ;; evidence not shown — 'the diff is truncated before showing the
+          ;; test-file changes', 'the diff contains no change unifying wind
+          ;; sampling' when the sampling predated the run (karamazov-0way).
+          rubric-cfg (gates/threshold :rubric)
+          diff (delay (gitdiff/diff root git-baseline
+                                    (or (:diff-fetch-chars rubric-cfg)
+                                        (gitdiff/max-diff-chars))))
+          sources (delay (files/read-sources root (gitdiff/changed-files root git-baseline)))
+          evidence (delay (judge/evidence rows))
+          judge (fn [question]
+                  (let [prompt (judge/yesno-prompt
+                                {:question question
+                                 :answer (:final-answer branch)
+                                 :evidence @evidence
+                                 :diff (judge/focused-diff @diff question (:diff-chars rubric-cfg))
+                                 :sources (judge/focus-sources @sources question
+                                                               (:sources-chars rubric-cfg))})
+                        r (llm/chat llm-adapter llm-config [{:role "user" :content prompt}])]
+                    (try (journal/record-side-call!
+                          conn run-id {:branch-id (:id branch) :kind :acceptance-judge
+                                       :role :critic :model (:model llm-config)
+                                       :usage (:usage r)})
+                         (catch Throwable _ nil))
+                    {:yes? (judge/parse-yesno (:content r)) :reply (:content r)}))
+          results (acceptance/check
+                   (vec criteria)
+                   {:run-check #(verify/run-verify root % (get-in config [:run :verify-timeout-ms]))
+                    :judge judge})]
+      (journal/note! conn run-id :acceptance
+                     {:data {:at "verify"
+                             :passed? (acceptance/all-passed? results)
+                             :results (mapv #(update % :output
+                                                     (fn [o] (judge/for-the-record :reply-chars (str o))))
+                                            results)}})
+      results)))
+
+(defn- acceptance-note
+  "What the verify note says about the criteria: nothing when there are none,
+  the failing ones by name with the failure's own words when any failed —
+  this is what :feature/route hands the next round — and a one-line count
+  when all passed."
+  [results]
+  (when results
+    (if (acceptance/all-passed? results)
+      (str "acceptance criteria met: " (acceptance/table results))
+      (str "acceptance criteria not met:\n"
+           (str/join "\n" (map (fn [{:keys [name output]}]
+                                 (str "FAIL  " name "\n  " (tail output 10)))
+                               (acceptance/failed results)))))))
+
 (cell/defcell :feature/verify
-  {:doc "Gate 2 — run the tests. The completion criteria are two gates: gate 1 is
-        that a diff exists and the review passes (hollow? + reviewer + critic);
-        gate 2, here, is that the tests actually pass. Runs config :run
-        :verify-cmd in the project root and passes only on exit 0. Short-circuits
-        (does not pay for a test run) when gate 1 already failed — a hollow diff
-        or a revise verdict means the loop is going back anyway. No :verify-cmd
-        configured -> not applicable, passes."
-   :effects [:proc :db]
+  {:doc "Gate 2 — run the tests, and the operator's acceptance criteria. The
+        completion criteria are two gates: gate 1 is that a diff exists and the
+        review passes (hollow? + reviewer + critic); gate 2, here, is that the
+        tests actually pass AND every acceptance criterion in config :run
+        :acceptance does (karamazov-a6mj.2). Runs config :run :verify-cmd in
+        the project root and passes only on exit 0; runs each criterion — a
+        shell :check or a narrow :judge question to the critic — and passes
+        only when none is decided against. Short-circuits (does not pay for a
+        test run) when gate 1 already failed — a hollow diff or a revise
+        verdict means the loop is going back anyway. Neither configured -> not
+        applicable, passes."
+   :effects [:proc :net :db]
    :requires [:config :conn :git-baseline :root :run-id]
    ;; Reads gate 1's verdicts to decide whether to pay for a test run at all,
    ;; so both are required — a manifest wiring verify without a review and a
    ;; critique in front of it would short-circuit on nils and pass by default,
    ;; which is the wrong direction for a gate.
-   :input  [:map [:review/decision :keyword] [:critic/decision :keyword]]
+   :input  [:map [:branch :map] [:review/decision :keyword] [:critic/decision :keyword]]
    ;; Both keys on every branch of the cond, the note carrying WHY on the
    ;; paths where nothing ran.
    :output [:map [:verify/passed? :boolean] [:verify/note :any]]}
   (fn [{:keys [conn run-id root config] :as ctx} data]
-    (let [cmd (get-in config [:run :verify-cmd])]
+    (let [cmd (get-in config [:run :verify-cmd])
+          criteria? (seq (get-in config [:run :acceptance]))]
       (cond
         (hollow? ctx)
         (assoc data :verify/passed? false :verify/note "not run — no diff to test")
@@ -449,20 +524,44 @@
         (or (= :revise (:review/decision data)) (= :revise (:critic/decision data)))
         (assoc data :verify/passed? false :verify/note "not run — review already sent it back")
 
-        (str/blank? (str cmd))
+        (and (str/blank? (str cmd)) (not criteria?))
         (assoc data :verify/passed? true :verify/note "no :verify-cmd configured")
 
         :else
-        (let [r (proc/run {:timeout-ms (or (get-in config [:run :verify-timeout-ms]) 600000)}
-                          "sh" "-c" (str "cd " root " && " cmd))
-              passed? (and (not (:timeout r)) (zero? (or (:exit r) 1)))]
+        (let [r (when-not (str/blank? (str cmd))
+                  (proc/run {:timeout-ms (or (get-in config [:run :verify-timeout-ms]) 600000)}
+                            "sh" "-c" (str "cd " root " && " cmd)))
+              tests-passed? (if r
+                              (and (not (:timeout r)) (zero? (or (:exit r) 1)))
+                              true)
+              ;; The criteria are checked whether or not the suite is green:
+              ;; a run whose suite is red AND whose criteria fail should hear
+              ;; about both at once rather than one per round. Fail-open on a
+              ;; checker error, like every gate here — a broken gate must not
+              ;; end the run — and the error is on the record.
+              results (try (accept! ctx data)
+                           (catch Throwable e
+                             (journal/note! conn run-id :stage-error
+                                            {:data {:stage :acceptance :error (ex-message e)}})
+                             nil))
+              accepted? (or (nil? results) (acceptance/all-passed? results))
+              passed? (and tests-passed? accepted?)
+              note (str/join "\n"
+                             (remove str/blank?
+                                     [(cond (nil? r) "no :verify-cmd configured"
+                                            (:timeout r) "tests TIMED OUT"
+                                            tests-passed? "tests passed"
+                                            :else (str "tests FAILED (exit " (:exit r) ")\n"
+                                                       (tail (str (:out r) "\n" (:err r)) 25)))
+                                      (acceptance-note results)]))]
+          ;; The note text rides the journal row too: it is the durable
+          ;; account of WHY gate 2 refused, and the two halves it now has
+          ;; make the booleans alone ambiguous.
           (journal/note! conn run-id :verify
-                         {:data {:passed passed? :exit (:exit r) :timeout (:timeout r)}})
-          (assoc data :verify/passed? passed?
-                 :verify/note (cond (:timeout r) "tests TIMED OUT"
-                                    passed? "tests passed"
-                                    :else (str "tests FAILED (exit " (:exit r) ")\n"
-                                               (tail (str (:out r) "\n" (:err r)) 25)))))))))
+                         {:data {:passed passed? :exit (:exit r) :timeout (:timeout r)
+                                 :tests-passed tests-passed? :accepted accepted?
+                                 :note (judge/for-the-record :reply-chars note)}})
+          (assoc data :verify/passed? passed? :verify/note note))))))
 
 (cell/defcell :feature/supervise
   {:doc "Where the supervisor's directives about the OUTER loop land.
@@ -678,6 +777,16 @@
                                     (not hollow)
                                     (not= :revise (:review/decision data))
                                     (not= :revise (:critic/decision data)))
-                           (str "The tests did not pass:\n" (:verify/note data))))))
+                           ;; Gate 2 has two halves now (karamazov-a6mj.2),
+                           ;; and the header says which one refused: a note
+                           ;; that opens "tests passed" and goes on to list
+                           ;; unmet criteria must not be handed to the next
+                           ;; round under "the tests did not pass" — that is
+                           ;; the 33-turns-proving-a-green-suite-green shape
+                           ;; of karamazov-q0u3 again, from the other side.
+                           (str (if (str/starts-with? (str (:verify/note data)) "tests passed")
+                                  "The acceptance criteria were not met:\n"
+                                  "The tests did not pass:\n")
+                                (:verify/note data))))))
             (dissoc :results :review/decision :critic/decision
                     :review/findings :critique/findings :verify/passed? :verify/note))))))

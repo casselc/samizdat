@@ -195,6 +195,63 @@ section always passes. The compaction fold's summary call runs on the
 `:summarizer` role the same way. Pattern and numbers after Spotify's shunt;
 karamazov-b76m.
 
+### The acceptance rung
+
+`done` has one rung that is not the run's own evidence: the **acceptance
+criteria**, `:run :acceptance` in the project's `.samizdat/config.edn` — the
+one file under the root the run may not write (RFC-003 invariant 6). Written
+by the operator before the run, they are thinkingbox's model of completion
+brought here: a task is a problem *plus a checker over the post-run world
+state*, invisible to the agent, testing the outcome and never the path
+(karamazov-a6mj.2).
+
+```clojure
+:acceptance [{:name "suite green, no test lost" :check "jolt -M:test | awk '...'"}
+             {:name "says what it saw"          :judge "Does the answer say what the screenshot showed, or name the wall that stopped it?"}]
+```
+
+A `:check` is a shell command in the project root, pass = exit 0, its output
+the failure's own words. A `:judge` is **one** narrow yes/no question for the
+critic role over the answer, the diff and the evidence block — one concept
+per question; anything with an "and" is two criteria. Prefer `:check`
+wherever a deterministic form exists.
+
+Every criterion gets its own verdict (`samizdat.agent.acceptance/check` →
+`{:name :kind :passed? :output}`), journalled per criterion under
+`:acceptance` with `:at done|verify`. `done` runs the `:check` criteria —
+this gate is model-free — and refuses naming each failing criterion with its
+output (`prompts/acceptance-failed.md`); `:feature/verify` runs both kinds as
+Gate 2's other half, and a failing criterion is what `:feature/route` hands
+the next round. A criterion not decided (not run, a judge with no verdict,
+a checker that threw) is `:passed? nil`: recorded, fail-open, never a pass.
+
+Why it is a gate and the suite is not: the suite is written by the run and
+karamazov-fgsb measured 2 of 22 runs weakening an assertion; the criteria
+cannot be reached from inside. Why it is cheaper than the critic: the critic
+caught the same omission (karamazov-dsfx) a round — ~90 turns, ~1.5M tokens —
+later. A malformed spec refuses `system/start!` rather than wedging every
+branch at `done` on a message about the operator's file.
+
+### The simulated user
+
+`ask_human` has three answers. A person, when one is configured
+(`gates.edn :approval :mode :block`). Otherwise, when the operator supplied
+`:run :user-context` — what the user knows that the problem does not say —
+the **:user role**: a model answering from that context and the visible
+transcript alone, copying entities verbatim, saying `I don't know` where the
+context is silent, refusing to do the assistant's work
+(`prompts/user-simulator.md`; thinkingbox's user-LLM). Otherwise the
+standing refusal: decide it yourself and say so. The branch is told when the
+answer is simulated; the exchange is journalled under `:simulated-user` and
+billed as a side call (karamazov-a6mj.3).
+
+What it buys: an underspecified task can be written to test *asking* — the
+fact goes in the context and not the problem, and the run either asks and
+gets it or guesses and fails the criterion. Its counterpart at the other end
+is the `:asks-the-reader` ship rung: an answer whose last line asks its reader
+something is a run with a question left, and `done` refuses it naming
+`ask_human`.
+
 ## Protocol
 
 ```
@@ -233,6 +290,7 @@ per turn: context-block prepends "Current task: …" or "No task claimed."
 | Closing the current task frees the slot. | The tool clears `:task`; `kanban-test`. |
 | Every dispatched tool is documented. | `prompt-test/every-tool-is-documented`. |
 | Every tool a gate vocabulary names is registered. | `agent-test`. |
+| A failing acceptance criterion refuses `done`, naming itself. | `acceptance-test/done-is-refused-by-a-failing-acceptance-check-naming-the-criterion`; `feature-test/acceptance-criteria-are-gate-2-beside-the-tests` for Gate 2. |
 
 ## Known gaps
 

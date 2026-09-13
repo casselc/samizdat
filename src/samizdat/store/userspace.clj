@@ -45,7 +45,8 @@
   itself is the most valuable thing in its database: it is how a surprising
   run is explained, and how a bad edit is undone without a backup."
   (:require [clojure.string :as str]
-            [samizdat.store.db :as db]))
+            [samizdat.store.db :as db]
+            [samizdat.store.outcomes :as outcomes]))
 
 (def kinds
   "The kinds this store holds. Enumerated so a typo'd kind is a loud failure
@@ -80,7 +81,7 @@
   ended shipped / not while it was current)."
   [conn kind name]
   (db/fetch conn ["SELECT version, created_at, source, rationale,
-                          success_count, failure_count
+                          success_count, failure_count, error_count
                    FROM userspace
                    WHERE kind = ? AND name = ? ORDER BY version"
                   (kind-str kind) (str name)]))
@@ -190,7 +191,11 @@
 
 (defn record-run-outcome!
   "Stamp how a run ended onto every project-authored version that is current
-  as it ends: shipped bumps success_count, anything else failure_count.
+  as it ends. `outcome` is one of `outcomes/outcomes`: :shipped bumps
+  success_count, :failed failure_count, and :error — a run the harness could
+  not finish — error_count, its own column, because a crash filed as a failed
+  run taught the next supervisor that the current tuning fails runs from
+  evidence about the harness (karamazov-a6mj.1).
 
   Standing, for the next supervisor: a version that has survived N green runs
   has evidence behind it that a fresh reader's unfamiliarity does not
@@ -201,19 +206,15 @@
   The latest version at run END is an approximation of \"was current while
   it ran\": an edit landed mid-run was live for the tail of the run, and the
   run's outcome is the first evidence it has."
-  [conn shipped?]
-  (db/with-writer
-    (db/execute! conn [(if shipped?
-                         "UPDATE userspace SET success_count = success_count + 1
-                          WHERE source = 'project'
-                            AND version = (SELECT MAX(v.version) FROM userspace v
-                                           WHERE v.kind = userspace.kind
-                                             AND v.name = userspace.name)"
-                         "UPDATE userspace SET failure_count = failure_count + 1
-                          WHERE source = 'project'
-                            AND version = (SELECT MAX(v.version) FROM userspace v
-                                           WHERE v.kind = userspace.kind
-                                             AND v.name = userspace.name)")])))
+  [conn outcome]
+  (let [col (outcomes/column outcome)]
+    (db/with-writer
+      (db/execute! conn [(format "UPDATE userspace SET %s = %s + 1
+                                   WHERE source = 'project'
+                                     AND version = (SELECT MAX(v.version) FROM userspace v
+                                                    WHERE v.kind = userspace.kind
+                                                      AND v.name = userspace.name)"
+                                 col col)]))))
 
 (defn drift
   "How much each userspace surface has moved: per kind, the names edited, the

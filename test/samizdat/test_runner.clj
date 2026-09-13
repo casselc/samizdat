@@ -70,7 +70,9 @@
             [samizdat.boundary-test]
             [samizdat.compaction-test]
             [samizdat.collab-test]
+            [samizdat.acceptance-test]
             [samizdat.select-test]
+            [samizdat.stats-test]
             [samizdat.session-test]
             [samizdat.reflect-test]
             [samizdat.reflex-test]
@@ -144,6 +146,7 @@
             [samizdat.fork-test]
             [samizdat.probe-test]
             [samizdat.manual-test]
+            [samizdat.user-sim-test]
             [samizdat.userspace-test]
             [samizdat.beam-test]
             [samizdat.kanban-test]
@@ -251,7 +254,9 @@
     samizdat.boundary-test
     samizdat.compaction-test
     samizdat.collab-test
+    samizdat.acceptance-test
     samizdat.select-test
+    samizdat.stats-test
     samizdat.session-test
     samizdat.reflect-test
     samizdat.reflex-test
@@ -325,6 +330,7 @@
     samizdat.fork-test
     samizdat.probe-test
     samizdat.manual-test
+    samizdat.user-sim-test
     samizdat.userspace-test
     samizdat.beam-test
     samizdat.kanban-test

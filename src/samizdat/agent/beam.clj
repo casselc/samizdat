@@ -1153,11 +1153,17 @@
                       (catch Throwable e
                         ;; A crash is an outcome too: a workflow that crashes
                         ;; five times showing "no runs" in the selection
-                        ;; history taught the chooser nothing (blt.38).
+                        ;; history taught the chooser nothing (blt.38). But
+                        ;; it is ITS OWN outcome, not a failed run: filed as
+                        ;; :failed, a provider outage taught select that the
+                        ;; manifest fails this project and taught the next
+                        ;; supervisor that the current tuning fails runs —
+                        ;; evidence about the harness, charged to the thing
+                        ;; being judged (karamazov-a6mj.1).
                         (try (knowledge/record-workflow-outcome!
                               conn {:workflow loop-nm :run-id run-id
-                                    :shipped? false})
-                             (userspace/record-run-outcome! false)
+                                    :outcome :error})
+                             (userspace/record-run-outcome! :error)
                              (catch Throwable _ nil))
                         (throw e)))]
       ;; HOW THIS WORKFLOW WENT, for the next run's choice. A run only ever
@@ -1167,13 +1173,14 @@
       ;;
       ;; Here rather than in run-rounds' finally because this is the only place
       ;; that knows both which manifest drove the run and whether it shipped.
-      (knowledge/record-workflow-outcome!
-       conn {:workflow loop-nm :run-id run-id
-             :shipped? (boolean (:answer result))})
-      ;; The same ending, stamped onto the project-authored userspace versions
-      ;; that were current for it — the standing the versions listing shows a
-      ;; later supervisor weighing an unfamiliar edit (karamazov-c58).
-      (userspace/record-run-outcome! (boolean (:answer result)))
+      (let [outcome (if (:answer result) :shipped :failed)]
+        (knowledge/record-workflow-outcome!
+         conn {:workflow loop-nm :run-id run-id :outcome outcome})
+        ;; The same ending, stamped onto the project-authored userspace
+        ;; versions that were current for it — the standing the versions
+        ;; listing shows a later supervisor weighing an unfamiliar edit
+        ;; (karamazov-c58).
+        (userspace/record-run-outcome! outcome))
       result)))
 
 (defn summary

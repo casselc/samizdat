@@ -53,6 +53,7 @@
             [clojure.java.io :as io]
             [clojure.string :as str]
             [clojure.tools.logging :as log]
+            [samizdat.store.outcomes :as outcomes]
             [samizdat.store.userspace :as store]))
 
 ;; --- the bound project -------------------------------------------------------
@@ -443,12 +444,15 @@
        v))))
 
 (defn record-run-outcome!
-  "Stamp a run's ending onto the project-authored versions that were current
-  for it — their standing, read back through `versions`. A quiet nil when no
-  project is bound, like every other unbound write."
-  [shipped?]
+  "Stamp a run's ending — :shipped, :failed or :error (samizdat.store.outcomes)
+  — onto the project-authored versions that were current for it: their
+  standing, read back through `versions`. A quiet nil when no project is
+  bound, like every other unbound write; an outcome outside the vocabulary
+  throws whether bound or not."
+  [outcome]
+  (outcomes/column outcome)
   (when-let [c (conn)]
-    (store/record-run-outcome! c (boolean shipped?))
+    (store/record-run-outcome! c outcome)
     true))
 
 (defn versions

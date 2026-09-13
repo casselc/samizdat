@@ -238,6 +238,11 @@
      ;; it is being steered because something broke — what broke, in the
      ;; failure's own words, with the turn number that makes it fetchable.
      :goal (state/stated-goal branch)
+     ;; WHETHER THIS BRANCH IS PLANNING OR BUILDING, so a template can say
+     ;; "declare it with plan" to the one and "land it" to the other. The
+     ;; turn-budget notice told every design branch to land what it could
+     ;; verify; the branch had nothing to land (karamazov-ee72).
+     :planning (state/planning? branch)
      :failed-tool (:tool f)
      :failed-error (:error f)
      :failed-turn (:turn f)

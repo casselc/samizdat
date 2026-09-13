@@ -657,7 +657,11 @@
                               ;; produced one — free prose, not a path, so it is
                               ;; not folded into :files. nil for a lightweight plan.
                               :rfc (some-> rfc str not-empty)}
-                  :repl-written (or (:repl-written branch) #{}))))
+                  :repl-written (or (:repl-written branch) #{})
+                  ;; A declaration nothing has been written against yet. This
+                  ;; is what keeps the session OPEN when every declared file is
+                  ;; already in the ledger — see planned?.
+                  :repl-fresh? true)))
 
 (defn plan
   "The branch's current declaration, or nil."
@@ -667,7 +671,9 @@
 (defn note-write
   "Record that `path` was actually written, discharging it from the plan."
   [branch path]
-  (update branch :repl-written (fnil conj #{}) (norm-path path)))
+  (-> branch
+      (update :repl-written (fnil conj #{}) (norm-path path))
+      (assoc :repl-fresh? false)))
 
 (defn unwritten
   "Declared files this branch has not written yet, in declaration order — the
@@ -675,6 +681,36 @@
   [branch]
   (let [written (or (:repl-written branch) #{})]
     (vec (remove written (:files (plan branch))))))
+
+(defn planning?
+  "Whether this branch's PRODUCT is a plan rather than a change: the cell that
+  opened it tagged it `:planning? true`, as the board's design step does.
+
+  The tag is the whole distinction the loop has between a branch that is
+  designing and one that is building, and a lot hangs on it. A planning
+  branch is refused the tools that build or ship (phases.edn
+  :planning-declares-a-plan), its wind-down rungs ask for the plan rather
+  than a `done` (gates.edn :plan-wind-down / :plan-last-call), and its `plan`
+  call ENDS it — see finish-planning. Before any of that existed the design
+  step was a worker loop with no terminal but its cap: the branch had its
+  plan by turn 8, ran on, was FORCED to `done` by last-call, and had that
+  refused by the nothing-changed rung because an RFC is not a diff. Every
+  design step in runs 40c57a2a, 9ead0638 and 5f8de58c spent its whole cap
+  that way (karamazov-ee72)."
+  [branch]
+  (boolean (:planning? branch)))
+
+(defn finish-planning
+  "Close a planning branch on its declaration. The plan is the deliverable, so
+  the branch ends finished (not abandoned) with the plan as its answer — the
+  RFC when it wrote one, else the goal, else the files — and loop/route reads
+  the same :status/:final-answer it reads off a `done`."
+  [branch]
+  (let [p (plan branch)]
+    (assoc branch
+           :status :done
+           :inactive-reason "plan declared"
+           :final-answer (or (:rfc p) (:goal p) (str/join ", " (:files p))))))
 
 (defn last-failure
   "The most recent turn that went wrong, as `{:turn :tool :error}`, or nil.
@@ -730,10 +766,20 @@
   Landing closes the session, so the next `eval` needs its own plan. That makes
   the contract cyclic rather than one-shot, which is what any multi-part task
   needs. An empty declaration is still not a plan: naming no file is the state
-  the contract exists to rule out."
+  the contract exists to rule out.
+
+  A FRESH DECLARATION IS OPEN EVEN WHEN ITS FILES ARE ALREADY WRITTEN. The
+  ledger survives a re-plan (declare-plan, run a3566c73), so without this a
+  plan naming only files the branch had already landed was closed the moment
+  it was declared: eval refused with \"call plan first\", the branch re-planned
+  the same files into the same refusal — run 9ead0638's HUD owner, turns
+  74-80. The next write is what lands such a plan; until then the branch has
+  named its hypothesis and the REPL is its to use. `done` is not affected:
+  plan-not-landed reads `unwritten`, which is empty here."
   [branch]
   (boolean (and (seq (:files (plan branch)))
-                (seq (unwritten branch)))))
+                (or (seq (unwritten branch))
+                    (:repl-fresh? branch)))))
 
 (defn branch-id-for
   "A branch id that says WHICH TASK it is working: `T<owner><-slug>[v<round>]`.

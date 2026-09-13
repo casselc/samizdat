@@ -36,6 +36,7 @@
             [jolt.http.platform :as platform]
             [ring-chez.adapter :as adapter]
             [samizdat.api.control :as api-control]
+            [samizdat.agent.acceptance :as acceptance]
             [samizdat.agent.gates :as gates]
             [samizdat.agent.phases :as phases]
             [samizdat.lexicon :as lexicon]
@@ -107,6 +108,12 @@
    (when (started?)
      (throw (ex-info "system already started; call stop! first" {})))
    (let [cfg (config/load-config overrides)
+         ;; THE ACCEPTANCE SPEC IS CHECKED HERE, not at the ship gate. A
+         ;; malformed criterion is the operator's mistake in the operator's
+         ;; file, and a run that discovered it at `done` would wedge every
+         ;; branch on a message about a file it may not edit. Refusing to
+         ;; start is loud and cheap; the throw names the entry.
+         _ (acceptance/normalize (get-in cfg [:run :acceptance]))
          ;; A fresh session tally per process start. Short-term memory is
          ;; scoped to the process on purpose: a pattern that shows up across
          ;; three runs is exactly the pattern a single-run digest cannot see,

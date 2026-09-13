@@ -122,9 +122,9 @@
   ;; a unit that won't pass its tests, and this is what notices that the
   ;; unsplit approach keeps failing and chooses differently.
   (let [conn (db/open! ":memory:")]
-    (knowledge/record-workflow-outcome! conn {:workflow "loop" :run-id "r1" :shipped? false})
-    (knowledge/record-workflow-outcome! conn {:workflow "loop" :run-id "r2" :shipped? false})
-    (knowledge/record-workflow-outcome! conn {:workflow "decompose" :run-id "r3" :shipped? true})
+    (knowledge/record-workflow-outcome! conn {:workflow "loop" :run-id "r1" :outcome :failed})
+    (knowledge/record-workflow-outcome! conn {:workflow "loop" :run-id "r2" :outcome :failed})
+    (knowledge/record-workflow-outcome! conn {:workflow "decompose" :run-id "r3" :outcome :shipped})
     (let [cands (select/candidates conn)
           lines (select/history-lines conn cands)]
       (testing "one line per workflow that has actually run, best first"
@@ -145,12 +145,42 @@
         (is (not (str/includes? (select/build-prompt "a task" cands nil)
                                 "HOW THESE HAVE GONE")))))))
 
+(deftest a-crash-is-neither-a-shipped-run-nor-a-failed-one
+  ;; karamazov-a6mj.1. A Throwable escaping run-rounds — a provider outage, a
+  ;; jolt bug, a hung turn — used to be recorded as :shipped? false, so the
+  ;; chooser learned that the MANIFEST fails the task from a run the harness
+  ;; could not finish. A crash is an outcome, and it has to be written down
+  ;; (blt.38), but it is evidence about the harness, not about the workflow.
+  (let [conn (db/open! ":memory:")]
+    (knowledge/record-workflow-outcome! conn {:workflow "loop" :run-id "r1" :outcome :shipped})
+    (knowledge/record-workflow-outcome! conn {:workflow "loop" :run-id "r2" :outcome :failed})
+    (knowledge/record-workflow-outcome! conn {:workflow "loop" :run-id "r3" :outcome :error})
+    (knowledge/record-workflow-outcome! conn {:workflow "loop" :run-id "r4" :outcome :error})
+    (let [r (first (filter #(= "loop" (:workflow %)) (knowledge/workflow-record conn)))]
+      (is (= 1 (:shipped r)))
+      (is (= 1 (:failed r)) "a crash does not count as the workflow failing")
+      (is (= 2 (:errors r)) "but it is counted, as its own thing")
+      (is (= 2 (:runs r)) "the ratio the chooser reads is over FINISHED runs"))
+    (testing "the history line tells a reader 1 of 2 with 2 crashes from 1 of 4"
+      (let [lines (select/history-lines conn (select/candidates conn))
+            line (first (filter #(str/includes? % "loop") lines))]
+        (is (some? line))
+        (is (str/includes? line "shipped 1 of 2 runs") line)
+        (is (str/includes? line "2 crashed") line)))
+    (testing "a workflow that has only ever crashed is still reported — as crashed, not as unrun"
+      (knowledge/record-workflow-outcome! conn {:workflow "decompose" :run-id "r5" :outcome :error})
+      (let [lines (select/history-lines conn (select/candidates conn))
+            line (first (filter #(str/includes? % "decompose") lines))]
+        (is (some? line) (pr-str lines))
+        (is (str/includes? line "1 crashed") line)
+        (is (not (str/includes? line "shipped 0 of 0")) line)))))
+
 (deftest a-workflows-record-accumulates-across-runs
   (let [conn (db/open! ":memory:")]
     (dotimes [i 4]
       (knowledge/record-workflow-outcome! conn {:workflow "loop"
-                                                :run-id (str "r" i) :shipped? false}))
-    (knowledge/record-workflow-outcome! conn {:workflow "loop" :run-id "r9" :shipped? true})
+                                                :run-id (str "r" i) :outcome :failed}))
+    (knowledge/record-workflow-outcome! conn {:workflow "loop" :run-id "r9" :outcome :shipped})
     (let [r (first (filter #(= "loop" (:workflow %)) (knowledge/workflow-record conn)))]
       (is (= 5 (:runs r)) "one row per workflow, the counts doing the accumulating")
       (is (= 1 (:shipped r)))

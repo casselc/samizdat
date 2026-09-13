@@ -58,6 +58,8 @@
     :summary "A child carrying its parent's conversation — optionally truncated to an earlier turn."}
    {:name samizdat.agent.state/add-message
     :summary "Append a message, optionally stamped with the turn it belongs to."}
+   {:name samizdat.agent.state/planning?
+    :summary "Whether this branch's product is a plan (the board's design step tags it) — its plan call ends it, and done and the file writers are refused."}
    {:name samizdat.agent.state/describe
     :summary "One line about a branch: status, turns, artifacts, why it stopped."}
    {:name samizdat.agent.state/parked?
@@ -307,4 +309,26 @@
     :summary "The fraction of a change's mass held by functions over the complexity limit — mass(f) = cc * sqrt(sloc)."}
    {:name samizdat.metrics/review
     :summary "Structured code-quality findings for the changed sources, or none — what the diff critics merge into their verdict."}]}
+
+ {:group "Acceptance criteria: the operator's definition of done"
+  :entries
+  [{:name samizdat.agent.acceptance/normalize
+    :summary "config :run :acceptance as criteria: a vector of {:name :check \"<shell cmd>\"} (pass = exit 0 in the project root) or {:name :judge \"<one narrow yes/no question>\"} (put to the critic role). Written by the OPERATOR in .samizdat/config.edn before the run — the file the run may not write (karamazov-kvw) — so unlike the suite the run authors, it cannot be weakened from inside. A malformed entry refuses system start rather than being skipped."}
+   {:name samizdat.agent.acceptance/check
+    :summary "Run criteria with an injected shell and judge; one {:name :kind :passed? :output} per criterion, in order. :passed? nil is undecided (not run, or a judge with no verdict) and does not block — fail-open like every judge here. `done` runs the :check criteria (model-free, like the rest of that gate); :feature/verify runs both kinds as Gate 2's other half. Results are journalled per criterion under :acceptance with :at done|verify."}
+   {:name samizdat.agent.acceptance/refusal
+    :summary "What the branch reads when criteria failed: each by name with the failure's own words, and what was met. prompts/acceptance-failed.md."}
+   {:name samizdat.agent.judge/parse-yesno
+    :summary "true / false / nil from a narrow judge reply — the first word of the first line, else of the last. The shape prompts/acceptance-judge.md asks for; change both together."}
+   {:name samizdat.agent.judge/parse-criteria
+    :summary "An RFC's '## Acceptance criteria' bullets as rubric entries {:criterion :weight :kind}: unmarked = positive weight 1, [N] weight N, [-N] a deduction penalty (YES costs N), [xM] a multiplicative penalty (YES scales by 1-M). The syntax prompts/rfc-brief.md teaches. [] when the RFC has no such section, and then epic-review runs the two-pass review alone."}
+   {:name samizdat.agent.judge/review-rubric
+    :summary "One narrow yes/no call per criterion through an injected chat, scored as thinkingbox's RubricJudge: reward = clamp((earned - deductions) / positive weight) x the multipliers, against gates.edn :rubric :threshold. Undecided ratings sit out of both sides; nothing decided is a nil reward and a pass (fail-open). :findings lists the failed criteria and fired penalties with the judge's own sentence — what epic-review's fix child is told. `rubric-score` is the arithmetic alone, testable on ratings."}]}
+
+ {:group "The simulated user: asking instead of guessing"
+  :entries
+  [{:name samizdat.agent.tools.ask/user-prompt
+    :summary "The one message the :user role answers when ask_human is called with nobody attached and config :run :user-context set: the operator's ground truth, the visible transcript, the questions, and the rules — answer only from the context, copy entities verbatim, say \"I don't know\" where it is silent, never do the assistant's work (prompts/user-simulator.md). The :user role's model under :run :role-models, else the branch's own. A configured person (gates.edn :approval :mode :block) always outranks it. The exchange is journalled under :simulated-user and billed as a side call, and the branch is told the answer is simulated."}
+   {:name samizdat.agent.tools.ship/asks-the-reader?
+    :summary "The :asks-the-reader ship rung's predicate: the answer's LAST non-blank line is a request to whoever reads it — a question with a second-person subject, an offer of more work, a request to confirm — by wordlists.edn :asks-the-reader at word starts. `done` closes the run, so a question left in the answer is a question nobody answers; the refusal names ask_human. Last line only and phrase-anchored, so prose that asks and answers itself, or the `?` operator, does not fire."}]}
 ]

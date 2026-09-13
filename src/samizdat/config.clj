@@ -436,6 +436,28 @@
                   ;; Read with a default of true at the use site already; named
                   ;; here so it is visible and switchable.
                   :require-test? (not= "0" (or (env "HARNESS_REQUIRE_TEST") "1"))
+                  ;; The OPERATOR's definition of done (karamazov-a6mj.2): a
+                  ;; vector of {:name "..." :check "<shell cmd>"} (pass = exit
+                  ;; 0 in the project root) or {:name "..." :judge "<one
+                  ;; narrow yes/no question>"} (put to the critic role). No
+                  ;; default and no env form: it is per project and belongs
+                  ;; in .samizdat/config.edn, the one file under the root the
+                  ;; run cannot write, which is what makes it a gate the run
+                  ;; cannot weaken. `done` checks the :check criteria and
+                  ;; :feature/verify checks both kinds; system/start!
+                  ;; refuses a malformed spec. samizdat.agent.acceptance.
+                  :acceptance nil
+                  ;; What the USER knows that the problem statement does not
+                  ;; say (karamazov-a6mj.3): the ground truth a person would
+                  ;; answer from. When set and no person is attached
+                  ;; (gates.edn :approval :mode :refuse), ask_human is
+                  ;; answered by the :user role from this text alone —
+                  ;; verbatim entities, "I don't know" where it is silent —
+                  ;; so an underspecified task is resolved by asking rather
+                  ;; than guessing, and asking is testable. A person, when
+                  ;; configured, always outranks it. Per project or per run;
+                  ;; no env form. samizdat.agent.tools.ask.
+                  :user-context nil
                   ;; Cross-branch sharing of engine-confirmed artifacts. Off by
                   ;; default: shared lemmas may cost the beam its diversity, and
                   ;; whether they earn it is exactly what sweep-widths measures.

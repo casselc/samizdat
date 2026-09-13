@@ -385,6 +385,17 @@
                :board/outcome nil
                :board/decision nil
                :board/answer nil
+               ;; And its PLAN PHASE: the attempt counter, the plan the critic
+               ;; read, the findings it sent back, and triage's call. These
+               ;; used to survive the claim, so the second task's first design
+               ;; was "attempt 3" — past :max-design-attempts — and
+               ;; design-review failed open on every task after the first;
+               ;; run 9ead0638's RFC had the plan critic active for one child
+               ;; of seven.
+               :board/plan-attempts 0
+               :board/plan-text nil
+               :board/plan-decision nil
+               :board/design-findings nil
                ;; The baseline for THIS task, taken now: the review reads the
                ;; diff its owner produced, not the run's accumulated one.
                :board/baseline (gitdiff/baseline root)
@@ -518,19 +529,11 @@
 (defn- rfc-work-items
   "The concrete tasks an RFC breaks into: the bullet lines under its
   '## Work items' heading, marker stripped. Empty when the RFC names none —
-  then the epic is worked as one task rather than decomposed."
+  then the epic is worked as one task rather than decomposed. The same
+  reader epic-review's rubric uses for '## Acceptance criteria'
+  (judge/section-bullets), so the two sections are read one way."
   [rfc]
-  (let [lines (str/split-lines (str rfc))
-        section (->> lines
-                     (drop-while #(not (re-find #"(?i)^#+\s*work items\b" %)))
-                     rest
-                     (take-while #(not (re-find #"^#+\s" %))))]
-    (into []
-          (comp (map str/trim)
-                (filter #(re-find #"^[-*+]\s" %))
-                (map #(str/replace % #"^[-*+]\s+" ""))
-                (remove str/blank?))
-          section)))
+  (judge/section-bullets rfc #"(?i)^#+\s*work items\b"))
 
 (cell/defcell :board/triage
   {:doc "Decide how this claimed task enters construction: :skip straight to
@@ -594,7 +597,18 @@
               b (-> (state/new-branch
                      {:id did :problem prob
                       :messages (turn/initial-messages prob suffix :implementor)})
-                    (assoc :task {:id task :title (:title t)} :role :implementor))
+                    (assoc :task {:id task :title (:title t)} :role :implementor
+                           ;; THE TAG THAT MAKES THIS A DESIGN BRANCH. The
+                           ;; worker loop has no terminal but a finished
+                           ;; branch or its cap, and a plan finished nothing:
+                           ;; the branch had its RFC by turn 8, ran on, was
+                           ;; forced to `done` by last-call and refused by the
+                           ;; nothing-changed rung. Tagged, its `plan` call
+                           ;; ends it (state/finish-planning), done and the
+                           ;; file writers are refused (phases.edn
+                           ;; :planning-declares-a-plan) and the wind-down
+                           ;; rungs ask for the plan (karamazov-ee72).
+                           :planning? true))
               out (try (myc/run-compiled (wf/worker-compiled) ictx {:branch b :turn 1})
                        (catch Throwable _ nil))
               ;; The worker loop returns {:branch <finished branch>}, the same
@@ -836,21 +850,55 @@
                                           :usage (:usage r)})
                             (catch Throwable _ nil))
                        (:content r)))
+              answer "All of the RFC's work items were implemented."
+              evidence (judge/evidence rows)
               reviewed (try (judge/review
                              {:chat chat :requirement rfc
-                              :evidence (judge/evidence rows) :diff diff
-                              :answer "All of the RFC's work items were implemented."})
+                              :evidence evidence :diff diff :answer answer})
                             (catch Throwable _ nil))
-              qf (try (metrics/review
-                       (files/read-sources root (gitdiff/changed-files root baseline))
-                       (gates/threshold :code-quality))
+              ;; THE RUBRIC (karamazov-a6mj.4): the RFC's own acceptance
+              ;; criteria, one narrow yes/no each, scored as thinkingbox's
+              ;; RubricJudge scores them, against gates.edn :rubric
+              ;; :threshold. Beside the two-pass review, not instead of it:
+              ;; the review finds defects the author did not think to list,
+              ;; the rubric checks the list the author DID write. nil when
+              ;; the RFC lists no criteria, and fail-open on a throw.
+              criteria (judge/parse-criteria rfc)
+              ;; Under the rubric's OWN diff budget, fetched wide and cut per
+              ;; question after judge/focus-diff puts the question's files
+              ;; first — the branch-sized `diff` above lost the file five
+              ;; criteria were about on the first real epic (karamazov-0way).
+              rubric-cfg (gates/threshold :rubric)
+              rubric-diff (when (seq criteria)
+                            (gitdiff/diff root baseline
+                                          (or (:diff-fetch-chars rubric-cfg)
+                                              (:diff-chars rubric-cfg)
+                                              (gitdiff/max-diff-chars))))
+              changed (gitdiff/changed-files root baseline)
+              sources (files/read-sources root changed)
+              rubric (when (seq criteria)
+                       (try (judge/review-rubric
+                             {:chat (fn [content] (chat :rubric content))
+                              :criteria criteria :answer answer
+                              :diff rubric-diff :evidence evidence
+                              :diff-chars (:diff-chars rubric-cfg)
+                              :sources sources
+                              :sources-chars (:sources-chars rubric-cfg)
+                              :threshold (:threshold rubric-cfg)})
+                            (catch Throwable _ nil)))
+              qf (try (metrics/review sources (gates/threshold :code-quality))
                       (catch Throwable _ nil))
               quality (when (seq qf) (prompt/render "metrics-findings" {:findings qf}))
               all (not-empty (str/join "\n\n"
                                        (remove str/blank?
-                                               [(str (:findings reviewed)) (str quality)])))
-              blocking (when all (try (judge/blocking-findings (str "FINDINGS:\n" all))
-                                      (catch Throwable _ nil)))
+                                               [(str (:findings reviewed))
+                                                (str (:findings rubric))
+                                                (str quality)])))
+              blocking (or (when all (try (judge/blocking-findings (str "FINDINGS:\n" all))
+                                          (catch Throwable _ nil)))
+                           ;; a reward under the threshold blocks whatever
+                           ;; severity tags the lines carry
+                           (and rubric (not (:pass? rubric))))
               attempt (inc (count (filter #(= task (:task %))
                                           (journal/notes conn run-id :epic-review))))
               spent? (>= attempt (max-review-attempts))
@@ -869,7 +917,16 @@
           (journal/note! conn run-id :epic-review
                          {:data {:task task :attempt attempt :decision (name decision)
                                  :verdict (some-> reviewed :verdict)
-                                 :findings (judge/for-the-record :reply-chars all)}})
+                                 :findings (judge/for-the-record :reply-chars all)
+                                 ;; Per criterion, so a reader — and a
+                                 ;; supervisor asking which KIND of criterion
+                                 ;; its tuning keeps missing — sees the
+                                 ;; ratings and not only the total.
+                                 :rubric (when rubric
+                                           {:reward (:reward rubric) :pass (:pass? rubric)
+                                            :threshold (:threshold (gates/threshold :rubric))
+                                            :ratings (mapv #(select-keys % [:criterion :kind :weight :rating])
+                                                           (:ratings rubric))})}})
           (assoc data :board/epic-decision decision)))
       (fn [d]
         (try (tasks/close! conn task) (catch Throwable _ nil))

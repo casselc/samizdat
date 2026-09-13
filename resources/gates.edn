@@ -794,6 +794,45 @@
         NOTHING on a clean review, which skips it. Off is a legitimate stance
         for a project that would rather pay one call and read the noise."}
 
+ :rubric
+ {:value {:threshold 0.7
+          ;; Which RFC section holds the criteria — the reader's half of the
+          ;; format prompts/rfc-brief.md asks for; change both together.
+          :heading-regex "(?i)^#+\\s*acceptance criteria\\b"
+          ;; THE RUBRIC'S OWN DIFF BUDGET. An epic's diff is the sum of its
+          ;; tasks' diffs, and the first rubric scored on a real epic (run
+          ;; 5f8de58c) was shown it under the per-branch :context-budget
+          ;; :diff-chars: 20417 chars cut at 12000, exactly at the header of
+          ;; the file five of the fifteen criteria were about — eight NO
+          ;; ratings for evidence never shown, reward 0.4 (karamazov-0way).
+          ;; :diff-fetch-chars bounds the raw fetch (a runaway diff is still
+          ;; a runaway prompt); each question then sees the diff reordered
+          ;; by relevance to it (judge/focus-diff) and cut at :diff-chars.
+          :diff-chars 40000
+          :diff-fetch-chars 200000
+          ;; And the current sources of the files the run changed, ordered
+          ;; the same way (judge/focus-sources) — a question about the tree
+          ;; ('the wind is one field') is answered from what the code IS,
+          ;; which a diff of what changed cannot show.
+          :sources-chars 30000}
+  :kind :threshold :capability-tunable? false
+  :provenance ["karamazov-a6mj.4" "thinkingbox docs/rubrics_judge.md"]
+  :doc "The end-of-phase RUBRIC (karamazov-a6mj.4). When an approved RFC lists
+        acceptance criteria (its '## Acceptance criteria' bullets), epic-review
+        puts each to the critic as ONE narrow yes/no and scores them as
+        thinkingbox's RubricJudge does: positive criteria earn their weight on
+        YES, a [-N] deduction costs N on YES, an [xM] multiplicative penalty
+        scales the reward by (1 - M) on YES, reward = clamp((earned -
+        deductions) / positive weight) x the multipliers. :threshold is the
+        pass mark: reward below it is a blocking gap, and the failed criteria
+        become the fix child's problem text.
+
+        0.7 is thinkingbox's own worked example and a starting point, not a
+        measurement. A judge that decides nothing (every rating undecided)
+        passes — fail-open, like every judge here — and says so in the note.
+        One call PER CRITERION, so an RFC with eight criteria costs eight small
+        calls at the epic's end; the two-pass review still runs beside it."}
+
  :review-severities
  {:value ["critical" "high" "medium" "low"] :kind :threshold
   :capability-tunable? false
@@ -1778,7 +1817,7 @@
           ;; that say "this verdict was wrong" come from. :kinds names which
           ;; journal kinds count as a judgement.
           :verdicts {:kinds ["gate" "critic-score" "cull-spared" "critic"
-                             "board-review" "critique"]}}
+                             "board-review" "critique" "epic-review"]}}
   :kind :policy :capability-tunable? false
   :provenance ["karamazov-5ge3" "karamazov-3htz"]
   :doc "WHICH RUNS ARE WORTH IMITATING, when the journal is exported as
@@ -2421,6 +2460,10 @@
    ;; two halves are one decision and belong in one editable place.
    :verdict-line-regex "(?i)\\bVERDICT\\b"
    :findings-regex "(?is)FINDINGS:\\s*(.+)$"
+   ;; The test runner's summary line, as judge/evidence reports the last one
+   ;; a shell run printed — clojure.test's shape here; a project on another
+   ;; runner retunes it like :test-run-regex (karamazov-0way).
+   :test-summary-regex "(?m)^Ran \\d+ tests, \\d+ assertions, \\d+ failures, \\d+ errors\\.?"
    ;; What a second-pass reply says when it cleared every candidate. Paired
    ;; with prompts/judge-verify.md, which asks for exactly this phrase, and
    ;; load-bearing: it is the one signal that separates "the judge checked and
@@ -2491,6 +2534,10 @@
   ;; check against: a coding run's proof is its test run, not confirmed
   ;; claims, so empty evidence must not refuse every figure (the first
   ;; self-modification run did the work correctly and could not ship it).
+  ;; On a coding run that evidence is what the branch MEASURED — the output
+  ;; of its own eval and shell calls (ship.clj observed-output) — beside any
+  ;; artifacts; before that was added the rung checked a branch's figures
+  ;; against its siblings' accepted answers and nothing else (karamazov-3s54).
   {:value
    [{:name :answer-exists
      :when (str/blank? (str answer))
@@ -2511,19 +2558,45 @@
                         "```")}
     {:name :figure-coverage
      :when (and (seq evidence) (seq uncovered-numbers))
+     ;; Says what COVERS a figure, not only that these are uncovered. Run
+     ;; 9ead0638's cloud-wrap owner read "verify these or remove them",
+     ;; grepped its own test file for the coordinates it had quoted, and was
+     ;; refused three times: a read is not an artifact, and nothing had said
+     ;; what one was.
      :message-form (str "Your answer states figures no artifact supports: "
                         (str/join ", " (map (fn [x] (str "`" x "`"))
                                             (take 8 uncovered-numbers)))
                         ".\nA number in an answer has to come from something"
                         " confirmed or measured — that is the difference between a"
-                        " report and a fabricated one. Either verify these or"
-                        " remove them from the answer.")}
+                        " report and a fabricated one. A figure is covered when it"
+                        " appears in the OUTPUT of a test run or an `eval` this"
+                        " branch ran; reading or grepping a file that contains it"
+                        " covers nothing. Test inputs, coordinates, seeds and line"
+                        " numbers belong in the code, not the report — drop them,"
+                        " and keep only the figures your test output shows.")}
     {:name :engages-problem
      :when (and (not (str/blank? (str problem)))
                 (not (engages-problem? problem answer)))
      :message-form (str "This answer shares no substantive term with the problem"
                         " statement. Whatever it establishes, it is not an answer to"
                         " the question that was asked.")}
+    ;; karamazov-a6mj.3, thinkingbox's <DONE> rule: a final message may not
+    ;; both close the conversation and ask something of the person reading
+    ;; it. An answer whose last line is a question to the reader, an offer
+    ;; of more work or a request for confirmation is a run that has a
+    ;; question left, not a result. The predicate is last-line-only and
+    ;; phrase-anchored (wordlists :asks-the-reader) so prose that asks and
+    ;; answers itself is left alone.
+    {:name :asks-the-reader
+     :when (asks-the-reader? answer)
+     :message-form (str "This answer ends by asking its reader something — a"
+                        " question, an offer, a request to confirm. `done` closes"
+                        " the run; nobody answers what it asks. If the question"
+                        " matters to the result, ask it now with `ask_human` (a"
+                        " person answers when one is attached, the run's user"
+                        " context otherwise) and finish once you know. If it does"
+                        " not, decide it, say which way you went, and call `done`"
+                        " with the result and no question in it.")}
     ;; karamazov-g86, dirge completeness_gate.rs: the silent-exhaustion tell.
     ;; One sentence in the model's own voice planning more work means the run
     ;; is stopping halfway and saying so. The detection conjunction and its
@@ -2679,6 +2752,10 @@
    :turn-budget      #{"done" "give_up"}
    :wind-down        #{"done"}
    :last-call        #{"done" "give_up"}
+   ;; The planning branch's terminal is its declaration, so its wind-down
+   ;; rungs are met by `plan` — a `done` from it is refused before dispatch.
+   :plan-wind-down   #{"plan"}
+   :plan-last-call   #{"plan"}
    ;; :reflection's vocabulary went with its gate (karamazov-634): 69 firings
    ;; and 0 met across two models, five task shapes and two harness
    ;; generations. A prediction vocabulary for a gate that no longer exists
@@ -2745,13 +2822,44 @@
          the reviewer/critic can judge beats a silent exhaustion the supervisor
          has to re-task blind. If the branch truly has nothing, the done-gate
          refuses it and the done-blocked rung takes over toward giving up."
+   ;; NOT ON A PLANNING BRANCH: it has nothing to ship, and forcing a done
+   ;; on it produced a refusal every time (karamazov-ee72). :plan-last-call
+   ;; below is its rung.
    :when (and (state/active? branch)
+              (not (state/planning? branch))
               max-turns
               (>= (state/turn-count branch)
                   (- max-turns (threshold :last-call-window))))
    :message-file "last-call"
    :message-suffix "\n\nYou are at turn {{turn-count}} of {{max-turns}} — your last turns. Ship your best partial now with done."
    :prediction "the branch ships"
+   :window 2}
+
+  ;; Priority 2.4: the planning branch's last-call, one slot above the
+  ;; builder's so the two never compete (they are disjoint by :when anyway;
+  ;; priorities must be distinct). Same budget, same window.
+  {:gate :plan-last-call
+   :provenance ["karamazov-ee72"]
+   :priority 2.4
+   :budget :max-last-call-steers
+   :tool "plan"
+   :doc "A PLANNING branch is in its last turns and has not declared its plan.
+         The design step is a worker loop whose only product is the `plan`
+         call, and until this rung existed its final turns were last-call's:
+         a FORCED `done` that the nothing-changed rung refused, because an RFC
+         is not a diff. Every design step in three live runs spent its whole
+         cap that way and half of them sent the task to construction with no
+         plan at all. This forces the one call that ends the step — `plan` is
+         the planning branch's terminal tool, which is what makes it
+         forceable under :forceable-tools' own rule."
+   :when (and (state/active? branch)
+              (state/planning? branch)
+              max-turns
+              (>= (state/turn-count branch)
+                  (- max-turns (threshold :last-call-window))))
+   :message-file "plan-last-call"
+   :message-suffix "\n\nYou are at turn {{turn-count}} of {{max-turns}} — your last planning turns.{% if goal %} You are planning: {{goal}}.{% endif %}"
+   :prediction "the branch declares its plan"
    :window 2}
 
   {:gate :mechanics-streak
@@ -2815,12 +2923,34 @@
          a branch near its cap is told to ship before it is nagged to do more,
          but it never outranks done-blocked or safe-state: a branch that has
          just been told it cannot ship is not being asked to ship."
+   ;; NOT ON A PLANNING BRANCH — :plan-wind-down below asks it for the one
+   ;; thing it can deliver (karamazov-ee72).
    :when (and (state/active? branch)
+              (not (state/planning? branch))
               (>= (state/turn-count branch)
                   (* (threshold :wind-down-fraction) (max 1 max-turns))))
    :message-file "wind-down"
    :message-suffix "\n\nYou are at turn {{turn-count}} of {{max-turns}}."
    :prediction "the branch ships"
+   :window 3}
+
+  ;; Priority 3.1: the planning branch's wind-down, below :plan-last-call as
+  ;; :wind-down is below :last-call — the soft ask, then the force.
+  {:gate :plan-wind-down
+   :provenance ["karamazov-ee72"]
+   :priority 3.1
+   :budget :max-wind-down-steers
+   :doc "A PLANNING branch has passed the wind-down fraction of its cap with
+         no plan declared. The builder's :wind-down told it to ship, which it
+         cannot; this asks for the plan, which is the step's only product and
+         the call that ends it."
+   :when (and (state/active? branch)
+              (state/planning? branch)
+              (>= (state/turn-count branch)
+                  (* (threshold :wind-down-fraction) (max 1 max-turns))))
+   :message-file "plan-wind-down"
+   :message-suffix "\n\nYou are at turn {{turn-count}} of {{max-turns}}.{% if goal %} You are planning: {{goal}}.{% endif %}"
+   :prediction "the branch declares its plan"
    :window 3}
 
   {:gate :emergency-review
@@ -2937,7 +3067,10 @@
                notified (:notified-fractions branch #{})]
            (boolean (some (fn [frac] (and (>= used frac) (not (contains? notified frac))))
                           (threshold :turn-budget-notices))))
-   :message-suffix "**Turn budget**: you have used {{turn-count}} of {{max-turns}} turns. Land what you can verify rather than opening a new line of attack.{% if goal %} You are working on: {{goal}}{% endif %}"
+   ;; Two arms: a builder is told to land, a planning branch to declare —
+   ;; "land what you can verify" told every design branch to build what it
+   ;; was briefed not to (karamazov-ee72).
+   :message-suffix "**Turn budget**: you have used {{turn-count}} of {{max-turns}} turns.{% if planning %} Declare the plan you have with `plan` rather than reading further — the plan is this step's only product, and the call ends the step.{% else %} Land what you can verify rather than opening a new line of attack.{% endif %}{% if goal %} You are working on: {{goal}}{% endif %}"
    ;; Says what it MEASURES. The rule reads :settle-called :turn-budget,
    ;; which is #{"done" "give_up"} — terminating, not converging. A branch
    ;; that edits and writes its way toward finishing was settling `unmet`
@@ -3311,8 +3444,23 @@
  ;; Schemas for the tools a gate may FORCE via native tool_choice (tier 3b:
  ;; data). Only the terminal tools — forcing a mid-task tool would be the
  ;; harness deciding rather than steering. Minimal: enough for the provider
- ;; to accept the function.
- {"done" {:name "done"
+ ;; to accept the function. `plan` is here because it is the TERMINAL tool
+ ;; of a planning branch (state/planning?): the design step ends on its
+ ;; declaration, and :plan-last-call forces it exactly as :last-call forces
+ ;; a builder's done (karamazov-ee72).
+ {"plan" {:name "plan"
+          :description "Declare the plan: the files this change touches, the tests that pin it, the goal, and the RFC document when this step asked for one."
+          :parameters {:type "object"
+                       :properties {:files {:type "array" :items {:type "string"}
+                                            :description "Relative paths of the files the change touches."}
+                                    :tests {:type "array" :items {:type "string"}
+                                            :description "Relative paths of the tests that pin it."}
+                                    :goal {:type "string"
+                                           :description "One or two sentences: what the change does and how it meets the whole ask."}
+                                    :rfc {:type "string"
+                                          :description "The RFC document in markdown, when this step asked for one."}}
+                       :required ["files" "goal"]}}
+  "done" {:name "done"
           :description "Finish the task and return the final answer."
           :parameters {:type "object"
                        :properties {:answer {:type "string"

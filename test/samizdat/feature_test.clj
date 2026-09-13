@@ -10,10 +10,12 @@
   at the stage that applies them (RFC-012)."
   (:require [clojure.string :as str]
             [clojure.test :refer [deftest testing is use-fixtures]]
+            [samizdat.agent.files :as files]
             [samizdat.agent.gitdiff :as gitdiff]
             [samizdat.agent.judge :as judge]
             [samizdat.agent.state :as ag-state]
             [samizdat.agent.tools :as ag-tools]
+            [samizdat.agent.verify :as verify]
             [samizdat.engine.proc :as proc]
             [samizdat.llm.client :as llm]
             [mycelium.cell :as cell]
@@ -401,6 +403,55 @@
                                                :verify-cmd "run-tests"}}})]
         (is (= :completed (:status r)) "real diff + review pass + tests pass = completed")))))
 
+(defn- roles-answering-acceptance
+  "`roles`, plus a fixed YES/NO to every acceptance question — the narrow
+  judge the :judge criteria put to the critic role at verify."
+  [opts yesno]
+  (let [base (roles opts)]
+    (fn [a b messages & more]
+      (if (some #(str/includes? (str (:content %)) "Reply with YES or NO") messages)
+        {:content (str yesno " — because the evidence says so.") :finish-reason "stop"}
+        (apply base a b messages more)))))
+
+(deftest acceptance-criteria-are-gate-2-beside-the-tests
+  ;; karamazov-a6mj.2. The operator's criteria, checked at :feature/verify
+  ;; with both kinds — :check by the shell and :judge by the critic role. A
+  ;; :judge criterion is the one the ship gate cannot run (model-free), so it
+  ;; is the one that shows Gate 2 doing work of its own here.
+  (let [spec [{:name "suite green" :check "run-tests"}
+              {:name "says what it saw"
+               :judge "Does the answer say what the screenshot showed?"}]
+        run (fn [yesno]
+              (with-redefs [judge/deterministic-block (constantly nil)
+                            judge/parse-verdict (constantly :complete)
+                            judge/blocking-findings (constantly nil)
+                            gitdiff/changed-files (constantly ["src/x.clj" "test/x_test.clj"])
+                            proc/run (constantly {:exit 0 :out "ok"})
+                            verify/run-verify (fn [_ _ _] {:green? true :output "63 tests, 0 failures"})
+                            llm/chat (roles-answering-acceptance {:review :pass} yesno)]
+                (let [conn (db/open! ":memory:")
+                      r (run-feature conn {:config {:run {:loop "feature" :subtasks ["alpha"]
+                                                         :verify-cmd "run-tests"
+                                                         :acceptance spec
+                                                         :max-revisions 1 :max-revisions-hard 1}}})]
+                  {:result r
+                   :notes (journal/notes conn (:run-id r) :acceptance)
+                   :route (journal/notes conn (:run-id r) :route)
+                   :verify (journal/notes conn (:run-id r) :verify)})))]
+    (testing "a judge criterion the critic answers NO keeps the feature from completing"
+      (let [{:keys [result notes route verify]} (run "NO")]
+        (is (not= :completed (:status result)) "the suite was green; the criterion was not")
+        (let [at-verify (filter #(= "verify" (:at %)) notes)]
+          (is (seq at-verify) "the verdicts are on the journal from the verify stage")
+          (is (= [true false] (mapv :passed? (:results (first at-verify))))
+              "the check passed and the judge failed, each on its own line"))
+        (is (some #(false? (:tests-passed %)) route) "route saw gate 2 red")
+        (is (some #(str/includes? (str (:note %)) "says what it saw") verify)
+            "and the verify note names the criterion, in the failure's own words")))
+    (testing "the same run with a YES completes"
+      (let [{:keys [result]} (run "YES")]
+        (is (= :completed (:status result)))))))
+
 (deftest a-switch-directive-changes-the-implement-approach-mid-run
   ;; self-healing: the supervisor decides the board isn't working and switches
   ;; this run's implement stage to the decompose loop with a `switch`
@@ -662,3 +713,46 @@
              (outcome {:review/decision :pass :critic/decision :pass
                        :verify/passed? false :verify/note "2 failures"})))
       (finally (db/close conn)))))
+
+(deftest a-failing-acceptance-criterion-is-what-the-next-round-is-told
+  (let [g (str (guidance-for {:review/decision :pass
+                              :critic/decision :ship
+                              :verify/passed? false
+                              :verify/note "tests passed\nacceptance criteria not met:\nFAIL  says what it saw\n  NO — the answer never mentions a screenshot"}))]
+    (is (str/includes? g "says what it saw"))
+    (is (str/includes? g "never mentions a screenshot"))))
+
+(deftest the-acceptance-judge-is-shown-the-sources-and-a-rubric-sized-diff
+  ;; karamazov-0way's other half. Run 5f8de58c's verify-stage judges failed two
+  ;; operator criteria in their own words for evidence not shown: the diff was
+  ;; cut at the branch budget before the test files, and "the wind is one
+  ;; field" cannot be seen in a diff at all when the sampling predates the
+  ;; run. Each question now sees the diff focused on it under the rubric's
+  ;; budget, and the current sources of the files the run changed.
+  (let [asked (atom [])
+        spec [{:name "one field" :judge "Does every reader call `wind-at`?"}]
+        big-diff (str "diff --git a/PLAN.md b/PLAN.md\n+plan\n"
+                      "diff --git a/src/x.clj b/src/x.clj\n+(defn wind-at [] 1)\n")]
+    (with-redefs [judge/deterministic-block (constantly nil)
+                  judge/parse-verdict (constantly :complete)
+                  judge/blocking-findings (constantly nil)
+                  gitdiff/changed-files (constantly ["src/x.clj" "test/x_test.clj"])
+                  gitdiff/diff (fn [_ _ & _] big-diff)
+                  files/read-sources (constantly {"src/x.clj" "(ns x)\n(defn wind-at [] 1)\n(defn hud [] (wind-at))"})
+                  proc/run (constantly {:exit 0 :out "ok"})
+                  verify/run-verify (fn [_ _ _] {:green? true :output "63 tests, 0 failures"})
+                  llm/chat (let [base (roles-answering-acceptance {:review :pass} "YES")]
+                             (fn [a b messages & more]
+                               (when (some #(str/includes? (str (:content %)) "Reply with YES or NO") messages)
+                                 (swap! asked conj (str/join "\n" (map :content messages))))
+                               (apply base a b messages more)))]
+      (let [conn (db/open! ":memory:")]
+        (run-feature conn {:config {:run {:loop "feature" :subtasks ["alpha"]
+                                          :verify-cmd "run-tests" :acceptance spec
+                                          :max-revisions 1 :max-revisions-hard 1}}})
+        (let [q (first (filter #(str/includes? % "Does every reader call") @asked))]
+          (is (some? q) "the judge criterion was asked")
+          (is (str/includes? q "## Current sources") "the judge sees the tree, not only the diff")
+          (is (str/includes? q "(defn hud [] (wind-at))"))
+          (is (< (str/index-of q "diff --git a/src/x.clj") (str/index-of q "diff --git a/PLAN.md"))
+              "the diff is ordered with the file the question is about first"))))))

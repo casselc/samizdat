@@ -19,4 +19,11 @@ Nobody answered within {{seconds}} seconds, so the question has expired.
 
 Do not ask again — the same silence will cost you another {{seconds}} seconds.
 Decide it yourself, say which way you went and why, and continue.
+{% endif %}{% if simulated %}
+
+(Answered by the run's simulated user from `:run :user-context` — the operator's stated ground truth, not a person. Treat it as what the user context says; where it says "I don't know", the context does not decide it and you must.)
+{% endif %}{% if simulator-down %}
+There is no human attached to this run, and the simulated user that would have answered from `:run :user-context` could not be reached: {{error}}.
+
+Decide it yourself and say in your next message which way you went and why.
 {% endif %}

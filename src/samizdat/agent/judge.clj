@@ -115,6 +115,40 @@
               verdict-rules)
         verdict-default)))
 
+(defn parse-yesno
+  "A narrow yes/no verdict from a judge reply: true, false, or nil when the
+  reply commits to neither (karamazov-a6mj.2).
+
+  The first word of the first non-blank line decides; failing that, the last
+  line's first word, because a judge that reasons first and answers last is
+  the other natural shape. Anything else is nil — undecided — and the caller
+  treats undecided as fail-open, like every judge here: a judge that cannot
+  answer must not be able to refuse a ship on its own. Reasoning blocks are
+  stripped first (`usable`), for the reason its docstring gives."
+  [reply]
+  (let [lines (->> (str/split-lines (usable reply)) (remove str/blank?) vec)
+        word (fn [line] (some-> (re-find #"^\s*\W*([A-Za-z]+)" (str line)) second str/lower-case))
+        read (fn [w] (case w "yes" true "no" false nil))]
+    (when (seq lines)
+      (let [head (read (word (first lines)))]
+        (if (some? head) head (read (word (peek lines))))))))
+
+(defn yesno-prompt
+  "The user message for one acceptance question — prompts/acceptance-judge.md
+  over the question, the answer the branch wants to ship, the run's evidence
+  block and its diff. Asks for YES or NO first, which is the shape
+  `parse-yesno` reads; change both together."
+  [{:keys [question answer evidence diff sources]}]
+  (prompt/render "acceptance-judge"
+                 {:question (str question)
+                  :answer (str answer)
+                  :evidence (not-empty (str evidence))
+                  :diff (not-empty (str diff))
+                  ;; The tree as it stands, for a question the diff cannot
+                  ;; answer (karamazov-0way). Optional: the ship gate and
+                  ;; the plan critic have none to give.
+                  :sources (not-empty (str sources))}))
+
 (defn findings
   "The FINDINGS section of a judge reply, verbatim, trimmed — or nil when it
   named none. What the critique passes back to the branch below the verdict."
@@ -158,13 +192,114 @@
                   (map (fn [r] (str (if (= "failure" (some-> (:category r) name))
                                       "FAILED" "ok")
                                     ": " (one-line (arg r :command) 70))))
-                  distinct)]
+                  distinct)
+        ;; The last test-runner summary a SHELL run printed. "commands run"
+        ;; says a suite was invoked and whether the command exited 0; it
+        ;; cannot say how many tests ran or passed, and the first live rubric
+        ;; rated "total test count >= 83 and green" NO for exactly that
+        ;; reason (karamazov-0way). Shell rows only: a summary line read out
+        ;; of a file is not a run. The pattern is gates.edn :judge-rules.
+        summary (let [re (re-pattern (str (:test-summary-regex (rules))))]
+                  (->> rows
+                       (filter #(= "shell" (:tool_name %)))
+                       (keep #(last (re-seq re (str (:result %)))))
+                       last))]
     (str "tool calls: " (count (keep :tool_name rows))
          "\ntools used: " (str/join ", " (sort (keys by-tool)))
          (when (seq files)
            (str "\nfiles written: " (str/join ", " files)))
          (when (seq cmds)
-           (str "\ncommands run:\n  " (str/join "\n  " cmds))))))
+           (str "\ncommands run:\n  " (str/join "\n  " cmds)))
+         (when summary
+           (str "\nlast test summary: " summary)))))
+
+(defn- diff-chunks
+  "A unified diff split into its per-file chunks at each `diff --git` header.
+  A diff with no header is one chunk; text before the first header is one."
+  [diff]
+  (let [s (str diff)
+        marker "diff --git "
+        starts (loop [from 0 acc []]
+                 (if-let [i (str/index-of s marker from)]
+                   (recur (inc i)
+                          (if (or (zero? i) (= \newline (nth s (dec i))))
+                            (conj acc i)
+                            acc))
+                   acc))]
+    (if (empty? starts)
+      [s]
+      (let [starts (if (zero? (first starts)) starts (into [0] starts))
+            ends (concat (rest starts) [(count s)])]
+        (mapv (fn [a b] (subs s a b)) starts ends)))))
+
+(defn- relevance
+  "How much `text` (with `header` naming its file) is about `criterion`: ten
+  per path the criterion names that appears in the header, one per
+  backticked symbol it names that the text mentions. Shared by focus-diff
+  and focus-sources so a question ranks a file the same way in both."
+  [criterion header text]
+  (let [c (str criterion)
+        paths (re-seq #"[\w./-]+\.[A-Za-z]{1,5}" c)
+        symbols (map second (re-seq #"`([^`]+)`" c))]
+    (+ (* 10 (count (filter #(str/includes? (str header) %) paths)))
+       (count (filter #(str/includes? (str text) %) symbols)))))
+
+(defn focus-sources
+  "The current SOURCES of the files a run changed, `{path content}`, as one
+  text block ordered by relevance to `criterion` and cut at `cap` chars (nil
+  for no cut), or nil when there are none.
+
+  A question about the TREE cannot be answered from a diff: run 5f8de58c's
+  verify-stage judge answered 'the wind is one field felt and shown
+  consistently' NO because 'the diff contains no change unifying wind
+  sampling' — the sampling predated the run. The file the question names
+  comes first for the same reason focus-diff puts it first (karamazov-0way)."
+  [sources criterion cap]
+  (when (seq sources)
+    (let [blocks (->> sources
+                      (sort-by key)
+                      (map (fn [[path content]]
+                             [(- (relevance criterion path content)) path
+                              (str "--- " path " ---\n" content)]))
+                      (sort-by (fn [[s p _]] [s p]))
+                      (map peek))
+          text (str/join "\n" blocks)]
+      (if (and cap (> (count text) (long cap)))
+        (str (subs text 0 (long cap)) "\n… (sources truncated at " cap " chars)")
+        text))))
+
+(defn focus-diff
+  "`diff` with its per-file chunks reordered by relevance to `criterion`:
+  files whose path the criterion names first, then files whose hunks
+  mention a symbol it names in backticks, then the rest in git's order.
+  Nothing is dropped — this decides what a later cut falls on.
+
+  The first rubric ever scored on a real epic (run 5f8de58c) rated 8 of 15
+  criteria NO with 'the diff is truncated before windview_test.clj' as the
+  reason: the epic's diff was 20417 chars, the branch budget cut it at
+  12000, and the cut landed on the header of the one file five of the
+  questions were about. A rubric question is narrow, so the evidence it
+  needs is narrow too, and it should be at the front (karamazov-0way)."
+  [diff criterion]
+  (let [chunks (diff-chunks diff)]
+    (if (< (count chunks) 2)
+      (str diff)
+      (let [header (fn [chunk] (first (str/split-lines chunk)))
+            score (fn [chunk] (relevance criterion (header chunk) chunk))]
+        (->> chunks
+             (map-indexed (fn [i chunk] [(- (score chunk)) i chunk]))
+             (sort-by (fn [[s i _]] [s i]))
+             (map peek)
+             (apply str))))))
+
+(defn focused-diff
+  "focus-diff then cut at `cap` (nil for no cut) — the one call a cell makes
+  to show a question its diff under a budget."
+  [diff criterion cap]
+  (let [s (focus-diff diff criterion)]
+    (if (and cap (> (count s) (long cap)))
+      (str (subs s 0 (long cap)) "\n… (diff truncated at " cap " chars)")
+      s)))
 
 ;; --- deterministic finalization gates (run before the LLM judge) -----------
 
@@ -532,6 +667,136 @@
            :requirement requirement
            :diff plan
            :prompt-fn (fn [_] (plan-prompt {:requirement requirement :plan plan}))}))
+
+;; --- the rubric judge (karamazov-a6mj.4) -------------------------------------
+;;
+;; thinkingbox's RubricJudge: N narrow YES/NO criteria with weights, deduction
+;; and multiplicative penalties, a threshold. One verdict over N criteria is
+;; the multi-part question a judge is bad at; one question per criterion is
+;; what it is good at, and a failure that names the criterion is the steering
+;; principle's "what failed" for free. The RFC brief already asks the owner
+;; for an "## Acceptance criteria" list — this is what makes that list the
+;; contract epic-review judges the whole change by, criterion by criterion.
+
+(defn section-bullets
+  "The bullet lines under the first markdown heading matching `heading-re`,
+  markers stripped, up to the next heading. [] when the section is absent.
+  The one reader behind an RFC's work items and its acceptance criteria."
+  [text heading-re]
+  (let [section (->> (str/split-lines (str text))
+                     (drop-while #(not (re-find heading-re %)))
+                     rest
+                     (take-while #(not (re-find #"^#+\s" %))))]
+    (into []
+          (comp (map str/trim)
+                (filter #(re-find #"^[-*+]\s" %))
+                (map #(str/replace % #"^[-*+]\s+" ""))
+                (remove str/blank?))
+          section)))
+
+(defn parse-criteria
+  "An RFC's acceptance criteria as rubric entries, from the bullets of its
+  \"## Acceptance criteria\" section: `{:criterion :weight :kind}`.
+
+  The marker syntax, taught in prompts/rfc-brief.md and read tolerantly:
+    - text          positive, weight 1
+    - [3] text      positive, weight 3
+    - [-2] text     a DEDUCTION penalty: YES (the violation is observed) costs 2
+    - [x0.5] text   a MULTIPLICATIVE penalty: YES scales the reward by 0.5
+  Anything else in the brackets is left on the text. [] when there is no such
+  section — the rubric then does not run, and the two-pass review alone
+  decides, as before. Which heading names the section is gates.edn :rubric
+  :heading-regex, beside the brief that asks for it."
+  [rfc]
+  (into []
+        (map (fn [line]
+               (if-let [[_ mark rest] (re-matches #"(?s)\[\s*(x?-?[0-9]+(?:\.[0-9]+)?)\s*\]\s*(.+)" line)]
+                 (let [mult? (str/starts-with? mark "x")
+                       n (Double/parseDouble (if mult? (subs mark 1) mark))]
+                   (cond
+                     mult? {:criterion (str/trim rest) :weight (Math/abs n) :kind :multiplicative}
+                     (neg? n) {:criterion (str/trim rest) :weight (- n) :kind :deduction}
+                     :else {:criterion (str/trim rest) :weight n :kind :positive}))
+                 {:criterion line :weight 1.0 :kind :positive})))
+        (section-bullets rfc (re-pattern (:heading-regex (gates/threshold :rubric))))))
+
+(defn rubric-score
+  "The reward for a set of rated criteria — `{:criterion :weight :kind
+  :rating}` with `:rating` true / false / nil — as thinkingbox computes it:
+
+    base   = clamp((Σ earned − Σ deductions) / Σ positive weight, 0, 1)
+    reward = clamp(base × Π (1 − m) over fired multiplicative penalties, 0, 1)
+
+  An UNDECIDED rating (nil — the judge gave no verdict) is left out of both
+  sides rather than read as NO: it neither earns nor costs, and a positive
+  criterion nobody decided is not in the denominator. Nothing decided is
+  `:reward nil`, so the caller fails open the way every judge here does.
+  Returns the parts beside the total so a note can show its arithmetic."
+  [ratings]
+  (let [decided (filter #(boolean? (:rating %)) ratings)
+        pos (filter #(= :positive (:kind %)) decided)
+        positive-weight (reduce + 0.0 (map :weight pos))
+        earned (reduce + 0.0 (map :weight (filter :rating pos)))
+        deductions (reduce + 0.0 (map :weight (filter #(and (= :deduction (:kind %)) (:rating %)) decided)))
+        mults (map :weight (filter #(and (= :multiplicative (:kind %)) (:rating %)) decided))
+        clamp (fn [x] (-> x (max 0.0) (min 1.0)))
+        base (when (pos? positive-weight) (clamp (/ (- earned deductions) positive-weight)))
+        reward (when base (clamp (reduce * base (map #(- 1.0 %) mults))))]
+    {:earned earned :deductions deductions :positive-weight positive-weight
+     :multipliers (vec mults) :base base :reward reward
+     :undecided (count (remove #(boolean? (:rating %)) ratings))}))
+
+(defn review-rubric
+  "Judge `answer` + `diff` + `evidence` against `criteria` (from
+  `parse-criteria`), ONE narrow yes/no call per criterion through `chat`
+  (fn [content] -> reply), and score the ratings. Returns
+  `{:ratings :reward :pass? :findings}` — `:findings` the failed positive
+  criteria and the fired penalties, one line each carrying the judge's own
+  sentence, or nil when there is nothing to say.
+
+  `:pass?` is reward ≥ `threshold`, and TRUE when the reward is nil (nothing
+  decided): a judge that cannot answer must not be able to refuse the ship on
+  its own. A reduce over the criteria, not a mapv — `chat` parks.
+
+  `:diff-chars`, when given, is the rubric's OWN diff budget: each question
+  is shown `diff` reordered by relevance to it (focus-diff) and cut there.
+  Pass the diff uncut (or under a generous fetch cap) for that to mean
+  anything — a diff already cut at the branch budget has lost what the
+  reorder would have put first (karamazov-0way). Without it the diff is
+  shown as it came. `:sources` ({path content}, the files the run changed as
+  they stand) are shown the same way under `:sources-chars`, for a question
+  about the tree rather than the change."
+  [{:keys [chat criteria answer diff evidence threshold diff-chars sources sources-chars]}]
+  (let [ratings (reduce (fn [acc {:keys [criterion] :as c}]
+                          (let [shown (if diff-chars
+                                        (focused-diff diff criterion diff-chars)
+                                        diff)
+                                reply (try (chat (yesno-prompt
+                                                  {:question criterion :answer answer
+                                                   :diff shown :evidence evidence
+                                                   :sources (focus-sources sources criterion
+                                                                           sources-chars)}))
+                                           (catch Throwable _ nil))]
+                            (conj acc (assoc c :rating (parse-yesno reply)
+                                             :reply (for-the-record :reply-chars (usable reply))))))
+                        [] criteria)
+        score (rubric-score ratings)
+        reward (:reward score)
+        failed (filter (fn [{:keys [kind rating]}]
+                         (or (and (= :positive kind) (false? rating))
+                             (and (not= :positive kind) (true? rating))))
+                       ratings)
+        line (fn [{:keys [criterion kind reply]}]
+               (str "- [rubric] "
+                    (if (= :positive kind) "not met: " "penalty: ")
+                    criterion
+                    (when-let [r (some-> reply str/trim not-empty)]
+                      (str " — " (first (str/split-lines r))))))]
+    {:ratings ratings
+     :score score
+     :reward reward
+     :pass? (or (nil? reward) (>= reward (double threshold)))
+     :findings (when (seq failed) (str/join "\n" (map line failed)))}))
 
 (defn critique-message
   "The single consolidated note injected back into the branch when the judge

@@ -443,3 +443,202 @@
           "and the note carries the findings it blocked on")
       (is (every? #(seq (str (:branch_id %))) rows)
           "the branch is on the row, where every other per-branch note keeps it"))))
+
+;; --- the rubric judge (karamazov-a6mj.4) ------------------------------------------
+
+(def ^:private rfc-with-criteria
+  "# RFC: haze
+## Purpose
+fade the horizon.
+## Work items
+- pure flight.haze with tests
+## Acceptance criteria
+- the far ground blends toward the sky colour
+- [3] no tree is drawn past the ground it stands on
+- [-2] the near field changed appearance
+- [x0.5] a test was deleted or weakened
+Some trailing prose that is not a bullet.
+## Notes
+- not a criterion, this is another section")
+
+(deftest acceptance-criteria-parse-from-the-rfc-with-weights-and-penalties
+  (let [c (judge/parse-criteria rfc-with-criteria)]
+    (is (= 4 (count c)) "the bullets of that section and no other")
+    (is (= {:criterion "the far ground blends toward the sky colour" :weight 1.0 :kind :positive}
+           (first c))
+        "an unmarked bullet is a positive criterion of weight 1")
+    (is (= {:criterion "no tree is drawn past the ground it stands on" :weight 3.0 :kind :positive}
+           (second c)))
+    (is (= {:criterion "the near field changed appearance" :weight 2.0 :kind :deduction}
+           (nth c 2))
+        "[-N] is a deduction: YES costs N")
+    (is (= {:criterion "a test was deleted or weakened" :weight 0.5 :kind :multiplicative}
+           (nth c 3))
+        "[xM] scales the reward by (1 - M) on YES"))
+  (is (= [] (judge/parse-criteria "# RFC\n## Purpose\nnone"))
+      "an RFC with no such section has no criteria — the rubric does not run")
+  (is (= [] (judge/parse-criteria nil))))
+
+(deftest the-rubric-arithmetic-is-the-documented-one
+  ;; thinkingbox docs/rubrics_judge.md's worked example: 50+30+0 earned of
+  ;; 100, a 15-point deduction, a x0.5 multiplicative penalty -> 0.325.
+  (let [ratings [{:criterion "a" :weight 50.0 :kind :positive :rating true}
+                 {:criterion "b" :weight 30.0 :kind :positive :rating true}
+                 {:criterion "c" :weight 20.0 :kind :positive :rating false}
+                 {:criterion "d" :weight 15.0 :kind :deduction :rating true}
+                 {:criterion "e" :weight 0.5 :kind :multiplicative :rating true}]
+        s (judge/rubric-score ratings)]
+    (is (= 80.0 (:earned s)))
+    (is (= 15.0 (:deductions s)))
+    (is (= 100.0 (:positive-weight s)))
+    (is (< (Math/abs (- 0.65 (:base s))) 1e-9))
+    (is (< (Math/abs (- 0.325 (:reward s))) 1e-9)))
+  (testing "clamped to [0, 1]: deductions cannot go negative"
+    (is (= 0.0 (:reward (judge/rubric-score [{:weight 1.0 :kind :positive :rating false}
+                                              {:weight 5.0 :kind :deduction :rating true}])))))
+  (testing "an undecided rating is left out of both sides, not read as NO"
+    (let [s (judge/rubric-score [{:weight 1.0 :kind :positive :rating true}
+                                 {:weight 1.0 :kind :positive :rating nil}
+                                 {:weight 3.0 :kind :deduction :rating nil}])]
+      (is (= 1.0 (:reward s)))
+      (is (= 2 (:undecided s)) "the undecided positive and the undecided penalty")))
+  (testing "nothing decided is no reward, not zero — fail-open for the caller"
+    (is (nil? (:reward (judge/rubric-score [{:weight 1.0 :kind :positive :rating nil}]))))
+    (is (nil? (:reward (judge/rubric-score []))))))
+
+(deftest a-rubric-review-asks-one-narrow-question-per-criterion
+  (let [asked (atom [])
+        chat (fn [content]
+               (swap! asked conj content)
+               (cond (str/includes? content "blends toward the sky") "YES — draw.clj lerps toward sky-color."
+                     (str/includes? content "past the ground") "NO. tree-radius is still 190."
+                     (str/includes? content "near field") "NO"
+                     (str/includes? content "deleted or weakened") "well, hard to say"
+                     :else "NO"))
+        r (judge/review-rubric {:chat chat
+                                :criteria (judge/parse-criteria rfc-with-criteria)
+                                :answer "faded it" :diff "+ lerp" :evidence "files written: draw.clj"
+                                :threshold 0.7})]
+    (is (= 4 (count @asked)) "one call per criterion, none combined")
+    (is (every? #(str/includes? % "faded it") @asked) "each sees the answer")
+    (is (every? #(re-find #"(?i)YES or NO" %) @asked) "each is the narrow yes/no shape")
+    (is (= [true false false nil] (mapv :rating (:ratings r))))
+    ;; earned 1 of 4 positive weight, no penalty triggered, one undecided
+    (is (< (Math/abs (- 0.25 (:reward r))) 1e-9))
+    (is (false? (:pass? r)))
+    (testing "the findings name the failed criteria with the judge's own words"
+      (is (str/includes? (:findings r) "no tree is drawn past the ground"))
+      (is (str/includes? (:findings r) "tree-radius is still 190"))
+      (is (not (str/includes? (:findings r) "blends toward the sky")) "a met criterion is not a finding")
+      (is (not (str/includes? (:findings r) "deleted or weakened")) "an undecided one is not a finding either"))
+    (testing "a penalty that fired is a finding too"
+      (let [r (judge/review-rubric {:chat (fn [c] (if (str/includes? c "near field") "YES, the fog covers everything" "YES"))
+                                    :criteria (judge/parse-criteria rfc-with-criteria)
+                                    :answer "a" :threshold 0.7})]
+        (is (str/includes? (:findings r) "near field"))
+        (is (< (:reward r) 1.0))))
+    (testing "over the threshold passes and has nothing to say"
+      (let [r (judge/review-rubric {:chat (fn [c] (if (re-find #"near field|deleted" c) "NO" "YES"))
+                                    :criteria (judge/parse-criteria rfc-with-criteria)
+                                    :answer "a" :threshold 0.7})]
+        (is (= 1.0 (:reward r)))
+        (is (true? (:pass? r)))
+        (is (nil? (:findings r)))))
+    (testing "a judge that decides nothing passes — fail-open, and says so"
+      (let [r (judge/review-rubric {:chat (fn [_] "hmm") :criteria (judge/parse-criteria rfc-with-criteria)
+                                    :answer "a" :threshold 0.7})]
+        (is (nil? (:reward r)))
+        (is (true? (:pass? r)))))))
+
+(deftest section-bullets-reads-one-markdown-section
+  (is (= ["a" "b"] (judge/section-bullets "# t\n## Work items\n- a\n* b\nprose\n## Next\n- c" #"(?i)^#+\s*work items\b")))
+  (is (= [] (judge/section-bullets "# t\n## Other\n- c" #"(?i)^#+\s*work items\b"))))
+
+;; --- karamazov-0way: the rubric judge must be shown the file the question is about
+
+(def ^:private epic-diff
+  (str "diff --git a/PLAN.md b/PLAN.md\n--- a/PLAN.md\n+++ b/PLAN.md\n+wind arrow over the bird\n"
+       "diff --git a/src/flight/game.clj b/src/flight/game.clj\n--- a/src/flight/game.clj\n+++ b/src/flight/game.clj\n"
+       "-(def ring-spacing 70.0)\n+(def ring-spacing 50.0)\n"
+       "diff --git a/test/flight/windview_test.clj b/test/flight/windview_test.clj\n--- a/test/flight/windview_test.clj\n+++ b/test/flight/windview_test.clj\n"
+       "+(deftest arrow-tail-is-the-float-point\n+  (is (= (indicator-arrow pos wind) ...)))\n"))
+
+(deftest focus-diff-puts-the-criterion-s-files-first
+  ;; The first live rubric (run 5f8de58c) scored 0.4: the epic's 20417-char
+  ;; diff was cut at 12000, exactly at windview_test.clj's header, and five
+  ;; criteria about that file were rated NO for evidence never shown. The
+  ;; per-file chunks are ordered by what the question names before any cut.
+  (testing "a path named in the criterion goes first"
+    (let [d (judge/focus-diff epic-diff "The test in test/flight/windview_test.clj pins the arrow")]
+      (is (str/starts-with? d "diff --git a/test/flight/windview_test.clj"))
+      (is (= (count epic-diff) (count d)) "reordered, nothing dropped")))
+  (testing "a backticked symbol the criterion names ranks the file that mentions it"
+    (let [d (judge/focus-diff epic-diff "A test pins that `indicator-arrow`'s tail equals the float point")]
+      (is (str/starts-with? d "diff --git a/test/flight/windview_test.clj")))
+    (let [d (judge/focus-diff epic-diff "`ring-spacing` is 50 so rings stay reachable")]
+      (is (str/starts-with? d "diff --git a/src/flight/game.clj"))))
+  (testing "a criterion naming nothing leaves the diff in git's order"
+    (is (= epic-diff (judge/focus-diff epic-diff "the code is clean"))))
+  (testing "a diff with no file headers is returned as it is"
+    (is (= "+ lerp" (judge/focus-diff "+ lerp" "`lerp` is used")))
+    (is (= "" (judge/focus-diff "" "anything")))))
+
+(deftest the-rubric-judge-sees-the-relevant-hunks-under-its-own-budget
+  (let [seen (atom [])
+        chat (fn [content] (swap! seen conj content) "YES")
+        crit (judge/parse-criteria (str "## Acceptance criteria\n\n"
+                                        "- A test pins `indicator-arrow`'s tail\n"
+                                        "- `ring-spacing` is 50\n"))]
+    (judge/review-rubric {:chat chat :criteria crit :answer "done" :evidence "e"
+                          :diff epic-diff :diff-chars 260 :threshold 0.7})
+    (is (= 2 (count @seen)))
+    (testing "each question is shown its own file first, and the cut falls elsewhere"
+      (is (str/includes? (first @seen) "arrow-tail-is-the-float-point"))
+      (is (str/includes? (second @seen) "ring-spacing 50.0"))
+      (is (every? #(str/includes? % "diff truncated at 260 chars") @seen)
+          "the budget is the rubric's, not the branch's :diff-chars"))
+    (testing "without a budget the diff is passed through whole"
+      (reset! seen [])
+      (judge/review-rubric {:chat chat :criteria crit :answer "done" :diff epic-diff :threshold 0.7})
+      (is (every? #(str/includes? % "PLAN.md") @seen)))))
+
+(deftest evidence-carries-the-last-test-summary-it-saw
+  ;; 'Total test count is >= 83 and the suite is green' was rated NO because
+  ;; the evidence block listed `ok: jolt -M:test` with no output. The last
+  ;; clojure.test summary line a shell run printed is a fact the judge can read.
+  (let [e (judge/evidence [{:tool_name "shell" :args {:command "jolt -M:test"} :category "success"
+                            :result "...\nRan 86 tests, 1436 assertions, 0 failures, 0 errors.\n"}
+                           {:tool_name "shell" :args {:command "jolt -M:test"} :category "success"
+                            :result "Ran 92 tests, 1493 assertions, 0 failures, 0 errors."}
+                           {:tool_name "read_file" :args {:path "x"} :category "neutral"
+                            :result "Ran 999 tests, 0 assertions, 0 failures, 0 errors."}])]
+    (is (str/includes? e "last test summary: Ran 92 tests, 1493 assertions, 0 failures, 0 errors")
+        "the LAST one a shell run printed")
+    (is (not (str/includes? e "999")) "a summary read out of a file is not a run"))
+  (is (not (str/includes? (judge/evidence [{:tool_name "eval" :args {} :category "neutral"}])
+                          "last test summary"))
+      "nothing to say when no run printed one"))
+
+(deftest focus-sources-ranks-the-files-a-criterion-is-about-and-cuts-there
+  ;; The verify-stage judge answered "the wind is one field felt and shown
+  ;; consistently" NO because "the diff contains no change unifying wind
+  ;; sampling" — the sampling predates the run, and a question about the
+  ;; TREE cannot be answered from a diff. The current sources of the files
+  ;; the run changed are the evidence, the one the question names first.
+  (let [srcs {"src/flight/draw.clj" "(ns flight.draw) (defn hud [] (wind/wind-at pos))"
+              "src/flight/game.clj" "(ns flight.game) (def ring-spacing 50.0)"
+              "src/flight/wind.clj" "(ns flight.wind) (defn wind-at [pos] ...)"}
+        out (judge/focus-sources srcs "The wind is one field: every reader calls `wind-at`" nil)]
+    (testing "files mentioning the named symbol come first, in path order among equals"
+      (is (str/starts-with? out "--- src/flight/draw.clj ---"))
+      (is (< (str/index-of out "src/flight/wind.clj") (str/index-of out "src/flight/game.clj"))))
+    (testing "a named path outranks a symbol mention"
+      (is (str/starts-with? (judge/focus-sources srcs "`ring-spacing` in src/flight/game.clj is 50" nil)
+                            "--- src/flight/game.clj ---")))
+    (testing "every source is present when there is no budget"
+      (doseq [p (keys srcs)] (is (str/includes? out p))))
+    (testing "a budget cuts the tail and says so"
+      (let [cut (judge/focus-sources srcs "`wind-at`" 80)]
+        (is (<= (count cut) (+ 80 60)))
+        (is (str/includes? cut "sources truncated at 80 chars"))))
+    (is (nil? (judge/focus-sources {} "anything" 100)) "no sources, no section")))

@@ -43,7 +43,7 @@
   Used by the `prompt` tool to list what a project can edit. Reading one still
   goes through the userspace seam, which is what decides whether the project's
   version or the template answers."
-  ["architect" "ask-tool" "assembly" "branch-cap"
+  ["acceptance-failed" "acceptance-judge" "architect" "ask-tool" "assembly" "branch-cap"
    "branch-out" "cell-shadowed" "cell-tool" "clojure-syntax"
    "compaction-marker" "compaction-summary" "context-empty" "critic"
    "critic-system" "crossover" "cull-reprieve" "digest"
@@ -60,8 +60,9 @@
    "memory-tool" "memory-unverified" "metrics-findings" "milestone" "mutation-refused"
    "no-call-exhausted" "no-call-imitation" "no-call-reason" "no-call-withheld"
    "no-edits" "over-budget" "orienting" "outside-role-surface" "oversight-pass"
-   "parked" "parse-error-causes" "parse-error-repaired" "plan-not-landed"
-   "plan-tool" "planner" "policy-tool" "probe-candidates"
+   "parked" "parse-error-causes" "parse-error-repaired" "plan-last-call"
+   "plan-not-landed" "plan-tool" "plan-wind-down" "planner"
+   "planning-declares-a-plan" "policy-tool" "probe-candidates"
    "probe-steer" "problem" "progress-stalled" "prologue-cap"
    "prompt-tool" "read-too-large" "repl-needs-a-plan" "repopulate"
    "residual-report" "retirement" "retry-diagnosis" "review" "rfc-brief"
@@ -73,8 +74,9 @@
    "task-claimed" "task-current" "task-none" "task-reflection"
    "task-reflection-input" "task-required" "task-tests" "team-worker"
    "thinking-runaway" "trajectory-judge" "turn-deadline" "uncertain-effect"
-   "verify-hollow" "verify-red" "verify-timeout" "verify-unknown"
-   "watch-intervention" "webfetch-tool" "websearch-tool" "wind-down" "workflow-select"
+   "user-simulator" "verify-hollow" "verify-red" "verify-timeout" "verify-unknown"
+   "watch-intervention" "webfetch-tool" "websearch-tool" "wind-down" "workflow-history"
+   "workflow-select"
    "workflow-select-system"])
 
 (defn prompt
