@@ -16,7 +16,8 @@
   different file later is how the answer gets corrected.
 
   The wording lives in prompts/plan-tool.md; the flow lives in the `repl`
-  manifest."
+  manifest. On a branch tagged `:planning?` (the board's design step) the
+  call is also the branch's END — see state/finish-planning."
   (:require [samizdat.agent.state :as state]
             [samizdat.agent.tools.base :as base]
             [samizdat.prompt :as prompt]))
@@ -55,9 +56,18 @@
       (base/malformed branch (msg {:needs-files true}))
 
       :else
-      (let [b (state/declare-plan branch {:files files :tests tests :goal goal :rfc rfc})]
+      (let [b (state/declare-plan branch {:files files :tests tests :goal goal :rfc rfc})
+            ;; On a PLANNING branch the declaration is the deliverable, so it
+            ;; ends the branch — the board's design step reads the plan off the
+            ;; finished branch. Nothing else ended it: the step ran to its cap
+            ;; and was then forced to a `done` it could never pass
+            ;; (karamazov-ee72). A building branch is untouched — its plan
+            ;; opens the repl session it then has to land.
+            planning? (state/planning? b)
+            b (if planning? (state/finish-planning b) b)]
         (assoc (base/ok branch (msg {:declared true
                                      :files (clojure.string/join ", "
                                                                  (:files (state/plan b)))
-                                     :goal goal :rfc (boolean rfc)}))
+                                     :goal goal :rfc (boolean rfc)
+                                     :planning planning?}))
                :branch b)))))

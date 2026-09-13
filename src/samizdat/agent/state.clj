@@ -682,6 +682,36 @@
   (let [written (or (:repl-written branch) #{})]
     (vec (remove written (:files (plan branch))))))
 
+(defn planning?
+  "Whether this branch's PRODUCT is a plan rather than a change: the cell that
+  opened it tagged it `:planning? true`, as the board's design step does.
+
+  The tag is the whole distinction the loop has between a branch that is
+  designing and one that is building, and a lot hangs on it. A planning
+  branch is refused the tools that build or ship (phases.edn
+  :planning-declares-a-plan), its wind-down rungs ask for the plan rather
+  than a `done` (gates.edn :plan-wind-down / :plan-last-call), and its `plan`
+  call ENDS it — see finish-planning. Before any of that existed the design
+  step was a worker loop with no terminal but its cap: the branch had its
+  plan by turn 8, ran on, was FORCED to `done` by last-call, and had that
+  refused by the nothing-changed rung because an RFC is not a diff. Every
+  design step in runs 40c57a2a, 9ead0638 and 5f8de58c spent its whole cap
+  that way (karamazov-ee72)."
+  [branch]
+  (boolean (:planning? branch)))
+
+(defn finish-planning
+  "Close a planning branch on its declaration. The plan is the deliverable, so
+  the branch ends finished (not abandoned) with the plan as its answer — the
+  RFC when it wrote one, else the goal, else the files — and loop/route reads
+  the same :status/:final-answer it reads off a `done`."
+  [branch]
+  (let [p (plan branch)]
+    (assoc branch
+           :status :done
+           :inactive-reason "plan declared"
+           :final-answer (or (:rfc p) (:goal p) (str/join ", " (:files p))))))
+
 (defn last-failure
   "The most recent turn that went wrong, as `{:turn :tool :error}`, or nil.
 

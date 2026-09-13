@@ -811,3 +811,50 @@
         ;; :board/attempts is seeded to 0 at every claim and dies with the
         ;; round; this one is the task's and survives both.
         (is (= 2 (tasks/attempted! conn id)))))))
+
+(deftest the-design-step-ends-on-its-plan-call
+  ;; karamazov-ee72, live in every RFC run: the design branch had its plan, and
+  ;; nothing ended the step — it ran to the design cap, was FORCED to `done` by
+  ;; last-call in its final turns, and the nothing-changed rung refused the RFC
+  ;; for not being a diff. Here the owner tries `done` first (refused: it is
+  ;; planning) and declares on its second turn, and the step ends there.
+  (let [design-turns (atom 0)]
+    (with-redefs [llm/chat
+                  (fn [a c messages & rest]
+                    (let [content (str/join " " (map :content messages))]
+                      (cond
+                        (str/includes? content "reviewing this PLAN")
+                        {:content "VERDICT: COMPLETE" :finish-reason "stop"}
+                        (str/includes? content "PLANNING this task")
+                        (if (= 1 (swap! design-turns inc))
+                          ;; the shape the live runs took: the RFC handed to done
+                          {:content "```tool-call\n{\"name\":\"done\",\"args\":{\"answer\":\"the plan: storage and handlers\"}}\n```"
+                           :finish-reason "stop"}
+                          {:content (str "```tool-call\n{\"name\":\"plan\",\"args\":"
+                                         "{\"files\":[\"src/x.clj\"],\"tests\":[\"test/x_test.clj\"],"
+                                         "\"goal\":\"storage, handlers and templates\"}}\n```")
+                           :finish-reason "stop"})
+                        (judge-call? messages)
+                        {:content "VERDICT: COMPLETE" :finish-reason "stop"}
+                        :else (apply ships-its-task a c messages rest))))]
+      (let [conn (db/open! ":memory:")]
+        (tasks/create! conn {:title "storage and handlers"
+                             :body "Add the storage layer AND the handlers AND the templates. Three parts."})
+        (run-board conn {})
+        (let [rid (:id (first (db/fetch conn ["SELECT id FROM runs"])))
+              designs (journal/notes conn rid :design)
+              turns (db/fetch conn ["SELECT tool_name, result FROM turns WHERE branch_id LIKE 'design-%' ORDER BY turn"])]
+          (testing "one attempt, and it declared"
+            (is (= 1 (count designs)))
+            (is (true? (:declared (first designs)))))
+          (testing "the step ended on the plan call — two turns, not the cap"
+            ;; The turns table, not the stub's counter: task reflection
+            ;; re-sends the branch's conversation to the model at the end,
+            ;; and that call carries the brief too.
+            (is (= ["done" "plan"] (mapv :tool_name turns))))
+          (testing "the done was refused as a planning branch's, naming plan"
+            (is (str/includes? (:result (first turns)) "`plan`"))
+            (is (not (str/includes? (:result (first turns)) "changed no files"))
+                "not the construction refusal aimed at a branch that was never meant to change one"))
+          (testing "construction still ran and the task closed"
+            (is (= "done" (:status (first (db/fetch conn ["SELECT status FROM tasks"])))))))))))

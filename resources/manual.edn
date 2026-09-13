@@ -58,6 +58,8 @@
     :summary "A child carrying its parent's conversation — optionally truncated to an earlier turn."}
    {:name samizdat.agent.state/add-message
     :summary "Append a message, optionally stamped with the turn it belongs to."}
+   {:name samizdat.agent.state/planning?
+    :summary "Whether this branch's product is a plan (the board's design step tags it) — its plan call ends it, and done and the file writers are refused."}
    {:name samizdat.agent.state/describe
     :summary "One line about a branch: status, turns, artifacts, why it stopped."}
    {:name samizdat.agent.state/parked?

@@ -71,7 +71,23 @@
  ;; TO TURN IT OFF, set :tools to #{}. It is data, and a project that does not
  ;; want a board should not have to carry one.
  :refusals
- [{:rule :work-needs-a-task
+ [;; A PLANNING BRANCH DECLARES; IT DOES NOT BUILD OR SHIP. The board's design
+  ;; step tags its branch :planning? (state/planning?) because its whole
+  ;; product is the `plan` call, which ends it. Before this rule the same
+  ;; branch was steered exactly like a builder: told to land files it was
+  ;; briefed not to write, and forced to a `done` in its last turns that the
+  ;; nothing-changed rung then refused — an RFC is not a diff. The refusal
+  ;; here says the one thing that is true of the branch: call plan. First in
+  ;; the table because it is the sharpest reason; a design branch holds a
+  ;; task, so :work-needs-a-task would not have caught it anyway
+  ;; (karamazov-ee72). `give_up` stays open — a branch that cannot plan must
+  ;; still be able to say so.
+  {:rule :planning-declares-a-plan
+   :when (samizdat.agent.state/planning? branch)
+   :tools #{"done" "write_file" "edit_file"}
+   :message-file "planning-declares-a-plan"}
+
+  {:rule :work-needs-a-task
    :when (nil? (:task branch))
    :tools #{"write_file" "edit_file"}
    :message-file "task-required"}
@@ -137,8 +153,13 @@
   ;; deliberation in run b8ae2b1f spent the pass on this and steered nothing
   ;; (karamazov-iwm4). Asking whether the branch MAY plan, rather than naming
   ;; the exempt role, keeps this right if a role gains or loses the tool.
+  ;; AND NOT A PLANNING BRANCH. Its plan IS its product and the plan call
+  ;; ends it, so "call plan first, then the REPL is yours" would tell it to
+  ;; finish before it has read anything. The hypothesis this rule forces is
+  ;; the thing a planning branch is in the middle of forming.
   {:rule :repl-needs-a-plan
    :when (and (samizdat.agent.roles/may-use? (:role branch) "plan")
+              (not (samizdat.agent.state/planning? branch))
               (not (samizdat.agent.state/planned? branch)))
    :tools #{"eval"}
    :message-file "repl-needs-a-plan"}

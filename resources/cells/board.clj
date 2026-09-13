@@ -597,7 +597,18 @@
               b (-> (state/new-branch
                      {:id did :problem prob
                       :messages (turn/initial-messages prob suffix :implementor)})
-                    (assoc :task {:id task :title (:title t)} :role :implementor))
+                    (assoc :task {:id task :title (:title t)} :role :implementor
+                           ;; THE TAG THAT MAKES THIS A DESIGN BRANCH. The
+                           ;; worker loop has no terminal but a finished
+                           ;; branch or its cap, and a plan finished nothing:
+                           ;; the branch had its RFC by turn 8, ran on, was
+                           ;; forced to `done` by last-call and refused by the
+                           ;; nothing-changed rung. Tagged, its `plan` call
+                           ;; ends it (state/finish-planning), done and the
+                           ;; file writers are refused (phases.edn
+                           ;; :planning-declares-a-plan) and the wind-down
+                           ;; rungs ask for the plan (karamazov-ee72).
+                           :planning? true))
               out (try (myc/run-compiled (wf/worker-compiled) ictx {:branch b :turn 1})
                        (catch Throwable _ nil))
               ;; The worker loop returns {:branch <finished branch>}, the same

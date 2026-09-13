@@ -950,3 +950,66 @@
     (is (nil? (base/phase-refusal {:branch {:id "SUP" :role :supervisor}
                                    :tool-name "eval"}))
         "it is shown eval, permitted eval, and must therefore be able to call it")))
+
+;; --- karamazov-ee72: a planning branch's product is its plan -----------------
+;;
+;; The board's design step runs the owner as a worker loop whose deliverable is
+;; the `plan` call — nothing else. Seen live in runs 40c57a2a, 9ead0638 and
+;; 5f8de58c: the branch had its plan by turn 8, nothing ended the step, and the
+;; wind-down rungs then FORCED a `done` (last-call's native tool_choice) that
+;; the nothing-changed rung refused for the RFC not being a diff. Every design
+;; step spent its whole cap, and every second attempt was sent to build.
+
+(deftest a-plan-call-ends-a-planning-branch
+  (let [b (assoc (state/new-branch {:id "design-T0" :problem "p"}) :planning? true)
+        r (tools/run-tool {:tool-name "plan" :branch b
+                           :args {"files" ["src/a.clj"] "tests" ["test/a_test.clj"]
+                                  "goal" "wire the thing" "rfc" "# RFC\n\nPurpose."}})
+        b' (:branch r)]
+    (is (state/planning? b))
+    (is (not (state/planning? (state/new-branch {:id "T0" :problem "p"})))
+        "a branch nobody tagged is building")
+    (is (= ["src/a.clj" "test/a_test.clj"] (:files (state/plan b')))
+        "the declaration is recorded as on any branch")
+    (is (not (state/active? b'))
+        "and it IS the deliverable: the step is over on the turn it is declared")
+    (is (= :done (:status b')))
+    (is (some? (:final-answer b')) "a declared plan closes the branch as finished, not abandoned")
+    (is (str/includes? (str (:result r)) "planning step is complete")
+        "the reply says the step is over")
+    (is (not (str/includes? (str (:result r)) "write those files"))
+        "and does not tell a planning branch to build")))
+
+(deftest a-plan-call-on-a-building-branch-keeps-it-open
+  (let [b (state/new-branch {:id "T0" :problem "p"})
+        r (tools/run-tool {:tool-name "plan" :branch b
+                           :args {"files" ["src/a.clj"] "goal" "g"}})]
+    (is (state/active? (:branch r)) "the repl-session contract is unchanged off a planning branch")
+    (is (str/includes? (str (:result r)) "write those files"))))
+
+(deftest a-malformed-plan-call-does-not-end-a-planning-branch
+  (let [b (assoc (state/new-branch {:id "design-T0" :problem "p"}) :planning? true)
+        r (tools/run-tool {:tool-name "plan" :branch b :args {"goal" "no files named"}})]
+    (is (= :mechanics (:category r)))
+    (is (state/active? (or (:branch r) b)) "a refused declaration leaves the step open to try again")))
+
+(deftest a-planning-branch-may-not-build-or-ship
+  (let [b (-> (state/new-branch {:id "design-T0" :problem "p"})
+              (assoc :planning? true :role :implementor :task {:id "t1" :title "t"}))]
+    (testing "done and the file writers are withheld, naming the plan call instead"
+      (doseq [t ["done" "write_file" "edit_file"]]
+        (let [r (base/phase-refusal {:branch b :tool-name t})]
+          (is (= :planning-declares-a-plan (:refusal-rule r)) (str t " should be refused"))
+          (is (str/includes? (str (:result r)) "`plan`") "the refusal says what to call")
+          (is (str/includes? (str (:result r)) t) "and names the call it declined"))))
+    (testing "everything the branch reads with stays free, and so do plan and give_up"
+      (doseq [t ["read_file" "grep" "shell" "plan" "give_up"]]
+        (is (nil? (base/phase-refusal {:branch b :tool-name t})) (str t " was refused"))))
+    (testing "the REPL is open to a planning branch without a prior plan — its plan IS the product,
+              and the entry refusal's 'call plan first' would end the step"
+      (is (nil? (base/phase-refusal {:branch b :tool-name "eval"}))))
+    (testing "a building branch is untouched by the rule"
+      (let [building (dissoc b :planning?)]
+        (doseq [t ["done" "write_file" "edit_file"]]
+          (is (not= :planning-declares-a-plan
+                    (:refusal-rule (base/phase-refusal {:branch building :tool-name t})))))))))

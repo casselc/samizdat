@@ -2645,3 +2645,49 @@
     (is (empty? (filter #(= "slow" (:gate %))
                         (journal/retirement-candidates c {:min-runs 3 :limit 8})))
         "met-late is a window to widen, not a gate to delete")))
+
+(deftest the-wind-down-rungs-ask-a-planning-branch-for-its-plan
+  ;; karamazov-ee72. The design step is a worker loop whose deliverable is a
+  ;; `plan` call, and every wind-down rung told it to SHIP: turn-budget said
+  ;; "land what you can verify", wind-down said ship, and last-call FORCED a
+  ;; done via native tool_choice — which the nothing-changed rung then refused,
+  ;; because an RFC is not a diff. Three runs, every design step, its whole cap.
+  (let [planning (fn [turns] (branch-with :planning? true :turns (vec (repeat turns {}))))]
+    (testing "in the last turns the force is a plan call, not a done"
+      (let [d (arbiter/decide {:branch (planning 9) :max-turns 10})]
+        (is (= :plan-last-call (:gate d)))
+        (is (= "plan" (:name (arbiter/force-tool-for d)))
+            "plan is the planning branch's terminal tool, so it is the one forced")
+        (is (str/includes? (:message d) "`plan`"))
+        (is (not (str/includes? (:message d) "done")))
+        (is (not-any? #{:last-call :wind-down}
+                      (map :gate (arbiter/eligible {:branch (planning 9) :max-turns 10})))
+            "the ship rungs stay silent on a branch that has nothing to ship")))
+    (testing "past the wind-down fraction the soft steer asks for the plan"
+      (let [elig (map :gate (arbiter/eligible {:branch (planning 34) :max-turns 40}))]
+        (is (some #{:plan-wind-down} elig))
+        (is (not-any? #{:wind-down} elig))))
+    (testing "the turn-budget notice names the plan, not landing"
+      (let [msg ((:message (gates/by-name :turn-budget)) {:branch (planning 5) :max-turns 10})]
+        (is (str/includes? msg "`plan`"))
+        (is (not (str/includes? msg "Land what you can verify")))
+        (is (str/includes? ((:message (gates/by-name :turn-budget))
+                            {:branch (branch-with :turns (vec (repeat 5 {}))) :max-turns 10})
+                           "Land what you can verify")
+            "a building branch reads the notice it always did")))
+    (testing "a building branch is steered exactly as before"
+      (is (= :last-call (:gate (arbiter/decide {:branch (branch-with :turns (vec (repeat 39 {})))
+                                                :max-turns 40}))))
+      (is (not-any? #{:plan-last-call :plan-wind-down}
+                    (map :gate (arbiter/eligible {:branch (branch-with :turns (vec (repeat 39 {})))
+                                                  :max-turns 40})))))
+    (testing "the planning rungs settle on the plan call and plan is forceable"
+      (is (= #{"plan"} (get (gates/tool-vocab :settle-called) :plan-last-call)))
+      (is (= #{"plan"} (get (gates/tool-vocab :settle-called) :plan-wind-down)))
+      (is (= "plan" (:name (get-in (gates/config) [:forceable-tools "plan"]))))
+      (is (contains? (set (get-in (gates/config) [:forceable-tools "plan" :parameters :required]))
+                     "files")))
+    (testing "a spent planning branch is not steered — the step is over"
+      (let [done (assoc (planning 9) :status :done :final-answer "plan")]
+        (is (not-any? #{:plan-last-call :plan-wind-down}
+                      (map :gate (arbiter/eligible {:branch done :max-turns 10}))))))))
