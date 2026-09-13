@@ -538,6 +538,28 @@
     (is (state/planned? (state/note-write b "a.clj"))
         "partly landed is still an open session — do not close it mid-way")))
 
+;; --- a re-plan over files already written is still a plan ------------------
+;; The write ledger survives a re-plan on purpose (run a3566c73, see
+;; declare-plan). Combined with "landed means closed" above, that made a plan
+;; naming ONLY files the branch had already written dead on arrival: unwritten
+;; was empty the moment it was declared, so eval was refused with "call plan
+;; first" — which it had just done — and the branch re-planned the same files
+;; into the same refusal. Run 9ead0638's HUD owner livelocked this way from
+;; turn 74 (plan at 75 and 78, eval refused at 74, 77 and 80). A fresh
+;; declaration opens the session; the NEXT write is what lands it.
+
+(deftest re-declaring-written-files-reopens-the-session
+  (let [landed (-> (state/declare-plan {} {:files ["a.clj"]})
+                   (state/note-write "a.clj"))
+        again (state/declare-plan landed {:files ["a.clj"] :goal "verify a"})]
+    (is (not (state/planned? landed)) "landed: closed")
+    (is (state/planned? again)
+        "re-declared over written files: OPEN — the branch has named its hypothesis")
+    (is (empty? (state/unwritten again))
+        "but nothing is OWED, so done is not withheld by plan-not-landed (a3566c73)")
+    (is (not (state/planned? (state/note-write again "a.clj")))
+        "the next write lands it and closes the session again — the contract stays cyclic")))
+
 ;; --- karamazov-b3z: a child sees the surface it sits in ---------------------
 ;; A task owner got its own contract and nothing about the whole: which sibling
 ;; parts exist, what the overarching goal is, what another owner is already

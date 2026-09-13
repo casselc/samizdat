@@ -657,7 +657,11 @@
                               ;; produced one — free prose, not a path, so it is
                               ;; not folded into :files. nil for a lightweight plan.
                               :rfc (some-> rfc str not-empty)}
-                  :repl-written (or (:repl-written branch) #{}))))
+                  :repl-written (or (:repl-written branch) #{})
+                  ;; A declaration nothing has been written against yet. This
+                  ;; is what keeps the session OPEN when every declared file is
+                  ;; already in the ledger — see planned?.
+                  :repl-fresh? true)))
 
 (defn plan
   "The branch's current declaration, or nil."
@@ -667,7 +671,9 @@
 (defn note-write
   "Record that `path` was actually written, discharging it from the plan."
   [branch path]
-  (update branch :repl-written (fnil conj #{}) (norm-path path)))
+  (-> branch
+      (update :repl-written (fnil conj #{}) (norm-path path))
+      (assoc :repl-fresh? false)))
 
 (defn unwritten
   "Declared files this branch has not written yet, in declaration order — the
@@ -730,10 +736,20 @@
   Landing closes the session, so the next `eval` needs its own plan. That makes
   the contract cyclic rather than one-shot, which is what any multi-part task
   needs. An empty declaration is still not a plan: naming no file is the state
-  the contract exists to rule out."
+  the contract exists to rule out.
+
+  A FRESH DECLARATION IS OPEN EVEN WHEN ITS FILES ARE ALREADY WRITTEN. The
+  ledger survives a re-plan (declare-plan, run a3566c73), so without this a
+  plan naming only files the branch had already landed was closed the moment
+  it was declared: eval refused with \"call plan first\", the branch re-planned
+  the same files into the same refusal — run 9ead0638's HUD owner, turns
+  74-80. The next write is what lands such a plan; until then the branch has
+  named its hypothesis and the REPL is its to use. `done` is not affected:
+  plan-not-landed reads `unwritten`, which is empty here."
   [branch]
   (boolean (and (seq (:files (plan branch)))
-                (seq (unwritten branch)))))
+                (or (seq (unwritten branch))
+                    (:repl-fresh? branch)))))
 
 (defn branch-id-for
   "A branch id that says WHICH TASK it is working: `T<owner><-slug>[v<round>]`.
