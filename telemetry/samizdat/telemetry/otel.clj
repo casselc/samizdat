@@ -63,31 +63,50 @@
 
 (defn- mirror-langfuse
   "Add the Langfuse view beside the canonical keys. Derived from the manifest,
-  never hand-mapped here."
-  [attrs]
-  (let [m (contract/langfuse-mapping)
-        kind (get attrs "samizdat.observation.kind")
-        session (some #(get attrs %) (:session-sources m))
-        model (some->> (:model-source m) (get attrs))
-        infra? (or (= "infra-error" (get attrs "samizdat.evaluator.status"))
-                   (true? (get attrs "samizdat.infra.error")))]
-    (cond-> (reduce (fn [acc [canonical mirror]]
-                      (if (contains? attrs canonical) (assoc acc mirror (get attrs canonical)) acc))
-                    attrs
-                    (concat (:trace-metadata m) (:observation-metadata m)))
-      kind (assoc (:observation-type-key m) kind)
-      session (assoc (:session-id-key m) session)
-      model (assoc (:model-key m) model)
-      infra? (assoc (:level-key m) "ERROR"))))
+  never hand-mapped here. `kind` and `mode` are fallbacks for attributes
+  set after the span started (set-facts!); the attrs win when present.
+  Trace-level metadata is mirrored only from the root observation kind;
+  other kinds mirror the same attribute into observation metadata
+  (mapping/2, so child observations never clobber one trace slot)."
+  ([attrs] (mirror-langfuse attrs nil nil))
+  ([attrs kind mode]
+   (let [m (contract/langfuse-mapping)
+         kind (or (get attrs (:observation-type-source m)) kind)
+         mode (or (get attrs (:mode-source m)) mode)
+         root? (= kind (:root-observation-kind m))
+         session (some #(get attrs %) (:session-sources m))
+         model (some->> (:model-source m) (get attrs))
+         infra? (or (= "infra-error" (get attrs "samizdat.evaluator.status"))
+                    (true? (get attrs "samizdat.infra.error")))]
+     (cond-> (reduce (fn [acc [canonical mirror]]
+                       (if (contains? attrs canonical) (assoc acc mirror (get attrs canonical)) acc))
+                     attrs
+                     (concat (if root? (:trace-metadata m) (:trace-metadata-on-observation m))
+                             (:observation-metadata m)))
+       (contains? attrs (:observation-type-source m))
+       (assoc (:observation-type-key m) (get attrs (:observation-type-source m)))
+       session (assoc (:session-id-key m) session)
+       model (assoc (:model-key m) model)
+       infra? (assoc (:level-key m) "ERROR")))))
+
+(defn- span-attribute
+  "Read an attribute already set on an SDK span (nil for non-recording or
+  API spans, which carry no state)."
+  [span k]
+  (try (some-> (:state span) deref :attributes (get k))
+       (catch Throwable _ nil)))
 
 (defn prepare
   "Contract-normalise `attrs` (unknown keys -> samizdat.x.* strings), stamp the
-  observation kind and mirror the Langfuse keys. Pure."
+  observation kind, apply the content policy and mirror the Langfuse keys.
+  Pure."
   [kind attrs]
-  (-> (assoc attrs "samizdat.observation.kind" (name kind)
-             "samizdat.telemetry.schema" (contract/schema-version))
-      contract/normalize
-      mirror-langfuse))
+  (let [[attrs content] (contract/split-content attrs)
+        attrs (-> (assoc attrs "samizdat.observation.kind" (name kind)
+                         "samizdat.telemetry.schema" (contract/schema-version))
+                  contract/normalize
+                  mirror-langfuse)]
+    (contract/apply-content attrs content (get attrs "samizdat.observation.mode"))))
 
 (defn- tracer [] (:tracer @runtime))
 
@@ -101,9 +120,23 @@
     (or (tracer) trace/noop-tracer)))
 
 (defn set-facts!
-  "Set contract attributes on an active span (kind-less: facts only)."
+  "Set contract attributes on an active span. The span's own kind and mode
+  decide the trace-metadata scope and the content policy."
   [span attrs]
-  (trace/set-attributes! span (mirror-langfuse (contract/normalize attrs)))
+  (let [[attrs content] (contract/split-content attrs)
+        kind (span-attribute span "samizdat.observation.kind")
+        mode (or (get attrs "samizdat.observation.mode")
+                 (span-attribute span "samizdat.observation.mode"))
+        attrs (contract/apply-content (mirror-langfuse (contract/normalize attrs) kind mode)
+                                      content mode)
+        refused-key contract/content-refused-key
+        already (span-attribute span refused-key)
+        attrs (if (and already (contains? attrs refused-key))
+                (assoc attrs refused-key
+                       (str/join "," (sort (distinct (concat (str/split already #",")
+                                                             (str/split (get attrs refused-key) #","))))))
+                attrs)]
+    (trace/set-attributes! span attrs))
   span)
 
 ;; --- semantic wrappers -------------------------------------------------------

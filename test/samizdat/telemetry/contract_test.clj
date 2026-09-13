@@ -32,7 +32,7 @@
 
 (deftest manifest-loads-and-is-well-formed
   (is (= "samizdat-telemetry/1" (c/schema-version m)))
-  (is (= "samizdat-langfuse-mapping/1" (c/mapping-version m)))
+  (is (= "samizdat-langfuse-mapping/2" (c/mapping-version m)))
   (is (< 40 (count (:attributes m))))
   (is (= (count (:attributes m)) (count (c/attributes m))) "keys unique")
   (testing "the closed promoted set is small, typed and never double"
@@ -139,7 +139,42 @@
       (is (= [{:when {"samizdat.evaluator.status" "infra-error"} :level "ERROR"}
               {:when {"samizdat.infra.error" true} :level "ERROR"}]
              (:level-rules lf)))
-      (is (not (some #(re-find #"score" (str %)) (keys lf)))))))
+      (is (not (some #(re-find #"score" (str %)) (keys lf)))))
+    (testing "mapping/2: trace metadata is root-scoped, with an observation-scoped twin"
+      (is (= "root-observation" (:trace-metadata-scope lf)))
+      (is (= "agent" (:root-observation-kind lf)))
+      (is (= (set (keys (:trace-metadata lf))) (set (keys (:trace-metadata-on-observation lf)))))
+      (is (= "langfuse.observation.metadata.cost_action_charged_s"
+             (get (:trace-metadata-on-observation lf) "samizdat.cost.action_charged_s")))
+      (is (every? #(clojure.string/starts-with? % "langfuse.observation.metadata.")
+                  (vals (:trace-metadata-on-observation lf)))))
+    (testing "mapping/2: content policy is declared, synthetic-only"
+      (is (= "samizdat.observation.mode" (:mode-source lf)))
+      (is (= ["langfuse.observation.input" "langfuse.observation.output"] (:content-keys lf)))
+      (is (= ["synthetic"] (:content-allowed-modes lf)))
+      (is (= "samizdat.x.content.refused" (:content-refused-key lf))))))
+
+(deftest content-policy-never-stringifies-refused-content
+  (let [attrs {"samizdat.run.id" "r1"
+               "langfuse.observation.input" {:prompt "SYNTHETIC-IN"}
+               "langfuse.observation.output" "SYNTHETIC-OUT"}
+        [rest content] (c/split-content attrs)]
+    (is (= {"samizdat.run.id" "r1"} rest))
+    (is (= {"langfuse.observation.input" "{:prompt \"SYNTHETIC-IN\"}"
+            "langfuse.observation.output" "SYNTHETIC-OUT"} content))
+    (testing "normalising the split map cannot leak content into the fallback"
+      (is (not-any? #(re-find #"SYNTHETIC" (str %)) (vals (c/normalize m rest)))))
+    (testing "synthetic mode carries content verbatim"
+      (let [a (c/apply-content (c/normalize m rest) content "synthetic")]
+        (is (= "SYNTHETIC-OUT" (get a "langfuse.observation.output")))
+        (is (not (contains? a "samizdat.x.content.refused")))))
+    (doseq [mode ["live" "historical-import" nil "bogus"]]
+      (testing (str "mode " (pr-str mode) " refuses content and names the keys only")
+        (let [a (c/apply-content (c/normalize m rest) content mode)]
+          (is (= "langfuse.observation.input,langfuse.observation.output"
+                 (get a "samizdat.x.content.refused")))
+          (is (not-any? #(re-find #"SYNTHETIC" (str %)) (vals a))))))
+    (is (= (c/normalize m rest) (c/apply-content (c/normalize m rest) {} "live")) "no content, no marker")))
 
 (deftest typed-column-fragments-have-the-joc-v3-shape
   (let [frags (c/typed-column-fragments m)]
@@ -164,5 +199,5 @@
         (is (= "samizdat-telemetry/1" (get back "schema")))
         (is (= (count (:attributes m)) (count (get back "attributes"))))))
     (testing "mapping and fragments render too"
-      (is (str/starts-with? (c/mapping-json m) "{\"level-key\""))
+      (is (str/starts-with? (c/mapping-json m) "{\"content-allowed-modes\""))
       (is (str/includes? (c/fragments-json m) "\"otel_traces\"")))))

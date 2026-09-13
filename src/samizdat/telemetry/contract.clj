@@ -194,6 +194,56 @@
   (let [prefix "samizdat."]
     (str/replace (if (str/starts-with? k prefix) (subs k (count prefix)) k) "." "_")))
 
+(def root-observation-kind
+  "The observation kind that owns the trace: trace-level metadata is mirrored
+  from this kind only. Every other kind mirrors the same attribute into its
+  own observation metadata, so two child observations carrying different
+  values (two evaluator checks with different charged seconds, say) never
+  race for one trace-level slot (mapping/2)."
+  "agent")
+
+(def content-keys
+  "Langfuse observation content. Never carried by live or historical
+  telemetry (docs/DATA-GOVERNANCE.md excludes prompts, tool arguments and
+  file contents); allowed only in synthetic mode, where the content is stub
+  text that qualifies the input/output path itself."
+  ["langfuse.observation.input" "langfuse.observation.output"])
+
+(def content-allowed-modes #{"synthetic"})
+
+(def content-refused-key
+  "Fallback attribute naming the content keys that were dropped (key names
+  only, never the values)."
+  "samizdat.x.content.refused")
+
+(defn content-allowed?
+  "May observation content travel under `mode` (a samizdat.observation.mode
+  value)? Unknown or absent modes refuse."
+  [mode]
+  (contains? content-allowed-modes mode))
+
+(defn split-content
+  "Separate content keys from `attrs` before normalisation, so a refused
+  input/output can never be stringified into the fallback map.
+  Returns [attrs-without-content {content-key string-value}]."
+  [attrs]
+  (reduce (fn [[rest content] k]
+            (let [k* (key-string k) v (get attrs k)]
+              (if (and (some #{k*} content-keys) (some? v))
+                [(dissoc rest k) (assoc content k* (str v))]
+                [rest content])))
+          [attrs {}]
+          (keys attrs)))
+
+(defn apply-content
+  "Add `content` back to normalised `attrs` when `mode` allows it; otherwise
+  drop it and name the refused keys under `content-refused-key`."
+  [attrs content mode]
+  (cond
+    (empty? content) attrs
+    (content-allowed? mode) (merge attrs content)
+    :else (assoc attrs content-refused-key (str/join "," (sort (keys content))))))
+
 (defn langfuse-mapping
   "Derived, never hand-written: how each canonical attribute is mirrored for
   Langfuse. Canonical keys are always kept; the mirror is additive."
@@ -206,6 +256,12 @@
       :observation-type-key "langfuse.observation.type"
       :observation-type-source "samizdat.observation.kind"
       :observation-types (vec (:observation-kinds m))
+      :root-observation-kind root-observation-kind
+      :trace-metadata-scope "root-observation"
+      :mode-source "samizdat.observation.mode"
+      :content-keys content-keys
+      :content-allowed-modes (vec (sort content-allowed-modes))
+      :content-refused-key content-refused-key
       :session-id-key "langfuse.session.id"
       :session-sources (vec (:session-keys m))
       :model-key "langfuse.observation.model.name"
@@ -220,6 +276,11 @@
       :trace-metadata (into (sorted-map)
                             (map (fn [a] [(:key a) (str "langfuse.trace.metadata." (short-name (:key a)))]))
                             (:trace-metadata by-target))
+      ;; the same attributes on a non-root observation: observation-scoped
+      :trace-metadata-on-observation
+      (into (sorted-map)
+            (map (fn [a] [(:key a) (str "langfuse.observation.metadata." (short-name (:key a)))]))
+            (:trace-metadata by-target))
       :observation-metadata (into (sorted-map)
                                   (map (fn [a] [(:key a) (str "langfuse.observation.metadata." (short-name (:key a)))]))
                                   (:observation-metadata by-target))})))

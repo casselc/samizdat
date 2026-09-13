@@ -23,7 +23,7 @@
 ;; False, zero, negative and empty-string values are real values and are
 ;; always emitted; only nil is "absent".
 {:schema "samizdat-telemetry/1"
- :mapping-version "samizdat-langfuse-mapping/1"
+ :mapping-version "samizdat-langfuse-mapping/2"
  :fallback-prefix "samizdat.x."
  :observation-kinds ["agent" "generation" "tool" "evaluator" "span"]
  :session-keys ["samizdat.family.id" "samizdat.run.id"]

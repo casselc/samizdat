@@ -20,7 +20,8 @@
   "The semantic wrappers against the in-memory exporter: attribute types,
   false/zero/absent, signed negatives, the Langfuse mirror, lifecycle spans
   through the hook, suppression, and TRACEPARENT parenting."
-  (:require [clojure.test :refer [deftest is testing use-fixtures]]
+  (:require [clojure.string]
+            [clojure.test :refer [deftest is testing use-fixtures]]
             [otel.context :as ctx]
             [otel.exporter.memory :as memory]
             [otel.trace :as trace]
@@ -161,6 +162,64 @@
     (let [s (by-name "child")]
       (is (= "0af7651916cd43dd8448eb211c80319c" (get-in s [:span-context :trace-id])))
       (is (= "b7ad6b7169203331" (:parent-span-id s))))))
+
+(deftest trace-metadata-is-mirrored-from-the-root-observation-only
+  ;; Live finding (mapping/1): two evaluator.check children each mirrored
+  ;; samizdat.cost.action_charged_s into langfuse.trace.metadata.*, and the
+  ;; trace kept the last writer's value. Under mapping/2 only the agent
+  ;; (root) span writes trace metadata; children keep the same fact in
+  ;; their own observation metadata.
+  (tel/with-execution [root "execution" {"samizdat.run.id" "r1"
+                                         "samizdat.execution.kind" "continuation"
+                                         "samizdat.observation.mode" "synthetic"}]
+    (tel/with-evaluator [_ "action.check" {"samizdat.evaluator.id" "s80/5"
+                                           "samizdat.evaluator.status" "passed"
+                                           "samizdat.evaluator.purpose" "operational"
+                                           "samizdat.cost.action_charged_s" 0.045}])
+    (tel/with-evaluator [sp "action.check2" {"samizdat.evaluator.id" "s80/5"
+                                             "samizdat.evaluator.purpose" "operational"}]
+      (tel/set-facts! sp {"samizdat.cost.action_charged_s" 0.042
+                          "samizdat.evaluator.status" "failed"}))
+    (tel/record-budgets! root {:turns {:remaining 3}}))
+  (let [r (:attributes (by-name "execution"))
+        c1 (:attributes (by-name "action.check"))
+        c2 (:attributes (by-name "action.check2"))]
+    (is (= "continuation" (get r "langfuse.trace.metadata.execution_kind")))
+    (is (= 3 (get r "langfuse.trace.metadata.budget_turns_remaining")) "set-facts! on the root still writes trace metadata")
+    (is (= 0.045 (get c1 "samizdat.cost.action_charged_s")) "canonical key always kept")
+    (is (= 0.045 (get c1 "langfuse.observation.metadata.cost_action_charged_s")))
+    (is (= 0.042 (get c2 "langfuse.observation.metadata.cost_action_charged_s")) "set-facts! reads the span's kind")
+    (is (= "failed" (get c2 "langfuse.observation.metadata.evaluator_status")))
+    (doseq [a [c1 c2]]
+      (is (not-any? #(clojure.string/starts-with? % "langfuse.trace.metadata.") (keys a))
+          "a child never writes trace-level metadata"))))
+
+(deftest observation-content-travels-only-in-synthetic-mode
+  (tel/with-execution [_ "synthetic-exec" {"samizdat.run.id" "r1" "samizdat.observation.mode" "synthetic"}]
+    (tel/with-generation [sp "gen" {"gen_ai.request.model" "stub-model"
+                                    "samizdat.observation.mode" "synthetic"
+                                    "langfuse.observation.input" "SYNTHETIC-IN"}]
+      (tel/set-facts! sp {"langfuse.observation.output" "SYNTHETIC-OUT"})))
+  (tel/with-execution [_ "live-exec" {"samizdat.run.id" "r2" "samizdat.observation.mode" "live"}]
+    (tel/with-tool [sp "tool" {"samizdat.tool.name" "run"
+                               "samizdat.observation.mode" "live"
+                               "langfuse.observation.input" "LEAK-IN"}]
+      (tel/set-facts! sp {"langfuse.observation.output" "LEAK-OUT"})))
+  (tel/with-tool [sp "modeless" {"samizdat.tool.name" "run"
+                                 "langfuse.observation.output" "LEAK-MODELESS"}])
+  (let [g (:attributes (by-name "gen"))
+        t (:attributes (by-name "tool"))
+        m (:attributes (by-name "modeless"))]
+    (is (= "SYNTHETIC-IN" (get g "langfuse.observation.input")))
+    (is (= "SYNTHETIC-OUT" (get g "langfuse.observation.output")) "set-facts! reads the span's mode")
+    (is (not (contains? g "samizdat.x.content.refused")))
+    (doseq [a [t m]]
+      (is (not-any? #(re-find #"LEAK" (str %)) (vals a)) "refused content never reaches the span")
+      (is (not (contains? a "langfuse.observation.input")))
+      (is (not (contains? a "langfuse.observation.output"))))
+    (is (= "langfuse.observation.input,langfuse.observation.output" (get t "samizdat.x.content.refused"))
+        "refusals accumulate across prepare and set-facts!")
+    (is (= "langfuse.observation.output" (get m "samizdat.x.content.refused")) "absent mode refuses")))
 
 (deftest prepare-is-pure-and-manifest-driven
   (let [a (tel/prepare :generation {"gen_ai.request.model" "stub-model"

@@ -113,6 +113,30 @@ the targeted attributes, `gen_ai.usage.*` native, and
 `langfuse.observation.level=ERROR` only for infrastructure errors. Failed
 verdicts are verdicts; there are no Langfuse scores.
 
+Mapping version `samizdat-langfuse-mapping/2` adds two rules, both learned
+from live readback of `/1`:
+
+- **Trace metadata is root-scoped.** Langfuse keeps one `metadata` map per
+  trace and applies every span's `langfuse.trace.metadata.*` to it, last
+  writer wins. Under `/1` two `evaluator` children carrying different
+  `samizdat.cost.action_charged_s` values raced for one trace slot. Under
+  `/2` only the root observation kind (`agent`, `:root-observation-kind`)
+  mirrors a trace-targeted attribute to `langfuse.trace.metadata.<key>`;
+  every other kind mirrors the same attribute to
+  `langfuse.observation.metadata.<key>` (`:trace-metadata-on-observation`).
+  The canonical `samizdat.*` key is present on every span regardless.
+  `set-facts!` reads the kind from the span it is given.
+- **Observation content is synthetic-only.** `langfuse.observation.input` and
+  `langfuse.observation.output` (`:content-keys`) travel only when
+  `samizdat.observation.mode` (`:mode-source`) is `synthetic`
+  (`:content-allowed-modes`). Live and historical-import spans never carry
+  prompts, tool arguments, file contents or delivered text
+  (`docs/DATA-GOVERNANCE.md`); a content key offered in any other mode, or
+  with no mode, is dropped before normalisation (so it can never be
+  stringified into the `samizdat.x.*` fallback) and the key *names* are
+  recorded under `samizdat.x.content.refused`. Synthetic qualification uses
+  stub content to exercise the input/output path end to end.
+
 ## Rendering for consumers
 
 ```
