@@ -2691,3 +2691,46 @@
       (let [done (assoc (planning 9) :status :done :final-answer "plan")]
         (is (not-any? #{:plan-last-call :plan-wind-down}
                       (map :gate (arbiter/eligible {:branch done :max-turns 10}))))))))
+
+(deftest figures-are-covered-by-what-this-branch-measured
+  ;; karamazov-3s54. On a coding run the only artifact anything produces is
+  ;; an accepted done's own answer, so the figure rung checked a branch's
+  ;; numbers against its siblings' answers and never against the test run or
+  ;; eval it had just watched. Run 5f8de58c's exercise branch re-derived every
+  ;; figure in one eval, as the refusal told it to, was refused for all of
+  ;; them, and exhausted. What the branch MEASURED — the output of its own
+  ;; eval and shell calls — is the evidence the rung reads now.
+  (let [c (db/open! ":memory:")
+        rid (runs/start-run! c {:problem "pin the wind arrow"})
+        b (state/new-branch {:id "T4" :problem "pin the wind arrow"})
+        record! (fn [turn tool result]
+                  (journal/record-turn! c rid {:branch-id "T4" :turn turn :tool-name tool
+                                               :args "{}" :result result :category :neutral}))
+        ship (fn [answer]
+               (tools/run-tool {:branch b :tool-name "done" :turn 9 :conn c :run-id rid
+                                :root "/tmp" :git-baseline "HEAD"
+                                :config {:run {:verify-cmd "jolt -M:test"}}
+                                :args {:answer answer}}))
+        refused-for (fn [r] (second (re-find #"figures no artifact supports: ([^\n]*)" (str (:result r)))))]
+    (record! 1 "shell" "Ran 92 tests, 1493 assertions, 0 failures, 0 errors.")
+    (record! 2 "eval" "=> {:width 1024 :height 640}")
+    (record! 3 "read_file" "test/x_test.clj:\n(is (= 77 (count rings)))")
+    (record! 4 "done" "`done` refused.\n\nYour answer states figures no artifact supports: `55`.")
+    (with-redefs [gitdiff/changed-files (fn [_ _] ["src/x.clj" "test/x_test.clj"])
+                  verify/run-verify (fn [_ _ _] {:green? true :output "Ran 92 tests"})]
+      (testing "figures this branch's own test run and eval printed are covered"
+        (let [r (ship "pinned the wind arrow: 92 tests and 1493 assertions green, the shot is 1024 by 640")]
+          (is (nil? (refused-for r)) (str "refused: " (:result r)))))
+      (testing "a figure only a file READ showed is not — a read is not a measurement"
+        (let [r (ship "pinned the wind arrow: the course has 77 rings, 92 tests green")]
+          (is (= "`77`." (refused-for r)) "77 came from reading the test file; 92 from running it")))
+      (testing "a refused done's own echo of a figure covers nothing"
+        (is (= "`55`." (refused-for (ship "pinned the wind arrow in 55 frames"))))))
+    (testing "the observed corpus is the verification vocabulary, read off the branch's turns"
+      (let [rows (journal/branch-turns c rid "T4")
+            obs (ship/observed-output rows)]
+        (is (str/includes? (:witness obs) "1493"))
+        (is (str/includes? (:witness obs) "1024"))
+        (is (not (str/includes? (:witness obs) "77")))
+        (is (not (str/includes? (:witness obs) "55")))
+        (is (nil? (ship/observed-output [])) "nothing measured, nothing to add")))))

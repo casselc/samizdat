@@ -268,6 +268,33 @@
           (and (>= (count token) long-enough)
                (str/includes? word-text (subs token 0 prefix)))))))
 
+(defn observed-output
+  "What this branch MEASURED, as one artifact-shaped entry for the figure rung,
+  or nil when it measured nothing.
+
+  On a coding run the only artifact anything produces is an accepted done's
+  own answer (see the :artifact below), so the rung used to check a branch's
+  figures against its siblings' answers and its own earlier ones — and never
+  against the test run or `eval` it had just watched. Run 5f8de58c's exercise
+  branch re-derived every figure in a single eval, exactly as the refusal
+  told it to, was refused for all of them, and exhausted (karamazov-3s54).
+
+  The corpus is the results of the branch's :verification-vocabulary calls
+  (gates.edn — eval and shell): an output the harness ran and handed back is
+  a measurement. A read_file or grep result is not — a test file's expected
+  value is an input, which is the fabrication this rung exists to catch — and
+  a refused `done`'s result echoes the answer's own figures, so it must never
+  count either. `turn-rows` are journal/branch-turns rows."
+  [turn-rows]
+  (let [measuring (or (gates/tool-vocab :verification) #{})
+        text (->> turn-rows
+                  (filter #(contains? measuring (str (:tool_name %))))
+                  (map #(str (:result %)))
+                  (remove str/blank?)
+                  (str/join "\n"))]
+    (when (seq text)
+      {:kind :observed :witness text})))
+
 (defn uncovered-tokens
   "Answer tokens no confirmed artifact mentions.
 
@@ -426,7 +453,14 @@
         ;; consecutive live runs). run-role marks the branch.
         advisory? (boolean (:advisory? branch))
         confirmed (state/confirmed-artifacts branch)
-        own (concat confirmed (state/empirical-artifacts branch))
+        ;; Plus what the branch itself measured — its eval and shell output
+        ;; off the journal. Computed here and banked nowhere: it is evidence
+        ;; for THIS check, not an artifact to share (karamazov-3s54).
+        observed (when (and (:conn ctx) (:run-id ctx))
+                   (observed-output
+                    (journal/branch-turns (:conn ctx) (:run-id ctx) (:id branch))))
+        own (concat confirmed (state/empirical-artifacts branch)
+                    (when observed [observed]))
         ;; And what the rest of the run established: a branch is shown the
         ;; shared-artifact block, so refusing the answer that cites it would
         ;; punish the branch for reading what the harness handed it (vf-b9c).

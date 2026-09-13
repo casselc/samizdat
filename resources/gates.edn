@@ -2514,6 +2514,10 @@
   ;; check against: a coding run's proof is its test run, not confirmed
   ;; claims, so empty evidence must not refuse every figure (the first
   ;; self-modification run did the work correctly and could not ship it).
+  ;; On a coding run that evidence is what the branch MEASURED — the output
+  ;; of its own eval and shell calls (ship.clj observed-output) — beside any
+  ;; artifacts; before that was added the rung checked a branch's figures
+  ;; against its siblings' accepted answers and nothing else (karamazov-3s54).
   {:value
    [{:name :answer-exists
      :when (str/blank? (str answer))
