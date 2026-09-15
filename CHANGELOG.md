@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Add an opt-in `:embedded-telemetry` dependency profile that layers Oscope's
+  embedded chDB profile over `:telemetry`, converges its database, data.json,
+  Malli, and crypto providers, and raises Samizdat's Jolt floor to 0.8.6 so
+  the embedded profile's otherwise non-transitive runtime floor is enforced.
 - Add an optional OpenTelemetry profile for Samizdat's nine run seams, a
   versioned typed-attribute manifest, independently bounded local and Langfuse
   exporters, and a fail-open source hook. The stock profile remains free of

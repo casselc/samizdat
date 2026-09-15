@@ -1,7 +1,8 @@
 {;; jolt.ffi/write takes the value BEFORE the offset as of jolt 0.8.0, and the
  ;; two spellings are both integers — an older runtime writes to the wrong
- ;; place rather than failing. Declare the floor so it refuses instead.
- :jolt/min-version "0.8.3"
+ ;; place rather than failing. Oscope's optional embedded profile requires the
+ ;; current supported runtime too, so enforce its non-transitive floor here.
+ :jolt/min-version "0.8.6"
 
  :paths ["src" "resources"]
 
@@ -170,6 +171,30 @@
                         jolt-lang/time
                         {:git/url "https://github.com/jolt-lang/time"
                          :git/sha "91cef5b692c624806ea92ba280200162314cdb52"}}}
+           ;; Embedded Oscope/chDB is a separate opt-in layer over :telemetry.
+           ;; The existing standalone OTLP modes and their dependency graph are
+           ;; unchanged unless callers explicitly combine both aliases.
+           :embedded-telemetry
+           {:extra-deps
+            {io.github.chucklehead-dev/oscope
+             {:git/url "https://github.com/chucklehead-dev/oscope.git"
+              :git/sha "39abe12e9d438adfb16ef104050a0cfb41acdaed"
+              :deps/root "profiles/embedded"
+              ;; Samizdat's newer casselc/otel pin is the sole SDK source.
+              :exclusions [io.github.casselc/otel]}}
+            :override-deps
+            {jolt-lang/db
+             {:git/url "https://github.com/casselc/db.git"
+              :git/sha "96324713500c96ae97c0deaf84691f31df158f25"
+              ;; Avoid a second jolt.time.* provider under a different key.
+              :exclusions [io.github.jolt-lang/time]}
+             org.clojure/data.json
+             {:git/url "https://github.com/casselc/data.json.git"
+              :git/sha "3174868a7baa06e118fb8d1201edd98c5769b335"}
+             metosin/malli {:mvn/version "0.20.1"}
+             jolt-lang/jolt-crypto
+             {:git/url "https://github.com/jolt-lang/jolt-crypto.git"
+              :git/sha "5effcc89a3258499a79a2a3d69edad9e7800d1bf"}}}
            ;; The otel-dependent tests; always combined: jolt -M:telemetry:telemetry-test
            :telemetry-test {:extra-paths ["telemetry-test" "test"]
                             :main-opts ["-m" "samizdat.telemetry.test-runner"]}
