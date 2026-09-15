@@ -1587,6 +1587,26 @@
         is not split into rubble. Re-tune it against measured runs; that is
         what it is data for."}
 
+ :untracked-line-scan
+ {:value {:binary-prefix-bytes 8000
+          :buffer-bytes 8192
+          :max-bytes 65536}
+  :kind :threshold :capability-tunable? false
+  :provenance ["casselc/samizdat#24" "chucklehead-dev/jolt-aspect-packs#135"]
+  :doc "Bounds and classification prefix for authored-line counting of
+        untracked files.
+
+        Git treats a file as binary when a NUL appears in its first 8000
+        bytes, so :binary-prefix-bytes matches that protocol behavior.
+        :buffer-bytes bounds working memory. :max-bytes bounds repeated
+        per-turn reads while covering the 500-line task budget at roughly
+        131 bytes per line; a longer text file contributes its conservative
+        prefix count.
+
+        Runtime files exposed the need for binary classification in
+        casselc/samizdat#24. Jolt's current special-file classification is
+        tracked separately by chucklehead-dev/jolt-aspect-packs#135."}
+
  :code-quality
  {:value {:cc-fn-limit 10
           :verbosity-max 0.21

@@ -2,7 +2,9 @@
 ;; SPDX-License-Identifier: GPL-3.0-or-later
 
 (ns samizdat.gitdiff-test
-  (:require [clojure.test :refer [deftest is testing]]
+  (:require [clojure.string :as str]
+            [clojure.test :refer [deftest is testing]]
+            [samizdat.agent.gates :as gates]
             [samizdat.agent.gitdiff :as gd]
             [samizdat.engine.proc :as proc]
             [samizdat.security.secrets :as scrub]))
@@ -26,6 +28,12 @@
 (defn- sh [dir cmd]
   (proc/run {:timeout-ms 15000} "sh" "-c" (str "cd " dir " && " cmd)))
 
+(deftest untracked-line-scan-is-gates-data
+  (is (= {:binary-prefix-bytes 8000
+          :buffer-bytes 8192
+          :max-bytes 65536}
+         (gates/threshold :untracked-line-scan))))
+
 (deftest changed-files-sees-new-untracked-files
   ;; The bug this pins: `git diff` is blind to untracked files, so a run that
   ;; CREATES a namespace + its test read as 'changed nothing' and every done
@@ -45,6 +53,100 @@
           (let [changed (set (gd/changed-files dir base))]
             (is (contains? changed "src_new.clj") "the newly-created file is seen")
             (is (contains? changed "seed.txt") "and a tracked edit is still seen")))
+        (finally (sh dir (str "rm -rf " dir)))))))
+
+(deftest changed-lines-uses-gits-text-binary-classification-for-untracked-files
+  (when (proc/available? "git")
+    (let [dir (str (System/getProperty "java.io.tmpdir") "/gd-lines-"
+                   (System/currentTimeMillis))]
+      (try
+        (proc/run {:timeout-ms 15000} "sh" "-c" (str "mkdir -p " dir))
+        (sh dir "git init -q && git config user.email t@t.co && git config user.name t")
+        (sh dir "printf 'seed\\n' > seed.txt && git add -A && git commit -qm init")
+        (let [base (gd/baseline dir)
+              large-lines 5000]
+          (spit (str dir "/notes.txt") "first\nsecond\n")
+          (spit (str dir "/large.txt") (apply str (repeat large-lines "x\n")))
+          (spit (str dir "/unterminated.txt") "last line")
+          (spit (str dir "/empty.txt") "")
+          ;; SQLite's header is followed by a NUL. Newline-like bytes after it
+          ;; must not turn persistent binary state into apparent source lines.
+          (spit (str dir "/state.sqlite3")
+                (str "SQLite format 3" \u0000 "page\nbytes\n"))
+          (testing "text, a multi-buffer file, and a final unterminated line count"
+            (is (= (+ large-lines 3) (gd/changed-lines dir base))))
+          (spit (str dir "/seed.txt") "seed\ntracked one\ntracked two\n")
+          (testing "tracked and untracked text counts are combined"
+            (is (= (+ large-lines 5) (gd/changed-lines dir base)))))
+        (finally (sh dir (str "rm -rf " dir)))))))
+
+(deftest changed-lines-fails-soft-when-an-untracked-file-vanishes
+  ;; The path can disappear or become unreadable after ls-files reports it.
+  ;; That one file contributes zero; the line-budget measurement still returns.
+  (let [calls (atom 0)
+        responses (atom [{:exit 0 :out "" :err ""}
+                         {:exit 0 :out "vanished.sqlite3\n" :err ""}])]
+    (with-redefs [proc/run (fn [& _]
+                            (swap! calls inc)
+                            (let [r (first @responses)]
+                              (swap! responses rest)
+                              r))]
+      (is (= 0 (gd/changed-lines "/tmp/racing-repo" "HEAD")))
+      (is (= 2 @calls) "only tracked numstat and the untracked listing spawn Git")
+      (is (empty? @responses)))))
+
+(deftest changed-lines-does-not-spawn-per-untracked-file
+  (let [path-count 200
+        calls (atom 0)
+        listing (str (str/join "\n" (map #(str "gone-" % ".dat")
+                                          (range path-count)))
+                     "\n")]
+    (with-redefs [proc/run (fn [& _]
+                            (let [call (swap! calls inc)]
+                              (case call
+                                1 {:exit 0 :out "" :err ""}
+                                2 {:exit 0 :out listing :err ""}
+                                {:exit 128 :out "" :err "unexpected process"})))]
+      (is (= 0 (gd/changed-lines "/tmp/many-racing-files" "HEAD")))
+      (is (= 2 @calls)
+          "untracked file count must not multiply the per-turn process count"))))
+
+(deftest changed-lines-caps-an-untracked-text-scan
+  (when (proc/available? "git")
+    (let [dir (str (System/getProperty "java.io.tmpdir") "/gd-capped-"
+                   (System/currentTimeMillis))
+          scan-cap (:max-bytes (gates/threshold :untracked-line-scan))
+          complete-lines (dec (/ scan-cap 2))]
+      (try
+        (proc/run {:timeout-ms 15000} "sh" "-c" (str "mkdir -p " dir))
+        (sh dir "git init -q && git config user.email t@t.co && git config user.name t")
+        (sh dir "printf 'seed\\n' > seed.txt && git add -A && git commit -qm init")
+        (let [base (gd/baseline dir)]
+          ;; At the cap: complete-lines `x\n` records plus the first two bytes
+          ;; of "partial". Lines beyond that point must never be read/countable.
+          (spit (str dir "/capped.txt")
+                (str (apply str (repeat complete-lines "x\n"))
+                     "partial\nignored\nignored\n"))
+          (is (= (inc complete-lines) (gd/changed-lines dir base))
+              "the partial line at the cap counts once; later lines do not"))
+        (finally (sh dir (str "rm -rf " dir)))))))
+
+(deftest changed-lines-skips-an-untracked-symlink-to-a-special-file
+  ;; Git reports the symlink as untracked even though it omits the FIFO itself.
+  ;; Opening the link as a FileInputStream would block waiting for a writer.
+  (when (and (proc/available? "git") (proc/available? "mkfifo"))
+    (let [dir (str (System/getProperty "java.io.tmpdir") "/gd-fifo-"
+                   (System/currentTimeMillis))]
+      (try
+        (proc/run {:timeout-ms 15000} "sh" "-c" (str "mkdir -p " dir))
+        (sh dir "git init -q && git config user.email t@t.co && git config user.name t")
+        (sh dir "printf 'seed\\n' > seed.txt && git add -A && git commit -qm init")
+        (let [base (gd/baseline dir)]
+          (sh dir "mkfifo blocked.pipe && ln -s blocked.pipe blocked-link")
+          (is (= #{"blocked-link"} (set (gd/changed-files dir base)))
+              "Git reports the symlink but omits the direct FIFO")
+          (is (= 1 (gd/changed-lines dir base))
+              "the symlink itself counts once without opening its FIFO target"))
         (finally (sh dir (str "rm -rf " dir)))))))
 
 (deftest snapshot-reads-the-tree-at-a-glance
