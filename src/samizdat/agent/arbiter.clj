@@ -42,6 +42,7 @@
   branch, and when, by editing gates.edn — not by editing this."
   (:require [samizdat.agent.gates :as gates]
             [samizdat.agent.state :as state]
+            [samizdat.telemetry.hook :as hook]
             [samizdat.util :as util]))
 
 (defn eligible
@@ -63,6 +64,7 @@
   only ever fires alone tells you something different from one that is
   perpetually outranked."
   [ctx]
+  (hook/observe! :steer {:branch-id (get-in ctx [:branch :id]) :turn (:turn ctx) :branch (:branch ctx)} (fn []
   (let [candidates (eligible ctx)]
     (when-let [chosen (first candidates)]
        {:gate (:gate chosen)
@@ -76,7 +78,7 @@
         ;; gate's own data, applied by loop/apply-effects.
         :effect (:effect chosen)
         :window (:window chosen)
-        :passed-over (mapv :gate (rest candidates))})))
+        :passed-over (mapv :gate (rest candidates))})))))
 
 (defn prefill-for
   "The partial assistant text that forecloses a prose answer on the steered

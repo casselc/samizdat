@@ -41,6 +41,7 @@
   To add a tool: open the group namespace it belongs to (or create a new one
   beside them) and defmethod base/run-tool there. This file stays as is."
   (:require [clojure.tools.logging :as log]
+            [clojure.walk :as walk]
             [samizdat.agent.gates :as gates]
             [samizdat.agent.toolerr :as toolerr]
             [samizdat.lexicon :as lexicon]
@@ -69,7 +70,8 @@
             [samizdat.agent.tools.skills]
             [samizdat.agent.tools.introspect]
             [samizdat.agent.tools.lsp]
-            [samizdat.security.secrets :as secrets]))
+            [samizdat.security.secrets :as secrets]
+            [samizdat.telemetry.hook :as hook]))
 
 ;; --- the dispatch seam ------------------------------------------------------
 ;;
@@ -102,6 +104,12 @@
   (if-let [env (:env ctx)]
     (secrets/known-values env)
     @process-known-values))
+
+(defn- redact-structure
+  "Every string leaf in structured content through the canonical redaction
+  boundary. Collection and scalar shapes are preserved for JSON encoding."
+  [x known]
+  (walk/postwalk #(if (string? %) (secrets/redact % known) %) x))
 
 (defn- redact-result
   "The model-bound strings of a result, with secrets replaced.
@@ -197,24 +205,34 @@
      mistake it exists to prevent.
   3. The model-bound strings are redacted. See the note above the delay."
   [{:keys [branch tool-name] :as ctx}]
-  (let [known (known-values-for ctx)
-        outcome (try {:ok (retrying ctx)}
-                     (catch Throwable e {:threw e}))]
-    (if-let [e (:threw outcome)]
-      (do (log/warn "tool" tool-name "threw:" (ex-message e))
-          (redact-result
-           (base/malformed branch (str "`" tool-name "` failed: " (ex-message e)))
-           known))
-      (let [r (:ok outcome)]
-        (if-let [fault (envelope-fault r)]
-          (do (log/error "tool" tool-name fault)
-              (redact-result
-               (base/malformed
-                branch
-                (str "`" tool-name "` " fault
-                     ". This is a harness fault, not yours — the call was fine."))
-               known))
-          (redact-result r known))))))
+  (let [known (known-values-for ctx)]
+    (hook/observe!
+     :tool
+     {:branch-id (:id branch)
+      :tool-name tool-name
+      ;; Only an installed observer can consume content. Scrub before the map
+      ;; crosses that boundary; with no observer the stock path does not walk
+      ;; args.
+      :input (when (hook/installed?)
+               (redact-structure (:args ctx) known))}
+     (fn []
+       (let [outcome (try {:ok (retrying ctx)}
+                          (catch Throwable e {:threw e}))]
+         (if-let [e (:threw outcome)]
+           (do (log/warn "tool" tool-name "threw:" (ex-message e))
+               (redact-result
+                (base/malformed branch (str "`" tool-name "` failed: " (ex-message e)))
+                known))
+           (let [r (:ok outcome)]
+             (if-let [fault (envelope-fault r)]
+               (do (log/error "tool" tool-name fault)
+                   (redact-result
+                    (base/malformed
+                     branch
+                     (str "`" tool-name "` " fault
+                          ". This is a harness fault, not yours — the call was fine."))
+                    known))
+               (redact-result r known)))))))))
 
 ;; Re-exports: loop.clj and the tests reach the tool surface through this
 ;; namespace and keep working unchanged.

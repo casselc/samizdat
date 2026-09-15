@@ -155,6 +155,9 @@
             [samizdat.prompt-test]
             [samizdat.server-test]
             [samizdat.adapter-test]
+            [samizdat.telemetry.aspect-manifest-test]
+            [samizdat.telemetry.contract-test]
+            [samizdat.telemetry.hook-test]
             [samizdat.proc-test]
             [samizdat.board-bt-test]
             [samizdat.finalization-test]
@@ -338,6 +341,9 @@
     samizdat.prompt-test
     samizdat.server-test
     samizdat.adapter-test
+    samizdat.telemetry.aspect-manifest-test
+    samizdat.telemetry.contract-test
+    samizdat.telemetry.hook-test
     samizdat.proc-test
     samizdat.gui-api-test
     samizdat.gui-ops-test

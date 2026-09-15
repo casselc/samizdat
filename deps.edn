@@ -129,6 +129,50 @@
  ;; them without cmake, GTK, or a terminal.
  :aliases {:test {:extra-paths ["test" "gui" "tui"]
                   :main-opts ["-m" "samizdat.test-runner"]}
+
+           ;; OpenTelemetry export for the harness (docs/telemetry.md).
+           ;; Optional and build-selected: the stock build never loads
+           ;; casselc/otel; samizdat.telemetry.hook is an inert seam until
+           ;; samizdat.telemetry.otel is loaded under this alias. Only
+           ;; casselc/otel is added — jolt-otel-clickhouse is deliberately NOT
+           ;; a dependency here because its jolt-chdb pin resolves casselc/db
+           ;; over this project's jolt-lang/db. Typed-column compilation
+           ;; therefore runs outside this repository from the rendered manifest.
+           :telemetry {:extra-paths ["telemetry"]
+                       :extra-deps
+                       {casselc/otel
+                        {:git/url "https://github.com/casselc/otel.git"
+                         ;; Current casselc/otel main as of 2026-09-15.
+                         ;; Its HTTP dependency uses a different lib id from
+                         ;; Samizdat's stock coordinate, so exclude that edge
+                         ;; and select the same source below. Otherwise both
+                         ;; checkouts provide jolt.http.* on one classpath.
+                         :git/sha "88503a695d9f0786475de7ce7faa1a773db51696"
+                         :exclusions [io.github.casselc/http-client]}
+                        ;; The exact HTTP revision current otel selects, under
+                        ;; Samizdat's stock lib id: one physical provider and
+                        ;; no namespace-order dependency.
+                        jolt-lang/http-client
+                        {:git/url "https://github.com/casselc/http-client.git"
+                         :git/sha "eab6b78d5957f88690faf6768360572a3f185341"}
+                        ;; Likewise jolt-crypto: use the exact provider revision
+                        ;; selected by casselc/otel and its HTTP client.
+                        jolt-lang/jolt-crypto
+                        {:git/url "https://github.com/jolt-lang/jolt-crypto"
+                         :git/sha "44da69bad08a2fd7631bd4061e3fb53938dafff6"}
+                        ;; jolt-crypto declares :jolt/provides, which
+                        ;; switches the resolver to explicit-provides mode; the
+                        ;; root time pin bc85090 predates time's own provides
+                        ;; declaration (33c5e98), so under this alias time is
+                        ;; the first revision that declares java.time.* —
+                        ;; otherwise data.json fails to load (no provider for
+                        ;; java.time.format.DateTimeFormatter).
+                        jolt-lang/time
+                        {:git/url "https://github.com/jolt-lang/time"
+                         :git/sha "91cef5b692c624806ea92ba280200162314cdb52"}}}
+           ;; The otel-dependent tests; always combined: jolt -M:telemetry:telemetry-test
+           :telemetry-test {:extra-paths ["telemetry-test" "test"]
+                            :main-opts ["-m" "samizdat.telemetry.test-runner"]}
            ;; The dev tree (the nREPL client, the ebb spike) plus the tests, so
            ;; a live image can run the suite without paying startup — with
            ;; :test too, for the gui path: `jolt -A:dev:test nrepl-server 7899`,
@@ -215,6 +259,13 @@
           ;; {:rc 14}) — provenance A-3. `;` not `&&` so a hardened
           ;; environment where 1024 exceeds the hard limit still runs.
           test  "(ulimit -n 1024 2>/dev/null; jolt -M:test)"
+         ;; Render the telemetry contract (attribute manifest, Langfuse
+         ;; mapping, typed-column fragments) as canonical JSON for consumers:
+         ;;   jolt telemetry-manifest OUT-DIR
+         telemetry-manifest {:doc "render the telemetry contract as JSON into OUT-DIR"
+                             :main-opts ["-m" "samizdat.telemetry.contract"]}
+         ;; The telemetry tests need the otel dependency, hence the alias.
+         telemetry-test "(ulimit -n 1024 2>/dev/null; jolt -M:telemetry:telemetry-test)"
          gui   "jolt -M:gui"
          tui   "jolt -M:tui"
          ;; A shell string, not :main-opts: a task's main-opts cannot carry an

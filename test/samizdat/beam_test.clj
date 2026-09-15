@@ -24,6 +24,7 @@
             [samizdat.store.knowledge :as knowledge]
             [samizdat.store.runs :as runs]
             [samizdat.store.userspace :as store]
+            [samizdat.telemetry.hook :as hook]
             [samizdat.userspace :as us]
             [samizdat.workflow :as workflow]))
 
@@ -189,8 +190,15 @@
   ;; that the current tuning fails runs. Both must still learn that a run
   ;; happened (blt.38: five crashes showing "no runs" taught nothing) — under
   ;; the outcome that says what it was.
-  (let [c (db/open! ":memory:")]
+  (let [c (db/open! ":memory:")
+        observed (atom [])]
     (try
+      ;; Exercise the re-anchored source seam, not only its inert path. The
+      ;; observer is transparent, but run! still has to classify a thrown run
+      ;; as :error rather than the old boolean failed/not-shipped outcome.
+      (hook/install! (fn [kind _attrs thunk]
+                       (swap! observed conj kind)
+                       (thunk)))
       (us/bind! c)
       (us/save! :prompt "mine" "a tuning" "because")
       (with-redefs [beam/run-rounds (fn [_ctx _branches _turn]
@@ -207,7 +215,8 @@
       (let [[row] (store/versions c :prompt "mine")]
         (is (= 0 (:failure_count row)))
         (is (= 1 (:error_count row))))
-      (finally (us/unbind!) (db/close c)))))
+      (is (some #{:run} @observed) "the instrumented run seam was exercised")
+      (finally (hook/uninstall!) (us/unbind!) (db/close c)))))
 
 (deftest teardown-sees-the-branches-as-they-stood-when-the-round-died
   ;; A thrown manifest hands nothing back, so the driver keeps its own window.
