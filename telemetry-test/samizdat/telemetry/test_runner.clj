@@ -22,6 +22,7 @@
   (:require [clojure.test :as t]
             [samizdat.telemetry.aspect-manifest-test]
             [samizdat.telemetry.contract-test]
+            [samizdat.telemetry.embedded-test]
             [samizdat.telemetry.hook-test]
             [samizdat.telemetry.otel-test]
             [samizdat.telemetry.pipelines-test]))
@@ -29,6 +30,7 @@
 (def namespaces
   '[samizdat.telemetry.aspect-manifest-test
     samizdat.telemetry.contract-test
+    samizdat.telemetry.embedded-test
     samizdat.telemetry.hook-test
     samizdat.telemetry.otel-test
     samizdat.telemetry.pipelines-test])
