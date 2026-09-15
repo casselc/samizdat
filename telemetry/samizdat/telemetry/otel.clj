@@ -19,7 +19,7 @@
 (ns samizdat.telemetry.otel
   "Semantic OpenTelemetry wrappers over casselc/otel for the Samizdat contract.
 
-  Loaded ONLY under the :telemetry alias (Jolt 0.8.3, casselc/otel 88503a6);
+  Loaded ONLY under the :telemetry alias (Jolt 0.8.6, casselc/otel 88503a6);
   the stock build never requires this namespace and never depends on otel.
   Nothing here decides anything: it takes facts a caller is entitled to state
   (the contract's `:authority`), normalises them through
@@ -67,7 +67,7 @@
 (def langfuse-traces-path "/api/public/otel/v1/traces")
 (def default-headers-env "SAMIZDAT_LANGFUSE_OTLP_HEADERS")
 
-(def ^{:doc "Current runtime: {:provider :tracer :pipelines :mode :destinations} or nil."}
+(def ^{:doc "Current internally owned or externally attached runtime, or nil."}
   runtime (atom nil))
 
 ;; --- content override --------------------------------------------------------
@@ -518,12 +518,14 @@
       :dual {:local {:exporter (mk :local local-exporter) :config cfg}
              :langfuse {:exporter (mk :langfuse langfuse-exporter) :config cfg}})))
 
-(defn resource-attributes [{:keys [service-name extra]}]
-  (merge {"service.name" (or service-name "samizdat")
-          "samizdat.telemetry.schema" (contract/schema-version)
-          "samizdat.import.mapping_version" (contract/mapping-version)
-          contract/content-marker-key (if (content-enabled?) "on" "off")}
-         extra))
+(defn resource-attributes
+  ([opts] (resource-attributes opts @content-policy))
+  ([{:keys [service-name extra]} policy]
+   (merge {"service.name" (or service-name "samizdat")
+           "samizdat.telemetry.schema" (contract/schema-version)
+           "samizdat.import.mapping_version" (contract/mapping-version)
+           contract/content-marker-key (if (:enabled? policy) "on" "off")}
+          extra)))
 
 (defn content-policy-from-env
   "The override as the environment states it; :max-chars falls back to the
@@ -533,6 +535,54 @@
     {:enabled? (parse-content-flag (getenv contract/content-override-env))
      :max-chars (if (and (int? n) (pos? n)) n default-content-max-chars)}))
 
+(defn- normalized-content-policy [content]
+  (merge {:enabled? false :max-chars default-content-max-chars}
+         (if (nil? content) (content-policy-from-env) content)))
+
+(defn attach!
+  "Attach Samizdat's observer to an externally owned SDK runtime without
+  constructing or initializing a provider. Required options are an existing
+  `:tracer` and `:flush!`, `:stats`, and `:shutdown!` callbacks owned by the
+  caller. Samizdat dispatches lifecycle calls to those callbacks but otherwise
+  owns only hook installation. Optional `:content` has the same normalization
+  and environment fallback as `init!`. Idempotent like `init!`: while any
+  runtime is active, a later attach returns it unchanged."
+  [{:keys [tracer flush! stats shutdown! install-hook? content]
+    :or {install-hook? true}}]
+  (locking runtime
+    (or @runtime
+        (do
+          (when-not tracer
+            (throw (ex-info "telemetry attach requires an existing :tracer" {})))
+          (doseq [[k f] [[:flush! flush!] [:stats stats] [:shutdown! shutdown!]]]
+            (when-not (fn? f)
+              (throw (ex-info (str "telemetry attach requires a " k " callback")
+                              {:callback k}))))
+          (let [policy (normalized-content-policy content)
+                previous-runtime @runtime
+                previous-policy @content-policy
+                previous-observer @hook/observer
+                rt {:owner :external
+                    :tracer tracer
+                    :flush-callback flush!
+                    :stats-callback stats
+                    :shutdown-callback shutdown!}]
+            (try
+              (reset! content-policy policy)
+              (reset! runtime rt)
+              (when (:enabled? policy)
+                (log/warn "telemetry content override ON for externally owned SDK; clipped at"
+                          (:max-chars policy) "chars"))
+              (when install-hook? (install!))
+              rt
+              (catch Throwable error
+                ;; An external provider remains caller-owned. Roll back only
+                ;; Samizdat publication, including a partially installed hook.
+                (reset! runtime previous-runtime)
+                (reset! content-policy previous-policy)
+                (reset! hook/observer previous-observer)
+                (throw error))))))))
+
 (defn init!
   "Start the runtime. Returns the runtime map (or nil for :off). Idempotent:
   a second call returns the existing runtime. Options: :mode (else env),
@@ -540,56 +590,103 @@
   :host (else LANGFUSE_HOST), :endpoint, :headers-env, :install-hook? (true)."
   ([] (init! {}))
   ([{:keys [mode install-hook? content] :or {install-hook? true} :as opts}]
-   (or @runtime
-       (let [mode (or mode (parse-mode (getenv "SAMIZDAT_TELEMETRY")))]
-         (when-not (= :off mode)
-           (let [policy (merge {:enabled? false :max-chars default-content-max-chars}
-                               (if (nil? content) (content-policy-from-env) content))
-                 _ (reset! content-policy policy)
-                 ;; With content on, a batch is bounded by value count x clip
-                 ;; size (8 x 2 x 32768 chars = 512 KiB), under the local
-                 ;; receiver's 1 MiB request limit; an explicit :batch wins.
-                 opts (cond-> opts
-                        (nil? (:host opts)) (assoc :host (getenv "LANGFUSE_HOST"))
-                        (:enabled? policy) (update :batch #(merge {:max-export-batch-size 8} %)))
-                 dests (destinations mode opts)
-                 pipelines (export/independent-batch-pipelines dests)
-                 provider (sdk/tracer-provider
-                           {:resource (res/merge-resources (res/default-resource)
-                                                           (res/resource (resource-attributes opts)))
-                            :processors [pipelines]})
-                 rt {:mode mode
-                     :destinations (vec (sort (keys dests)))
-                     :provider provider
-                     :pipelines pipelines
-                     :tracer (sdk/get-tracer provider {:name scope-name :version scope-version})}]
-             (reset! runtime rt)
-             (when (:enabled? policy)
-               (log/warn "telemetry content override ON: prompts, model outputs and tool results"
-                         "travel to" (pr-str (:destinations rt)) "clipped at" (:max-chars policy) "chars"))
-             (when install-hook? (install!))
-             rt))))))
+   (locking runtime
+     (or @runtime
+         (let [mode (or mode (parse-mode (getenv "SAMIZDAT_TELEMETRY")))]
+           (when-not (= :off mode)
+             (let [policy (normalized-content-policy content)
+                   previous-policy @content-policy
+                   previous-observer @hook/observer
+                   pipelines* (atom nil)
+                   provider* (atom nil)]
+               (try
+                 (let [;; With content on, a batch is bounded by value count x
+                       ;; clip size (8 x 2 x 32768 chars = 512 KiB), under the
+                       ;; local receiver's 1 MiB request limit; an explicit
+                       ;; :batch wins.
+                       opts (cond-> opts
+                              (nil? (:host opts)) (assoc :host (getenv "LANGFUSE_HOST"))
+                              (:enabled? policy) (update :batch #(merge {:max-export-batch-size 8} %)))
+                       dests (destinations mode opts)
+                       pipelines (export/independent-batch-pipelines dests)
+                       _ (reset! pipelines* pipelines)
+                       provider (sdk/tracer-provider
+                                 {:resource
+                                  (res/merge-resources
+                                   (res/default-resource)
+                                   (res/resource (resource-attributes opts policy)))
+                                  :processors [pipelines]})
+                       _ (reset! provider* provider)
+                       tracer (sdk/get-tracer provider {:name scope-name :version scope-version})
+                       rt {:mode mode
+                           :destinations (vec (sort (keys dests)))
+                           :provider provider
+                           :pipelines pipelines
+                           :tracer tracer}]
+                   ;; Publish only after every owned resource and the tracer
+                   ;; exist. The runtime lock keeps this transition atomic with
+                   ;; attach/init/shutdown and hook installation.
+                   (reset! content-policy policy)
+                   (reset! runtime rt)
+                   (when (:enabled? policy)
+                     (log/warn "telemetry content override ON: prompts, model outputs and tool results"
+                               "travel to" (pr-str (:destinations rt)) "clipped at"
+                               (:max-chars policy) "chars"))
+                   (when install-hook? (install!))
+                   rt)
+                 (catch Throwable error
+                   ;; No partial state is visible while this lock is held.
+                   ;; Both ownership faces are terminal/idempotent; attempt each
+                   ;; exactly once and preserve the construction failure.
+                   (reset! runtime nil)
+                   (reset! content-policy previous-policy)
+                   (reset! hook/observer previous-observer)
+                   (if-let [provider @provider*]
+                     ;; The provider owns and retires its processor pipeline.
+                     (try (sdk/shutdown! provider) (catch Throwable _ nil))
+                     (when-let [pipelines @pipelines*]
+                       (try (export/shutdown-pipelines! pipelines)
+                            (catch Throwable _ nil))))
+                   (throw error))))))))))
 
 (defn stats
   "Bounded scalar per-destination diagnostics; never exporter errors."
   []
-  (when-let [rt @runtime] (export/pipeline-stats (:pipelines rt))))
+  (locking runtime
+    (when-let [rt @runtime]
+      (if-let [stats-callback (:stats-callback rt)]
+        (stats-callback)
+        (export/pipeline-stats (:pipelines rt))))))
 
 (defn flush! []
-  (when-let [rt @runtime] (export/force-flush-pipelines! (:pipelines rt))))
+  (locking runtime
+    (when-let [rt @runtime]
+      (if-let [flush-callback (:flush-callback rt)]
+        (flush-callback)
+        (export/force-flush-pipelines! (:pipelines rt))))))
 
 (defn shutdown!
   "Flush and stop every destination (each exactly once, all attempted), then
-  uninstall the hook. Returns {destination {:ok? ...}} or nil."
+  uninstall the hook. Internally owned runtimes return per-destination results;
+  attached runtimes return the external shutdown callback's result. Returns nil
+  when no runtime remains."
   []
-  (when-let [rt @runtime]
-    (uninstall!)
-    (let [r (ctx/with-instrumentation-suppressed
-              (try (sdk/shutdown! (:provider rt)) (catch Throwable _ nil))
-              (export/shutdown-pipelines! (:pipelines rt)))]
-      (reset! runtime nil)
-      (reset! content-policy {:enabled? false :max-chars default-content-max-chars})
-      r)))
+  (when-let [rt (locking runtime
+                  (when-let [rt @runtime]
+                    ;; Retire all Samizdat state before entering owner code.
+                    ;; Re-entrant/concurrent shutdown therefore sees nil, and
+                    ;; hook installation cannot race after retirement.
+                    (reset! runtime nil)
+                    (uninstall!)
+                    (reset! content-policy
+                            {:enabled? false :max-chars default-content-max-chars})
+                    rt))]
+    (if-let [shutdown-callback (:shutdown-callback rt)]
+      (ctx/with-instrumentation-suppressed (shutdown-callback))
+      (let [r (ctx/with-instrumentation-suppressed
+                (try (sdk/shutdown! (:provider rt)) (catch Throwable _ nil))
+                (export/shutdown-pipelines! (:pipelines rt)))]
+        r))))
 
 ;; --- inbound context -------------------------------------------------------
 
