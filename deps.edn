@@ -141,14 +141,12 @@
            ;; therefore runs outside this repository from the rendered manifest.
            :telemetry {:extra-paths ["telemetry"]
                        :extra-deps
-                       {casselc/otel
+                       {io.github.casselc/otel
                         {:git/url "https://github.com/casselc/otel.git"
-                         ;; Current casselc/otel main as of 2026-09-15.
-                         ;; Its HTTP dependency uses a different lib id from
-                         ;; Samizdat's stock coordinate, so exclude that edge
-                         ;; and select the same source below. Otherwise both
-                         ;; checkouts provide jolt.http.* on one classpath.
-                         :git/sha "88503a695d9f0786475de7ce7faa1a773db51696"
+                         ;; Canonical coordinate shared with Oscope's embedded
+                         ;; profile. Keep the HTTP client under Samizdat's stock
+                         ;; coordinate below so one checkout provides it.
+                         :git/sha "4d61f8e921d1310bc7ba39d7208cc38ac14a3215"
                          :exclusions [io.github.casselc/http-client]}
                         ;; The exact HTTP revision current otel selects, under
                         ;; Samizdat's stock lib id: one physical provider and
@@ -178,12 +176,28 @@
            {:extra-deps
             {io.github.chucklehead-dev/oscope
              {:git/url "https://github.com/chucklehead-dev/oscope.git"
-              :git/sha "39abe12e9d438adfb16ef104050a0cfb41acdaed"
-              :deps/root "profiles/embedded"
-              ;; Samizdat's newer casselc/otel pin is the sole SDK source.
-              :exclusions [io.github.casselc/otel]}}
+              :git/sha "7ee3ec4f6aaa4d085d88384f85934280d421fa1a"
+              :deps/root "profiles/embedded"}
+             ;; Viewer-only dependencies are explicit: this slice qualifies
+             ;; the handlers but does not load a listener or receiver owner.
+             io.github.casselc/jolt-http
+             {:git/url "https://github.com/casselc/jolt-http.git"
+              :git/sha "35d1d7f9ebdc796ee9bd4c80745298b2c8b7fdf8"}
+             io.github.chucklehead-dev/jolt-otel-viewer
+             {:git/url "https://github.com/chucklehead-dev/jolt-otel-viewer.git"
+              :git/sha "5723a7c28c3bb3ae7cb27f9856b90463e77df523"}}
             :override-deps
-            {jolt-lang/db
+            {io.github.casselc/otel
+             {:git/url "https://github.com/casselc/otel.git"
+              :git/sha "4d61f8e921d1310bc7ba39d7208cc38ac14a3215"
+              :exclusions [io.github.casselc/http-client]}
+             io.github.chucklehead-dev/jolt-chdb
+             {:git/url "https://github.com/chucklehead-dev/jolt-chdb.git"
+              :git/sha "95d7b2b31c95e007d5065e3950deb1869e2d0f8a"}
+             io.github.chucklehead-dev/jolt-otel-clickhouse
+             {:git/url "https://github.com/chucklehead-dev/jolt-otel-clickhouse.git"
+              :git/sha "14a2998a27f64a9bff329811461be9157a00c849"}
+             jolt-lang/db
              {:git/url "https://github.com/casselc/db.git"
               :git/sha "96324713500c96ae97c0deaf84691f31df158f25"
               ;; Avoid a second jolt.time.* provider under a different key.

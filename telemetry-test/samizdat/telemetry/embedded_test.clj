@@ -3,9 +3,12 @@
 ;; SPDX-License-Identifier: GPL-3.0-or-later
 
 (ns samizdat.telemetry.embedded-test
-  (:require [clojure.test :refer [deftest is testing]]
+  (:require [clojure.edn :as edn]
+            [clojure.string :as str]
+            [clojure.test :refer [deftest is testing]]
             [jdbc.chdb.durable :as durable]
             [jdbc.chdb.durable.local-posix :as local-posix]
+            [jolt.process :as process]
             [oscope.embedded :as oscope]
             [otel.sdk :as sdk]
             [samizdat.telemetry.embedded :as embedded]
@@ -282,7 +285,56 @@
     nil
     (catch Throwable error error)))
 
-(deftest real-native-round-trip-when-runtime-supports-durable-wal
+(def ^:private reopen-protocol-prefix "SAMIZDAT_EMBEDDED_REOPEN_V1 ")
+
+(defn- sanitized-child-env []
+  (cond-> {"PATH" (or (System/getenv "PATH") "/usr/bin:/bin")}
+    ;; These locate the caller's existing dependency/cache and temporary roots;
+    ;; values are forwarded unchanged and never rendered in diagnostics.
+    (System/getenv "HOME")
+    (assoc "HOME" (System/getenv "HOME"))
+    (System/getenv "TMPDIR")
+    (assoc "TMPDIR" (System/getenv "TMPDIR"))
+    (System/getenv "JOLT_CHDB_LIB")
+    (assoc "JOLT_CHDB_LIB" (System/getenv "JOLT_CHDB_LIB"))
+    (System/getenv "JOLT_CACHE_DIR")
+    (assoc "JOLT_CACHE_DIR" (System/getenv "JOLT_CACHE_DIR"))))
+
+(defn- reopen-in-fresh-process [durable-root scratch-parent]
+  (let [jolt-bin (or (System/getenv "JOLT_BIN") "jolt")
+        wrapper (System/getenv "JOLT_WRAPPER")
+        command (cond-> [] wrapper (conj wrapper))
+        command (into command
+                      [jolt-bin "-Srepro"
+                       "-A:telemetry:embedded-telemetry:telemetry-test"
+                       "-m" "samizdat.telemetry.embedded-reopen-worker"
+                       durable-root scratch-parent])
+        child (process/process
+               command
+               {:env (sanitized-child-env) :out :string :err :string})
+        result (deref child 120000 ::timeout)]
+    (when (= ::timeout result)
+      (try (process/destroy-tree child) (catch Throwable _ nil)))
+    (if (= ::timeout result)
+      {:status :timeout}
+      (let [protocol-line
+            (some #(when (str/starts-with? % reopen-protocol-prefix) %)
+                  (str/split-lines (or (:out result) "")))
+            payload (when protocol-line
+                      (try
+                        (edn/read-string
+                         (subs protocol-line (count reopen-protocol-prefix)))
+                        (catch Throwable _ nil)))]
+        {:status (if (and (zero? (:exit result)) (= :ok (:status payload)))
+                   :ok :failed)
+         :exit (:exit result)
+         :payload payload
+         ;; Never echo child output: dependency diagnostics may contain local
+         ;; paths, and this protocol must not become a credential side channel.
+         :stdout-lines (count (str/split-lines (or (:out result) "")))
+         :stderr-lines (count (str/split-lines (or (:err result) "")))}))))
+
+(deftest real-native-round-trip-recovers-in-a-fresh-process
   (let [directory (java.nio.file.Files/createTempDirectory
                    "samizdat-embedded-telemetry-"
                    (make-array java.nio.file.attribute.FileAttribute 0))
@@ -331,22 +383,14 @@
             (is (instance? clojure.lang.ExceptionInfo error))
             (is (= :oscope.live/closed (:type (ex-data error))))))
 
-        (testing "a fresh instance recovers and queries the same Durable root"
-          (let [reopened (embedded/start! options)
-                reopened-source (:source reopened)]
-            (swap! lifecycles* conj reopened)
-            (is (not= (:instance (:db-spec lifecycle))
-                      (:instance (:db-spec reopened))))
-            (let [rows (get-in
-                        ((:load-command reopened-source)
-                         :embedded-test-reopened
-                         {:signal :spans :field :span-name
-                          :window :15m :limit 20})
-                        [:table :rows])]
-              (is (some #(= "lifecycle.embedded-test" (:value %)) rows)))
+        (testing "process A closes before process B recovers the same Durable root"
+          (is (= :closed (:phase (embedded/status lifecycle))))
+          (let [child-result (reopen-in-fresh-process durable-root (str directory))]
+            (is (= :ok (:status child-result)) (pr-str child-result))
             (is (= {:status :closed :phase :closed}
-                   (embedded/stop! reopened)))
-            (is (= :closed (:phase (oscope/status (:oscope reopened))))))))
+                   (get-in child-result [:payload :stop])))
+            (is (= "lifecycle.embedded-test"
+                   (get-in child-result [:payload :recovered-span]))))))
       (finally
         (doseq [lifecycle @lifecycles*]
           (try (embedded/stop! lifecycle) (catch Throwable _ nil)))
