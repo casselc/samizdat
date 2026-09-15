@@ -12,6 +12,8 @@
   without constructing a provider. Internal and attached runtimes share content
   policy and serialized, transactional lifecycle transitions, including
   exactly-once concurrent and re-entrant shutdown.
+- Add explicit local-only embedded Oscope/Durable ownership with retryable
+  terminal shutdown and same-root recovery under a fresh fenced instance.
 - Add an optional OpenTelemetry profile for Samizdat's nine run seams, a
   versioned typed-attribute manifest, independently bounded local and Langfuse
   exporters, and a fail-open source hook. The stock profile remains free of
