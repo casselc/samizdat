@@ -10,6 +10,7 @@
   already uncommitted. Everything here fails soft: no git, no repo, or any
   error yields an empty diff, and the critic simply reviews completeness only."
   (:require [clojure.string :as str]
+            [samizdat.agent.gates :as gates]
             [samizdat.engine.proc :as proc]
             [samizdat.lexicon :as lexicon]
             [samizdat.security.secrets :as secrets]))
@@ -98,6 +99,94 @@
       (when (or (some? tracked) (some? untracked))
         (vec (distinct (concat (or tracked []) (or untracked []))))))))
 
+(defn- numstat-lines
+  "Added plus deleted lines from Git's numstat output. Binary `-` fields count
+  zero, which is the same rule for tracked and untracked paths."
+  [out]
+  (let [num (fn [s] (or (parse-long (str s)) 0))]
+    (some->> out
+             str/split-lines
+             (remove str/blank?)
+             (map #(str/split % #"\t"))
+             (map (fn [[a d & _]] (+ (num a) (num d))))
+             (reduce + 0))))
+
+(defn- finish-line-count [bytes-read line-feeds last-byte]
+  (if (zero? bytes-read)
+    0
+    (+ line-feeds (if (= 10 last-byte) 0 1))))
+
+(defn- untracked-lines
+  "Stream one untracked path using Git's default text/binary rule.
+
+  A NUL among the first 8000 bytes makes the file binary and therefore worth
+  zero lines. Otherwise LF bytes are counted through EOF, with a non-empty
+  final unterminated line counted once, matching Git numstat. At 64 KiB the
+  conservative prefix count is returned, including a partial final line.
+  Memory stays at one fixed buffer. A symlink is one authored line and is never
+  dereferenced. Paths rejected by File.isFile, or paths that vanish or become
+  unreadable, fail soft to zero."
+  [root rel]
+  (try
+    (let [{:keys [binary-prefix-bytes buffer-bytes max-bytes]}
+          (gates/threshold :untracked-line-scan)
+          file (java.io.File. (str root) (str rel))
+          path (.toPath file)]
+      (cond
+        ;; Git represents a symlink as one line containing its target. Count
+        ;; that authored entry without following it into a FIFO or outside root.
+        (java.nio.file.Files/isSymbolicLink path) 1
+
+        ;; Guard before opening. Git does not report direct special files in
+        ;; ls-files --others; its reported symlinks were handled above.
+        (not (.isFile file)) 0
+
+        :else
+        (let [input (java.io.FileInputStream. file)]
+          (try
+            (let [buffer (byte-array buffer-bytes)]
+              (loop [bytes-read 0
+                     line-feeds 0
+                     last-byte -1]
+                (if (= bytes-read max-bytes)
+                  (finish-line-count bytes-read line-feeds last-byte)
+                  (let [n (.read input buffer 0
+                                 (min buffer-bytes
+                                      (- max-bytes bytes-read)))]
+                    (cond
+                      (neg? n)
+                      (finish-line-count bytes-read line-feeds last-byte)
+
+                      ;; FileInputStream does not return zero for a non-empty
+                      ;; buffer. Preserve the prefix if a host shim does.
+                      (zero? n)
+                      (finish-line-count bytes-read line-feeds last-byte)
+
+                      :else
+                      (let [prefix-length
+                            (min n (max 0 (- binary-prefix-bytes bytes-read)))
+                            binary? (loop [i 0]
+                                      (cond
+                                        (= i prefix-length) false
+                                        (zero? (aget buffer i)) true
+                                        :else (recur (inc i))))]
+                        (if binary?
+                          0
+                          (let [chunk-lines
+                                (loop [i 0 count 0]
+                                  (if (= i n)
+                                    count
+                                    (recur (inc i)
+                                           (if (= 10 (aget buffer i))
+                                             (inc count)
+                                             count))))]
+                            (recur (+ bytes-read n)
+                                   (+ line-feeds chunk-lines)
+                                   (aget buffer (dec n)))))))))))
+            ;; A close failure must not erase a successfully counted prefix.
+            (finally (try (.close input) (catch Throwable _ nil)))))))
+    (catch Throwable _ 0)))
+
 (defn changed-lines
   "How many lines the run has WRITTEN since `baseline`: added plus deleted,
   tracked and untracked together. nil when git cannot answer.
@@ -118,20 +207,11 @@
   reports `-` for it, and a budget is about code the model wrote."
   [root baseline]
   (when (and root baseline)
-    (let [num (fn [s] (or (parse-long (str s)) 0))
-          tracked (some->> (git root "diff" "--numstat" baseline)
-                           str/split-lines
-                           (remove str/blank?)
-                           (map #(str/split % #"\t"))
-                           (map (fn [[a d & _]] (+ (num a) (num d))))
-                           (reduce + 0))
+    (let [tracked (numstat-lines (git root "diff" "--numstat" baseline))
           untracked (some->> (git root "ls-files" "--others" "--exclude-standard")
                              str/split-lines
                              (remove str/blank?)
-                             (map (fn [rel]
-                                    (try (-> (java.io.File. (str root) (str rel))
-                                             slurp str/split-lines count)
-                                         (catch Throwable _ 0))))
+                             (map #(untracked-lines root %))
                              (reduce + 0))]
       (when (or (some? tracked) (some? untracked))
         (+ (or tracked 0) (or untracked 0))))))
