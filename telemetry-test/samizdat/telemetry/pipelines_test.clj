@@ -147,6 +147,116 @@
         (tel/shutdown!)
         (hook/uninstall!)))))
 
+(deftest failed-attach-restores-publication-and-can-retry
+  (tel/shutdown!)
+  (let [initial-policy {:enabled? false :max-chars 31}
+        initial-observer (fn [_ _ thunk] (thunk))
+        partial-observer (fn [_ _ thunk] (thunk))
+        boom (ex-info "hook install failed" {:stage :install})
+        external-shutdowns (atom 0)]
+    (reset! tel/content-policy initial-policy)
+    (hook/install! initial-observer)
+    (try
+      (let [failure
+            (with-redefs [tel/install!
+                          (fn []
+                            (hook/install! partial-observer)
+                            (throw boom))]
+              (try
+                (tel/attach! {:tracer trace/noop-tracer
+                              :flush! (constantly true)
+                              :stats (constantly {})
+                              :shutdown! #(swap! external-shutdowns inc)
+                              :content {:enabled? true :max-chars 71}})
+                (catch Throwable error error)))]
+        (is (identical? boom failure))
+        (is (nil? @tel/runtime))
+        (is (= initial-policy @tel/content-policy))
+        (is (identical? initial-observer @hook/observer))
+        (is (zero? @external-shutdowns)
+            "a failed attachment never assumes shutdown ownership")
+        (let [rt (tel/attach! {:tracer trace/noop-tracer
+                               :flush! (constantly :flushed)
+                               :stats (constantly {:ready true})
+                               :shutdown! #(do (swap! external-shutdowns inc)
+                                               :stopped)
+                               :content {:enabled? false}})]
+          (is (identical? rt @tel/runtime))
+          (is (hook/installed?))
+          (is (= :flushed (tel/flush!)))
+          (is (= :stopped (tel/shutdown!)))
+          (is (= 1 @external-shutdowns))))
+      (finally
+        (tel/shutdown!)
+        (hook/uninstall!)
+        (reset! tel/content-policy
+                {:enabled? false :max-chars tel/default-content-max-chars})))))
+
+(deftest flush-and-stats-finish-before-concurrent-shutdown
+  (doseq [[label callback-key operation expected]
+          [[:flush :flush! tel/flush! :flushed]
+           [:stats :stats tel/stats {:queued 1}]]]
+    (testing (name label)
+      (tel/shutdown!)
+      (let [operation-entered (promise)
+            release-operation (promise)
+            shutdown-attempted (promise)
+            shutdown-entered (promise)
+            blocking-callback
+            #(do (deliver operation-entered true)
+                 @release-operation
+                 expected)
+            callbacks (assoc {:tracer trace/noop-tracer
+                              :flush! (constantly :flushed)
+                              :stats (constantly {:queued 1})
+                              :shutdown! #(do (deliver shutdown-entered true)
+                                              :stopped)}
+                             callback-key blocking-callback)]
+        (tel/attach! callbacks)
+        (let [operation-result (future (operation))]
+          (is (= true (deref operation-entered 5000 ::timeout)))
+          (let [shutdown-result
+                (future
+                  (deliver shutdown-attempted true)
+                  (tel/shutdown!))]
+            (is (= true (deref shutdown-attempted 5000 ::timeout)))
+            (is (= ::blocked (deref shutdown-entered 100 ::blocked))
+                "shutdown callback cannot enter during flush/stats")
+            (deliver release-operation true)
+            (is (= expected (deref operation-result 5000 ::timeout)))
+            (is (= :stopped (deref shutdown-result 5000 ::timeout)))
+            (is (= true (deref shutdown-entered 5000 ::timeout)))))))))
+
+(deftest attached-flush-and-stats-callbacks-may-reenter-the-runtime-lock
+  (tel/shutdown!)
+  (try
+    (tel/attach! {:tracer trace/noop-tracer
+                  :flush! #(vector :flush (tel/stats))
+                  :stats (constantly :stats)
+                  :shutdown! (constantly :stopped)})
+    (is (= [:flush :stats]
+           (deref (future (tel/flush!)) 5000 ::deadlock)))
+    (tel/shutdown!)
+
+    (tel/attach! {:tracer trace/noop-tracer
+                  :flush! (constantly :flushed)
+                  :stats #(vector :stats (tel/flush!))
+                  :shutdown! (constantly :stopped)})
+    (is (= [:stats :flushed]
+           (deref (future (tel/stats)) 5000 ::deadlock)))
+    (tel/shutdown!)
+
+    (tel/attach! {:tracer trace/noop-tracer
+                  :flush! #(vector :flush (tel/shutdown!))
+                  :stats (constantly :stats)
+                  :shutdown! (constantly :stopped)})
+    (is (= [:flush :stopped]
+           (deref (future (tel/flush!)) 5000 ::deadlock)))
+    (is (nil? @tel/runtime))
+    (finally
+      (tel/shutdown!)
+      (hook/uninstall!))))
+
 (deftest init-still-constructs-one-internally-owned-runtime
   (tel/shutdown!)
   (let [mem (memory/exporter)

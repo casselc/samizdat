@@ -559,18 +559,29 @@
               (throw (ex-info (str "telemetry attach requires a " k " callback")
                               {:callback k}))))
           (let [policy (normalized-content-policy content)
+                previous-runtime @runtime
+                previous-policy @content-policy
+                previous-observer @hook/observer
                 rt {:owner :external
                     :tracer tracer
                     :flush-callback flush!
                     :stats-callback stats
                     :shutdown-callback shutdown!}]
-            (reset! content-policy policy)
-            (reset! runtime rt)
-            (when (:enabled? policy)
-              (log/warn "telemetry content override ON for externally owned SDK; clipped at"
-                        (:max-chars policy) "chars"))
-            (when install-hook? (install!))
-            rt)))))
+            (try
+              (reset! content-policy policy)
+              (reset! runtime rt)
+              (when (:enabled? policy)
+                (log/warn "telemetry content override ON for externally owned SDK; clipped at"
+                          (:max-chars policy) "chars"))
+              (when install-hook? (install!))
+              rt
+              (catch Throwable error
+                ;; An external provider remains caller-owned. Roll back only
+                ;; Samizdat publication, including a partially installed hook.
+                (reset! runtime previous-runtime)
+                (reset! content-policy previous-policy)
+                (reset! hook/observer previous-observer)
+                (throw error))))))))
 
 (defn init!
   "Start the runtime. Returns the runtime map (or nil for :off). Idempotent:
@@ -641,16 +652,18 @@
 (defn stats
   "Bounded scalar per-destination diagnostics; never exporter errors."
   []
-  (when-let [rt @runtime]
-    (if-let [stats-callback (:stats-callback rt)]
-      (stats-callback)
-      (export/pipeline-stats (:pipelines rt)))))
+  (locking runtime
+    (when-let [rt @runtime]
+      (if-let [stats-callback (:stats-callback rt)]
+        (stats-callback)
+        (export/pipeline-stats (:pipelines rt))))))
 
 (defn flush! []
-  (when-let [rt @runtime]
-    (if-let [flush-callback (:flush-callback rt)]
-      (flush-callback)
-      (export/force-flush-pipelines! (:pipelines rt)))))
+  (locking runtime
+    (when-let [rt @runtime]
+      (if-let [flush-callback (:flush-callback rt)]
+        (flush-callback)
+        (export/force-flush-pipelines! (:pipelines rt))))))
 
 (defn shutdown!
   "Flush and stop every destination (each exactly once, all attempted), then
