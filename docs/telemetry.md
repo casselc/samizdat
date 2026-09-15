@@ -89,9 +89,9 @@ and model content never become attributes; only their digests and sizes do
 (`docs/DATA-GOVERNANCE.md`; mapping/2 carries content in synthetic mode
 only). Every run span carries `samizdat.execution.kind = "run"` and
 `samizdat.observation.mode = "live"`; the run id is mirrored to
-`langfuse.trace.metadata.run_id` and used as the session id. The seam list
-matches the inert upstream manifest
-`resources/META-INF/jolt/aspects/samizdat-m2-core.edn`.
+`langfuse.trace.metadata.run_id` and used as the session id. The aspect form
+of the seam list is
+`resources/META-INF/jolt/aspects/samizdat-observability-run-22be90d.edn`.
 
 ### Content override (prompts and outputs on live spans)
 
@@ -112,13 +112,14 @@ digests and counts. Strings travel verbatim; structures travel as JSON
 | `turn` | the branch summary plus `turn` and `last-message`, the tape entry the turn starts from | the branch summary plus `appended`: only the messages this turn added (the model's reply, the tool's result) — never the whole tape |
 | `model.chat` | the wire messages, as JSON (after `message/prepare`, i.e. exactly what the provider received) | the model's content |
 | `tool.selection` | `{content prefill}`, the reply the parser read | `{parsed signals}`, the call it found (`name`, `args`) and the mechanics signals |
-| `tool` | the model's arguments, as JSON | the result the branch reads |
+| `tool` | the model's arguments, recursively scrubbed through the run's known-value redaction set, as JSON | the result the branch reads |
 | `steer` | the branch summary plus `turn` (what the gates read) | the realised decision — `gate priority message prediction tool window passed-over` (a gate's `effect` fn is dropped) — with `"steered":true`, or `{"steered":false}` when no gate fired |
 | `branch.close` | `{branch-id status reason}` | `{rows closed}` |
 
 What travels is only text the model already saw or produced and the
 harness's own decisions about it: messages after the RFC-003 redaction, tool
-results after `redact-result`, the model's content, steer messages, branch
+arguments and results after the canonical known-value redaction boundary, the
+model's content, steer messages, branch
 reasons. No environment value, endpoint or credential has a path onto a span
 through this override. The seams hand the hook references (the branch map,
 the branch list, the response), and none of it is read unless the override

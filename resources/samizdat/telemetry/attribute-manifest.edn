@@ -264,7 +264,7 @@
   {:key "samizdat.aspect.build_identity" :type :string :group :version :authority :telemetry
    :promote? false :langfuse :trace-metadata :missing :not-applicable}
 
-  ;; --- harness run seams (the M2 surface samizdat-m2-core.edn names) ------
+  ;; --- harness run seams (samizdat-observability-run-22be90d.edn) ---------
   ;; One live beam run: run! (root agent), run-rounds (control loop), turns,
   ;; branch open/close, model calls, tool selection, tools, steers. Facts
   ;; only — no problem text, messages, tool arguments or results travel.

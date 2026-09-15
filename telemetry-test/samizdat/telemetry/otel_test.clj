@@ -20,11 +20,14 @@
   "The semantic wrappers against the in-memory exporter: attribute types,
   false/zero/absent, signed negatives, the Langfuse mirror, lifecycle spans
   through the hook, suppression, and TRACEPARENT parenting."
-  (:require [clojure.string]
+  (:require [clojure.data.json :as json]
+            [clojure.string]
             [clojure.test :refer [deftest is testing use-fixtures]]
             [otel.context :as ctx]
             [otel.exporter.memory :as memory]
             [otel.trace :as trace]
+            [samizdat.agent.tools :as tools]
+            [samizdat.agent.tools.base :as tool-base]
             [samizdat.telemetry.contract :as contract]
             [samizdat.telemetry.hook :as hook]
             [samizdat.telemetry.otel :as tel]))
@@ -207,7 +210,7 @@
     (is (= (contract/schema-version) (get a "samizdat.telemetry.schema")))))
 
 (deftest harness-run-seams-emit-a-run-trace-through-the-hook
-  ;; The M2 seams as the harness calls them (samizdat-m2-core.edn's surface),
+  ;; The seams named by samizdat-observability-run-22be90d.edn,
   ;; driven directly through the hook: a run whose turn runs in a future (as
   ;; beam/advance-all does), one model call with usage, one tool, one steer.
   (let [problem "write a function that returns 42"
@@ -279,6 +282,36 @@
                 :content policy})
     (try (binding [*mem* mem] (f))
          (finally (tel/shutdown!) (hook/uninstall!)))))
+
+(deftest tool-content-scrubs-known-values-without-flattening-arguments
+  ;; A tool's arguments are model-authored, but may contain a symbolic value
+  ;; copied from host configuration. Plant an opaque secret so only the
+  ;; known-values pass (not a vendor-token regex) can catch it, then inspect
+  ;; the decoded JSON shape the exporter actually received.
+  (with-content-runtime {:enabled? true}
+    (fn []
+      (let [secret "opaque-telemetry-canary-7849"
+            args {:command "deploy"
+                  :auth {:token secret :labels ["blue" "safe"]}
+                  :attempt 2
+                  :enabled false}
+            result (with-redefs [tool-base/run-tool
+                                 (fn [{:keys [branch]}]
+                                   (tool-base/ok branch "accepted"))]
+                     (tools/run-tool {:tool-name "deploy"
+                                      :branch {:id "B1"}
+                                      :env {"SOME_API_KEY" secret}
+                                      :args args}))
+            encoded (get-in (by-name "tool")
+                            [:attributes "langfuse.observation.input"])
+            decoded (json/read-str encoded :key-fn keyword)]
+        (is (= "accepted" (:result result)) "observation does not alter dispatch")
+        (is (= {:command "deploy"
+                :auth {:token "[REDACTED]" :labels ["blue" "safe"]}
+                :attempt 2
+                :enabled false}
+               decoded)
+            "redaction changes only the secret leaf and preserves JSON structure")))))
 
 (def ^:private branch-before
   {:id "B1" :status :active :inactive-reason nil :created-at-turn 0 :turns [] :phase :explore

@@ -42,8 +42,9 @@
   mode too, marks the resource samizdat.telemetry.content=on, and clips each
   value to SAMIZDAT_TELEMETRY_CONTENT_MAX_CHARS (default 32768) with
   samizdat.content.truncated. What travels is only text the model already
-  sees or produced — messages after the RFC-003 redaction, tool results after
-  redact-result, the model's own content — never an env value.
+  sees or produced — messages after the RFC-003 redaction, tool arguments and
+  results after the canonical known-value redaction boundary, the model's own
+  content — never an env value.
   A process-scoped TRACEPARENT env var parents the root span under the caller
   (a lifecycle_cli process under the Python execution span)."
   (:require [clojure.data.json :as json]
@@ -287,7 +288,7 @@
       v)))
 
 
-;; --- harness run observer (the M2 seams samizdat-m2-core.edn names) --------
+;; --- harness run observer (samizdat-observability-run-22be90d.edn) ---------
 
 (defn- sha256-hex [^String s]
   (let [d (.digest (java.security.MessageDigest/getInstance "SHA-256") (.getBytes s "UTF-8"))]
