@@ -22,7 +22,11 @@
   diagnostics are scalar."
   (:require [clojure.test :refer [deftest is testing]]
             [otel.exporter.memory :as memory]
+            [otel.sdk :as otel-sdk]
             [otel.sdk.export :as export]
+            [otel.sdk.tracer :as sdk]
+            [otel.trace :as trace]
+            [samizdat.telemetry.hook :as hook]
             [samizdat.telemetry.otel :as tel]))
 
 (defrecord ThrowingExporter []
@@ -88,6 +92,309 @@
     (is (nil? r2))
     (is (nil? (tel/stats)))
     (is (not (samizdat.telemetry.hook/installed?)))))
+
+(deftest attach-dispatches-to-the-external-owner-only
+  (tel/shutdown!)
+  (let [calls (atom {:sdk-init 0 :provider 0 :get-tracer 0 :provider-shutdown 0
+                     :flush 0 :stats 0 :shutdown 0})
+        supplied-tracer trace/noop-tracer
+        callbacks {:tracer supplied-tracer
+                   :flush! #(do (swap! calls update :flush inc) {:flushed :external})
+                   :stats #(do (swap! calls update :stats inc) {:queued 3})
+                   :shutdown! #(do (swap! calls update :shutdown inc) {:stopped :external})}
+        rt (with-redefs [otel-sdk/init!
+                         (fn [& _]
+                           (swap! calls update :sdk-init inc)
+                           (throw (ex-info "SDK initialization is externally owned" {})))
+                         sdk/tracer-provider
+                         (fn [& _]
+                           (swap! calls update :provider inc)
+                           (throw (ex-info "provider construction is externally owned" {})))
+                         sdk/get-tracer
+                         (fn [& _]
+                           (swap! calls update :get-tracer inc)
+                           (throw (ex-info "tracer construction is externally owned" {})))]
+             (tel/attach! callbacks))]
+    (try
+      (is (identical? supplied-tracer (:tracer rt)))
+      (is (not (contains? rt :provider)))
+      (is (not (contains? rt :pipelines)))
+      (is (= 0 (:sdk-init @calls)))
+      (is (= 0 (:provider @calls)))
+      (is (= 0 (:get-tracer @calls)))
+      (is (hook/installed?))
+      (is (= :observed (hook/observe! :external-test {} (constantly :observed))))
+      (is (identical? rt
+                      (tel/attach! {:tracer :ignored
+                                    :flush! #(throw (ex-info "replaced flush" {}))
+                                    :stats #(throw (ex-info "replaced stats" {}))
+                                    :shutdown! #(throw (ex-info "replaced shutdown" {}))})))
+      (is (= {:queued 3} (tel/stats)))
+      (is (= {:flushed :external} (tel/flush!)))
+      (is (= {:flushed :external} (tel/flush!)))
+      (is (= {:stopped :external}
+             (with-redefs [sdk/shutdown!
+                           (fn [& _]
+                             (swap! calls update :provider-shutdown inc)
+                             (throw (ex-info "must not shut down external provider" {})))]
+               (tel/shutdown!))))
+      (is (nil? (tel/shutdown!)))
+      (is (= {:sdk-init 0 :provider 0 :get-tracer 0 :provider-shutdown 0
+              :flush 2 :stats 1 :shutdown 1}
+             @calls))
+      (is (not (hook/installed?)))
+      (finally
+        (tel/shutdown!)
+        (hook/uninstall!)))))
+
+(deftest init-still-constructs-one-internally-owned-runtime
+  (tel/shutdown!)
+  (let [mem (memory/exporter)
+        provider-fn sdk/tracer-provider
+        get-tracer-fn sdk/get-tracer
+        calls (atom {:provider 0 :get-tracer 0})]
+    (try
+      (with-redefs [sdk/tracer-provider
+                    (fn [opts]
+                      (swap! calls update :provider inc)
+                      (provider-fn opts))
+                    sdk/get-tracer
+                    (fn [provider opts]
+                      (swap! calls update :get-tracer inc)
+                      (get-tracer-fn provider opts))]
+        (let [rt (tel/init! {:mode :local :exporters {:local mem}})]
+          (is (some? (:provider rt)))
+          (is (some? (:pipelines rt)))
+          (is (= [:local] (:destinations rt)))
+          (is (identical? rt (tel/init! {:mode :dual})))
+          (is (= {:provider 1 :get-tracer 1} @calls))
+          (is (map? (tel/flush!)))
+          (is (map? (tel/shutdown!)))
+          (is (nil? (tel/shutdown!)))
+          (is (not (hook/installed?)))))
+      (finally
+        (tel/shutdown!)
+        (hook/uninstall!)))))
+
+(deftest failed-init-cleans-partial-ownership-and-can-retry
+  (tel/shutdown!)
+  (let [initial-policy {:enabled? false :max-chars 23}
+        initial-observer (fn [_ _ thunk] (thunk))
+        boom (ex-info "get-tracer failed" {:stage :tracer})
+        pipeline-fn export/independent-batch-pipelines
+        provider-fn sdk/tracer-provider
+        provider-shutdown-fn sdk/shutdown!
+        pipeline-shutdown-fn export/shutdown-pipelines!
+        calls (atom {:pipeline-created 0 :provider-created 0 :get-tracer 0
+                     :provider-cleanup 0 :pipeline-cleanup 0})]
+    (reset! tel/content-policy initial-policy)
+    (hook/install! initial-observer)
+    (try
+      (let [failure
+            (with-redefs [export/independent-batch-pipelines
+                          (fn [destinations]
+                            (swap! calls update :pipeline-created inc)
+                            (pipeline-fn destinations))
+                          sdk/tracer-provider
+                          (fn [opts]
+                            (swap! calls update :provider-created inc)
+                            (provider-fn opts))
+                          sdk/get-tracer
+                          (fn [& _]
+                            (swap! calls update :get-tracer inc)
+                            (throw boom))
+                          sdk/shutdown!
+                          (fn [provider]
+                            (swap! calls update :provider-cleanup inc)
+                            (provider-shutdown-fn provider))
+                          export/shutdown-pipelines!
+                          (fn [pipelines]
+                            (swap! calls update :pipeline-cleanup inc)
+                            (pipeline-shutdown-fn pipelines))]
+              (try
+                (tel/init! {:mode :local
+                            :exporters {:local (memory/exporter)}
+                            :content {:enabled? true :max-chars 99}})
+                (catch Throwable error error)))]
+        (is (identical? boom failure))
+        (is (= {:pipeline-created 1 :provider-created 1 :get-tracer 1
+                :provider-cleanup 1 :pipeline-cleanup 1}
+               @calls))
+        (is (nil? @tel/runtime))
+        (is (= initial-policy @tel/content-policy))
+        (is (identical? initial-observer @hook/observer))
+        (hook/uninstall!)
+        (let [rt (tel/init! {:mode :local :exporters {:local (memory/exporter)}})]
+          (is (some? (:provider rt)))
+          (is (hook/installed?))
+          (is (map? (tel/shutdown!)))))
+      (finally
+        (tel/shutdown!)
+        (hook/uninstall!)
+        (reset! tel/content-policy
+                {:enabled? false :max-chars tel/default-content-max-chars})))))
+
+(deftest config-failure-before-resource-creation-leaves-state-untouched
+  (tel/shutdown!)
+  (let [initial-policy {:enabled? false :max-chars 29}
+        initial-observer (fn [_ _ thunk] (thunk))
+        boom (ex-info "destination config failed" {:stage :destinations})
+        cleanup-calls (atom 0)]
+    (reset! tel/content-policy initial-policy)
+    (hook/install! initial-observer)
+    (try
+      (let [failure
+            (with-redefs [tel/destinations (fn [& _] (throw boom))
+                          sdk/shutdown! (fn [& _] (swap! cleanup-calls inc))
+                          export/shutdown-pipelines! (fn [& _] (swap! cleanup-calls inc))]
+              (try
+                (tel/init! {:mode :local :content {:enabled? true}})
+                (catch Throwable error error)))]
+        (is (identical? boom failure))
+        (is (zero? @cleanup-calls))
+        (is (nil? @tel/runtime))
+        (is (= initial-policy @tel/content-policy))
+        (is (identical? initial-observer @hook/observer)))
+      (finally
+        (hook/uninstall!)
+        (reset! tel/content-policy
+                {:enabled? false :max-chars tel/default-content-max-chars})))))
+
+(deftest throwing-external-shutdown-is-not-retried
+  (tel/shutdown!)
+  (let [calls (atom 0)]
+    (tel/attach! {:tracer trace/noop-tracer
+                  :flush! (constantly true)
+                  :stats (constantly {})
+                  :shutdown! #(do (swap! calls inc)
+                                  (throw (ex-info "external stop failed" {})))})
+    (is (thrown-with-msg? Throwable #"external stop failed" (tel/shutdown!)))
+    (is (nil? (tel/shutdown!)))
+    (is (= 1 @calls))
+    (is (not (hook/installed?)))))
+
+(deftest attached-tracer-uses-the-shared-content-policy
+  (tel/shutdown!)
+  (let [mem (memory/exporter)
+        provider (sdk/tracer-provider {:processors [(export/simple-processor mem)]})
+        tracer (sdk/get-tracer provider {:name "attached-content-test"})]
+    (tel/attach! {:tracer tracer
+                  :flush! #(sdk/force-flush! provider)
+                  :stats (constantly {:owner :test})
+                  :shutdown! #(sdk/shutdown! provider)
+                  :content {:enabled? true :max-chars 64}})
+    (tel/with-generation [sp "attached.content" {"samizdat.observation.mode" "live"
+                                                   "langfuse.observation.input" "attached input"}]
+      (tel/set-facts! sp {"langfuse.observation.output" "attached output"}))
+    (tel/flush!)
+    (let [attrs (:attributes (first (memory/spans mem)))]
+      (is (= "attached input" (get attrs "langfuse.observation.input")))
+      (is (= "attached output" (get attrs "langfuse.observation.output"))))
+    (is (tel/content-enabled?))
+    (is (= 64 (:max-chars @tel/content-policy)))
+    (tel/shutdown!)
+    (is (not (tel/content-enabled?)))
+    (is (= tel/default-content-max-chars (:max-chars @tel/content-policy))))
+  (with-redefs [tel/content-policy-from-env
+                (constantly {:enabled? true :max-chars 17})]
+    (tel/attach! {:tracer trace/noop-tracer
+                  :flush! (constantly true)
+                  :stats (constantly {})
+                  :shutdown! (constantly true)})
+    (is (= {:enabled? true :max-chars 17} @tel/content-policy))
+    (tel/shutdown!)))
+
+(deftest concurrent-init-and-attach-publish-one-runtime
+  (tel/shutdown!)
+  (let [mem (memory/exporter)
+        provider-fn sdk/tracer-provider
+        provider-entered (promise)
+        release-provider (promise)
+        attach-started (promise)
+        provider-calls (atom 0)
+        external-shutdowns (atom 0)]
+    (with-redefs [sdk/tracer-provider
+                  (fn [opts]
+                    (swap! provider-calls inc)
+                    (deliver provider-entered true)
+                    @release-provider
+                    (provider-fn opts))]
+      (let [init-future (future
+                          (tel/init! {:mode :local :exporters {:local mem}}))]
+        (is (= true (deref provider-entered 5000 ::timeout)))
+        (let [attach-future
+              (future
+                (deliver attach-started true)
+                (tel/attach! {:tracer trace/noop-tracer
+                              :flush! (constantly true)
+                              :stats (constantly {})
+                              :shutdown! #(swap! external-shutdowns inc)}))]
+          (is (= true (deref attach-started 5000 ::timeout)))
+          (deliver release-provider true)
+          (let [init-rt (deref init-future 5000 ::timeout)
+                attach-rt (deref attach-future 5000 ::timeout)]
+            (is (not= ::timeout init-rt))
+            (is (not= ::timeout attach-rt))
+            (is (identical? init-rt attach-rt))
+            (is (= 1 @provider-calls))
+            (is (some? (:provider init-rt)))
+            (is (nil? (:owner init-rt)))
+            (is (= 0 @external-shutdowns))))))
+    (tel/shutdown!)))
+
+(deftest concurrent-external-shutdown-has-one-winner
+  (tel/shutdown!)
+  (let [start (promise)
+        callback-entered (promise)
+        release-callback (promise)
+        calls (atom 0)]
+    (tel/attach! {:tracer trace/noop-tracer
+                  :flush! (constantly true)
+                  :stats (constantly {})
+                  :shutdown! #(do (swap! calls inc)
+                                  (deliver callback-entered true)
+                                  @release-callback
+                                  :external-stopped)})
+    (let [stop #(future @start (tel/shutdown!))
+          a (stop)
+          b (stop)]
+      (deliver start true)
+      (is (= true (deref callback-entered 5000 ::timeout)))
+      (deliver release-callback true)
+      (let [results [(deref a 5000 ::timeout) (deref b 5000 ::timeout)]]
+        (is (= 1 (get (frequencies results) :external-stopped 0)))
+        (is (= 1 (get (frequencies results) nil 0)))
+        (is (= 1 @calls))
+        (is (not (hook/installed?)))))))
+
+(deftest concurrent-and-reentrant-internal-shutdown-has-one-winner
+  (tel/shutdown!)
+  (tel/init! {:mode :local :exporters {:local (memory/exporter)}})
+  (let [shutdown-fn sdk/shutdown!
+        start (promise)
+        callback-entered (promise)
+        release-callback (promise)
+        calls (atom 0)
+        reentrant-result (atom ::unset)]
+    (with-redefs [sdk/shutdown!
+                  (fn [provider]
+                    (swap! calls inc)
+                    (reset! reentrant-result (tel/shutdown!))
+                    (deliver callback-entered true)
+                    @release-callback
+                    (shutdown-fn provider))]
+      (let [stop #(future @start (tel/shutdown!))
+            a (stop)
+            b (stop)]
+        (deliver start true)
+        (is (= true (deref callback-entered 5000 ::timeout)))
+        (deliver release-callback true)
+        (let [results [(deref a 5000 ::timeout) (deref b 5000 ::timeout)]]
+          (is (= 1 (count (filter map? results))))
+          (is (= 1 (count (filter nil? results))))
+          (is (= 1 @calls))
+          (is (nil? @reentrant-result))
+          (is (not (hook/installed?))))))))
 
 (deftest mode-parsing
   (is (= :off (tel/parse-mode nil)))
