@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Mount Oscope's read-only trace, event, and chart handlers at `/oscope` on
+  the existing embedded Samizdat listener, with exact Host validation,
+  instrumentation suppression, bounded admission, and drain-before-Durable
+  shutdown. The initial surface deliberately excludes OTLP, plot editing, and
+  binary export.
 - Qualify the embedded profile's current Oscope, OTel, chDB, ClickHouse
   exporter, and viewer-only HTTP graph without loading a listener or receiver.
 - Add an opt-in `:embedded-telemetry` dependency profile that layers Oscope's

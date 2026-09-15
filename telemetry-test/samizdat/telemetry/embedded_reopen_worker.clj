@@ -3,12 +3,15 @@
 
 (ns samizdat.telemetry.embedded-reopen-worker
   "Fresh-process half of the native Durable recovery qualification."
-  (:require [samizdat.telemetry.embedded :as embedded]))
+  (:require [clojure.string :as str]
+            [samizdat.telemetry.embedded :as embedded]
+            [samizdat.telemetry.embedded-http :as embedded-http]))
 
 (def ^:private protocol-prefix "SAMIZDAT_EMBEDDED_REOPEN_V1 ")
 
 (defn -main [durable-root scratch-parent]
   (let [lifecycle* (atom nil)
+        viewer* (atom nil)
         stopped? (atom false)]
     (try
       (let [lifecycle
@@ -32,6 +35,27 @@
         (when-not recovered?
           (throw (ex-info "fresh process did not recover the expected span"
                           {:type ::missing-span})))
+        (let [viewer (embedded-http/start! lifecycle "127.0.0.1:8080")
+              _ (reset! viewer* viewer)
+              response (embedded-http/handle
+                        viewer
+                        {:request-method :get
+                         :uri "/oscope/telemetry"
+                         :headers {"Host" "127.0.0.1:8080"}})
+              ui-recovered? (and (= 200 (:status response))
+                                 (str/includes? (:body response)
+                                                "lifecycle.embedded-test"))]
+          (when-not ui-recovered?
+            (throw (ex-info "fresh process UI did not render the expected span"
+                            {:type ::missing-ui-span
+                             :status (:status response)})))
+          (let [viewer-stop (embedded-http/stop! viewer)]
+            (when-not (= {:status :closed :phase :closed} viewer-stop)
+              (throw (ex-info "fresh process did not drain the viewer"
+                              {:type ::viewer-not-closed
+                               :status (:status viewer-stop)
+                               :phase (:phase viewer-stop)})))
+            (reset! viewer* nil)))
         (let [stop-result (embedded/stop! lifecycle)]
           (reset! stopped? (= {:status :closed :phase :closed} stop-result))
           (when-not @stopped?
@@ -42,7 +66,10 @@
           (println (str protocol-prefix
                         (pr-str {:status :ok
                                  :recovered-span "lifecycle.embedded-test"
+                                 :ui-readback true
                                  :stop stop-result})))))
       (finally
+        (when @viewer*
+          (try (embedded-http/stop! @viewer*) (catch Throwable _ nil)))
         (when (and @lifecycle* (not @stopped?))
           (try (embedded/stop! @lifecycle*) (catch Throwable _ nil)))))))

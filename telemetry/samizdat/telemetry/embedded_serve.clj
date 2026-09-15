@@ -12,7 +12,9 @@
             [jolt.host]
             [samizdat.core :as core]
             [samizdat.system :as system]
-            [samizdat.telemetry.embedded :as embedded]))
+            [samizdat.telemetry.embedded :as embedded]
+            [samizdat.telemetry.embedded-http :as embedded-http]
+            [samizdat.server :as server]))
 
 (def durable-root-env "SAMIZDAT_EMBEDDED_DURABLE_ROOT")
 
@@ -92,6 +94,11 @@
   [runtime]
   (stop-capability-until-closed! #(embedded/stop! runtime)))
 
+(defn stop-viewer-until-closed!
+  "Drain the borrowed viewer before its Oscope source can be retired."
+  [viewer]
+  (stop-capability-until-closed! #(embedded-http/stop! viewer)))
+
 (defn- log-stop-failure! [failure]
   (log-safely!
    (fn []
@@ -140,37 +147,49 @@
               (:result terminal))))))))
 
 (defn stop-owned!
-  "Stop application ingress/resources before retiring the embedded SDK,
-  query source, checkpoint, and Durable connection. Logs a bounded failure
-  before rethrowing so Jolt's isolated shutdown-hook runner cannot hide it."
-  [runtime]
-  (log-safely!
-   #(log/info "stopping Samizdat application before embedded telemetry"))
-  (let [application-failure (try
-                              (system/stop!)
-                              nil
-                              (catch Throwable failure failure))
-        _ (log-safely!
-           #(log/info "Samizdat application stop attempt completed; retiring embedded telemetry"))
-        embedded-outcome (try
-                           {:result (stop-until-closed! runtime)}
-                           (catch Throwable failure {:failure failure}))]
-    (if-let [embedded-failure (:failure embedded-outcome)]
-      (let [terminal-failure (if application-failure
-                               (dual-stop-failure embedded-failure)
-                               embedded-failure)]
-        (log-stop-failure! terminal-failure)
-        (throw terminal-failure))
-      (let [result (:result embedded-outcome)]
-        (log-safely!
-         #(log/info "embedded telemetry stopped"
-                    (pr-str (safe-stop-result result))))
-        (if application-failure
-          (do
-            (log-safely!
-             #(log/error "Samizdat application stop failed; embedded telemetry closed"))
-            (throw application-failure))
-          result)))))
+  "Record interrupted work, stop application ingress/resources, drain the
+  borrowed viewer, then retire the embedded SDK, query source, checkpoint,
+  and Durable connection."
+  ([runtime] (stop-owned! runtime nil))
+  ([runtime viewer]
+   (log-safely!
+    #(log/info "stopping Samizdat application before embedded telemetry"))
+   (let [_ (core/record-exit!)
+         application-failure (try (system/stop!) nil
+                                  (catch Throwable failure failure))
+         viewer-failure (when viewer
+                          (try (stop-viewer-until-closed! viewer) nil
+                               (catch Throwable failure failure)))
+         _ (log-safely!
+            #(log/info "Samizdat application stop attempt completed; retiring embedded telemetry"))
+         ;; Never retire the source while an admitted handler might still be
+         ;; querying it. A bounded drain failure is terminal and leaves the
+         ;; embedded owner open for process teardown to report honestly.
+         _ (when viewer-failure
+             (let [terminal-failure (if application-failure
+                                      (dual-stop-failure viewer-failure)
+                                      viewer-failure)]
+               (log-stop-failure! terminal-failure)
+               (throw terminal-failure)))
+         embedded-outcome (try
+                            {:result (stop-until-closed! runtime)}
+                            (catch Throwable failure {:failure failure}))]
+     (if-let [embedded-failure (:failure embedded-outcome)]
+       (let [terminal-failure (if application-failure
+                                (dual-stop-failure embedded-failure)
+                                embedded-failure)]
+         (log-stop-failure! terminal-failure)
+         (throw terminal-failure))
+       (let [result (:result embedded-outcome)]
+         (log-safely!
+          #(log/info "embedded telemetry stopped"
+                     (pr-str (safe-stop-result result))))
+         (if application-failure
+           (do
+             (log-safely!
+              #(log/error "Samizdat application stop failed; embedded telemetry closed"))
+             (throw application-failure))
+           result))))))
 
 (defn- stop-incomplete-startup!
   "Retire the narrow retry capability returned by embedded/start!."
@@ -204,6 +223,21 @@
           (throw failure))
         (throw failure)))))
 
+(defn- start-viewer! [runtime publish-stop!]
+  (try
+    (let [authority #(str "127.0.0.1:"
+                          (get-in (system/config) [:http :port]))
+          viewer (embedded-http/start! runtime authority)]
+      {:viewer viewer
+       :handler (embedded-http/compose-handler #'server/handler viewer)})
+    (catch Throwable failure
+      ;; The embedded owner already exists, but application ingress does not.
+      ;; Publish and retire that owner before letting adapter construction fail.
+      (let [stop! (terminal-stop #(stop-owned! runtime nil))]
+        (publish-stop! stop!)
+        (stop!)
+        (throw failure)))))
+
 (defn run!
   "Start the local embedded owner and the ordinary Samizdat server.
 
@@ -212,9 +246,10 @@
   faces share the same idempotent ordered cleanup."
   [args publish-stop!]
   (let [runtime (start-owner! args publish-stop!)
-        stop! (terminal-stop #(stop-owned! runtime))]
+        {:keys [viewer handler]} (start-viewer! runtime publish-stop!)
+        stop! (terminal-stop #(stop-owned! runtime viewer))]
     (try
       (when (publish-stop! stop!)
-        (core/-main))
+        (core/run! handler {:own-shutdown? false}))
       (finally
         (stop!)))))

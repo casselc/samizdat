@@ -24,6 +24,7 @@
             [samizdat.telemetry.contract-test]
             [samizdat.telemetry.embedded-bootstrap-test]
             [samizdat.telemetry.embedded-dependency-test]
+            [samizdat.telemetry.embedded-http-test]
             [samizdat.telemetry.embedded-test]
             [samizdat.telemetry.embedded-serve-test]
             [samizdat.telemetry.hook-test]
@@ -35,6 +36,7 @@
     samizdat.telemetry.contract-test
     samizdat.telemetry.embedded-bootstrap-test
     samizdat.telemetry.embedded-dependency-test
+    samizdat.telemetry.embedded-http-test
     samizdat.telemetry.embedded-test
     samizdat.telemetry.embedded-serve-test
     samizdat.telemetry.hook-test

@@ -117,7 +117,7 @@
       (log/warn "nREPL not started:" (ex-message e))
       nil)))
 
-(defn- record-exit!
+(defn record-exit!
   "Name what was still running when the process ended.
 
   Best-effort and silent on failure by design: this runs during shutdown, when
@@ -131,29 +131,40 @@
           (map :id)))
     (catch Throwable _ nil)))
 
+(defn run!
+  "Run the ordinary Samizdat lifecycle with an explicit Ring handler.
+
+  Stock mode owns its shutdown hooks. An enclosing launcher may pass
+  `:own-shutdown? false` and perform one stronger ordered cleanup after the
+  park returns."
+  ([handler] (run! handler {}))
+  ([handler {:keys [own-shutdown?] :or {own-shutdown? true}}]
+   (system/start! handler)
+   (let [cfg (system/config)
+         nrepl-port (get-in cfg [:nrepl :port])
+         warm (warm-tls! cfg)]
+     ;; RECORD THE EXIT BEFORE TEARING ANYTHING DOWN. A parked server does not
+     ;; exit on its own, so an exit with work still in flight is a bug — and the
+     ;; reason run a3ba69bb cost a whole investigation is that it went with a 0
+     ;; and no message, which is indistinguishable from somebody stopping it
+     ;; (karamazov-1xx). Registered FIRST so it runs while the store is still
+     ;; open and can still say what was running.
+     (when own-shutdown?
+       (jolt.host/add-shutdown-hook record-exit!)
+       (jolt.host/add-shutdown-hook system/stop!))
+     (start-nrepl! nrepl-port)
+     (println)
+     (println "samizdat")
+     (println (str "  http   http://127.0.0.1:" (get-in cfg [:http :port]) "/health"))
+     (println (str "  nrepl  127.0.0.1:" nrepl-port))
+     (println (str "  model  " (name (get-in cfg [:llm :provider]))
+                   " / " (get-in cfg [:llm :model])
+                   " (" (name warm) ")"))
+     (println)
+     ;; Park. The server and nREPL run on worker threads; the shutdown hooks
+     ;; close them. Returning here lets the launcher tear the process down.
+     (jolt.host/park-until-interrupt)
+     (when own-shutdown? (system/stop!)))))
+
 (defn -main [& _args]
-  (system/start! #'server/handler)
-  (let [cfg (system/config)
-        nrepl-port (get-in cfg [:nrepl :port])
-        warm (warm-tls! cfg)]
-    ;; RECORD THE EXIT BEFORE TEARING ANYTHING DOWN. A parked server does not
-    ;; exit on its own, so an exit with work still in flight is a bug — and the
-    ;; reason run a3ba69bb cost a whole investigation is that it went with a 0
-    ;; and no message, which is indistinguishable from somebody stopping it
-    ;; (karamazov-1xx). Registered FIRST so it runs while the store is still
-    ;; open and can still say what was running.
-    (jolt.host/add-shutdown-hook record-exit!)
-    (jolt.host/add-shutdown-hook system/stop!)
-    (start-nrepl! nrepl-port)
-    (println)
-    (println "samizdat")
-    (println (str "  http   http://127.0.0.1:" (get-in cfg [:http :port]) "/health"))
-    (println (str "  nrepl  127.0.0.1:" nrepl-port))
-    (println (str "  model  " (name (get-in cfg [:llm :provider]))
-                  " / " (get-in cfg [:llm :model])
-                  " (" (name warm) ")"))
-    (println)
-    ;; Park. The server and nREPL run on worker threads; the shutdown hooks
-    ;; close them. Returning here lets the launcher tear the process down.
-    (jolt.host/park-until-interrupt)
-    (system/stop!)))
+  (run! #'server/handler))
