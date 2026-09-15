@@ -142,6 +142,54 @@ the environment, registers `otel/shutdown!` as a shutdown hook and then
 delegates to `samizdat.core/-main`. `HARNESS_*` variables configure the
 harness exactly as for `jolt serve`.
 
+### Embedded local-only server
+
+The explicit embedded launcher keeps Oscope, its in-process chDB exporter,
+and Durable storage in the Samizdat process. It opens no telemetry listener,
+does not select standalone OTLP or Langfuse, and never reads Langfuse endpoint
+or credential variables. Telemetry content is off and cannot be enabled by
+the standalone mode's environment variables.
+
+The alias enters through a host-only bootstrap. It arms Jolt's centralized
+INT/HUP/TERM shutdown owner before dynamically loading Oscope or chDB, so
+native worker threads cannot take a process signal away from the shutdown
+hook. A signal during construction prevents application ingress and waits at
+most 120 seconds for the embedded cleanup capability to publish or startup to
+fail.
+
+```sh
+JOLT_CHDB_LIB=/path/to/libchdb.so \
+  jolt -M:telemetry:embedded-telemetry:embedded-serve -- \
+  --durable-root /path/to/non-secret/telemetry-store
+```
+
+`SAMIZDAT_EMBEDDED_DURABLE_ROOT` is the file-safe fallback when the flag is
+omitted. The flag takes precedence. Paths are required and are never retained
+in configuration errors or shutdown diagnostics. `HARNESS_*` continues to
+configure the ordinary server and model runtime.
+
+Application ingress and resources stop before the embedded owner drains its
+SDK, closes the Oscope source, checkpoints Durable, and closes the connection.
+An application-stop exception does not skip that embedded retirement: when the
+embedded owner closes, the original application exception remains primary; if
+both fail, the bounded Durable-close failure is primary and records only that
+application stop also failed, never its exception, message, data, path, or
+cause. Lifecycle logging is observational and fail-open: a logging backend or
+rendering failure cannot skip cleanup or replace its terminal result.
+Retryable `:closing` or thrown stop attempts are retried at 25 ms intervals,
+at most 100 attempts. Exhaustion logs a bounded status/phase and exits with a
+failure instead of spinning or claiming a close that Durable did not confirm;
+normal, signal, and `finally` cleanup faces share that first terminal result or
+failure, so they neither redrive the bound nor duplicate its diagnostic. A
+concurrent cleanup face waits at most 120 seconds for that terminal outcome and
+fails explicitly if the owner remains stuck. The launcher does not call
+`System/exit`, but leaves the bounded failure uncaught for Jolt's normal nonzero
+termination. If embedded attachment fails after acquiring Oscope, its narrow
+retry capability is published to the same shutdown owner and driven through
+this bound before the startup error escapes.
+The stock `jolt serve` and standalone `off`/`local`/`langfuse`/`dual` launcher
+are unchanged.
+
 ## Dependencies under the alias
 
 Only the alias adds dependencies; the stock `:deps` are unchanged.
