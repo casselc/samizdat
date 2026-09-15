@@ -84,6 +84,7 @@
             [samizdat.store.journal :as journal]
             [samizdat.store.knowledge :as knowledge]
             [samizdat.store.runs :as runs]
+            [samizdat.telemetry.hook :as hook]
             [samizdat.userspace :as userspace]
             [samizdat.workflow :as workflow])
   (:refer-clojure :exclude [run!]))
@@ -546,6 +547,7 @@
   threw here and ended the whole run, which is right for a single-branch
   driver and wrong for one branch of five."
   [ctx b turn]
+  (hook/observe! :turn {:run-id (:run-id ctx) :branch-id (:id b) :turn turn :branch b} (fn []
   (if-let [wf (:turn-workflow ctx)]
     (let [data (workflow/note-schema-warnings!
                 ctx (myc/run-compiled wf ctx {:branch b :turn turn}))
@@ -565,7 +567,7 @@
     ;; Loud rather than a quiet second path: every caller that reaches here in
     ;; production sets this, so its absence is a wiring bug and not a mode.
     (throw (ex-info "the beam was handed no :turn-workflow — a turn is defined by a manifest, and the scheduler cannot advance a branch without one"
-                    {:branch (:id b) :turn turn}))))
+                    {:branch (:id b) :turn turn}))))))
 
 (defn advance-all
   "One turn for every active branch, concurrently, each under a hard deadline.
@@ -858,6 +860,8 @@
   ORIGINAL budget — so starting at turn N+1 of M is what keeps a crash from
   re-granting the N turns before it. Returns {:status :run-id :branches …}."
   [{:keys [conn run-id config repl-session] :as ctx} branches start-turn]
+  (hook/observe! :control-loop {:run-id run-id :start-turn start-turn :branches (count branches)
+                                :branch-list branches} (fn []
   (let [live-branches (atom branches)
         ctx (assoc ctx :live-branches live-branches)
         _ (session/mark-run! run-id)
@@ -980,7 +984,7 @@
         ;; for the life of the harness.
         (try (route/release! (:root ctx))
              (catch Throwable e
-               (log/warn "stopping the project image failed:" (ex-message e))))))))
+               (log/warn "stopping the project image failed:" (ex-message e))))))))))
 
 (defn run!
   "Run a beam to completion.
@@ -990,6 +994,8 @@
   provider calls after the answer exists is pure waste."
   [{:keys [conn config llm-adapter llm-config problem max-turns beam-width
            token-budget abort on-start seed-run quarantine complete] :as opts}]
+  (hook/observe! :run {:provider (:provider llm-config) :model (:model llm-config)
+                       :problem problem :max-turns max-turns :beam-width beam-width} (fn []
   (let [max-turns (or max-turns (get-in config [:run :max-turns]) 40)
         ;; Tokens the whole run may spend; nil is unbounded. Enforced by
         ;; :beam/round-open against the journal, sized against below.
@@ -1181,7 +1187,7 @@
         ;; listing shows a later supervisor weighing an unfamiliar edit
         ;; (karamazov-c58).
         (userspace/record-run-outcome! outcome))
-      result)))
+      result)))))
 
 (defn summary
   "One line per branch, for logs and the run response."

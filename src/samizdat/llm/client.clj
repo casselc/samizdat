@@ -50,7 +50,8 @@
             [samizdat.llm.message :as message]
             [samizdat.llm.ratelimit :as ratelimit]
             [samizdat.util :as util]
-            [samizdat.session :as session]))
+            [samizdat.session :as session]
+            [samizdat.telemetry.hook :as hook]))
 
 (def default-max-retries 2)
 (def default-timeout-ms 300000)
@@ -335,7 +336,14 @@
   ([adapter config messages] (chat adapter config messages nil))
   ([adapter config messages {:keys [max-tokens temperature max-retries prefill force-tool
                                     cache-key reasoning-effort]}]
-   (let [request {:messages (message/prepare messages)
+   (let [wire (message/prepare messages)]
+   (hook/observe! :model {:provider (adapter/id adapter) :model (:model config)
+                          :messages (count messages) :max-tokens (or max-tokens (:max-tokens config))
+                          :prefill (some? prefill) :force-tool (some? force-tool)
+                          ;; The wire messages, for the content override only;
+                          ;; an observer without it reads the count above.
+                          :input wire} (fn []
+   (let [request {:messages wire
                   :max-tokens (or max-tokens (:max-tokens config))
                   :temperature (or temperature (:temperature config))
                   ;; Passed through as given; the adapter decides whether it
@@ -433,7 +441,7 @@
              ;; (samizdat.model.ratelimit-teardown-test enumerates the race
              ;; the old sleep allowed).
              (cancel/sleep! wait)
-             (recur (inc attempt) errors))))))))
+             (recur (inc attempt) errors)))))))))))
 
 (defn- file-stem
   "`/a/b/Qwen3.8-27B-Q8_0.gguf` -> `Qwen3.8-27B-Q8_0`; a bare alias is itself."

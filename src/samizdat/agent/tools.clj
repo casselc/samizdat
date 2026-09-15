@@ -69,7 +69,8 @@
             [samizdat.agent.tools.skills]
             [samizdat.agent.tools.introspect]
             [samizdat.agent.tools.lsp]
-            [samizdat.security.secrets :as secrets]))
+            [samizdat.security.secrets :as secrets]
+            [samizdat.telemetry.hook :as hook]))
 
 ;; --- the dispatch seam ------------------------------------------------------
 ;;
@@ -197,6 +198,9 @@
      mistake it exists to prevent.
   3. The model-bound strings are redacted. See the note above the delay."
   [{:keys [branch tool-name] :as ctx}]
+  (hook/observe! :tool {:branch-id (:id branch) :tool-name tool-name
+                        ;; The model's own arguments, for the content override.
+                        :input (:args ctx)} (fn []
   (let [known (known-values-for ctx)
         outcome (try {:ok (retrying ctx)}
                      (catch Throwable e {:threw e}))]
@@ -214,7 +218,7 @@
                 (str "`" tool-name "` " fault
                      ". This is a harness fault, not yours — the call was fine."))
                known))
-          (redact-result r known))))))
+          (redact-result r known))))))))
 
 ;; Re-exports: loop.clj and the tests reach the tool surface through this
 ;; namespace and keep working unchanged.

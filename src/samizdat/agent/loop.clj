@@ -1062,6 +1062,7 @@
                      branch)
             decision (arbiter/decide
                       {:branch branch
+                       :turn turn
                        :max-turns max-turns
                        ;; How wide the beam already is, so the reproduction
                        ;; rung knows whether the run can afford offspring.
