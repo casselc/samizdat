@@ -24,36 +24,105 @@
   compatibility while `POST /v1/runs` starts one and returns. A branch is an
   entity with a durable id rather than a value threaded through the loop,
   because an intervention has to be able to name one."
-  (:require [clojure.data.json :as json]
+  (:require ;; the java.time.* host shim, before data.json — see samizdat.store.journal
+            [jolt.time]
+            [clojure.data.json :as json]
+            ;; log is called from start-run!'s retention sweep. jolt resolves
+            ;; ns aliases lazily, so leaving this out loads fine and throws on
+            ;; the first run start that actually prunes — which made enabling
+            ;; :retention :run-record-days break every subsequent run start
+            ;; (karamazov-blt.31).
+            [clojure.tools.logging :as log]
+            ;; db.jdbc registers the java.sql shim clojure.jdbc compiles against and
+            ;; points connection construction at the native driver; it has to load
+            ;; before jdbc.core.
+            [db.jdbc]
             [jdbc.core :as jdbc]
             [samizdat.store.db :as db]
-            [samizdat.store.journal :as journal]))
+            [samizdat.store.journal :as journal]
+            [samizdat.lexicon :as lexicon]))
 
 (defn start-run!
   "Open a run and return its id."
-  [conn {:keys [problem provider model max-turns beam-width prompt-digest]}]
+  [conn {:keys [problem provider model max-turns beam-width prompt-digest
+                token-budget]}]
   (let [id (str (random-uuid))]
-    ;; The retention sweep (review2 #11): events outlive their run's tail
-    ;; window, then go — every durable table keeps the content.
-    (journal/prune-finished!
-     conn (str (.minusSeconds (java.time.Instant/now) (* 24 3600))))
+    ;; The retention sweep (provenance R2-11), on run START rather than at
+    ;; finish: a client tailing a just-finished run still reads its
+    ;; :run-finished entry to learn the run ended.
+    ;;
+    ;; Two windows, and they are different KINDS of decision. Events are a
+    ;; tail buffer and go on their own; the run RECORD is what a resume
+    ;; replays from and what makes a crashed run inspectable, so it is kept
+    ;; forever unless an operator says otherwise. Both are gates.edn
+    ;; :retention — the events window was (* 24 3600) here, a number nobody
+    ;; could change without a rebuild.
+    (let [{:keys [events-hours run-record-days]} (lexicon/policy :retention)
+          ago (fn [seconds]
+                (str (.minusSeconds (java.time.Instant/now) (long seconds))))]
+      (when events-hours
+        (journal/prune-finished! conn (ago (* events-hours 3600))))
+      (when run-record-days
+        (let [n (journal/prune-run-record! conn (ago (* run-record-days 86400)))]
+          (when (pos? n)
+            (log/info "retention: dropped the record of" n "run(s) older than"
+                      run-record-days "days")))))
     (db/with-writer
       (db/execute! conn
                      ["INSERT INTO runs (id, problem, status, provider, model, max_turns,
-                                         beam_width, prompt_digest, started_at)
-                       VALUES (?, ?, 'running', ?, ?, ?, ?, ?, ?)"
+                                         beam_width, prompt_digest, started_at,
+                                         token_budget)
+                       VALUES (?, ?, 'running', ?, ?, ?, ?, ?, ?, ?)"
                       ;; The columns are NOT NULL DEFAULT '', and a DEFAULT does
                       ;; not apply to an explicitly-inserted NULL, so these
-                      ;; coerce rather than relying on the schema.
+                      ;; coerce rather than relying on the schema. token_budget
+                      ;; is the exception: NULL there means unbounded.
                       id problem (if provider (name provider) "") (or model "")
                       (or max-turns 0) (or beam-width 1) (or prompt-digest "")
-                      (db/now)]))
+                      (db/now) token-budget]))
     (journal/note! conn id :run-started {:data {:problem problem :model model}})
     id))
 
+(def terminal-statuses
+  "Every status that means the run is OVER.
+
+  Enumerated once, here, because it was enumerated twice and one copy was
+  wrong: api.control listed completed/aborted/failed and missed `interrupted`
+  (written by startup reconciliation) and `exhausted`, so a directive against
+  such a run was accepted and sat `pending` forever — the intervention that
+  never resolves, which is the exact defect blt.38 was filed for.
+
+  NOT the same question as `unresumable-statuses` below, which is only
+  completed and aborted. A run that ran out of budget is over AND resumable;
+  those are different facts and deliberately keep different lists.
+
+  `abandoned` is on the list and was missing, which is the same defect one
+  layer along: :loop/finish and :board/finish both write it (a branch that
+  gave up rather than shipped), so `terminal?` said an abandoned run was
+  still going and api.control accepted a directive against it — pending
+  forever, with nothing left to drain it (karamazov-agbw)."
+  #{"completed" "aborted" "failed" "interrupted" "exhausted" "abandoned"})
+
+(def unresumable-statuses
+  "The endings a resume will not pick up, so the only ones after which a
+  directive that never reached a boundary is certainly undeliverable.
+
+  Named here beside `terminal-statuses` because the two are read together and
+  were previously one enumerated and one inline: agent.resume's `resumable?`
+  is defined against this set, and the drivers' teardown expires pending
+  directives against it. An aborted run stays aborted and a completed one
+  shipped; everything else is over but may yet continue, and a pending
+  directive against it is not stale, it is early (karamazov-agbw)."
+  #{"completed" "aborted"})
+
+(defn terminal?
+  "Whether this run row has ended, whatever ended it."
+  [run]
+  (contains? terminal-statuses (str (:status run))))
+
 (defn finish-run!
   "Terminal only from 'running', decided by the ROW rather than the caller
-  (review2 #4): abort!'s transient window could overwrite a run that completed
+  (provenance R2-4): abort!'s transient window could overwrite a run that completed
   between its registry read and this write. Returns rows written; 0 means the
   run was already terminal and nothing changed, the journal says nothing."
   [conn run-id status final-answer]
@@ -120,6 +189,19 @@
                   run-id])
     (db/change-count conn)))
 
+(defn nth-recent-start
+  "The started_at of the nth most recent run (1 = the latest), or nil when
+  fewer than n runs exist.
+
+  \"The last n runs\" as a bound for tables that carry a created_at and no
+  run id — userspace versions, knowledge rows. nil means everything: a store
+  younger than its window is read whole rather than cut at a run that does
+  not exist."
+  [conn n]
+  (:started_at (db/fetch-one conn ["SELECT started_at FROM runs
+                                     ORDER BY started_at DESC LIMIT 1 OFFSET ?"
+                                    (dec (long n))])))
+
 (defn get-run [conn run-id]
   (db/fetch-one conn ["SELECT * FROM runs WHERE id = ?" run-id]))
 
@@ -166,18 +248,41 @@
    (db/fetch conn ["SELECT * FROM runs ORDER BY started_at DESC LIMIT ?" limit])))
 
 (defn open-branch!
-  [conn run-id {:keys [branch-id parent-id created-at-turn]}]
-  (db/with-writer
-    (db/execute! conn
-                   ["INSERT INTO branches (id, run_id, parent_id, status, created_at_turn)
-                     VALUES (?, ?, ?, 'active', ?)"
-                    branch-id run-id parent-id (or created-at-turn 0)]))
-  (journal/note! conn run-id :branch-opened
-                 {:branch-id branch-id :data {:parent parent-id}})
+  "`:problem` is the branch's OWN problem when it differs from the run's — a
+  decompose unit's contract, a team worker's sub-task — and nil for a branch
+  working the run-level problem. It is what a resume rebuilds the branch's
+  opening messages from (karamazov-blt.23). `:role` is the role the branch
+  runs as, nil for the unscoped default (karamazov-5ge3). `:prompt-suffix` is
+  the text the cell appended to the role's system prompt — the same value it
+  hands `initial-messages` — and completes what a rebuild needs to open the
+  same messages. Recorded as \"\" when there is none, so the row says so:
+  NULL means the row predates the column (v24, karamazov-kgvg)."
+  [conn run-id {:keys [branch-id parent-id created-at-turn problem role prompt-suffix]}]
+  ;; IDEMPOTENT, because a resumed run re-opens branch ids it already has.
+  ;; Branch ids are round-scoped by construction (T0, T0v1, T0r1), so after a
+  ;; crash and resume the board claims the same task to the same id and the
+  ;; plain INSERT died on the (run_id, id) primary key — taking the board
+  ;; stage down with it and surfacing to the supervisor as a crash it then
+  ;; spent half a run chasing (karamazov-otd, found live on run e0c7662f).
+  ;;
+  ;; OR IGNORE rather than an upsert, deliberately: the existing row is this
+  ;; same branch's record, and the one thing it holds that we must not
+  ;; overwrite is how it ENDED. close-branch! refuses to rewrite a closed
+  ;; branch's status for exactly that reason (provenance R2-4); re-opening
+  ;; must not do through the back door what closing refuses to do directly.
+  ;; So a rejoin keeps the row and says so in the journal.
+  (let [n (db/with-writer
+            (db/execute! conn
+                         ["INSERT OR IGNORE INTO branches (id, run_id, parent_id, status, created_at_turn, problem, role, prompt_suffix)
+                           VALUES (?, ?, ?, 'active', ?, ?, ?, ?)"
+                          branch-id run-id parent-id (or created-at-turn 0) problem
+                          (some-> role name) (str prompt-suffix)]))]
+    (journal/note! conn run-id (if (pos? n) :branch-opened :branch-rejoined)
+                   {:branch-id branch-id :data {:parent parent-id}}))
   branch-id)
 
 (defn close-branch!
-  "Only from 'active' (review2 #4): a late close used to overwrite a closed
+  "Only from 'active' (provenance R2-4): a late close used to overwrite a closed
   branch's status and inactive_reason — the column the cull-honesty work
   exists to keep truthful. Returns rows written."
   [conn run-id branch-id status reason]

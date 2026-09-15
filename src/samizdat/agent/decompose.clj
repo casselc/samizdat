@@ -21,7 +21,9 @@
   Pure here — the architect prompt and the decision parsing; the orchestration
   (attempt, recurse, assemble, depth cap) lives in cells/decompose.clj. Same
   split as planner.clj vs cells/team.clj."
-  (:require [clojure.data.json :as json]
+  (:require ;; the java.time.* host shim, before data.json — see samizdat.store.journal
+            [jolt.time]
+            [clojure.data.json :as json]
             [clojure.string :as str]
             [samizdat.agent.gates :as gates]
             [samizdat.prompt :as prompt]))
@@ -30,13 +32,18 @@
 ;; :decompose-max-parts) — cost ceilings, since each level of recursion
 ;; multiplies sub-agents.
 
-(def max-depth
+(defn max-depth
   "How deep the split recursion may go before a stuck unit is a hard failure
   rather than split again. Kept shallow: each level multiplies sub-agents, and a
-  unit that still won't pass its tests three levels down is not a size problem."
+  unit that still won't pass its tests three levels down is not a size problem.
+
+  A FUNCTION: a top-level def froze the gates.edn value at namespace load —
+  the exact bug generation-cache fixed everywhere else — so a retune (or the
+  project's own policy after bind) never took effect (blt.38)."
+  []
   (gates/threshold :decompose-max-depth))
 
-(def default-max-parts (gates/threshold :decompose-max-parts))
+(defn default-max-parts [] (gates/threshold :decompose-max-parts))
 
 (defn architect-prompt
   "Ask the architect to diagnose a stuck unit and choose to split it or hint a
@@ -47,29 +54,20 @@
   section is an empty ctx value and collapses cleanly."
   [{:keys [problem contract tests]}
    {:keys [attempts last-answer last-failure depth fresh-failed force-split]}]
+  ;; Values only. Every heading and every sentence of framing that used to be
+  ;; assembled here is in prompts/architect.md now, behind its own {% if %} —
+  ;; an architect prompt half in a template and half in `str` calls is a
+  ;; prompt a supervisor can only edit half of.
   (prompt/render "architect"
     {:attempts (or attempts "several")
-     :problem (str problem "\n")
-     :contract (if (seq (str contract))
-                 (str "\n### Its contract\n" contract "\n") "")
-     :tests (if (seq (str tests))
-              (str "\n### Its tests (the spec it must satisfy)\n" tests "\n") "")
-     :last-answer (if (seq (str last-answer))
-                    (str "\n### The most recent attempt\n" last-answer "\n") "")
-     :last-failure (if (seq (str last-failure))
-                     (str "\n### Why it failed\n" last-failure "\n") "")
-     :force-split (if (or fresh-failed force-split)
-                    (str "\n### A different angle was already tried and also failed\n"
-                         "Retrying with a hint did not work. Do NOT ask for another retry — the "
-                         "unit must be SPLIT into smaller sub-units now. Even a unit that looks "
-                         "like 'one thing' can be broken down (e.g. a focused test that pins the "
-                         "contract, plus the smallest change that makes it pass). Choose "
-                         "DECOMPOSE and list 2 or more sub-units.\n") "")
-     :max-parts default-max-parts
-     :last-round (if (>= (or depth 0) (dec max-depth))
-                   (str "This is the LAST recovery round — the depth budget is nearly spent, "
-                        "so further splitting will be rejected. You MUST choose "
-                        "FRESH_APPROACH.\n\n") "")}))
+     :problem (str problem)
+     :contract (not-empty (str/trim (str contract)))
+     :tests (not-empty (str/trim (str tests)))
+     :last-answer (not-empty (str/trim (str last-answer)))
+     :last-failure (not-empty (str/trim (str last-failure)))
+     :force-split (boolean (or fresh-failed force-split))
+     :max-parts (default-max-parts)
+     :last-round (>= (or depth 0) (dec (max-depth)))}))
 
 (defn- normalize-subtask [m]
   (let [name (some-> (or (get m "name") (get m :name)) str str/trim not-empty)
@@ -78,12 +76,19 @@
 
 (defn child-node
   "A sub-unit node from the parent and an architect subtask spec. Its id encodes
-  lineage; its problem is the subtask's one-paragraph contract."
+  lineage; its problem is the subtask's one-paragraph contract.
+
+  `:parent-task` carries the PARENT'S task id, not its node id, so the row the
+  child mints hangs off the row the parent holds. Without it the fallback
+  path's task tree was flat — every architect-made unit an orphan — while the
+  split path's was properly nested, so the same run recorded its work two
+  different ways depending on which path produced a unit (run 3b3ce405)."
   [parent {:keys [name description]}]
   {:id (str (:id parent) "/" name)
    :name name
    :problem description
-   :parent (:id parent)})
+   :parent (:id parent)
+   :parent-task (:task-id parent)})
 
 (defn- can-split?
   "Whether a unit at this depth may still be decomposed. Below the budget a stuck
@@ -111,19 +116,60 @@
 
 (declare solve)
 
-(defn- decompose-node
-  "Split `node` per `decision`, solve each sub-unit (recursively, so a stuck
-  sub-unit splits again), then — if they all land — re-attempt the parent as the
-  thin assembly that composes them, judged against the parent's OWN tests."
-  [node depth {:keys [attempt fan] :as ops} decision]
-  (let [children (:subtasks decision)
-        results (fan (mapv (fn [c] #(solve (child-node node c) (inc depth) ops)) children))]
+(defn- assemble
+  "Solve `children` (recursively, so a stuck sub-unit splits again), then — if
+  they all land — re-attempt the parent as the assembly that composes them,
+  judged against the parent's OWN tests.
+
+  The parent may ADJUST what the pieces delivered at this step. Seeing them
+  compose is the first time anyone can tell whether the boundary was right, so
+  assembly is where the design gets checked rather than only where the glue
+  goes (prompts/assembly.md). What it must not do is discard a piece that met
+  its contract.
+
+  THIS IS THE WAIT, and `resume` is what makes it a wait rather than a
+  replacement. A parent that delegated is parked, not finished; passing its
+  parked branch back means the agent that designed the boundary is the agent
+  that composes it, on the tape where it drew the boundary. Nil on the
+  architect path — a unit split from outside was stuck when it stopped, and
+  resuming it would resume the confusion; that one starts fresh."
+  [node depth {:keys [attempt fan] :as ops} children resume]
+  (let [results (fan (mapv (fn [c] #(solve c (inc depth) ops)) children))]
     (if-not (every? #(= :landed (:status %)) results)
       {:status :failed :reason "a sub-unit did not land" :node node :children results}
-      (let [asm (attempt (assoc node :assembly true :child-answers (mapv :answer results)))]
-        (if (:passed? asm)
+      ;; `:assembled` names the rows the pieces are on, so the assembly
+      ;; attempt composes them instead of rediscovering them as a delegation
+      ;; it has just made. Empty on the architect path, whose children are
+      ;; described rather than stubbed and are filtered out anyway.
+      (let [asm (attempt (cond-> (assoc node :assembly true
+                                        :child-answers (mapv :answer results)
+                                        :assembled (into #{} (keep :task-id children)))
+                           resume (assoc :resume resume)))]
+        (cond
+          (:passed? asm)
           {:status :landed :answer (:answer asm) :node node :children results}
+
+          ;; A second-generation split. `solve` has no path to honour one — the
+          ;; pieces are already built and this node is the composition — so say
+          ;; that rather than reporting it as an ordinary miss.
+          (seq (:split asm))
+          {:status :failed :reason "assembly split again"
+           :node node :children results}
+
+          :else
           {:status :failed :reason "assembly did not land" :node node :children results})))))
+
+(defn- decompose-node
+  "Assemble from an ARCHITECT's decision rather than the agent's own split.
+
+  This is the recovery path: a unit that got stuck, could not be talked into a
+  different approach, and is being broken up from outside. Its children are
+  described rather than stubbed — the architect has no tools and cannot write
+  code — so they carry a paragraph where a delegated piece carries a signature.
+  That is a weaker contract, and it is why this is the fallback and the agent's
+  own `split` is the ordinary path."
+  [node depth ops decision]
+  (assemble node depth ops (mapv #(child-node node %) (:subtasks decision)) nil))
 
 (defn solve
   "Recursive decompose-on-stuck for one node. Pure control flow over injected
@@ -148,11 +194,36 @@
   node is a stable subassembly: it passed its own tests, so a parent that
   composes it never re-litigates it."
   [node depth {:keys [attempt recover fan max-depth] :as ops}]
-  (let [max-d (or max-depth samizdat.agent.decompose/max-depth)
-        r (attempt node)]
-    (if (:passed? r)
-      {:status :landed :answer (:answer r) :node node}
-      (let [ev {:last-answer (:answer r) :last-failure (:failure r) :depth depth}
+  (let [max-d (or max-depth (samizdat.agent.decompose/max-depth))
+        r (attempt node)
+        ;; The attempt is what learns this unit's task id — the root's row is
+        ;; minted when it is first tried — so the node only knows it afterwards.
+        ;; Threading it back is what lets child-node point a sub-unit's row at
+        ;; its parent's.
+        node (cond-> node (:task-id r) (assoc :task-id (:task-id r)))]
+    (cond
+      ;; THE AGENT SPLIT ITS OWN TASK. It wrote the stubs, the harness verified
+      ;; them against the tree, and the child tasks exist — so there is nothing
+      ;; to diagnose and no architect to ask. This is the recursion's ordinary
+      ;; path, not its recovery path: a unit that split was never stuck.
+      ;; The parked branch travels with the split, so the assembly wakes this
+      ;; agent rather than opening a new one under its name. `attempt` reports
+      ;; no branch when the split was recovered from the board after a crash,
+      ;; and the assembly then opens fresh.
+      (seq (:split r))
+      (assemble node depth ops (:split r)
+                (when (:branch r) {:branch (:branch r) :turn (:turn r)}))
+
+      (:passed? r) {:status :landed :answer (:answer r) :node node}
+
+      :else
+      (let [ev {:last-answer (:answer r) :last-failure (:failure r) :depth depth
+                ;; From the TASK ROW (v21), not a counter in this process. A
+                ;; resumed run picks up the tally its predecessor left, so a
+                ;; unit on its fourth try is diagnosed as one — the architect
+                ;; is told how many times this has been attempted, and that
+                ;; number used to reset to zero on every crash.
+                :attempts (:attempts r)}
             decision (recover node ev)]
         (case (:kind decision)
           ;; The architect wants a split. Honour it if the budget allows; at the
@@ -211,7 +282,7 @@
              ;; a decompose degrades to a fresh approach.
              want-split? (and (= decision "decompose")
                               (seq subtasks)
-                              (< depth (dec max-depth)))]
+                              (< depth (dec (max-depth))))]
          (cond
            want-split? {:kind :decompose :reason reason :subtasks subtasks}
            (or hint (= decision "fresh_approach"))

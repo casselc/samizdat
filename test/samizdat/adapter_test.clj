@@ -17,7 +17,7 @@
 
 (ns samizdat.adapter-test
   "The vendored ring adapter's connection handling, driven end to end through a
-  raw socket client: chunked-body refusal (review3 #3), the request-size cap
+  raw socket client: chunked-body refusal (provenance R3-3), the request-size cap
   and read timeout (#4), and byte-exact body decoding across packet splits
   (#5). The client carries its own 5s SO_RCVTIMEO so a broken server FAILS
   these tests instead of hanging the suite."
@@ -42,14 +42,14 @@
 ;; make-sockaddr (macOS wants sin_len in byte 0, Linux starts at the family).
 (defn- sockaddr [port]
   (let [sa (ffi/alloc 16)]
-    (dotimes [i 16] (ffi/write sa :uint8 i 0))
+    (dotimes [i 16] (ffi/write sa :uint8 0 i))
     (if macos?
-      (do (ffi/write sa :uint8 0 16) (ffi/write sa :uint8 1 af-inet))
-      (ffi/write sa :uint8 0 af-inet))
-    (ffi/write sa :uint8 2 (bit-and (bit-shift-right port 8) 0xff))
-    (ffi/write sa :uint8 3 (bit-and port 0xff))
-    (ffi/write sa :uint8 4 127) (ffi/write sa :uint8 5 0)
-    (ffi/write sa :uint8 6 0)   (ffi/write sa :uint8 7 1)
+      (do (ffi/write sa :uint8 16 0) (ffi/write sa :uint8 af-inet 1))
+      (ffi/write sa :uint8 af-inet 0))
+    (ffi/write sa :uint8 (bit-and (bit-shift-right port 8) 0xff) 2)
+    (ffi/write sa :uint8 (bit-and port 0xff) 3)
+    (ffi/write sa :uint8 127 4) (ffi/write sa :uint8 0 5)
+    (ffi/write sa :uint8 0 6)   (ffi/write sa :uint8 1 7)
     sa))
 
 (defn- connect!
@@ -64,8 +64,8 @@
         (throw (ex-info "connect() failed" {})))
       (ffi/free sa))
     (let [tv (ffi/alloc 16)]
-      (ffi/write tv :int64 0 5)
-      (ffi/write tv :int64 8 0)
+      (ffi/write tv :int64 5 0)
+      (ffi/write tv :int64 0 8)
       (adapter/c-setsockopt fd sol-socket so-rcvtimeo tv 16)
       (ffi/free tv))
     fd))
@@ -106,15 +106,38 @@
             :else (recur (str acc (ffi/read-bytes buf n))))))
       (finally (ffi/free buf)))))
 
+(defn- free-port
+  "A port the OS says is free right now.
+
+  This used to be `(+ 40000 (rand-int 20000))` — a guess, bound with no check
+  that anything else held it. It was latent for as long as nothing else in the
+  suite took ephemeral ports; karamazov-zrq's project images do, Linux hands
+  those out of a range that overlaps 40000-59999, and CI failed with
+  `bind() failed on port 52106`. Asking the OS is both narrower and correct.
+
+  Still a race in principle — the port is free when we close it and taken by
+  the time the server binds — which is why the caller retries."
+  []
+  (with-open [s (java.net.ServerSocket. 0)]
+    (.getLocalPort s)))
+
 (defn- with-server
   "Run (f port) against an adapter whose handler records every request it
-  sees into `captured`."
+  sees into `captured`.
+
+  Retries the bind, because a free port can be taken between asking and using
+  it and a test that fails on that is testing the scheduler, not the adapter."
   [opts captured f]
-  (let [port (+ 40000 (rand-int 20000))
-        handler (fn [req]
+  (let [handler (fn [req]
                   (swap! captured conj req)
                   {:status 200 :headers {"Content-Type" "text/plain"} :body "ok"})
-        server (adapter/run-server handler (assoc opts :port port))]
+        [port server] (loop [attempt 0]
+                        (let [p (free-port)
+                              srv (try (adapter/run-server handler (assoc opts :port p))
+                                       (catch Exception e
+                                         (when (>= attempt 4) (throw e))
+                                         nil))]
+                          (if srv [p srv] (recur (inc attempt)))))]
     (try (f port) (finally (adapter/stop-server server)))))
 
 (defn- lengthed-post [body]
@@ -123,7 +146,7 @@
        body))
 
 (deftest chunked-request-bodies-are-refused-not-truncated
-  ;; review3 #3: with no Content-Length header, content-length answered 0, so
+  ;; provenance R3-3: with no Content-Length header, content-length answered 0, so
   ;; a chunked body looked complete the instant its headers arrived and the
   ;; handler ran on whatever fragment happened to land in the first recv. A
   ;; 1.1 server that does not speak chunked must refuse it (411), never serve
@@ -145,7 +168,7 @@
             (finally (adapter/c-close fd))))))))
 
 (deftest a-request-over-the-cap-is-refused-not-buffered-forever
-  ;; review3 #4: the read loop appended whatever arrived with no ceiling, so a
+  ;; provenance R3-4: the read loop appended whatever arrived with no ceiling, so a
   ;; Content-Length claim of any size was buffered in full — and read to the
   ;; end — before anyone looked at it.
   (let [captured (atom [])]
@@ -163,7 +186,7 @@
             (finally (adapter/c-close fd))))))))
 
 (deftest a-request-that-stalls-is-closed-not-held
-  ;; review3 #4: recv blocked forever with no SO_RCVTIMEO, so a client that
+  ;; provenance R3-4: recv blocked forever with no SO_RCVTIMEO, so a client that
   ;; sent its headers and vanished held its connection thread for the life of
   ;; the server. With a server-side read timeout the stalled connection is
   ;; closed on the server's schedule — :closed? here is true only when the
@@ -181,7 +204,7 @@
             (finally (adapter/c-close fd))))))))
 
 (deftest a-body-split-across-packets-decodes-exactly-once
-  ;; review3 #5: the accumulator decoded every recv separately and str'd the
+  ;; provenance R3-5: the accumulator decoded every recv separately and str'd the
   ;; pieces together, so a multibyte UTF-8 char landing across two packets
   ;; reached the handler as U+FFFD replacement chars. Octets must accumulate
   ;; raw and the string decode once, after the body is complete.

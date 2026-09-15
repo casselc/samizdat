@@ -30,9 +30,11 @@
   ;; Every command faces the permission engine, runs under a scrubbed
   ;; environment, and its output is redacted before it returns — one call into
   ;; samizdat.security.policy, which owns all three. A denied or unapproved
-  ;; command never spawns. The result's :category is what the cull guard reads:
-  ;; a policy refusal is :neutral (the branch did nothing wrong, the harness
-  ;; declined), a real command failure is :failure.
+  ;; command never spawns. The result's :category is what the cull guard
+  ;; reads: a deny is :mechanics with :policy-refusal? (the branch did
+  ;; nothing wrong, the harness declined — the refusal counter's business,
+  ;; not the cull counter's), an :ask is :neutral (waiting on a human), and
+  ;; a real command failure is :failure.
   (if-let [m (base/missing ctx :command)]
     (base/malformed branch m)
     (let [r (policy/run-shell ctx)]

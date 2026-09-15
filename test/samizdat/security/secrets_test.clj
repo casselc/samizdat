@@ -162,3 +162,74 @@
     (testing "the model still directed the call — the symbolic ref is intact upstream"
       (is (str/includes? command "{{env/SECRET_API_KEY}}"))
       (is (not (str/includes? command canary))))))
+
+(deftest the-substring-pass-redacts-an-opaque-secret
+  ;; RFC-003 F4. This pass exists for secrets with no recognizable shape — a
+  ;; database password, a bearer token with no vendor prefix — and it was DEAD
+  ;; on every real call path: `known-values` returns a SET, and `distinct` on a
+  ;; set yields the first element as nil under this runtime, so the reduce
+  ;; iterated over nothing.
+  ;;
+  ;; It looked tested. The canary below starts with `sk-`, so the vendor-prefix
+  ;; REGEX caught it and the spec passed while asserting nothing about this
+  ;; pass. So this test uses a value with NO recognizable shape, and passes the
+  ;; known-values as the set the real caller passes.
+  (testing "a set, which is what known-values returns"
+    (is (= "value is [REDACTED] here"
+           (secrets/redact "value is opaqueSECRETvalue here" #{"opaqueSECRETvalue"}))))
+  (testing "and a seq, which is what a hand-written caller might pass"
+    (is (= "value is [REDACTED] here"
+           (secrets/redact "value is opaqueSECRETvalue here" ["opaqueSECRETvalue"]))))
+  (testing "the regex is not what is doing the work here"
+    (is (not (secrets/sensitive-value? "opaqueSECRETvalue"))
+        "no vendor prefix, no URL userinfo — only the substring pass can catch it")))
+
+(deftest spec-eval-output-is-inside-the-redaction-boundary
+  ;; RFC-003 F1. `eval` runs in the harness process, so it can read the
+  ;; environment and the resolved config directly — strictly more capability
+  ;; than the shell path, which gets a scrubbed env AND a redacted result.
+  ;; It had neither, and the security model asserted that no path from the
+  ;; environment reaches model space unredacted.
+  ;;
+  ;; This closes the ACCIDENTAL leak, which is the realistic one: a model
+  ;; prints a config map while debugging and a provider key lands in the branch
+  ;; messages and the journal permanently. Deliberate exfiltration is out of
+  ;; scope by design — in-process execution cannot be contained from inside the
+  ;; process — and RFC-003 says so rather than leaving it unhandled.
+  (let [canary "sk-CANARYcanarycanary00000"
+        env {"SOME_API_KEY" canary}
+        known (secrets/known-values env)
+        ;; What the eval tool now does to a payload on its way to the model.
+        payload (str "=> {:api-key \"" canary "\"}")]
+    (is (not (str/includes? (secrets/redact payload known) canary))
+        "a credential read in-process does not reach the transcript verbatim")))
+
+(deftest the-whole-github-token-family-is-redactable
+  ;; GITHUB_TOKEN/GH_TOKEN are deliberately SAFE_EXACT — gh must see them — so
+  ;; their values are never in known-values and the regex rail is the only
+  ;; thing between `echo $GITHUB_TOKEN` (which rides the echo allow) and the
+  ;; journal. The rail covered ghp_/github_pat_ only, while `gh auth login`
+  ;; issues gho_/ghu_/ghs_/ghr_ tokens (karamazov-blt.30).
+  (doseq [prefix ["ghp_" "gho_" "ghu_" "ghs_" "ghr_"]]
+    (let [tok (str prefix "AbCdEfGhIjKlMnOpQrStUvWxYz0123456789")]
+      (is (secrets/sensitive-value? tok)
+          (str prefix " is a high-confidence credential shape"))
+      (is (not (str/includes? (secrets/redact (str "token: " tok)) tok))
+          (str prefix " is caught by the regex rail with no known-values")))))
+
+(deftest scrub-env-drops-the-parents-own-project-dir
+  ;; JOLT_PWD is the variable jolt's dev wrapper (bin/jolt) exports to say
+  ;; which directory is THE PROJECT, and the runtime resolves relative files
+  ;; against it. It describes the parent and must never reach a child: a
+  ;; project image or a shell tool spawned by a harness that was itself
+  ;; started from a source-tree jolt inherited the HARNESS checkout as its
+  ;; project dir, so `(slurp "README.md")` inside a run read the harness's
+  ;; README and `jolt -M:test` would have run the harness's suite — exactly
+  ;; what the project image exists to prevent. Dropping it lets the child's
+  ;; own wrapper set it from the cwd `:dir` gave it.
+  (let [scrubbed (secrets/scrub-env {"JOLT_PWD" "/Users/someone/src/samizdat"
+                                     "PATH" "/usr/bin"
+                                     "HOME" "/Users/someone"})]
+    (is (not (contains? scrubbed "JOLT_PWD")))
+    (is (= "/usr/bin" (get scrubbed "PATH")) "ordinary vars pass through")
+    (is (= "/Users/someone" (get scrubbed "HOME")))))

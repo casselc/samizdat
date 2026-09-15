@@ -35,14 +35,24 @@
             [jolt.time]
             [jolt.http.platform :as platform]
             [ring-chez.adapter :as adapter]
+            [samizdat.api.control :as api-control]
+            [samizdat.agent.acceptance :as acceptance]
             [samizdat.agent.gates :as gates]
             [samizdat.agent.phases :as phases]
-            [samizdat.agent.wordlists :as wordlists]
+            [samizdat.lexicon :as lexicon]
             [samizdat.config :as config]
+            [samizdat.llm.client :as llm-client]
+            [samizdat.llm.fence :as fence]
             [samizdat.llm.registry :as registry]
+            [samizdat.manifests :as manifests]
+            [mycelium.core :as myc]
+            [samizdat.session :as session]
+            [samizdat.steps :as steps]
             [samizdat.lsp.client :as lsp-client]
             [samizdat.store.db :as db]
-            [samizdat.store.runs :as runs]))
+            [samizdat.store.runs :as runs]
+            [samizdat.cells :as cells]
+            [samizdat.userspace :as userspace]))
 
 (defonce system (atom nil))
 
@@ -59,6 +69,25 @@
   "The provider adapter for the configured provider."
   []
   (registry/adapter-for (get-in @system [:config :llm :provider])))
+
+(defn bind-project!
+  "Point userspace at this project's store, THEN reload every policy table.
+
+  One seam, because the order is the whole point (karamazov-blt.1): the
+  reloads used to run at the top of start!, ~35 lines before `bind!`, so all
+  three caches were filled from the SHIPPED templates and nothing re-read
+  them after the project bound — a project whose gates, wordlists or phases
+  had diverged silently ran factory policy for the whole process lifetime.
+  Reloading after the bind is what makes the caches hold the project's own
+  policy; the reload-on-every-start half (rather than trusting an atom that
+  survives stop!/start!) is what lets a long-lived interpreted session pick
+  up edits without a process restart."
+  [conn]
+  (userspace/bind! conn)
+  (gates/reload-config!)
+  (lexicon/reload!)
+  (phases/reload!)
+  conn)
 
 (defn start!
   "Bring the system up. `overrides` is merged into the config, so a REPL
@@ -79,19 +108,106 @@
    (when (started?)
      (throw (ex-info "system already started; call stop! first" {})))
    (let [cfg (config/load-config overrides)
-          ;; Gate thresholds are cached in an atom that survives stop!/start!,
-           ;; so a restart would keep serving the pre-edit gates.edn. Reload on
-           ;; every start: long-lived interpreted sessions pick up threshold
-           ;; edits without a process restart. Same for the wordlists (tier 1c)
-           ;; and the phase machine (drg-4026 #34).
-           _ (gates/reload-config!)
-           _ (wordlists/reload!)
-           _ (phases/reload!)
+         ;; THE ACCEPTANCE SPEC IS CHECKED HERE, not at the ship gate. A
+         ;; malformed criterion is the operator's mistake in the operator's
+         ;; file, and a run that discovered it at `done` would wedge every
+         ;; branch on a message about a file it may not edit. Refusing to
+         ;; start is loud and cheap; the throw names the entry.
+         _ (acceptance/normalize (get-in cfg [:run :acceptance]))
+         ;; A fresh session tally per process start. Short-term memory is
+         ;; scoped to the process on purpose: a pattern that shows up across
+         ;; three runs is exactly the pattern a single-run digest cannot see,
+         ;; and a tally that survived a restart would be measuring a harness
+         ;; that no longer exists.
+         _ (session/reset!)
          ;; Process-wide, and set here rather than in core so that every entry
          ;; point gets it: the tests, the benchmark runner and a REPL session
          ;; all bring the system up through start! without going through -main.
          _ (platform/set-max-response-ms! (get-in cfg [:llm :max-response-ms]))
+         ;; Ask the endpoint what it is, once, at startup. A llama.cpp server
+         ;; answers /props with a total_slots; anything else answers something
+         ;; else, and the probe returns nil. RFC-005 recorded that :local was
+         ;; decided by which config key an endpoint sat under, so a
+         ;; llama-server configured as :openai silently lost prefix pinning —
+         ;; asking is what fixes that, and asking is specifically NOT the same
+         ;; as sending the knob hopefully, which a strict OpenAI-compatible
+         ;; server answers with a 422 on the whole request.
+         ;;
+         ;; Merged into the LLM config so it reaches chat-body the way every
+         ;; other endpoint fact does, and so a test can set it directly.
+         probed (llm-client/probe-llama-cpp (:llm cfg))
+         cfg (cond-> cfg probed (update :llm merge probed))
+         _ (when probed
+             (log/info "endpoint identified as llama.cpp:"
+                       (:total-slots probed) "KV slots — prefix caching on"
+                       (when-let [m (:model-id probed)] (str "— serving " m))))
+         ;; Which config files were read, so a surprising value is traceable
+         ;; to its layer rather than to a guess about which file won.
+         _ (doseq [{:keys [layer path present?]} (config/config-sources
+                                                  (get-in cfg [:run :root]))]
+             (log/info "config" (name layer)
+                       (cond (nil? path) "— no config home"
+                             present? (str "read " path)
+                             :else (str "absent " path))))
+         _ (when (= :legacy (get-in cfg [:db :from]))
+             (log/info "db: opening the pre-existing root file"
+                       (get-in cfg [:db :path])
+                       "— new projects get .samizdat/samizdat.sqlite3; move"
+                       "this one there to adopt the new layout"))
          c (db/open! (get-in cfg [:db :path]))
+         ;; Point the userspace reads at THIS project's store, and reload the
+         ;; policy caches AFTER the bind so they hold the project's own
+         ;; gates/wordlists/phases (bind-project! carries the ordering
+         ;; argument). From here on a cell, manifest, policy table or prompt
+         ;; resolves to the project's own version — seeded from the shipped
+         ;; template on first read — so two projects running this binary can
+         ;; evolve different loops and neither can edit the other's. Unbound
+         ;; (a bare REPL, a unit test) the same reads fall back to the
+         ;; templates, which is what the harness did before the store existed.
+         _ (bind-project! c)
+         ;; And which DIRECTORY the project is. Prompt assembly reads it to
+         ;; decide whether this run's target is the harness itself — the
+         ;; sections about cells, manifests and src-vs-resources are standing
+         ;; instruction about the wrong codebase on any other project
+         ;; (karamazov-8zk). The same value the drivers take :root from.
+         _ (userspace/bind-root! (get-in cfg [:run :root]))
+         ;; And which MODEL, for the prompt file layer
+         ;; (.samizdat/prompts/<provider>/<model>/). The configured :model is
+         ;; the identity for a hosted provider; for a local endpoint it is the
+         ;; placeholder "local-model", and what the server actually loaded
+         ;; came back from the /props probe above.
+         _ (userspace/bind-model! {:provider (get-in cfg [:llm :provider])
+                                   :model (or (get-in cfg [:llm :model-id])
+                                              (get-in cfg [:llm :model]))})
+         ;; The project's cells, loaded HERE, on the main thread, once the
+         ;; project is bound. Every run reloads them (compile-loop), so this
+         ;; is not what makes them available; it is what makes every
+         ;; namespace a cell requires already loaded before a run's fiber
+         ;; touches them. A run's process starts on the request thread and
+         ;; resumes on a carrier, and on jolt a namespace compiled for the
+         ;; first time from a `load-string` on that resumed fiber came out
+         ;; analysed against the wrong current namespace in two of four live
+         ;; runs (reflect.clj's own private `clip` unresolved from
+         ;; cells.loop; karamazov-iev2). Loading at boot also fails fast: a
+         ;; cell that cannot load stops the harness starting, not the first
+         ;; run two minutes into its selection call.
+         _ (log/info "loaded" (count (cells/load-cells!)) "cell(s) for"
+                     (get-in cfg [:run :root]))
+         ;; The repair ladder is a COMPOSITION, so the workflow layer owns it:
+         ;; the `repair` manifest wires the fence's rung fns as cells, and
+         ;; this install is how the fence — which sits below the workflow
+         ;; layer and cannot require it — runs the project's version. Resolved
+         ;; per call through compiled-manifest, so a manifest or cell edit
+         ;; takes effect on the very next malformed call; fence's repair-json
+         ;; fails open to its built-in chain if the manifest is broken.
+         _ (fence/install-repair!
+            (fn [body]
+              (:body (myc/run-compiled (manifests/compiled-manifest "repair")
+                                       {} {:body body}))))
+         ;; The manifest-state trace, buffered where an HTTP client can read
+         ;; it. Started before the server, so a client that connects on the
+         ;; first request is not polling a ring nothing is filling yet.
+         _ (steps/start-pump!)
          server (adapter/run-server handler {:port (get-in cfg [:http :port])})]
      (reset! system {:config cfg :conn c :server server})
      (log/info "samizdat up on port" (get-in cfg [:http :port])
@@ -112,8 +228,38 @@
   stop the Lisp task regardless of what the agent believed."
   []
   (when-let [s @system]
-    (doseq [[label f] [["http server" #(adapter/stop-server (:server s))]
+    (doseq [[label f] [;; Active runs FIRST, before anything they depend on
+                       ;; closes under them: set every abort flag and give the
+                       ;; run threads a bounded window to reach a boundary and
+                       ;; journal their ending. Tearing the db down while run
+                       ;; futures kept executing meant their writes — including
+                       ;; the crash record — landed on a closed handle, and a
+                       ;; restart!'s reconcile-orphans! marked still-executing
+                       ;; runs interrupted while their threads kept going
+                       ;; (karamazov-blt.14).
+                       ["active runs"
+                        #(let [runs @api-control/active]
+                           (doseq [[_ {:keys [abort]}] runs]
+                             (when abort (reset! abort true)))
+                           (doseq [[rid {:keys [future]}] runs]
+                             (when future
+                               (when (= ::hung (deref future 15000 ::hung))
+                                 (log/warn "run" rid "did not stop within 15s;"
+                                           "closing the system under it")))))]
+                       ["http server" #(adapter/stop-server (:server s))]
+                       ;; After the server, so a request in flight can still
+                       ;; read the trace it was serving; the rings go with it.
+                       ["step pump" #(do (steps/stop-pump!) (steps/reset!))]
+                       ;; Uninstall so a bare REPL after stop! parses with the
+                       ;; built-in chain instead of resolving manifests against
+                       ;; an unbound store.
+                       ["repair seam" #(fence/install-repair! nil)]
                        ["lsp clients" #(lsp-client/shutdown-all!)]
+                       ;; Unbind BEFORE the connection closes: a userspace read
+                       ;; against a closed handle would throw where the same
+                       ;; read against no handle simply serves the template.
+                       ["userspace" #(do (userspace/unbind!)
+                                         (userspace/bind-root! nil))]
                        ["database" #(db/close (:conn s))]]]
       (try (f) (catch Throwable e (log/warn "stopping" label "failed:" (ex-message e)))))
     (reset! system nil)

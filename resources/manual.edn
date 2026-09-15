@@ -1,0 +1,334 @@
+;; THE OPERATOR MANUAL — the harness's own command surface, as data.
+;;
+;; The agent develops at the REPL inside this image, so the functions it can
+;; usefully call are part of its tool surface whether or not anything documents
+;; them. Without a curated list the only way to find them is to guess a
+;; namespace and read `complete` output, which is how a whole capability stays
+;; invisible.
+;;
+;; llm-repl solves this by tagging vars with ^{:manual "sentence"} and
+;; compiling the manual from ns-publics. That is the right shape and the wrong
+;; PLACE for us: metadata lives in src, and src is the half of this system the
+;; supervisor cannot edit at runtime. So the curation lives here instead —
+;; which entries exist, and the one-sentence summary each gets. The mechanism
+;; that resolves and renders it is samizdat.manual.
+;;
+;; TWO AUDIENCES, TWO TEXTS, ONE SEAM. The docstring on the var stays
+;; maintainer-dense; :summary is the operator sentence. `samizdat.manual/render`
+;; shows the summaries, `entries` returns both as data, and anything that wants
+;; the full docstring reads :doc off the resolved var.
+;;
+;; Every :name must resolve. A name that does not is a loud failure, not a hole
+;; in the rendering: a manual that quietly lists nothing is worse than no
+;; manual, because it reads as "there is nothing here".
+;;
+;; Adding an entry needs no rebuild. Removing one hides a capability, so remove
+;; only what has actually gone away.
+[{:group "The tape"
+  :entries
+  [{:name samizdat.tape/truncate-at
+    :summary "The tape as it was after its first N messages — the fork primitive."}
+   {:name samizdat.tape/append-user
+    :summary "Append a user turn, returning a new tape. The old one is untouched."}
+   {:name samizdat.tape/due-indices
+    :summary "Which messages have aged out of the verbatim window and are still compaction candidates."}
+   {:name samizdat.tape/within-band?
+    :summary "Whether a replacement is small enough to accept: |new| <= max(|original|, floor)."}
+   {:name samizdat.tape/apply-fold
+    :summary "Collapse a finished conversation into one block plus a verbatim tail, or reject it."}]}
+
+ {:group "Probing without committing"
+  :entries
+  [{:name samizdat.agent.infer/of-branch
+    :summary "Project a branch onto its tape: everything a model call depends on, and nothing else."}
+   {:name samizdat.agent.infer/complete-fn
+    :summary "Build the one effect — a function from tape to model reply. Pass a stub to drive a turn offline."}
+   {:name samizdat.agent.infer/step
+    :summary "One inference step: tape in, advanced tape out. Pure given the completion function."}
+   {:name samizdat.agent.infer/bounce
+    :summary "Ask what the model would do next off a fixed tape. Nothing is appended and no tool runs."}
+   {:name samizdat.agent.infer/trampoline
+    :summary "Bounce many candidate inputs off the same fixed tape, independently. The tape never moves."}
+   {:name samizdat.agent.infer/ab
+    :summary "Ask one question of several model configs off one tape, and keep every answer."}]}
+
+ {:group "Branches"
+  :entries
+  [{:name samizdat.agent.state/fork-branch
+    :summary "A child carrying its parent's conversation — optionally truncated to an earlier turn."}
+   {:name samizdat.agent.state/add-message
+    :summary "Append a message, optionally stamped with the turn it belongs to."}
+   {:name samizdat.agent.state/planning?
+    :summary "Whether this branch's product is a plan (the board's design step tags it) — its plan call ends it, and done and the file writers are refused."}
+   {:name samizdat.agent.state/describe
+    :summary "One line about a branch: status, turns, artifacts, why it stopped."}
+   {:name samizdat.agent.state/parked?
+    :summary "Whether a branch stopped because it DELEGATED. `split` parks the caller and blocks the row it holds; the branch is not active (so its turns stop), not done (so nothing reads an answer off it) and not abandoned (so nothing hands its task to somebody else). Whoever composed the loop wakes it when its pieces land."}]}
+
+ {:group "Changing the harness"
+  :entries
+  [{:name samizdat.cells/loaded
+    :summary "Which cells are registered and which file each came from."}
+   {:name samizdat.cells/load-cells!
+    :summary "Reload every cell from resources. Transactional — a broken edit rolls the registry back."}
+   {:name samizdat.mutation/propose-cell!
+    :summary "The safety around a cell edit: install, validate against every manifest, soak, commit a project version or roll back."}
+   {:name samizdat.workflow/catalog
+    :summary "Every workflow available to select or adapt, with its description."}
+   {:name samizdat.manifests/preconditions
+    :summary "Every node's preconditions as one report — the ctx keys and data keys it requires, what holds on every path in, and what is unsatisfied with the path that fails — before an edit rather than as the refusal after."}
+   {:name samizdat.workflow/compile-loop
+    :summary "Compile a workflow definition through mycelium's static checks. Throws on any violation."}
+   {:name samizdat.workflow/turn-manifest
+    :summary "A whole-run manifest reduced to one turn — the slice the beam schedules. Refuses a manifest that declares :turn-sliceable? false, and one that routes an edge back to :start without iterating (that edge is cut into :end, so each cycle would run as a fresh turn with a fresh data map)."}
+   {:name samizdat.workflow/turn-sliceable?
+    :summary "Whether a manifest may be a run's LOOP at all. Default true; declare :turn-sliceable? false at the top of a manifest for one whose back edge to :start is structural rather than a turn — beam.edn (the scheduler, which drives branches rather than being driven) and repl.edn (a shape whose four pure cells classify a branch, enforced by phases.edn refusals). Such a manifest stays in the catalogue but is off the supervisor's switch menu and off selection's candidate list, and both drivers refuse to run it."}
+   {:name samizdat.workflow/workflow-prompt
+    :summary "A manifest's own instructions: `:prompt \"name\"` at the top names resources/prompts/<name>.md, appended to the base system prompt for every branch the run opens. This is how a manifest declares what its graph is FOR — review.edn is the same loop framed as a code review — so a new task shape is a manifest plus a prompt rather than a code path. Read from the LOADED definition, so an edit to the manifest reframes the next run."}
+   {:name samizdat.userspace/self-hosting?
+    :summary "Whether the project under work IS a samizdat checkout. What the system prompt gates its sections about cells, manifests and src-vs-resources on: all of it is load-bearing here and standing instruction about the wrong codebase anywhere else."}
+   {:name samizdat.agent.webfetch/fetch
+    :summary "Read a named URL. HTML is converted to text unless you ask for `html`; http is upgraded to https; the result is capped and says so when it cuts. Its confinement is the part to know about: a host on this machine or its private network is REFUSED, and a redirect into one is refused too — checking only the address you gave would be no check at all. Budgets are gates.edn :webfetch; the host rules are mechanism in src/, because a guard the agent can retune is not a guard."}
+
+   {:name samizdat.agent.files/glob-project
+    :summary "Every project file whose PATH matches a glob, sorted, relative to the root — `**/*.clj`, `deps.edn`, `test/**/*_test.clj`. Not limited to Clojure sources the way grep-project is: matching a name costs nothing, and a model looking for a png or a markdown file is asking a reasonable question a source-only glob would answer with silence. Hidden directories are skipped, so cache and VCS noise never matches. `:paths` scopes it. This is the find-by-name half of search; `grep-project` is the find-by-content half."}
+
+   {:name samizdat.agent.files/reference-roots
+    :summary "The READ-ONLY roots a project declared beside its own (.samizdat/config.edn :run :reference-paths). read_file and grep resolve against them; writes stay confined to the root."}
+   {:name samizdat.config/file-config
+    :summary "Both config files as one map: ~/.config/samizdat/config.edn ($XDG_CONFIG_HOME honoured) with the project's .samizdat/config.edn merged on top, key by key. Every reader of on-disk config comes through here."}
+   {:name samizdat.config/config-sources
+    :summary "Which config files this process reads, lowest precedence first, and whether each exists — what the boot log and /health show so a surprising value can be traced to its file."}
+   {:name samizdat.config/db-location
+    :summary "Where the project db is and why: HARNESS_DB, the existing .samizdat/samizdat.sqlite3, a legacy root samizdat.sqlite3 (opened in place, logged), or the .samizdat/ default for a fresh project."}
+   {:name samizdat.userspace/bind-model!
+    :summary "Which {:provider :model} the prompt FILE layer serves. Bound once at start from the run config, after the endpoint probe has said what a local server actually loaded — :local's configured model is only a placeholder."}
+   {:name samizdat.userspace/prompt-source
+    :summary "Where a prompt's text comes from — a file under .samizdat/prompts/ (and which layer: model, provider, project), a stored row, or the shipped template. A file always wins; this is how you see that it did."}
+   {:name samizdat.userspace/prompt-variants
+    :summary "Every prompt file the project holds, by name, with the provider/model directory each applies to. The `prompt list` view of the file layer, so a per-model wording is visible rather than a shadow."}]}
+
+ {:group "Patterns: dispatch tables and rules"
+  :entries
+  [{:name samizdat.symbolic/rule
+    :summary "Compile {:when pattern :if guard :then template}. A map is an open subset (extra keys ignored, a named key must be present), a vector is closed and positional, ?x binds and repeats as equal, _ matches anything, sets and lists are literals."}
+   {:name samizdat.symbolic/first-match
+    :summary "The first rule that matches a term, with its bindings and result — a manifest dispatch table is this over the data map."}
+   {:name samizdat.symbolic/guard-catalog
+    :summary "Every guard a rule or a dispatch entry may name, with its arity and meaning. Nothing outside this list evaluates."}
+   {:name samizdat.symbolic/subsumes?
+    :summary "Whether every term one pattern matches the other matches too — the specificity order the dispatch check uses."}
+   {:name samizdat.symbolic.dispatch/analyse
+    :summary "A dispatch table's shadowed branches (refused at save) and order-dependent pairs (reported), over the order that runs."}
+   {:name samizdat.symbolic/widest-beam
+    :summary "The widest beam that fits one turn deadline against a provider serving N calls at a time, and the run's token budget at the turn cap, in core.logic.fd; gates.edn :beam-contention and :run :token-budget feed it."}
+   {:name samizdat.repl.guard/rules
+    :summary "The eval guard's rules — what an eval may not do in the live image — with the clauses that decide each. Enumerable, not editable: a guard the guarded thing can edit is not a guard."}
+   {:name samizdat.security.policy/rules
+    :summary "The shell policy as data: the structural rules, most authoritative first, and the allow/deny table. Every refusal names the one that made it."}
+   {:name samizdat.security.policy/shell-split
+    :summary "How the policy reads a command's shell structure — statements, separators, redirection — through a POSIX-subset grammar; a string the shell would refuse comes back with the position it stopped at."}]}
+
+ {:group "Policy as data"
+  :entries
+  [{:name samizdat.agent.gates/threshold
+    :summary "Read one tunable from gates.edn. Every gate budget in the harness is a value here."}
+   {:name samizdat.agent.gates/reload-config!
+    :summary "Re-read gates.edn from userspace and recompile the steer table. The policy tool's save does this for you."}
+   {:name samizdat.agent.gates/message-context
+    :summary "The render context a gate's prose is selmer-rendered against: turn count and budget, the branch's stated goal, its last failure, and whether it may call `split`. A :message-form in gates.edn passes it to sp/render-str so a gate written that way gets the same {% if %} and {{...}} as a plain :message-file."}
+   {:name samizdat.userspace/save!
+    :summary "Append a new version of any userspace piece (:cell :manifest :policy :prompt), with a rationale the history shows. Prefer the matching tool, which validates first and requires the rationale."}
+   {:name samizdat.userspace/revert!
+    :summary "Re-append an older version of a userspace piece as the newest — the universal rollback, recorded with your stated reason."}
+   {:name samizdat.agent.phases/withholds
+    :summary "Which tools a phase refuses, from phases.edn."}
+   {:name samizdat.agent.gates/storm-policy
+    :summary "The storm guard's live policy: window, thresholds, and tool classification for withholding repeated identical calls. Tune the :storm-* thresholds and the :storm-exempt/:storm-mutating vocabularies in gates.edn; the withhold rules themselves are the phases.edn :storm entries."}
+   {:name samizdat.agent.storm/blocked?
+    :summary "Whether the next call with this signature would be withheld as a repeat, judged against a branch's storm window."}
+   {:name samizdat.agent.storm/oscillating?
+    :summary "Whether a call would extend an A-B-A-B alternation between two calls — the loop shape no failure-keyed guard can see."}
+   {:name samizdat.agent.tournament/run
+    :summary "Rank N candidates by pairwise comparison at linear cost: a ring pass that cancels positional bias, then everyone against the top-k pivots. The comparator is yours to inject — an LLM judge, a test result, anything returning p(a beats b)."}
+   {:name samizdat.agent.trajectory/score-run
+    :summary "Score a branch's trajectory from the journal on the A-T letter scale, steps-so-far only — the offline validation entry point. Run it over a completed and an exhausted run and compare curves before wiring anything to the number."}
+   {:name samizdat.agent.gates/trajectory-policy
+    :summary "The trajectory-scoring policy from gates.edn: repeats, stride, criteria, and the not-yet-consulted abandon threshold."}
+   {:name samizdat.manifests/validate-mode
+    :summary "What a cell whose data does not match its declared shape costs at RUN time, from gates.edn :schema-validation :mode — :warn (record it on :mycelium/warnings and carry on), :strict (stop with the schema error), :off. Every cell declares :input/:output and every manifest an :input-schema, so mycelium checks the shapes each pass; this decides the cost. It does NOT reach the schema CHAIN check, which refuses a manifest whose wiring does not hold together whatever this says — that half is not yours to switch off."}
+   {:name samizdat.prompt/render
+    :summary "Render a prompt resource through selmer. Every harness message the model sees comes through here."}]}
+
+ {:group "Reading and writing Clojure"
+  :entries
+  [{:name samizdat.lisp/diagnose
+    :summary "Why a piece of Clojure would not load AS WRITTEN, or nil — reason plus 1-based line/col, naming both ends of a mismatch. Answers 'is this loadable now', which is a different question from lisp/balance's 'could this be repaired': the delimiters balancing does not promise it READS, and `(defn f [] :)` is perfectly balanced and is not Clojure."}
+   {:name samizdat.lisp/balance
+    :summary "The repair half, two rungs deep: closes a trailing truncation or trims a trailing over-close from the delimiter stack, and where the stack has to give up falls to lisp/indent-repair. Refuses anything it cannot repair by ADDING, because removing or moving a mid-file delimiter re-parents code. Returns data, not sentences — the words live in prompts/file-tool.md."}
+   {:name samizdat.lisp/indent-repair
+    :summary "Repair from INDENTATION rather than from the delimiter stack (vendored parinferish, indent mode). The stack knows how many delimiters are open and never where the missing one goes, so it can only append at the end; indentation says an unclosed binding vector ended before the body indented under it, and puts the `]` there. Accepted only when every change is an INSERTED delimiter and the result reads — parinfer would also resolve a mismatch or a stray by deleting, and deleting from a model's text is a corruption, not a repair. Reached by write_file and eval (whole texts), never by edit_file, which refuses instead."}
+   {:name samizdat.escapes/decode-unicode-escapes
+    :summary "Undo the \\uXXXX drift a model writes when it meant the character itself — the six characters \\u2014 become an em dash. Deliberately narrow, and the narrowness is why it is safe: the backslash must be UNESCAPED (text about an escape is left alone) and the escape must name a VISIBLE ASSIGNED character judged on the code point, so an ASCII or control escape, a private-use point, an unassigned point, a bidi override, a zero-width joiner, a line separator and a space that is not a space all survive verbatim. A surrogate pair is judged by the character it builds, so emoji decode and an invisible tag character cannot sneak in as one. Applied to the model's OWN text — write_file's content, edit_file's new_text, patch's replace — never to the assembled file, so an edit cannot rewrite lines it did not touch."}
+   {:name samizdat.agent.state/drop-unloaded
+    :summary "Remove the compaction digests from a branch's context — the withholding move against digest imitation. On a long branch nearly every message is an [unloaded] line standing in for a past turn, and a model reading its own history that way starts writing digests instead of tool calls; telling it not to leaves the exemplar in front of it (0-for-42 on run 89f6487a), so this takes the exemplar away. Nothing is lost: a digest is bookkeeping about a turn, the turn is in the journal, and fetch_turn reopens it. Rung two of the no-call ladder, gates.edn :no-call-ladder."}
+   {:name samizdat.userspace/prescription-mass
+    :summary "How much of this project's userspace is its OWN rather than the shipped template: per kind, the names overridden, the versions written, and the character mass against the factory bodies they replaced. Metan's M9 is that nothing measures accumulated prescription, so 'the loop is now over-specified' is undetectable — and its AlgoTune result is that richer context made a pre-optimized kernel WORSE. The supervisor's brief carries this once gates.edn :supervisor-digest :prescription-floor names are overridden, so a run about to write its tenth rule can see that it already wrote nine."}
+   {:name samizdat.agent.telemetry/failure-patterns
+    :summary "The DISTRIBUTION of a run's failures by shape, commonest first, alongside the newest few exemplars. Exemplars answer what went wrong recently; the distribution answers what is going wrong, which is the question a supervisor tuning the loop has. Twelve instances of one signature is one fix; twelve unrelated failures is a different situation, and an exemplar list renders both the same. Signatures strip numbers, quoted strings and paths, so instances of one bug collapse. Below gates.edn :supervisor-digest :floor failures it returns nil, because a histogram of ones is noise."}
+   {:name samizdat.agent.gates/self-graded-changes
+    :summary "Which of the SCORING gates an edit changes: :fitness (the weights session fitness is computed from) and :verify-unknown (whether the ship gate trusts or refuses when it cannot tell). Editing them is allowed — policy is runtime-editable data and that is not being narrowed — but it changes the run's SCORE rather than its behaviour, so `policy save gates` journals a :self-graded note and the supervisor's brief says YOU CHANGED HOW THIS RUN IS SCORED. The key list lives in src/ and not in gates.edn, because a watchlist inside the file being watched could be edited by the party it watches."}
+   {:name samizdat.agent.tools.digest/read-digest
+    :summary "read_digest: paths and a question, answered in bullets by the :reader role's model (config :run :role-models) so the files never enter the branch's context; anchors: true makes every line the reader cites a patch address. Numbers in gates.edn :digest; the rule that steers a whole-file read here is phases.edn :large-read-needs-a-digest."}
+   {:name samizdat.agent.files/large-untargeted-read?
+    :summary "Whether a read_file call would page a file of at least min-lines through the context with no offset and no limit — the predicate behind the read-too-large refusal. Targeted, missing and unresolvable reads pass."}
+   {:name samizdat.config/role-llm
+    :summary "The :llm config a role runs on under config :run :role-models, or nil when unassigned — the one resolver behind role-ctx (a role's sub-loop) and read_digest (one call). :reader and :summarizer are the cheap-role assignments; a run with neither still keeps files out of the branch's context, it just pays its own rate for the reading."}
+   {:name samizdat.agent.gates/digest-policy
+    :summary "gates.edn :digest as one map: :min-lines for the refusal, :budget-chars for the answer, :input-chars for what the reader is sent."}
+   {:name samizdat.agent.tools.split/verify
+    :summary "Everything wrong with a proposed split, as data: a stub the parent named but never wrote, one that is already implemented (a contract already met gives the child nothing to do), one claimed by two pieces, a missing test file, fewer than two pieces. Pure over the two readers it is handed, so the whole rule set is testable without a tree. The split is all-or-nothing — a half-created delegation leaves rows nobody owns and a parent believing it delegated less than it did — and a rejection is base/rejected, not charged to the branch, the same treatment a manifest that does not compile gets. Words in prompts/split-tool.md."}
+   {:name samizdat.agent.stubs/filled?
+    :summary "Whether a stub a parent delegated has been implemented: the name is still defined and its body is no longer a stub. Both halves matter — a child that DELETED the stub rather than filling it has not delivered, because the parent's composition calls that name. Beside it: `definitions` (every top-level def in a source, read rather than grepped, {} on a source that does not read), `definition` (one by name), `stub?` (the three shapes a stub is written in: no body, a body of exactly nil, a body whose only form is a throw), and `missing` (which of these names a source does not define, as data). This is the delegation boundary made checkable — a parent that splits a task writes the stubs the pieces must fill, so the two layers share the signature and nothing else."}
+   {:name samizdat.lisp/first-odd-quote-line
+    :summary "The line where the running unescaped-quote count first goes odd — the line that most likely opened a string nobody closed, which is NOT where the reader complains."}
+   {:name samizdat.hashline/line-anchor
+    :summary "Mint a `<line>:<hash>` anchor: the line locates, the three-hex content hash of the trimmed line verifies. What read_file({anchors: true}) prints and the patch tool spends."}
+   {:name samizdat.hashline/apply-edits
+    :summary "Apply a batch of anchored edits atomically. Every edit resolves against the same read, so order does not matter; one stale anchor or two edits over a line refuses the whole batch rather than half-writing it."}
+   {:name samizdat.hashline/resolve-one
+    :summary "The refusal ladder behind an anchor: exact, drifted-so-follow-the-content, ambiguous-hash-so-the-explicit-line-wins, far-away-so-REFUSE, and gone-but-here-is-the-current-anchor. A false refuse costs one re-read; a false accept corrupts the file."}]}
+
+ {:group "The record"
+  :entries
+  [{:name samizdat.store.journal/note!
+    :summary "Append a note to the run's journal. The durable record a later run reads back."}
+   {:name samizdat.store.journal/last-note
+    :summary "The most recent note of one kind on a run, parsed back from JSON. How the supervisor stream reads a round's outcome — the feature loop's :route note carries the revision, the strategy and the soft cap — since the loop hands its facts to nobody and the journal is where the two meet."}
+   {:name samizdat.store.journal/notes
+    :summary "Every note of one kind on a run, oldest first. What the stream reads :stage-error notes with — each is a crash a stage survived, and all of them are the supervisor's to look at."}
+   {:name samizdat.store.interventions/kinds
+    :summary "Every directive that can be queued against a run, with what each does — a person's at the control API, the supervisor's through `intervene`, the reflex's. Three boundaries own them: a branch's steer boundary (message, review), the beam's round top (cull, fork, retract, extend, pause, resume), and the feature loop's directives stage (switch, budget, stop). Each drain leaves alone what it does not own."}
+   {:name samizdat.store.journal/artifacts
+    :summary "Every artifact this run banked, across all branches."}
+   {:name samizdat.store.journal/branch-turns
+    :summary "One branch's turns as light rows — tool, args, category, result — the query to reach for when a failure report names a branch and you want its whole trajectory, not one turn."}
+   {:name samizdat.store.journal/run-usage
+    :summary "What the run has spent: turns, side calls, tokens, and the share of prompt tokens the cache served. The token total covers BOTH the committed turns and the side models (the reader behind read_digest, the critic, the reflection, the trajectory scorer) — it is what the beam ends a run :exhausted against. :cache-hit-rate is nil rather than 0 when no provider on the run reported a cache lane."}
+   {:name samizdat.store.journal/record-side-call!
+    :summary "Record a provider call the run paid for that is not a turn. Anything in the harness that asks a model outside the branch's own turn calls this, or the tokens are spent where the budget cannot see them."}
+   {:name samizdat.agent.state/context-part-names
+    :summary "Every part the per-turn context block can carry, in reading order. A branch holds what each cost last turn as :context-sizes; `introspect` renders both, so a cap in gates.edn :context-budget can be retuned against a measurement."}
+   {:name samizdat.store.journal/gate-tally
+    :summary "Fired / met / met-late / unmet per gate for a run — whether the steering is being obeyed, per steer."}
+   {:name samizdat.store.journal/retirement-candidates
+    :summary "Gates that fired across several runs and were never once met — deletion candidates. It surfaces them; deciding is yours."}
+   {:name samizdat.agent.telemetry/failure-exemplars
+    :summary "The concrete failures behind the rates over any set of turn rows — parse errors, provider failures, tool failures, each with the turn and branch to fetch."}
+   {:name samizdat.session/render
+    :summary "The live session tally since a named mark — what changed while your last adjustment was in force."}
+   {:name samizdat.session/branch-fitness
+    :summary "One branch's fitness per turn, by the same weights the session and every experiment are scored with — the number the cull reads and the digest shows (RFC-012 F3)."}
+   {:name samizdat.session/verdict
+    :summary "What an experiment measured, and every reason the number might not be a measurement of it: `confounded` when the reading with the provider's own failures discounted disagrees with the full one, `regraded` when the run moved the weights it is being scored by, and a count of the branches that went backwards under an aggregate that did not."}
+   {:name samizdat.events/subscribe
+    :summary "A channel of every event published from now on, for watching a run without polling."}]}
+
+ {:group "Cancellation and parking (RFC-013)"
+  ;; Every compiled manifest is cancellable: the check runs before each cell,
+  ;; and a Cancelled raised inside a cell passes through every catch. What a
+  ;; cell author has to know is small, and it is these five plus two rules:
+  ;; never park inside a lazy body (map/for/lazy-seq — a hang, not an error;
+  ;; use mapv, doseq, loop/recur), and never spawn a raw `future` in a cell
+  ;; (it escapes the run's cancellation tree; fan out with ebb's join).
+  :entries
+  [{:name samizdat.cancel/check!
+    :summary "Throw Cancelled if the running turn has been cancelled; a no-op off a task. Call it in any loop a cell writes that can run long."}
+   {:name samizdat.cancel/sleep!
+    :summary "Park for N ms instead of Thread/sleep: on a task the wait sees a cancel at once."}
+   {:name samizdat.cancel/after-blocking!
+    :summary "Call right after a blocking host call returns (a subprocess, a socket read): a cancel that landed while it ran becomes Cancelled here, not a value you act on."}
+   {:name samizdat.cancel/control-signal?
+    :summary "Whether a throwable is a cancellation (Cancelled or InterruptedException) rather than a failure — rethrow these from any catch a cell writes."}
+   {:name samizdat.cancel/pre-check
+    :summary "The :pre interceptor every manifest compiles with; a cell never calls it, but this is where a cancel between cells lands."}]}
+
+ {:group "Which image your eval lands in"
+  :entries
+  [{:name samizdat.repl.route/image-of
+    :summary "Whether this role's eval runs in the sandboxed project image or the live harness one. `introspect` prints the same thing in prose."}
+   {:name samizdat.repl.route/sandbox-spec
+    :summary "What the project image may not read, and the only directory it may exec from. Not tunable at runtime — it is the confinement."}
+   {:name samizdat.config/eval-image
+    :summary "The rule itself: :project for every role but the supervisor, unless the operator set :eval :mode in .samizdat/config.edn."}
+   {:name samizdat.repl.route/release!
+    :summary "Stop the project image for a root. The next eval starts a fresh one, losing everything defined at the REPL."}
+   {:name samizdat.security.sandbox/seatbelt-profile
+    :summary "The macOS profile the project image runs under, as text — read it when a refusal is surprising."}
+   {:name samizdat.security.sandbox/bwrap-argv
+    :summary "The Linux confinement, as the bubblewrap argv the image runs under: filesystem read-only but the project, secrets hidden by mounts, no child processes (seccomp), network open."}]}
+
+ {:group "Runs as training data"
+  :entries
+  [{:name samizdat.export/trajectories
+    :summary "The runs worth imitating (gates.edn :export), each shipping branch as the role-tagged tape its model saw, secrets redacted."}
+   {:name samizdat.export/write-jsonl!
+    :summary "Write trajectories as JSONL, one conversation per line, for a fine-tuning pipeline."}
+   {:name samizdat.export/verdicts
+    :summary "Every judgement the harness made — gate firings, critic scores, reprieves, finalization verdicts, board reviews, critiques — from every run, each labelled by what happened next (gates.edn :export :verdicts). The outcome is the label; a judge trained on its own verdicts alone imitates its guesses."}
+   {:name samizdat.export/write-verdicts!
+    :summary "Write verdicts as JSONL, one judgement per line: jolt export <db> [out.jsonl] --verdicts."}]}
+ {:group "Validating a change to the harness itself"
+  :entries
+  [{:name samizdat.replay/record
+    :summary "Freeze a finished run as a replay case: the model's side of the conversation, per branch, in order."}
+   {:name samizdat.replay/complete-fn
+    :summary "Serve a recorded case back in place of the provider, so the same loop runs on fixed input and costs nothing."}
+   {:name samizdat.battery/check
+    :summary "Run a case's named expectations against a finished run — per target, so a failure says WHICH behaviour broke."}
+   {:name samizdat.battery/vocabulary
+    :summary "Every assertion a battery case may use. The set is closed; an unknown one throws rather than passing."}
+   {:name samizdat.battery/accept?
+    :summary "Whether a candidate may commit given the retained baseline. Ties are accepted, deliberately."}
+   {:name samizdat.battery/regressions
+    :summary "The targets that passed before an edit and fail after — only the flips, so an old failure cannot freeze every edit."}
+   {:name samizdat.procedure/load-graph
+    :summary "A procedural graph as queryable facts: (procedure, relation, procedure) triplets over the agent's own tools."}
+   {:name samizdat.procedure/neighbourhood
+    :summary "What may follow the action you just took, out to h hops, with each transition's condition, guidance and pitfalls."}
+   {:name samizdat.procedure/check
+    :summary "A procedural graph's structural findings: traps, dangling edges, non-tool nodes, ambiguous and dead transitions."}]}
+
+ {:group "Code quality"
+  :entries
+  [{:name samizdat.metrics/report
+    :summary "The three SlopCodeBench heuristics over a corpus of source: cyclomatic complexity, erosion, clone-only verbosity."}
+   {:name samizdat.metrics/cyclomatic
+    :summary "Cyclomatic complexity of a form: 1 + its decision points, counting inline lambdas but not nested defns."}
+   {:name samizdat.metrics/erosion
+    :summary "The fraction of a change's mass held by functions over the complexity limit — mass(f) = cc * sqrt(sloc)."}
+   {:name samizdat.metrics/review
+    :summary "Structured code-quality findings for the changed sources, or none — what the diff critics merge into their verdict."}]}
+
+ {:group "Acceptance criteria: the operator's definition of done"
+  :entries
+  [{:name samizdat.agent.acceptance/normalize
+    :summary "config :run :acceptance as criteria: a vector of {:name :check \"<shell cmd>\"} (pass = exit 0 in the project root) or {:name :judge \"<one narrow yes/no question>\"} (put to the critic role). Written by the OPERATOR in .samizdat/config.edn before the run — the file the run may not write (karamazov-kvw) — so unlike the suite the run authors, it cannot be weakened from inside. A malformed entry refuses system start rather than being skipped."}
+   {:name samizdat.agent.acceptance/check
+    :summary "Run criteria with an injected shell and judge; one {:name :kind :passed? :output} per criterion, in order. :passed? nil is undecided (not run, or a judge with no verdict) and does not block — fail-open like every judge here. `done` runs the :check criteria (model-free, like the rest of that gate); :feature/verify runs both kinds as Gate 2's other half. Results are journalled per criterion under :acceptance with :at done|verify."}
+   {:name samizdat.agent.acceptance/refusal
+    :summary "What the branch reads when criteria failed: each by name with the failure's own words, and what was met. prompts/acceptance-failed.md."}
+   {:name samizdat.agent.judge/parse-yesno
+    :summary "true / false / nil from a narrow judge reply — the first word of the first line, else of the last. The shape prompts/acceptance-judge.md asks for; change both together."}
+   {:name samizdat.agent.judge/parse-criteria
+    :summary "An RFC's '## Acceptance criteria' bullets as rubric entries {:criterion :weight :kind}: unmarked = positive weight 1, [N] weight N, [-N] a deduction penalty (YES costs N), [xM] a multiplicative penalty (YES scales by 1-M). The syntax prompts/rfc-brief.md teaches. [] when the RFC has no such section, and then epic-review runs the two-pass review alone."}
+   {:name samizdat.agent.judge/review-rubric
+    :summary "One narrow yes/no call per criterion through an injected chat, scored as thinkingbox's RubricJudge: reward = clamp((earned - deductions) / positive weight) x the multipliers, against gates.edn :rubric :threshold. Undecided ratings sit out of both sides; nothing decided is a nil reward and a pass (fail-open). :findings lists the failed criteria and fired penalties with the judge's own sentence — what epic-review's fix child is told. `rubric-score` is the arithmetic alone, testable on ratings."}]}
+
+ {:group "The simulated user: asking instead of guessing"
+  :entries
+  [{:name samizdat.agent.tools.ask/user-prompt
+    :summary "The one message the :user role answers when ask_human is called with nobody attached and config :run :user-context set: the operator's ground truth, the visible transcript, the questions, and the rules — answer only from the context, copy entities verbatim, say \"I don't know\" where it is silent, never do the assistant's work (prompts/user-simulator.md). The :user role's model under :run :role-models, else the branch's own. A configured person (gates.edn :approval :mode :block) always outranks it. The exchange is journalled under :simulated-user and billed as a side call, and the branch is told the answer is simulated."}
+   {:name samizdat.agent.tools.ship/asks-the-reader?
+    :summary "The :asks-the-reader ship rung's predicate: the answer's LAST non-blank line is a request to whoever reads it — a question with a second-person subject, an offer of more work, a request to confirm — by wordlists.edn :asks-the-reader at word starts. `done` closes the run, so a question left in the answer is a question nobody answers; the refusal names ask_human. Last line only and phrase-anchored, so prose that asks and answers itself, or the `?` operator, does not fire."}]}
+]

@@ -26,17 +26,22 @@
 
   This namespace is pure logic: redefining `handler` against a running process
   takes effect on the next request. See samizdat.system."
-  (:require [clojure.data.json :as json]
+  (:require ;; the java.time.* host shim, before data.json — see samizdat.store.journal
+            [jolt.time]
+            [clojure.data.json :as json]
             [clojure.string :as str]
             [clojure.tools.logging :as log]
             [samizdat.agent.gates :as gates]
+            [samizdat.agent.gitdiff :as gitdiff]
             [samizdat.api.control :as control]
             [samizdat.api.openai :as openai]
             [samizdat.api.runs :as api-runs]
+            [samizdat.approval :as approval]
             [samizdat.config :as config]
             [samizdat.llm.client :as llm-client]
             [samizdat.store.db :as db]
-            [samizdat.system :as system]))
+            [samizdat.system :as system]
+            [samizdat.userspace :as userspace]))
 
 (defn json-response
   ([body] (json-response 200 body))
@@ -52,7 +57,7 @@
            (catch Throwable _ nil)))))
 
 (defn- url-decode
-  "review3 #12: query values arrive %XX-encoded with + for space. Decode to
+  "provenance R3-12: query values arrive %XX-encoded with + for space. Decode to
   bytes and build the string once from UTF-8, so a multibyte char spread
   across escapes reassembles whole. A % that does not head a valid escape
   passes through raw — the client already sent it, and a bad query string
@@ -103,6 +108,8 @@
       ;; had already served 91 shared artifacts. The per-run truth is on the
       ;; run detail endpoint as share_artifacts.
       :config_defaults (config/redacted (select-keys cfg [:llm :run :db]))
+      ;; Which files those defaults were layered from, lowest first.
+      :config_sources (config/config-sources (get-in cfg [:run :root]))
       ;; Kept under the old key as well: this is a published endpoint and the
       ;; GUI reads it. Removing it is a separate change from correcting it.
       :config (config/redacted (select-keys cfg [:llm :run :db]))})))
@@ -139,6 +146,75 @@
 (defn- gate-table [_req]
   (json-response {:gates (gates/describe) :thresholds (gates/config)}))
 
+(defn layout-body
+  "The project's terminal-UI layout, as the EDN text of its `tui` policy.
+
+  Served rather than read by the front end because only this process is
+  BOUND to the project: `userspace/body` reads the stored row here and falls
+  back to the shipped template, where the same call in the TUI's process —
+  which holds no database handle by design — can only ever see the template.
+  Without this the agent could save a new version of its own UI and nothing
+  would ever draw it.
+
+  Text, not parsed: the server has no business understanding a layout, and a
+  client that is going to `edn/read-string` it anyway gains nothing from a
+  round trip through JSON."
+  []
+  {:layout (userspace/body :policy "tui")})
+
+(defn- layout-table [_req]
+  (json-response (layout-body)))
+
+;; {:at ms :root path :snapshot m} — see gates.edn :git-snapshot-ttl-ms for why
+;; a cache exists at all.
+(defonce ^:private git-cache (atom nil))
+
+(defn cached-snapshot
+  "`gitdiff/snapshot` for `root`, at most once per :git-snapshot-ttl-ms.
+
+  Keyed on the root as well as the clock, so a harness whose project moved
+  does not serve the previous one's branch for the rest of the window."
+  [root]
+  (let [ttl (or (gates/threshold :git-snapshot-ttl-ms) 0)
+        now (System/currentTimeMillis)
+        c @git-cache]
+    (if (and c (= root (:root c)) (< (- now (:at c)) ttl))
+      (:snapshot c)
+      (let [s (gitdiff/snapshot root)]
+        (reset! git-cache {:at now :root root :snapshot s})
+        s))))
+
+(defn project-body
+  "What a front end needs to caption itself: which project, which branch, how
+  dirty, which model.
+
+  Served rather than read locally for the same reason the layout is: the TUI
+  holds no filesystem knowledge of the project and no database handle, so a
+  TUI pointed at a harness on another machine — or merely started from
+  another directory — would otherwise caption the wrong repo with perfect
+  confidence. Only this process knows what it is working on.
+
+  Every field is nullable and the endpoint never fails: a harness outside a
+  git tree still has a project name, and a front end that cannot draw a
+  branch should still draw the rest of its footer."
+  []
+  (let [cfg (system/config)
+        root (get-in cfg [:run :root])
+        snap (cached-snapshot root)]
+    {:project (some-> root (str/split #"/") last not-empty)
+     :root root
+     :branch (:branch snap)
+     :staged (:staged snap)
+     :unstaged (:unstaged snap)
+     :untracked (:untracked snap)
+     :last_commit (:last-commit snap)
+     :provider (some-> (get-in cfg [:llm :provider]) name)
+     :model (get-in cfg [:llm :model])
+     :context_window (get-in cfg [:llm :context-window])}))
+
+(defn- project-table [_req]
+  (json-response (project-body)))
+
 ;; --- routing ----------------------------------------------------------------
 ;;
 ;; A route is [method pattern handler]. A pattern segment starting with ':'
@@ -149,7 +225,7 @@
 (defn- clamp-slow-ms
   "/slow exists so the smoke probe can prove /health still answers while a
   handler is busy; its ms parameter is a dial for \"briefly busy\", not a lease
-  on a connection thread, so it is clamped (review3 #4)."
+  on a connection thread, so it is clamped (provenance R3-4)."
   [ms]
   (min (max (or ms 1000) 0) slow-ms-cap))
 
@@ -168,7 +244,13 @@
    [:get "/v1/models" #'models]
    [:post "/v1/chat/completions" #'chat-completions]
    [:get "/v1/harness/gates" #'gate-table]
+   ;; The terminal UI's own arrangement, so a front end that holds no
+   ;; database handle can still see the version the agent saved.
+   [:get "/v1/harness/layout" #'layout-table]
    [:get "/v1/harness/models" #'harness-models]
+   ;; Which project, which branch, how dirty, which model — the footer and the
+   ;; GIT panel. Served because only this process is bound to the project.
+   [:get "/v1/harness/project" #'project-table]
    [:get "/v1/runs" (fn [req] (json-response (api-runs/list-runs (system/conn)
                                                                  (long-param req "limit"))))]
    ;; `(or (:status r) 200)`, the same shape resume uses: a handler that refuses
@@ -186,6 +268,20 @@
                                                     (get-in req [:path-params :id])
                                                     (long-param req "since")
                                                     (long-param req "limit"))))]
+   ;; The live manifest-state trace. No conn: steps are held in memory, not
+   ;; journalled — see samizdat.steps.
+   [:get "/v1/runs/:id/steps"
+    (fn [req] (json-response (api-runs/steps-tail (get-in req [:path-params :id])
+                                                  (long-param req "since")
+                                                  (long-param req "limit"))))]
+   ;; One turn, whole. The branch listing drops the model's prose because it
+   ;; is the bulk; this is how a reader gets it back, a turn at a time.
+   [:get "/v1/runs/:id/branches/:branch/turns/:turn"
+    (fn [req] (let [{:keys [id branch turn]} (:path-params req)]
+                (if-let [t (api-runs/turn-detail (system/conn) id branch
+                                                 (parse-long (str turn)))]
+                  (json-response t)
+                  (json-response 404 {:error {:message "no such turn"}}))))]
    [:get "/v1/runs/:id/branches/:branch"
     (fn [req] (let [{:keys [id branch]} (:path-params req)]
                 (if-let [b (api-runs/branch-detail (system/conn) id branch)]
@@ -206,6 +302,27 @@
                                        (get-in req [:path-params :id])
                                        (body-json req))]
                 (json-response (or (:status r) 200) (:body r))))]
+   ;; Questions waiting on a person: the permission gate and ask_human, which
+   ;; share one queue because they differ only in what they carry.
+   [:get "/v1/runs/:id/approvals"
+    (fn [req] (json-response {:approvals (approval/pending
+                                          (get-in req [:path-params :id]))}))]
+   [:get "/v1/approvals"
+    (fn [_] (json-response {:approvals (approval/pending nil)}))]
+   [:post "/v1/approvals/:aid"
+    (fn [req]
+      (let [{:keys [decision note answers]} (body-json req)
+            d (keyword (or decision "deny"))]
+        (if (approval/decide! (get-in req [:path-params :aid])
+                              (cond-> {:decision d}
+                                note (assoc :note note)
+                                answers (assoc :answers answers)))
+          (json-response {:status "decided" :decision (name d)})
+          ;; Gone rather than never-existed: the ordinary cause is a second
+          ;; operator answering a question the first already settled, or a
+          ;; wait that expired. 409 says which, in the house style the other
+          ;; handlers use — a short noun phrase, not a sentence.
+          (json-response 409 {:error {:message "approval not open"}}))))]
    [:get "/v1/interventions/kinds" (fn [_] (json-response (control/kinds)))]])
 
 (defn- match-path [pattern uri]

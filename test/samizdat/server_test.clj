@@ -19,12 +19,17 @@
 (ns samizdat.server-test
   "The vendored ring adapter's request reader, and the listen socket's
   close-on-exec."
-  (:require [clojure.string :as str]
+  (:require [clojure.edn :as edn]
+            [clojure.string :as str]
             [clojure.test :refer [deftest testing is]]
             [jolt.process :as p]
             [ring-chez.adapter :as adapter]
+            [samizdat.agent.gitdiff :as gitdiff]
             [samizdat.api.control :as control]
-            [samizdat.server :as server]))
+            [samizdat.server :as server]
+            [samizdat.store.db :as db]
+            [samizdat.system :as system]
+            [samizdat.userspace :as userspace]))
 
 (defn- request [body]
   (str "POST /v1/runs HTTP/1.1\r\n"
@@ -36,7 +41,7 @@
 (deftest slow-clamps-its-sleep
   ;; /slow exists so the smoke probe can prove /health still answers while a
   ;; handler is busy; its ms parameter is a dial for "briefly busy", not a
-  ;; lease on a connection thread, so it is clamped (review3 #4). Resolved at
+  ;; lease on a connection thread, so it is clamped (provenance R3-4). Resolved at
   ;; runtime so the missing var reads as a failing assertion, not a dead file.
   (let [clamp (resolve 'samizdat.server/clamp-slow-ms)]
     (is (some? clamp) "clamp-slow-ms exists")
@@ -46,6 +51,81 @@
         (is (= 250 (@clamp 250)) "an in-range value passes through")
         (is (= 10000 (@clamp 999999999)) "the ceiling holds")
         (is (= 0 (@clamp -5)) "a negative asks to sleep nothing")))))
+
+(deftest the-harness-serves-the-layout-the-agent-saved
+  ;; The seam that makes "the agent can rearrange its own UI" true. Only the
+  ;; server is BOUND to the project, so only the server can read the stored
+  ;; `tui` policy; the TUI holds no database handle by design and asks. Before
+  ;; this endpoint existed, a saved version was written and nothing ever drew
+  ;; it — the front end's own userspace read could only reach the shipped
+  ;; template, and then cached that for the life of the process.
+  (let [tmp (str (java.io.File/createTempFile "layout" ".sqlite3"))
+        conn (db/open! tmp)
+        prev (userspace/bind! conn)]
+    (try
+      (testing "with nothing saved it is the shipped template, seeded"
+        (let [body (:layout (server/layout-body))]
+          (is (string? body))
+          (is (= (:layout (edn/read-string body))
+                 (:layout (edn/read-string (userspace/template :policy "tui"))))
+              "which is what a fresh project draws")))
+      (testing "and after the agent saves one, it is the agent's"
+        (userspace/save! :policy "tui"
+                         (pr-str {:prose-turns 3 :layout [:vbox [:widget/status {}]]}))
+        (let [spec (edn/read-string (:layout (server/layout-body)))]
+          (is (= [:vbox [:widget/status {}]] (:layout spec)))
+          (is (= 3 (:prose-turns spec)))))
+      (finally
+        (userspace/bind! prev)
+        (db/close conn)))))
+
+(deftest the-harness-serves-the-project-it-is-working-on
+  ;; Same seam as the layout above, for the footer and the GIT panel: only
+  ;; this process knows which directory it was pointed at, so a TUI reading
+  ;; git in its OWN process would caption whichever repo it happened to be
+  ;; started from — confidently, and wrongly, whenever it is pointed at a
+  ;; harness elsewhere.
+  (with-redefs [system/config (fn [] {:run {:root "/tmp/some/where/myproject"}
+                                      :llm {:provider :glm :model "glm-5.3"
+                                            :context-window 128000}})
+                server/cached-snapshot (fn [_] {:branch "trunk" :staged 1
+                                                :unstaged 2 :untracked 3
+                                                :last-commit "did a thing"})]
+    (let [b (server/project-body)]
+      (is (= "myproject" (:project b)) "the basename, which is what a footer has room for")
+      (is (= "trunk" (:branch b)))
+      (is (= [1 2 3] [(:staged b) (:unstaged b) (:untracked b)]))
+      (is (= "did a thing" (:last_commit b)))
+      (is (= "glm" (:provider b)) "a string on the wire, not a keyword")
+      (is (= "glm-5.3" (:model b)))
+      (is (= 128000 (:context_window b)))))
+  (testing "outside a git tree it still names the project"
+    (with-redefs [system/config (fn [] {:run {:root "/tmp/plain"}
+                                        :llm {:provider :local :model "m"}})
+                  server/cached-snapshot (fn [_] nil)]
+      (let [b (server/project-body)]
+        (is (= "plain" (:project b)))
+        (is (nil? (:branch b)))
+        (is (nil? (:staged b)) "absent, not zero — 'no repo' is not 'clean'")))))
+
+(deftest the-git-snapshot-is-cached-so-git-is-off-the-poll-path
+  ;; Three shell-outs per request and a poller asking every 1.5s per front
+  ;; end. dirge read .git/HEAD once per painted frame and froze its UI on
+  ;; large repos until it cached (dirge-vuzz); this is that lesson taken up
+  ;; front, with the window in gates.edn.
+  (let [calls (atom 0)]
+    (with-redefs [gitdiff/snapshot (fn [_] (swap! calls inc) {:branch "b"})]
+      (reset! @#'server/git-cache nil)
+      (is (= {:branch "b"} (server/cached-snapshot "/r")))
+      (is (= {:branch "b"} (server/cached-snapshot "/r")))
+      (is (= 1 @calls) "the second read came from the cache")
+      (testing "a different root is not the cached one"
+        (is (= {:branch "b"} (server/cached-snapshot "/other")))
+        (is (= 2 @calls)))
+      (testing "and an expired window reads again"
+        (swap! @#'server/git-cache assoc :at 0)
+        (server/cached-snapshot "/other")
+        (is (= 3 @calls))))))
 
 (deftest content-length-is-octets-not-characters
   ;; A 3-byte em-dash decodes to one char. Judging completeness by char count
@@ -175,7 +255,7 @@
         (is (= 16384 (:max-tokens r)))))))
 
 (deftest refusals-carry-their-own-reason-phrase
-  ;; review3 #12: status-text knew 409 and 503 not, and the status line fell
+  ;; provenance R3-12: status-text knew 409 and 503 not, and the status line fell
   ;; back to "OK" — a refusal that read as a success on the wire. Both are
   ;; statuses this API actually sends (abort/resume 409, start 503).
   (is (str/starts-with? (#'adapter/response->string
@@ -186,7 +266,7 @@
                         "HTTP/1.1 503 Service Unavailable")))
 
 (deftest a-failed-send-throws-rather-than-truncating
-  ;; review3 #12: send-all stopped silently when c-send answered <= 0, so the
+  ;; provenance R3-12: send-all stopped silently when c-send answered <= 0, so the
   ;; client read a body that ended exactly where the socket died while
   ;; Content-Length promised more — a well-formed lie. Throwing hands the
   ;; connection to serve-conn's error path instead.
@@ -199,7 +279,7 @@
       (finally (#'adapter/c-close fd)))))
 
 (deftest query-params-are-percent-decoded
-  ;; review3 #12: values arrived raw from the query string, so %XX stayed %XX
+  ;; provenance R3-12: values arrived raw from the query string, so %XX stayed %XX
   ;; and + stayed +. The API's own params are numeric, but a steer or a UI
   ;; search that ever carries text should not have to know the adapter's
   ;; omission.

@@ -26,6 +26,10 @@
   failure mode stays loud."
   (:require [clojure.test :refer [deftest testing is]]
             [clojure.string :as str]
+            ;; db.jdbc registers the java.sql shim clojure.jdbc compiles against and
+            ;; points connection construction at the native driver; it has to load
+            ;; before jdbc.core.
+            [db.jdbc]
             [jdbc.core :as jdbc]
             [samizdat.agent.gates :as gates]
             [samizdat.agent.loop :as branch-loop]
@@ -34,6 +38,8 @@
             [samizdat.store.artifacts :as artifacts]
             [samizdat.store.db :as db]
             [samizdat.store.interventions :as interventions]
+            [samizdat.lexicon :as lexicon]
+            [samizdat.store.failures :as failures]
             [samizdat.store.journal :as journal]
             [samizdat.store.migrations :as migrations]
             [samizdat.store.runs :as runs]))
@@ -88,7 +94,7 @@
     (is (every? (set (db/table-names c))
                 ["runs" "branches" "turns" "artifacts" "failures"
                  "gate_firings" "interventions" "events"
-                 "shared_artifacts"]))))
+                 "shared_artifacts" "side_calls"]))))
 
 (deftest migrations-are-idempotent
   (with-db [c]
@@ -821,7 +827,7 @@
        (is (re-find #"(?i)UNVERIFIED|not results" block)))))
 
 (deftest a-failed-migration-rolls-back-and-keeps-the-version
-  ;; review2 #3: migrations are non-idempotent ALTERs, but each ran as
+  ;; provenance R2-3: migrations are non-idempotent ALTERs, but each ran as
   ;; autocommitted statements with the version bump after the last one — a
   ;; crash between the two left user_version stale and every later boot
   ;; died on `duplicate column name` forever. A migration must be
@@ -846,7 +852,7 @@
            (set (filter #(str/starts-with? % "mg_") (db/table-names c)))))))
 
 (deftest lifecycle-writes-are-decided-by-the-row
-  ;; review2 #4: finish-run!/mark-running!/close-branch!/resolve! were
+  ;; provenance R2-4: finish-run!/mark-running!/close-branch!/resolve! were
   ;; WHERE id = ? only, so a stale caller rewrote a terminal run (abort!'s
   ;; transient window vs the run's own completion) or a closed branch's
   ;; inactive_reason. Guards follow reconcile-orphans!'s precedent.
@@ -880,7 +886,7 @@
                                         (interventions/history c rid)))))))))
 
 (deftest old-finished-runs-get-their-events-pruned-on-the-next-start
-  ;; review2 #11: events are a durable duplicate of every turn/artifact/
+  ;; provenance R2-11: events are a durable duplicate of every turn/artifact/
   ;; failure/gate write whose only readers are the live tail and
   ;; last-progress-at; nothing ever pruned them, so the one shared DB file
   ;; grew without bound. The sweep runs at run START, not at finish: a
@@ -922,3 +928,346 @@
         (is (= "stuck" (:gate (first (:unsettled-gates d)))))
         (is (= #{:branch :turns :unsettled-gates :artifacts}
                (set (keys d))))))))
+
+;; --- retention --------------------------------------------------------------
+
+(deftest the-run-record-is-kept-forever-by-default
+  ;; RFC-009's central property is that a resume rebuilds branch state by
+  ;; replay and that a crashed run stays inspectable. Pruning turns ends both
+  ;; for that run, so it is an operator's decision about disk and never a
+  ;; default anyone inherits.
+  (is (nil? (:run-record-days (lexicon/policy :retention)))
+      "if this ever defaults to a number, the harness silently starts
+       discarding the account every other property is built on")
+  (is (pos? (:events-hours (lexicon/policy :retention)))
+      "events are a tail buffer and do sweep on their own"))
+
+(deftest pruning-the-record-leaves-the-run-and-takes-the-detail
+  (with-db [c]
+    (let [rid (runs/start-run! c {:problem "p"})]
+      (runs/open-branch! c rid {:branch-id "B1"})
+      (journal/record-turn! c rid {:branch-id "B1" :turn 1 :tool-name "eval"
+                                   :args {} :result "r" :category "success"})
+      (journal/record-gate! c rid {:branch-id "B1" :turn 1 :gate "stuck"
+                                   :message "m" :prediction "p" :window 3})
+      (failures/record! c rid {:branch-id "B1" :turn 1 :tool-name "eval"
+                               :claim "c" :reason "why"})
+      (runs/finish-run! c rid "completed" "done")
+
+      (testing "a cutoff before the run leaves everything alone"
+        (is (= 0 (journal/prune-run-record! c "2000-01-01T00:00:00Z")))
+        (is (= 1 (count (journal/turns c rid)))))
+
+      (testing "a cutoff after it takes the detail"
+        (is (= 1 (journal/prune-run-record! c "2999-01-01T00:00:00Z")))
+        (is (empty? (journal/turns c rid)))
+        (is (empty? (journal/gate-firings c rid)))
+        (is (empty? (failures/recent c rid))))
+
+      (testing "and leaves the run itself — an index of what happened,
+                without the bulk, which beats a deleted row when somebody
+                asks what happened six months ago"
+        (let [r (runs/get-run c rid)]
+          (is (some? r))
+          (is (= "completed" (:status r)))
+          (is (= "p" (:problem r))))))))
+
+(deftest a-running-run-is-never-pruned
+  ;; A row that says it is running is either live or a leftover
+  ;; reconcile-orphans! has not seen yet, and neither is safe to strip.
+  (with-db [c]
+    (let [rid (runs/start-run! c {:problem "p"})]
+      (runs/open-branch! c rid {:branch-id "B1"})
+      (journal/record-turn! c rid {:branch-id "B1" :turn 1 :tool-name "eval"
+                                   :args {} :result "r" :category "success"})
+      (is (= 0 (journal/prune-run-record! c "2999-01-01T00:00:00Z")))
+      (is (= 1 (count (journal/turns c rid)))))))
+
+(deftest pruning-takes-the-fts-mirror-with-the-rows
+  ;; An orphaned index entry keeps ranking against nothing, which is worse
+  ;; than either keeping or deleting cleanly. The deletes are ordered so the
+  ;; subquery that finds the rowids still has rows to find.
+  (with-db [c]
+    (let [rid (runs/start-run! c {:problem "p"})]
+      (runs/open-branch! c rid {:branch-id "B1"})
+      (failures/record! c rid {:branch-id "B1" :turn 1 :tool-name "eval"
+                               :claim "the greedy bound holds" :reason "it does not"})
+      (runs/finish-run! c rid "completed" "done")
+      (is (seq (failures/similar c rid "greedy bound")))
+      (journal/prune-run-record! c "2999-01-01T00:00:00Z")
+      (is (empty? (failures/similar c rid "greedy bound"))
+          "the index went with the rows"))))
+
+(deftest enabling-record-retention-does-not-break-run-start
+  ;; start-run! logged the sweep through an alias the ns never required; jolt
+  ;; resolves aliases lazily, so the ns loaded fine and the throw waited for
+  ;; the first run start that actually pruned something — at which point every
+  ;; subsequent start failed until the knob was reverted (karamazov-blt.31).
+  ;; The one code path that exercises the advertised retention feature is the
+  ;; one this drives.
+  (with-db [c]
+    (let [old (runs/start-run! c {:problem "old"})]
+      (runs/open-branch! c old {:branch-id "B1"})
+      (journal/record-turn! c old {:branch-id "B1" :turn 1 :tool-name "eval"
+                                   :args {} :result "r" :category "success"})
+      (runs/finish-run! c old "completed" "done")
+      (db/execute! c ["UPDATE runs SET ended_at = ? WHERE id = ?"
+                      (str (.minusSeconds (java.time.Instant/now) (* 40 86400)))
+                      old])
+      (with-redefs [lexicon/policy (fn [k] (get {:retention {:events-hours 24
+                                                             :run-record-days 30}}
+                                               k))]
+        (let [id (runs/start-run! c {:problem "next"})]
+          (is (some? id) "the sweep-and-log path starts the run")
+          (is (empty? (journal/turns c old))
+              "and the aged-out record was actually pruned"))))))
+
+;; --- re-opening a branch a resume already has (karamazov-otd) ---------------
+
+(deftest open-branch-is-idempotent-so-a-resume-does-not-crash
+  ;; Branch ids are round-scoped (T0, T0v1), so a resumed run's board claims
+  ;; the same task to the same id. The plain INSERT died on the (run_id, id)
+  ;; primary key and took the board stage down with it.
+  (with-db [c]
+    (let [rid (runs/start-run! c {:problem "p"})]
+      (runs/open-branch! c rid {:branch-id "T0" :problem "part one"})
+      (is (= "T0" (runs/open-branch! c rid {:branch-id "T0" :problem "part one"}))
+          "re-opening returns the id rather than throwing")
+      (is (= 1 (count (db/fetch c ["SELECT * FROM branches WHERE run_id = ? AND id = ?"
+                                   rid "T0"])))
+          "and leaves exactly one row"))))
+
+(deftest re-opening-never-rewrites-how-a-branch-ended
+  ;; The one thing the existing row holds that must survive: its ending.
+  ;; close-branch! refuses to rewrite a closed branch's status (R2-4), and
+  ;; re-opening must not do through the back door what closing refuses to do.
+  (with-db [c]
+    (let [rid (runs/start-run! c {:problem "p"})]
+      (runs/open-branch! c rid {:branch-id "T0"})
+      (runs/close-branch! c rid "T0" :done nil)
+      (runs/open-branch! c rid {:branch-id "T0"})
+      (let [row (first (db/fetch c ["SELECT * FROM branches WHERE run_id = ? AND id = ?"
+                                    rid "T0"]))]
+        (is (= "done" (:status row))
+            "still done — a rejoin is not a resurrection")))))
+
+(deftest a-rejoin-is-journalled-as-a-rejoin
+  (with-db [c]
+    (let [rid (runs/start-run! c {:problem "p"})]
+      (runs/open-branch! c rid {:branch-id "T0"})
+      (runs/open-branch! c rid {:branch-id "T0"})
+      (let [kinds (set (map :kind (db/fetch c ["SELECT kind FROM events WHERE run_id = ?" rid])))]
+        (is (contains? kinds "branch-opened"))
+        (is (contains? kinds "branch-rejoined")
+            "the record distinguishes a first open from a resume's rejoin")))))
+
+(deftest a-branch-row-carries-the-role-it-ran-as
+  ;; The role scoped the tool surface and picked the system prompt, and it
+  ;; lived only on the in-memory branch — so every rebuild from the journal
+  ;; (resume, export) opened the branch as the unscoped default.
+  (with-db [c]
+    (let [rid (runs/start-run! c {:problem "p"})]
+      (runs/open-branch! c rid {:branch-id "SUP" :role :supervisor})
+      (runs/open-branch! c rid {:branch-id "B1"})
+      (is (= "supervisor" (:role (runs/get-branch c rid "SUP"))))
+      (is (nil? (:role (runs/get-branch c rid "B1"))) "nil is the unscoped default")
+      (runs/open-branch! c rid {:branch-id "SUP" :role :implementor})
+      (is (= "supervisor" (:role (runs/get-branch c rid "SUP")))
+          "a rejoin keeps the row, role included"))))
+
+(deftest a-branch-row-carries-the-suffix-it-opened-on
+  ;; The suffix — the board's owner prompt, a decompose unit's attempt
+  ;; framing, the supervisor's role text — was built by the cell at open time
+  ;; and never written down, so every rebuild from the journal (resume,
+  ;; export) opened the branch on the workflow's :prompt instead
+  ;; (karamazov-kgvg). Now on the row, beside the problem and the role.
+  (with-db [c]
+    (let [rid (runs/start-run! c {:problem "p"})]
+      (runs/open-branch! c rid {:branch-id "SUP" :prompt-suffix "You watch the run."})
+      (runs/open-branch! c rid {:branch-id "B1"})
+      (is (= "You watch the run." (:prompt_suffix (runs/get-branch c rid "SUP"))))
+      (is (= "" (:prompt_suffix (runs/get-branch c rid "B1")))
+          "opening on no suffix is RECORDED as none — NULL is a row older than the column")
+      (runs/open-branch! c rid {:branch-id "SUP" :prompt-suffix "something else"})
+      (is (= "You watch the run." (:prompt_suffix (runs/get-branch c rid "SUP")))
+          "a rejoin keeps the row, suffix included"))))
+
+(deftest timestamps-are-fixed-width-so-every-table-sorts-the-same-way
+  ;; Instant.toString drops the fraction when it is zero: "…:40Z" beside
+  ;; "…:40.123Z". 'Z' sorts after '.', so the whole-second stamp landed AFTER
+  ;; every fractional stamp in its own second, and `now`'s promise — one
+  ;; function so every table sorts the same way — held 999 times in 1000.
+  (is (= "2023-11-14T22:13:20.000Z" (db/iso-millis "2023-11-14T22:13:20Z")))
+  (is (= "2023-11-14T22:13:20.500Z" (db/iso-millis "2023-11-14T22:13:20.5Z")))
+  (is (= "2023-11-14T22:13:20.123Z" (db/iso-millis "2023-11-14T22:13:20.123456Z"))
+      "truncated, not rounded: a stamp must never sort after one taken later")
+  (is (neg? (compare (db/iso-millis "2023-11-14T22:13:20Z")
+                     (db/iso-millis "2023-11-14T22:13:20.123Z"))))
+  (is (re-matches #"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z" (db/now))))
+
+(deftest the-nth-most-recent-run-start-bounds-a-window-in-runs
+  ;; "The last N runs" as a timestamp bound, for tables that carry a
+  ;; created_at and no run id. nil when fewer than N runs exist: a store
+  ;; younger than its window is read whole.
+  (with-db [c]
+    (is (nil? (runs/nth-recent-start c 1)) "no runs: no bound")
+    (let [r1 (runs/start-run! c {:problem "a"})
+          _ (Thread/sleep 5)
+          r2 (runs/start-run! c {:problem "b"})
+          _ (Thread/sleep 5)
+          r3 (runs/start-run! c {:problem "c"})]
+      (is (= (:started_at (runs/get-run c r3)) (runs/nth-recent-start c 1)))
+      (is (= (:started_at (runs/get-run c r2)) (runs/nth-recent-start c 2)))
+      (is (= (:started_at (runs/get-run c r1)) (runs/nth-recent-start c 3)))
+      (is (nil? (runs/nth-recent-start c 4))))))
+
+;; --- side calls ---------------------------------------------------------------
+
+(deftest run-usage-counts-what-the-side-models-spent
+  ;; karamazov-2rqb.1. `run-usage` summed the turns table alone, and the turns
+  ;; table holds only the COMMITTED turn — so the reader behind read_digest,
+  ;; the critic, the reflection pass and the trajectory scorer all spent
+  ;; provider tokens the run's budget could not see. The more the digest shunt
+  ;; is used, which is the whole point of it, the more of the bill is invisible
+  ;; to the thing that is supposed to end the run at :exhausted.
+  (with-db [c]
+    (let [rid (runs/start-run! c {:problem "p"})]
+      (runs/open-branch! c rid {:branch-id "B1"})
+      (journal/record-turn! c rid {:branch-id "B1" :turn 1 :tool-name "shell"
+                                   :result "ok" :category "success"
+                                   :usage {:prompt-tokens 100 :completion-tokens 20
+                                           :total-tokens 120}})
+      (is (= 120 (:total-tokens (journal/run-usage c rid)))
+          "the committed turn, as before")
+      (journal/record-side-call! c rid {:branch-id "B1" :turn 1 :kind :digest
+                                        :role :reader :model "cheap"
+                                        :usage {:prompt-tokens 8000 :completion-tokens 200
+                                                :total-tokens 8200}})
+      (journal/record-side-call! c rid {:branch-id "B1" :turn 1 :kind :critic
+                                        :usage {:prompt-tokens 500 :completion-tokens 50
+                                                :total-tokens 550}})
+      (let [u (journal/run-usage c rid)]
+        (is (= 8870 (:total-tokens u))
+            "the turn plus both side calls — one bill, one number")
+        (is (= 1 (:turns u))
+            "a side call is not a turn: the turn count still counts turns")
+        (is (= 2 (:side-calls u)))))))
+
+(deftest a-side-call-with-no-total-still-counts-its-parts
+  ;; An OpenAI-compatible server that reports prompt and completion but no
+  ;; total_tokens would otherwise contribute a row summing to nothing —
+  ;; the same invisible-spend bug one level down.
+  (with-db [c]
+    (let [rid (runs/start-run! c {:problem "p"})]
+      (journal/record-side-call! c rid {:kind :digest
+                                        :usage {:prompt-tokens 300 :completion-tokens 40}})
+      (is (= 340 (:total-tokens (journal/run-usage c rid)))))))
+
+(deftest a-side-call-that-reported-no-usage-costs-nothing-and-still-records
+  ;; A provider error has no usage by construction. The row is the evidence
+  ;; that the call happened; it must not poison the sum with zeros that read
+  ;; as measurements.
+  (with-db [c]
+    (let [rid (runs/start-run! c {:problem "p"})]
+      (journal/record-side-call! c rid {:kind :critic :usage nil})
+      (let [u (journal/run-usage c rid)]
+        (is (= 1 (:side-calls u)))
+        (is (= 0 (:total-tokens u)))))))
+
+;; --- cache lanes --------------------------------------------------------------
+
+(deftest run-usage-reports-the-cache-hit-rate
+  ;; karamazov-2rqb.2. The lanes were parsed by the adapter and written to
+  ;; every turn row, and nothing read them back: 8jz's own 92-99% measurements
+  ;; had to be taken from a wire log because the harness had no way to answer
+  ;; the question about itself. A cache regression — a forced tool_choice, a
+  ;; compaction fold, a reordered context block — should surface as a cliff in
+  ;; this number rather than on an invoice.
+  (with-db [c]
+    (let [rid (runs/start-run! c {:problem "p"})]
+      (journal/record-turn! c rid {:branch-id "B1" :turn 1 :tool-name "shell"
+                                   :result "ok" :category "success"
+                                   :usage {:prompt-tokens 1000 :completion-tokens 10
+                                           :total-tokens 1010
+                                           :cache-hit-tokens 900
+                                           :cache-miss-tokens 100}})
+      (journal/record-side-call! c rid {:kind :digest
+                                        :usage {:prompt-tokens 1000 :completion-tokens 10
+                                                :total-tokens 1010
+                                                :cache-hit-tokens 500}})
+      (let [u (journal/run-usage c rid)]
+        (is (= 1400 (:cache-hit-tokens u)) "turns and side calls alike")
+        (is (= 100 (:cache-miss-tokens u)))
+        (is (= 0.7 (:cache-hit-rate u))
+            "hit over the prompt tokens of the calls that reported a lane")))))
+
+(deftest a-provider-that-reports-no-cache-lanes-has-no-rate
+  ;; llama.cpp and ollama report no split at all (llm/adapter/ollama.clj). A
+  ;; 0% there would assert every token missed the cache, which is a different
+  ;; and false claim — the same rule the adapter follows when it declines to
+  ;; write a zero.
+  (with-db [c]
+    (let [rid (runs/start-run! c {:problem "p"})]
+      (journal/record-turn! c rid {:branch-id "B1" :turn 1 :tool-name "shell"
+                                   :result "ok" :category "success"
+                                   :usage {:prompt-tokens 1000 :completion-tokens 10
+                                           :total-tokens 1010}})
+      (let [u (journal/run-usage c rid)]
+        (is (nil? (:cache-hit-rate u)) "unknown, not zero")
+        (is (= 0 (:cache-hit-tokens u)))))))
+
+(deftest the-hit-rate-ignores-calls-that-reported-no-lane
+  ;; A run whose branch talks to a caching provider and whose reader talks to a
+  ;; local llama.cpp would otherwise read as half as well-cached as it is: the
+  ;; reader's prompt tokens would land in the denominator with no hit lane to
+  ;; match them.
+  (with-db [c]
+    (let [rid (runs/start-run! c {:problem "p"})]
+      (journal/record-turn! c rid {:branch-id "B1" :turn 1 :tool-name "shell"
+                                   :result "ok" :category "success"
+                                   :usage {:prompt-tokens 1000 :completion-tokens 10
+                                           :total-tokens 1010
+                                           :cache-hit-tokens 800}})
+      (journal/record-side-call! c rid {:kind :digest
+                                        :usage {:prompt-tokens 9000 :completion-tokens 10
+                                                :total-tokens 9010}})
+      (is (= 0.8 (:cache-hit-rate (journal/run-usage c rid)))))))
+
+;; --- what the turn's context block costs --------------------------------------
+
+(deftest the-context-block-reports-what-each-of-its-parts-cost
+  ;; karamazov-2rqb.3. The block a branch is shown before every turn is seven
+  ;; renderers stacked — the task line, the settled-state ledger, the memory
+  ;; breadcrumbs, the inbox, the shared tree, the failure hits, the shared
+  ;; artifacts — each with its own cap in gates.edn, and nothing could say what
+  ;; any of them actually cost on a live turn. Autolith measures its
+  ;; contributions the same way and found a 12,000-token contribution that way.
+  (with-db [c]
+    (let [rid (runs/start-run! c {:problem "p"})
+          b (state/new-branch {:id "B1" :problem "p"})]
+      (journal/record-artifact! c rid {:branch-id "B1" :turn 1 :kind :lean
+                                       :tier :slow :claim-status :confirmed
+                                       :claim "a thing that is settled"
+                                       :code "theorem t : True := trivial"})
+      (let [{:keys [block branch]} (#'branch-loop/context-block c rid b nil false)
+            sizes (:context-sizes branch)]
+        (is (seq sizes) "the block says what it is made of")
+        (is (every? (fn [[_ n]] (and (integer? n) (pos? n))) sizes)
+            "each part with its own character count")
+        (is (contains? (set (map first sizes)) :ledger)
+            "the settled-state ledger rendered, so it is named")
+        (is (not (contains? (set (map first sizes)) :inbox))
+            "an empty inbox rendered nothing and is not listed as costing zero")
+        (is (<= (reduce + (map second sizes)) (count block))
+            "the parts cannot cost more than the block they compose")
+        ;; PINNED AGAINST THE DECLARED LIST, or introspect names the wrong
+        ;; parts as silent. A rename or a reorder here is the realistic drift:
+        ;; the names live in state (introspect cannot require the loop without
+        ;; closing a ring through the tool registry), so nothing else holds
+        ;; the two in step.
+        (let [declared state/context-part-names
+              produced (map first sizes)]
+          (is (every? (set declared) produced)
+              "every part the block builds is a part introspect knows about")
+          (is (= produced (filter (set produced) declared))
+              "and in the order the branch reads them in"))))))

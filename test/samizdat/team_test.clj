@@ -37,6 +37,29 @@
         (is (str/includes? (:answer r) "beta"))
         (is (str/includes? (:answer r) "2 workers"))))))
 
+(defn- worker-gives-up
+  "A worker that always gives up — nothing lands, retries included."
+  [_ _ _ & _]
+  {:content "```tool-call\n{\"name\":\"give_up\",\"args\":{\"reason\":\"cannot do it\"}}\n```"
+   :finish-reason "stop"})
+
+(deftest an-all-failed-team-run-does-not-report-completed
+  ;; karamazov-blt.19: the fan-out marked the run :done unconditionally, so a
+  ;; team where every worker failed still finished :completed with a summary
+  ;; of the failures as its answer — upstream of the false-completion
+  ;; memories in karamazov-mjb. The verdict now comes from :team/supervise,
+  ;; after its retries, from what actually landed.
+  (with-redefs [llm/chat worker-gives-up]
+    (let [conn (db/open! ":memory:")
+          r (workflow/run! {:conn conn
+                            :config {:run {:loop "team" :subtasks ["alpha"]}}
+                            :llm-adapter :a :llm-config {:max-tokens 16384}
+                            :problem "the feature" :max-turns 4})]
+      (is (not= :completed (:status r))
+          "a team where every worker failed must not read as a success")
+      (is (= "abandoned" (:status (db/fetch-one conn ["SELECT status FROM runs"])))
+          "the run row records the honest ending"))))
+
 (deftest team-with-no-subtasks-is-one-worker-on-the-whole-problem
   (with-redefs [llm/chat worker-dones-its-task]
     (let [conn (db/open! ":memory:")
@@ -104,10 +127,23 @@
                     {:content (str "```tool-call\n{\"name\":\"done\",\"args\":{\"answer\":\"handled "
                                    prob "\"}}\n```")
                      :finish-reason "stop"}
-                    ;; first sighting: give up, so the supervisor must re-task it
+                    ;; first sighting: give up, so the supervisor must re-task it.
+                    ;;
+                    ;; THE REASON HAS TO BE A REAL ACCOUNT. It said "stuck",
+                    ;; which `give_up` now refuses (karamazov-ylte.1): of the
+                    ;; four ways a branch can end that was the only ungated
+                    ;; one, so it was the cheapest, and a loop teaches by what
+                    ;; it makes cheap. The invariant this test pins is
+                    ;; unchanged — a worker that gives up is re-tasked on its
+                    ;; own retry branch — but what it takes to give up is not,
+                    ;; and a stub that cannot get past the gate never reaches
+                    ;; the supervisor this test is about.
                     (do (swap! seen conj prob)
-                        {:content (str "```tool-call\n{\"name\":\"give_up\","
-                                       "\"args\":{\"reason\":\"stuck\"}}\n```")
+                        {:content (str "```tool-call\n{\"name\":\"give_up\",\"args\":"
+                                       "{\"reason\":\"I could not build " prob
+                                       " — the module it needs is not on the "
+                                       "path and nothing I tried put it there.\"}}"
+                                       "\n```")
                          :finish-reason "stop"}))))]
     (with-redefs [llm/chat flaky]
       (let [conn (db/open! ":memory:")

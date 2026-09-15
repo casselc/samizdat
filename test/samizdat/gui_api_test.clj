@@ -20,7 +20,9 @@
   "The GUI's HTTP client and poll fold. samizdat.gui.api is deliberately
   toolkit-free (http-client + json only), which is what lets the headless
   suite cover it without ever loading GTK."
-  (:require [clojure.data.json :as json]
+  (:require ;; the java.time.* host shim, before data.json — see samizdat.store.journal
+            [jolt.time]
+            [clojure.data.json :as json]
             [clojure.string :as str]
             [clojure.test :refer [deftest testing is]]
             [jolt.http-client :as http]
@@ -123,7 +125,7 @@
               api/max-backoff-ms)))))
 
 (deftest a-batch-that-lands-after-stop-is-not-delivered
-  ;; code-review-2026-08 #5: an in-flight fetch completing after stop! still
+  ;; provenance CR1-5: an in-flight fetch completing after stop! still
   ;; delivered its callbacks, folding the OLD run's events into whatever the
   ;; UI was now showing. The loop rechecks @running between fetch and delivery.
   (let [delivered (atom 0)

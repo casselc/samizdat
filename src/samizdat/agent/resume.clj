@@ -34,9 +34,13 @@
   - failures are re-read fresh by the loop from the shared log, as always.
   - message history from the turns table: assistant_text is what the model
     said, result is what the harness answered, over the system prompt and the
-    run's recorded problem (loop/initial-messages). Steer messages that fired
-    pre-crash are not in the journal, so they are not replayed; that is good
-    enough for the model to continue and is the accepted fidelity gap.
+    branch's recorded problem (loop/initial-messages). Steer messages that
+    fired pre-crash are not in the journal, so they are not replayed; that is
+    good enough for the model to continue and is the accepted fidelity gap.
+  - the role and the prompt suffix the branch opened on (branches row, v23
+    and v24), so the system message is the role's prompt plus the text the
+    cell appended. A row older than v24 takes the run manifest's :prompt,
+    which is what every rebuild used before the column.
 
   REPLAYS CONSERVATIVELY, recomputed so no guard re-fires on its own past:
   - consecutive-failures, turns-since-progress, any-progress? from the turns
@@ -101,15 +105,20 @@
     table does hold the result text, but it holds the ESCALATED copy, which
     would not compare equal to the next clean one — replaying it would break
     the detection it was meant to restore."
-  (:require [clojure.data.json :as json]
+  (:require ;; the java.time.* host shim, before data.json — see samizdat.store.journal
+            [jolt.time]
+            [clojure.data.json :as json]
             [samizdat.agent.beam :as beam]
             [samizdat.agent.gates :as gates]
             [samizdat.agent.gitdiff :as gitdiff]
             [samizdat.agent.loop :as branch-loop]
             [samizdat.agent.state :as state]
+            [samizdat.agent.storm :as storm]
+            [samizdat.agent.tools.tasks :as task-tool]
             [samizdat.repl :as repl]
             [samizdat.store.journal :as journal]
             [samizdat.store.runs :as runs]
+            [samizdat.store.tasks :as tasks]
             [samizdat.workflow :as workflow]))
 
 (defn- parse-json [s]
@@ -130,15 +139,22 @@
 
 (defn- messages-from-turns
   "The message history a continuing model needs: what it said, and what the
-  harness answered, over the system prompt and the problem."
-  [problem turns]
+  harness answered, over the system prompt and the problem.
+
+  `prompt-suffix` is what the branch opened on: the row's recorded suffix, or
+  the run manifest's own `:prompt` for a row older than the column. The
+  system message is REBUILT here rather than replayed — the journal stores
+  turns and the suffix, not the rendered prompt — so a resume that omitted
+  the suffix dropped the workflow's framing at the crash: a review run came
+  back building features."
+  [problem prompt-suffix role turns]
   (reduce (fn [msgs t]
             (cond-> msgs
               (seq (:assistant_text t))
               (conj {:role "assistant" :content (:assistant_text t)})
               (seq (:result t))
               (conj {:role "user" :content (:result t)})))
-          (branch-loop/initial-messages problem)
+          (branch-loop/initial-messages problem prompt-suffix role)
           turns))
 
 (defn- rebuild-branch
@@ -146,8 +162,24 @@
 
   The green snapshot is not journalled, so a resumed branch always starts
   the safe-state rule from its 'otherwise' arm."
-  [run branch-row turns artifacts firings max-turns]
+  [run branch-row turns artifacts firings max-turns storm-pol prompt-suffix]
   (let [branch-id (:id branch-row)
+        ;; The branch's OWN problem where it has one — a decompose unit's
+        ;; contract, a team worker's sub-task — else the run's. Rebuilding
+        ;; every branch on the run-level problem re-aimed every worker at the
+        ;; top-level feature text (karamazov-blt.23).
+        problem (or (not-empty (str (:problem branch-row))) (:problem run))
+        ;; The role it ran as, from the row (v23): it scopes the tool surface
+        ;; and picks the system prompt, and a rebuild that dropped it handed
+        ;; a resumed supervisor the implementor's catalogue.
+        role (some-> (:role branch-row) not-empty keyword)
+        ;; The suffix it opened on, from the row (v24): what the cell handed
+        ;; initial-messages — an owner prompt, a unit's attempt framing, the
+        ;; supervisor's role text. "" is a recorded none. Only a row older
+        ;; than the column (NULL) falls back to the manifest's :prompt, which
+        ;; is what every rebuild used before and what the beam's own branches
+        ;; opened on (karamazov-kgvg).
+        suffix (if-some [s (:prompt_suffix branch-row)] s prompt-suffix)
         branch-turns (get turns branch-id [])
         ;; The phase is rebuilt from the banked sketch artifacts: a sketch on
         ;; record means the branch left explore, and its turn is the phase
@@ -159,11 +191,14 @@
                            artifact-maps)
         base (-> (state/new-branch {:id branch-id
                                     :parent-id (:parent_id branch-row)
-                                    :problem (:problem run)
+                                    :problem problem
                                     :created-at-turn (:created_at_turn branch-row)
-                                    :messages (messages-from-turns (:problem run)
+                                    :messages (messages-from-turns problem
+                                                                   suffix
+                                                                   role
                                                                    branch-turns)})
                  (assoc :status (keyword (:status branch-row))
+                        :role role
                         :inactive-reason (:inactive_reason branch-row)
                         :thesis (parse-json (:thesis branch-row))
                         :artifacts artifact-maps
@@ -182,22 +217,47 @@
                                                    :turn (:turn f)})
                                                 (remove #(:outcome %)
                                                         (get firings branch-id [])))))
-        ;; The counters, replayed through the same function the live loop
-        ;; uses. progress? is approximated from the category because the
-        ;; tool's own progress? flag is not journalled.
+        ;; The counters, replayed through the same functions the live loop
+        ;; uses — WITH the live loop's call discipline, not one of our own
+        ;; (karamazov-blt.22): a provider-error row is journalled but the live
+        ;; loop applies NEITHER add-turn nor record-outcome to it (the branch
+        ;; never got an answer to be wrong about — replaying it as :neutral
+        ;; DECREMENTED consecutive-failures and reset the mechanics
+        ;; counters), and a no-call/parse-error row records the outcome but
+        ;; appends no :turns entry. progress? is approximated from the
+        ;; category because the tool's own progress? flag is not journalled.
         branch (reduce (fn [b t]
-                         (let [cat (some-> (:category t) keyword)]
-                           (-> b
-                               (state/add-turn {:turn (:turn t)
-                                                :tool (:tool_name t)
-                                                :category cat})
-                               (state/record-outcome {:category cat
-                                                      :progress? (= :success cat)
-                                                      :policy-refusal? (pos? (or (:policy_refusal t) 0))}))))
+                         (let [cat (some-> (:category t) keyword)
+                               tool (:tool_name t)]
+                           (cond
+                             (= "__provider_error__" tool)
+                             b
+
+                             (contains? #{"__no_call__" "__parse_error__"} tool)
+                             (state/record-outcome b {:category cat
+                                                      :progress? false})
+
+                             :else
+                             (-> b
+                                 (state/add-turn {:turn (:turn t)
+                                                  :tool tool
+                                                  :category cat})
+                                 (state/record-outcome {:category cat
+                                                        :progress? (= :success cat)
+                                                        :policy-refusal? (pos? (or (:policy_refusal t) 0))})))))
                        base
                        branch-turns)
         branch (assoc branch
                       :tiers-seen (set (keep :tier (:artifacts branch)))
+                      ;; The storm window rebuilds from the journal's verbatim
+                      ;; args, so a resumed branch keeps its repeat protection
+                      ;; — unlike repeating-failure?, which the docstring
+                      ;; above documents comes back blind. Strikes are not
+                      ;; rebuilt (a refusal row is not distinguishable from a
+                      ;; malformed one), so the give_up escalation restarts;
+                      ;; the withhold itself does not.
+                      :storm-window (storm/window-from-turns
+                                     branch-turns storm-pol)
                       :mechanics {:calls (count branch-turns)
                                   :parse-errors (count (filter :parse_error branch-turns))
                                   :auto-repairs (count (filter #(pos? (:auto_repaired %))
@@ -217,7 +277,7 @@
   exhausted process that never got to tear down — is resumable."
   [conn run-id]
   (when-let [r (runs/get-run conn run-id)]
-    (not (contains? #{"completed" "aborted"} (:status r)))))
+    (not (contains? runs/unresumable-statuses (str (:status r))))))
 
 (defn resume!
   "Rebuild a run's branches from the journal and continue the beam's round
@@ -258,7 +318,6 @@
           turns (group-by :branch_id turn-rows)
           artifacts (group-by :branch_id (journal/artifacts conn run-id))
           firings (group-by :branch_id (journal/gate-firings conn run-id))
-          sessions (atom [])
           ;; Same three keys run! sets. A resumed run works on the same tree
           ;; and needs the same file root; the eval session is genuinely new,
           ;; because the old process's namespace died with it and nothing in
@@ -269,11 +328,16 @@
           ;; silently fall back to the bare composition and finish a critic or
           ;; feature run on the factory loop.
           loop-nm (workflow/active-loop-name config)
-          {turn-wf :compiled iterating? :iterating?}
+          {turn-wf :compiled iterating? :iterating? loop-def :definition}
           (workflow/compile-turn-loop conn loop-nm)
+          ;; The manifest's own instructions, as beam/run! seeds them.
+          prompt-suffix (workflow/workflow-prompt loop-def)
           ctx {:conn conn :run-id run-id :config config :problem (:problem run)
                :llm-adapter llm-adapter :llm-config llm-config
                :max-turns max-turns :beam? (> width 1) :beam-width width
+               ;; The budget the run STARTED under, like max-turns: a resume
+               ;; continues the same bound, it does not re-grant it.
+               :token-budget (:token_budget run)
                :root root
                :turn-workflow turn-wf
                :iterating-loop? iterating?
@@ -282,11 +346,28 @@
                ;; changed is already committed to the tree it starts from.
                :git-baseline (gitdiff/baseline root)
                :repl-session (repl/new-session)
-               :sessions sessions
                :abort abort}
+          ;; :verify-cmd rides on the policy so the rebuilt window skips
+          ;; verify calls exactly the way the live path never notes them.
+          storm-pol (assoc (gates/storm-policy)
+                           :verify-cmd (get-in config [:run :verify-cmd]))
           branches (mapv (fn [row]
-                           (rebuild-branch run row turns artifacts firings
-                                           max-turns))
+                           (let [b (rebuild-branch run row turns artifacts
+                                                   firings max-turns storm-pol
+                                                   prompt-suffix)
+                                 ;; The task claim survives the crash on its
+                                 ;; ROW; without restoring it here the branch
+                                 ;; came back reading "No task claimed", could
+                                 ;; claim a second task, and left the old one
+                                 ;; in_progress and attributed to it forever
+                                 ;; (karamazov-blt.21). The pinned statement
+                                 ;; is re-appended through the same renderer
+                                 ;; the claim used.
+                                 held (tasks/held-by conn run-id (:id b))]
+                             (cond-> b
+                               held (assoc :task {:id (:id held)
+                                                  :title (:title held)})
+                               held (task-tool/task-statement held))))
                          (runs/branches conn run-id))
           ;; The anchor: rounds completed are the max turn in the journal, so
           ;; the loop continues one past it. max-turns is the ORIGINAL budget.

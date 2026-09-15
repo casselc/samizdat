@@ -21,7 +21,7 @@
   mycelium's checks, drive a run.
 
   This ns is the seam the mutation protocol (karamazov-ioo.11) grows on: an
-  agent edit is a workflows/save! followed by the same compile-loop call the
+  agent edit is a us/save! :manifest followed by the same compile-loop call the
   driver makes, and a failed compile means the previous version keeps
   driving. Activation is serialized by construction — each run loads and
   compiles once, at start.
@@ -48,74 +48,61 @@
             [mycelium.workflow :as wf]
             [samizdat.cells :as cells]
             [samizdat.config :as config]
+            [samizdat.manifests :as manifests]
             [samizdat.llm.registry :as registry]
             [samizdat.agent.gitdiff :as gitdiff]
             [samizdat.agent.loop :as branch-loop]
             [samizdat.repl :as repl]
+            [samizdat.repl.route :as route]
+            [samizdat.session :as session]
+            [samizdat.userspace :as userspace]
             [samizdat.agent.state :as state]
+            [samizdat.store.interventions :as interventions]
             [samizdat.store.journal :as journal]
+            [samizdat.store.knowledge :as knowledge]
             [samizdat.store.runs :as runs]
-            [samizdat.store.workflows :as workflows])
+            [samizdat.store.userspace :as us])
   (:refer-clojure :exclude [run!]))
 
 (def loop-name "loop")
 (def loop-resource "manifests/loop.edn")
 
-(defn manifest-resource
-  "The factory resource path a manifest name seeds from, e.g. \"loop\" ->
-  \"manifests/loop.edn\". A manifest with no such resource lives only in the
-  workflows table — one the agent authored at runtime."
-  [name]
-  (str "manifests/" name ".edn"))
+;; Reading, validating and compiling a manifest moved to samizdat.manifests
+;; (karamazov-blt.2/.3/.4/.6): the tools could not require THIS namespace (it
+;; requires the branch loop, which requires the tool dispatcher), so each
+;; re-implemented a slice of the pipeline and the slices drifted. The vars
+;; below delegate so every existing caller and test keeps its name.
+(def manifest-resource manifests/manifest-resource)
 
 (defn active-loop-name
-  "Which manifest a run should drive: the configured name, or the factory
-  default. HARNESS_LOOP or a project's .samizdat/config.edn set :run :loop."
-  [config]
-  (or (get-in config [:run :loop]) loop-name))
+  "Which manifest a run should drive, in precedence order: the name the caller
+  configured, then what selection chose, then the factory default.
+  HARNESS_LOOP or a project's .samizdat/config.edn set :run :loop.
 
-(defn read-definition
-  "Parse a workflow definition from EDN text. Dispatch predicates stay as
-  forms here; maestro evaluates them at compile time."
-  [edn-text]
-  (edn/read-string edn-text))
+  THE CONFIGURED NAME ALWAYS WINS. `selected` is what samizdat.agent.select
+  picked from the catalogue for a run that named no workflow of its own; a run
+  that did name one is never overridden, because a caller who pinned a loop
+  asked a question this has no business re-answering.
 
-(defn register-subworkflows!
-  "A manifest can compose sub-loops: `:subworkflows {cell-id manifest-name}`
-  registers each named manifest as a workflow-cell (mycelium.compose) under
-  cell-id, so the parent can run it as one node. Sub-manifests are read from
-  their factory resource — a composed loop is authored, not agent-generated in
-  the db (yet). Runs before the parent compiles, since the parent references
-  these cell ids. A no-op for a flat manifest."
-  [definition]
-  (doseq [[cell-id mname] (:subworkflows definition)]
-    (let [res (manifest-resource mname)]
-      (when-not (io/resource res)
-        (throw (ex-info (str "sub-workflow manifest '" mname "' has no resource "
-                             res) {:manifest mname})))
-      (compose/register-workflow-cell!
-       cell-id (read-definition (slurp (io/resource res))) {}))))
+  Kept as one function with the precedence in it — rather than resolved at the
+  call site — because it is the ONLY place a run decides what drives it, and
+  that is worth having somewhere a reader can find."
+  ([config] (active-loop-name config nil))
+  ([config selected]
+   (or (get-in config [:run :loop])
+       selected
+       loop-name)))
 
-(defn compile-loop
-  "Compile a loop definition through mycelium's full static checking:
-  structure, dispatch coverage, reachability, and the :constraints that make
-  the loop's invariants compile-time errors. Throws on any violation —
-  which is the mutation protocol's first line of defense. Logs, and returns
-  compiled with, any :mycelium/compile-warnings (undeclared cell effects)."
-  [definition]
-  ;; Load the cells from resources before every compile. The cell registry is
-  ;; global mutable state, and a non-empty registry is not proof the LOOP's
-  ;; cells are present (a test or another workflow may have registered
-  ;; different ones) — so this always loads rather than guarding on emptiness.
-  ;; Idempotent, cheap (one file), and it picks up any edited cell, which is
-  ;; the hot-reload the mutation protocol will build on.
-  (cells/load-cells!)
-  ;; Register any composed sub-loops as cells before the parent references them.
-  (register-subworkflows! definition)
-  (let [compiled (myc/pre-compile definition)]
-    (when-let [warnings (:mycelium/compile-warnings (:compiled-fsm compiled))]
-      (log/warn "loop definition compiled with warnings:" (pr-str warnings)))
-    compiled))
+(def read-definition manifests/read-definition)
+(def register-subworkflows! manifests/register-subworkflows!)
+
+(def ctx-keys manifests/ctx-keys)
+(def cell-requires manifests/cell-requires)
+(def invariants manifests/invariants)
+(def enforced-constraints manifests/enforced-constraints)
+(def unenforced-invariants manifests/unenforced-invariants)
+
+(def compile-loop manifests/compile-loop)
 
 (defn load-loop!
   "The loop to drive a run: seed its factory resource on first use (if it has
@@ -126,17 +113,23 @@
   ([conn] (load-loop! conn loop-name))
   ([conn name]
    (let [res (manifest-resource name)
-         row (if (io/resource res)
-               (workflows/seed! conn name res)
-               (workflows/load-latest conn name))]
+         row (if-let [r (io/resource res)]
+               (us/seed! conn :manifest name (slurp r))
+               (us/load-latest conn :manifest name))]
      (when-not row
        (throw (ex-info (str "no loop manifest named '" name
                             "' — no resource at " res " and nothing stored")
                        {:name name})))
-     {:name name
-      :version (:version row)
-      :definition (read-definition (:edn row))
-      :compiled (compile-loop (read-definition (:edn row)))})))
+     ;; `:body`, not `:edn`. store/workflows.clj used to rename the column on
+     ;; the way out; reading the raw userspace row means the key is what the
+     ;; table calls it. Read once and compiled from the same value, so a
+     ;; caller cannot get a definition and a compiled FSM built from different
+     ;; text.
+     (let [definition (read-definition (:body row))]
+       {:name name
+        :version (:version row)
+        :definition definition
+        :compiled (compile-loop definition)}))))
 
 ;; --- the per-turn slice, for the beam ---------------------------------------
 ;;
@@ -153,87 +146,32 @@
 ;; turn, and the beam does the rest. The cells, the dispatches and the
 ;; constraints are untouched, so a manifest edit reaches both drivers.
 
-(def start-node
-  "The manifest's entry node. A convention every shipped manifest follows and
-  mycelium's own compile assumes."
-  :start)
-
-(defn finish-nodes
-  "Nodes whose cell is :loop/finish — the whole-run teardown the beam owns."
-  [definition]
-  (set (keep (fn [[node cell]] (when (= :loop/finish cell) node))
-             (:cells definition))))
-
-(defn iterating?
-  "Whether one pass through this manifest's slice is one TURN — a single model
-  call the beam can schedule against four siblings — or a whole-run workflow
-  that does its own looping inside one call.
-
-  Two conditions, and both are needed. The slice must contain :llm/infer, so
-  that a pass is one model call: `orchestrator` loops back to its start node,
-  but that node is an entire nested worker RUN, and treating it as a turn
-  would put a multi-minute job under the 900s turn deadline and run five of
-  them at once. And the chain must loop back to the start node, so that a pass
-  is a turn rather than the whole job: `team`, `feature` and `decompose` run
-  straight through.
-
-  loop / critic / review / worker / reviewer / supervisor iterate; team,
-  feature, decompose and orchestrator do not. The answer decides the beam's
-  width and whether the per-turn deadline applies."
-  [definition]
-  (let [cells (set (vals (:cells definition)))
-        loops-back? (some (fn [[_ to]]
-                            (if (map? to)
-                              (some #(= start-node %) (vals to))
-                              (= start-node to)))
-                          (:edges definition))]
-    (boolean (and (contains? cells :llm/infer) loops-back?))))
-
-(defn turn-manifest
-  "`definition` reduced to ONE turn: edges back to the start node and edges
-  into :loop/finish are redirected to :end, and the finish node is dropped
-  (mycelium's reachability check refuses an orphan).
-
-  Returns a definition that compiles and runs exactly like the original up to
-  the turn boundary, and then stops."
-  [definition]
-  (let [finish (finish-nodes definition)
-        terminal (conj finish start-node)
-        retarget (fn [to] (if (contains? terminal to) :end to))]
-    (-> definition
-        (assoc :cells (into {} (remove (comp finish key)) (:cells definition)))
-        (assoc :edges
-               (into {}
-                     (for [[from to] (:edges definition)
-                           ;; The finish node's own outgoing edge goes with it.
-                           :when (not (contains? finish from))]
-                       [from (if (map? to)
-                               (into {} (map (juxt key (comp retarget val))) to)
-                               (retarget to))]))))))
+(def start-node manifests/start-node)
+(def finish-nodes manifests/finish-nodes)
+(def iterating? manifests/iterating?)
+(def turn-sliceable? manifests/turn-sliceable?)
+(def turn-manifest manifests/turn-manifest)
 
 (defn compile-turn-loop
   "Load the named manifest and compile BOTH forms: the whole-run definition
   (for provenance and for `iterating?`) and its per-turn slice, which is what
-  the beam drives. Returns {:name :version :definition :iterating? :compiled}."
-  [conn name]
-  (let [{:keys [version definition]} (load-loop! conn name)]
-    {:name name
-     :version version
-     :definition definition
-     :iterating? (iterating? definition)
-     :compiled (compile-loop (turn-manifest definition))}))
+  the beam drives. Returns {:name :version :definition :iterating? :compiled}.
 
-(defn compiled-manifest
-  "Compile the named factory manifest to a runnable sub-loop. The seam a role
-  cell uses to run a role's own loop (worker for an implementor, reviewer for a
-  reviewer). Compiled fresh each call, so a cell edit is picked up. Throws if
-  the name has no factory resource."
-  [name]
-  (let [res (manifest-resource name)]
-    (when-not (io/resource res)
-      (throw (ex-info (str "no factory manifest resource for '" name "' at " res)
-                      {:manifest name})))
-    (compile-loop (read-definition (slurp (io/resource res))))))
+  `opts` passes through to the compile — the beam hands it the run's
+  `:on-trace` tracer, which is how the implementer's every step reaches the
+  supervisor's stream (RFC-012). Compiled once per run and driven for every
+  branch, so the tracer closes over the run and reads the branch out of each
+  event rather than being bound to one."
+  ([conn name] (compile-turn-loop conn name nil))
+  ([conn name opts]
+   (let [{:keys [version definition]} (load-loop! conn name)]
+     {:name name
+      :version version
+      :definition definition
+      :iterating? (iterating? definition)
+      :compiled (compile-loop (turn-manifest definition) opts)})))
+
+(def compiled-manifest manifests/compiled-manifest)
 
 (defn worker-compiled
   "The worker sub-loop, compiled — for a team cell that runs a worker per
@@ -247,55 +185,23 @@
   there is no such resource. The shared reader behind manifest :prompt injection
   and the team-worker roster."
   [name]
-  (some-> (io/resource (str "prompts/" name ".md")) slurp))
+  ;; Through the userspace seam: a workflow's prompt is this project's prompt.
+  ;; nil-tolerant, unlike prompt/prompt — a manifest declaring no :prompt and a
+  ;; :prompt naming nothing are both "no suffix", not errors.
+  (userspace/body :prompt name))
 
-(def ^:private factory-manifest-names
-  "The manifests that ship with the harness.
-
-  A literal list, resolved against `io/resource` rather than globbed off a
-  cwd-relative `resources/manifests`. Everything else in this namespace
-  already reads manifests through io/resource — the glob was the one holdout,
-  and it was the same bug review3 #11 fixed for the cells dir: a binary (or a
-  process started anywhere but the project root) found no directory, caught
-  the exception, and served the supervisor a catalogue with the factory half
-  silently missing. There is no portable listing for classpath resources, so
-  the set is enumerated and `catalog` drops any name that does not resolve —
-  a manifest deleted from resources/ falls out rather than 404ing."
-  ["loop" "critic" "orchestrator" "review" "reviewer" "supervisor"
-   "worker" "team" "feature" "decompose"])
-
-(defn catalog
-  "The workflows available to select or adapt: every factory manifest and every
-  stored one, each with its :description. This is the set the supervisor reads to
-  decide whether to switch a run to a different workflow, tweak an existing one,
-  or author a new one — the compiled menu the self-healing loop chooses from.
-  A manifest with no :description still lists, with an empty one."
-  [conn]
-  (let [factory (->> factory-manifest-names
-                     (filter #(io/resource (manifest-resource %)))
-                     set)
-        stored (->> (try (workflows/names conn) (catch Throwable _ nil))
-                    ;; workflows/names yields rows ({:name :version :versions}),
-                    ;; factory yields name strings — normalise to names.
-                    (map (fn [x] (if (map? x) (:name x) x)))
-                    (remove nil?)
-                    set)]
-    (->> (sort (into factory stored))
-         (keep (fn [nm]
-                 (let [res (manifest-resource nm)
-                       edn (if (io/resource res)
-                             (slurp (io/resource res))
-                             (some-> (workflows/load-latest conn nm) :edn))]
-                   (when edn
-                     (let [d (try (read-definition edn) (catch Throwable _ nil))]
-                       {:name nm :description (str (:description d))})))))
-         vec)))
+(def catalog manifests/catalog)
 
 (defn render-catalog
   "The workflow catalog as a text menu — one `- name — description` line each —
   for injecting into the supervisor's context."
   [conn]
-  (str/join "\n" (for [{:keys [name description]} (catalog conn)]
+  (str/join "\n" (for [{:keys [name description turn-sliceable?]} (catalog conn)
+                       ;; A workflow a run cannot be pointed at is not an
+                       ;; option, and offering it is worse than omitting it:
+                       ;; the supervisor is told it may switch, and the switch
+                       ;; fails at run start (karamazov-4sx).
+                       :when turn-sliceable?]
                    (str "- " name (when (seq description) (str " — " description))))))
 
 (defn workflow-prompt
@@ -316,58 +222,177 @@
   the run's provider and only change the model. This is how a cheap model can
   implement while a stronger one reviews or supervises."
   [ctx role]
-  (if-let [spec (get-in (:config ctx) [:run :role-models role])]
-    (let [provider (or (some-> (:provider spec) name str/lower-case keyword)
-                       (:provider (:llm-config ctx)))
-          llm (config/provider-llm provider (dissoc spec :provider))]
-      (assoc ctx :llm-adapter (registry/adapter-for provider) :llm-config llm))
-    ctx))
+  ;; :role rides the ctx from here on. It used to be consumed by prompt
+  ;; assembly and dropped, which left the tool layer unable to tell a
+  ;; supervisor from an implementor — and WHICH IMAGE AN EVAL LANDS IN is
+  ;; exactly that question (samizdat.repl.route). A ctx with no role gets the
+  ;; project image, which is the safe direction.
+  (let [ctx (assoc ctx :role role)]
+    ;; Resolution is config/role-llm, shared with read_digest, so a role's
+    ;; model has one answer whether it runs a sub-loop or one call.
+    (if-let [llm (config/role-llm (:config ctx) (:llm-config ctx) role)]
+      (assoc ctx :llm-adapter (registry/adapter-for (:provider llm)) :llm-config llm)
+      ctx)))
+
+(defn note-schema-warnings!
+  "Record any :mycelium/warnings the pass accumulated, and return `data`.
+
+  Under gates.edn :schema-validation :warn a cell whose data does not match
+  its declared shape leaves a warning on the data map and the run carries on.
+  That is the right cost while the declarations are still being tightened, and
+  it is worthless if nobody ever reads them — a warning nothing records is the
+  same as :off with extra steps.
+
+  Each warning carries :key-diff {:missing :extra}, which is what makes the
+  row worth keeping: it names the rename rather than reporting that something
+  somewhere did not match.
+
+  Best effort and returns its input either way, so it can sit in a threading
+  position on the run path. A journal that refuses must not fail a run that
+  otherwise worked — the same rule compaction's note! follows."
+  [{:keys [conn run-id]} data]
+  (when-let [warnings (seq (:mycelium/warnings data))]
+    (log/warn "schema warnings this pass:" (pr-str warnings))
+    (when (and conn run-id)
+      (try
+        (journal/note! conn run-id :schema-warning {:data {:warnings (vec warnings)}})
+        (catch Throwable e
+          (log/warn "recording the schema warnings failed:" (ex-message e))))))
+  data)
+
+(defn run-turn
+  "Advance one branch by one turn, through the manifest.
+
+  THE ONE DEFINITION OF A TURN. samizdat.agent.loop composed the same steps in
+  compiled Clojure until this replaced it, which meant there were two
+  definitions and an edit to the loop manifest reached only one of them. That
+  is the drift karamazov-ioo.20 found the first time — the beam called the
+  compiled composition while the manifest driver ran the same steps as cells,
+  and nothing in the production path ever reached the manifest, so four
+  workflows existed only under the test suite. Unifying the call site left the
+  duplicate standing; this removes it.
+
+  Lives here rather than in samizdat.agent.loop because a turn is now defined
+  by a manifest, and loading a manifest is this namespace's job — agent.loop
+  cannot require it without a cycle.
+
+  For a caller that wants one turn rather than a whole run: the benches, and
+  the tests that assert what a single turn does to a branch. Compiles the named
+  manifest's per-turn slice fresh, so a cell or manifest edit is picked up."
+  ([ctx branch turn] (run-turn ctx branch turn loop-name))
+  ([ctx branch turn manifest-name]
+   ;; Through the userspace seam: the stored version when the project has one,
+   ;; seeding the factory template on the way past — and a manifest the agent
+   ;; authored, which has no factory resource at all, drives a turn too
+   ;; (io/resource slurped unconditionally here and NPE'd on a store-only
+   ;; name, karamazov-blt.38).
+   (let [wf (compile-loop
+             (turn-manifest
+              (read-definition (manifests/manifest-body! manifest-name))))
+         data (note-schema-warnings!
+               ctx (myc/run-compiled wf ctx {:branch branch :turn turn}))]
+     (when (myc/error? data)
+       (throw (ex-info "the turn manifest failed structurally"
+                       {:error (myc/workflow-error data)})))
+     (:branch data))))
 
 (defn run!
   "Run one branch to completion under the stored loop definition.
   Returns {:status :answer :branch :run-id (:residual)}."
-  [{:keys [conn config llm-adapter llm-config problem max-turns]}]
+  [{:keys [conn config llm-adapter llm-config problem max-turns complete]}]
   (let [max-turns (or max-turns (get-in config [:run :max-turns]) 40)
         loop-nm (active-loop-name config)
         {:keys [version compiled definition]} (load-loop! conn loop-nm)
+        ;; THIS DRIVER TOO, and it is the reason the check is here rather
+        ;; than only inside turn-manifest: this path never slices, so an
+        ;; unsliceable manifest does not throw here, it RUNS — and `repl`,
+        ;; whose four cells are pure functions of an unchanging branch, spins
+        ;; forever on the :empty edge back to :start with no model call to
+        ;; break the cycle and no step cap to stop it. A hang is a worse
+        ;; failure than the beam's refusal, not a milder one (karamazov-4sx).
+        _ (when-not (turn-sliceable? definition)
+            (throw (ex-info (str "'" loop-nm "' cannot be turn-sliced, so it"
+                                 " cannot be a run's loop")
+                            {:loop loop-nm :turn-sliceable? false})))
         run-id (runs/start-run! conn {:problem problem
                                       :provider (:provider llm-config)
                                       :model (:model llm-config)
                                       :max-turns max-turns
                                       :beam-width 1
-                                      :prompt-digest (branch-loop/prompt-digest)})
+                                      :prompt-digest (branch-loop/prompt-digest
+                                                      (workflow-prompt definition))})
         branch (state/new-branch {:id "B1" :problem problem
                                   :messages (branch-loop/initial-messages
                                              problem (workflow-prompt definition))})
         ;; The project root the file tools are confined to, and the shell tool
         ;; runs in. Configurable so a run can target another checkout.
         root (or (get-in config [:run :root]) (System/getProperty "user.dir"))
+        ;; Make the project's own namespaces requirable from `eval` before any
+        ;; branch takes a turn. The system prompt's whole first section is
+        ;; REPL-first against the project under work, and without this that
+        ;; instruction is unreachable the moment :run :root is not the harness.
+        _ (repl/ensure-project-roots! root)
         ctx {:conn conn :run-id run-id :config config
              :llm-adapter llm-adapter :llm-config llm-config
+             ;; The injected model call, when the caller supplied one — the
+             ;; same named-or-dropped hazard as the beam's ctx above.
+             :complete complete
              :root root
-             ;; A run-start git baseline so a finalization critic can review
-             ;; exactly what this run changed. Only captured for a non-default
-             ;; manifest — the factory loop has no critic to read it, and
-             ;; skipping it keeps the common path off git entirely.
-             :git-baseline (when (not= loop-nm loop-name) (gitdiff/baseline root))
+             ;; A run-start git baseline: what this run changed, for a
+             ;; finalization critic AND — the part this used to miss — for the
+             ;; ship gate's test rung.
+             ;;
+             ;; This was `(when (not= loop-nm loop-name) …)`, on the reasoning
+             ;; that the factory loop has no critic to read it and skipping it
+             ;; keeps the common path off git entirely. That was true when the
+             ;; critic was the only reader. The ship gate reads it too now, via
+             ;; changed-files, and with no baseline `changed` is nil, no focused
+             ;; command is built, no tests run, and verify-block falls through
+             ;; its last clause — which trusts rather than deadlocks. So the
+             ;; default loop verified NOTHING while reporting a successful ship:
+             ;; observed live, a run that shipped `{:test 19 :pass 49 :error 5}`
+             ;; with the gate silently inert.
+             ;;
+             ;; Captured whenever anything downstream could use it.
+             :git-baseline (when (or (not= loop-nm loop-name)
+                                     (get-in config [:run :verify-focused?])
+                                     (not (str/blank? (str (get-in config [:run :verify-cmd])))))
+                             (gitdiff/baseline root))
              ;; A per-run eval session, so defs the agent makes with `eval`
              ;; persist across its turns (define, then use) — REPL-first
              ;; development against the live image.
              :repl-session (repl/new-session)
              :max-turns max-turns}]
-    (runs/open-branch! conn run-id {:branch-id "B1"})
+    (runs/open-branch! conn run-id {:branch-id "B1"
+                                    :prompt-suffix (workflow-prompt definition)})
+    ;; The window findings are evaluated over.
+    (session/mark-run! run-id)
+    ;; The single-branch driver drains the same interventions queue the beam
+    ;; does (loop/drain-directives!), so a directive reaches a branch here
+    ;; exactly as it does under the beam.
+    ;;
+    ;; NO SUPERVISOR ON THIS DRIVER. It used to start samizdat.watch, which
+    ;; was the only supervision it had; the reflex now lives on the
+    ;; supervisor's stream (RFC-012) and only the beam runs that stream. This
+    ;; is the single-branch driver a role's sub-loop uses and the benches
+    ;; drive — a nested reviewer loop being separately supervised was never
+    ;; the design, and the outer run's stream watches the whole thing anyway.
+
     ;; Which loop drove this run, durably: an agent reading a surprising run
     ;; back needs to know which version of itself produced it.
     (journal/note! conn run-id :loop-workflow
                    {:data {:name loop-nm :version version}})
-    (try
-      (let [data (myc/run-compiled compiled ctx
+    (let [stop-watch (constantly nil)]
+     (try
+      (let [data (note-schema-warnings!
+                  ctx
+                  (myc/run-compiled compiled ctx
                                    (cond-> {:branch branch :turn 1}
                                      ;; A team workflow fans out over these — one
                                      ;; worker per sub-task. The single-branch
                                      ;; loops ignore the key.
                                      (seq (get-in config [:run :subtasks]))
-                                     (assoc :subtasks (get-in config [:run :subtasks]))))]
+                                     (assoc :subtasks (get-in config [:run :subtasks])))))]
         (when (myc/error? data)
           ;; A structural failure mid-run is a harness bug, not a branch
           ;; outcome; surface it rather than shipping a half-closed run.
@@ -376,7 +401,49 @@
         (-> (select-keys data [:status :answer :branch :residual])
             (assoc :run-id run-id)))
       (finally
+        (stop-watch)
+        ;; NOTHING IS LEFT PENDING ON A RUN NOBODY WILL DRAIN AGAIN. The
+        ;; drains leave workflow kinds (switch/budget/stop) for a workflow's
+        ;; own directives stage and only feature.edn has one, so on any other
+        ;; loop such a directive was neither applied nor rejected and sat
+        ;; pending after the run ended (karamazov-agbw). Guarded on the
+        ;; ending: an exhausted or failed run is over and still resumable, and
+        ;; its pending `extend` is what the resume will apply.
+        ;;
+        ;; Best effort, like everything else in this teardown: a failure to
+        ;; tidy the queue must not turn a finished run into a failed one.
+        (try
+          (let [status (str (:status (runs/get-run conn run-id)))]
+            (when (contains? runs/unresumable-statuses status)
+              (interventions/expire-pending!
+               conn run-id
+               (str "the run ended (" status ") before a boundary applied it"))))
+          (catch Throwable e
+            (log/warn "expiring the run's pending directives failed:" (ex-message e))))
+
+        ;; SHORT-TERM BECOMES LONG-TERM, here too. This driver runs the factory
+        ;; loop, which is what most runs use; distilling only in the beam meant
+        ;; the common path measured everything and remembered none of it.
+        (try
+          (knowledge/distil-session! conn {:run-id run-id
+                                           :findings (session/findings
+                                                            ;; THIS RUN's window, not the
+                                                            ;; whole-process tally: counters
+                                                            ;; never reset between runs, so
+                                                            ;; run 1's parse-error rate kept
+                                                            ;; "corroborating" a finding at
+                                                            ;; the end of clean runs 2..n,
+                                                            ;; each with a distinct run-id
+                                                            ;; that defeated the guard
+                                                            ;; (karamazov-blt.24).
+                                                            (session/run-window run-id))
+                                           :experiments (session/experiments)})
+          (catch Throwable e
+            (log/warn "distilling the session failed:" (ex-message e))))
         ;; The run's eval namespace does not outlive the run
-        ;; (code-review-2026-08 #6): one namespace per run, never removed, was
+        ;; (provenance CR1-6): one namespace per run, never removed, was
         ;; unbounded growth on a serve process.
-        (repl/close-session (:repl-session ctx))))))
+        (repl/close-session (:repl-session ctx))
+        ;; The project image outlives a session, because it is a PROCESS. Left
+        ;; running it holds a port and a sandbox for the life of the harness.
+        (route/release! (:root ctx)))))))

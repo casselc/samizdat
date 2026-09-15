@@ -28,10 +28,23 @@
   Every append also emits an event carrying a monotonic cursor, which is what
   `GET /v1/runs/:id/journal?since=N` reads. The loop calls these; nothing calls
   the loop."
-  (:require [clojure.data.json :as json]
+  (:require ;; The java.time.* host shim, before data.json: it builds a
+            ;; DateTimeFormatter at namespace load, and under jolt 0.8.1 that
+            ;; class exists only once jolt.time has installed it — 0.8.0 had it
+            ;; implicitly. Required where the library that needs it enters, the
+            ;; same as selmer in samizdat.prompt and db.jdbc before jdbc.core.
+            [jolt.time]
+            [clojure.data.json :as json]
+            [clojure.string :as str]
             [clojure.tools.logging :as log]
+            ;; db.jdbc registers the java.sql shim clojure.jdbc compiles against and
+            ;; points connection construction at the native driver; it has to load
+            ;; before jdbc.core.
+            [db.jdbc]
             [jdbc.core :as jdbc]
+            [samizdat.agent.gates :as gates]
             [samizdat.events :as events]
+            [samizdat.session :as session]
             [samizdat.store.db :as db]))
 
 (defn- js
@@ -76,6 +89,20 @@
 
 ;; --- turns ------------------------------------------------------------------
 
+(defn- total-of
+  "The `usage` map's total, derived from its parts when the provider reported
+  none. `nil` when there was no usage at all — a provider error costs nothing,
+  and a zero there would read as a measurement rather than as an absence.
+
+  Some OpenAI-compatible servers omit `total_tokens` while reporting the two
+  halves. Storing the 0 the adapter defaults to would make the row sum to
+  nothing, which is the same invisible-spend bug one level down."
+  [{:keys [prompt-tokens completion-tokens total-tokens] :as usage}]
+  (when usage
+    (if (and total-tokens (pos? total-tokens))
+      total-tokens
+      (+ (or prompt-tokens 0) (or completion-tokens 0)))))
+
 (defn record-turn!
   "One model turn: what it called, with what, and what came back.
 
@@ -105,11 +132,90 @@
                     ;; see migration v4. `usage` is absent on the
                     ;; provider-error path by construction.
                     (:prompt-tokens usage) (:completion-tokens usage)
-                    (:total-tokens usage)
+                    ;; Derived when the provider reported no total: the
+                    ;; adapter defaults that field to 0, and a 0 here is a row
+                    ;; the budget cannot see. See `total-of`.
+                    (total-of usage)
                     (:cache-hit-tokens usage) (:cache-miss-tokens usage)
                     (if policy-refusal? 1 0)]))
   (emit! conn run-id :turn {:branch-id branch-id :turn turn
                             :data {:tool tool-name :category category}}))
+
+(defn record-side-call!
+  "A provider call the run paid for that is not a turn: the reader behind
+  read_digest, the critic, the end-of-task reflection, the trajectory scorer.
+
+  THE POINT IS THE SUM (karamazov-2rqb.1). These calls used to discard their
+  usage at the call site, so a run's budget bounded the committed turn and
+  nothing else — and the harder the digest shunt worked, the more of the bill
+  it moved out of view. `kind` says which caller; `role` and `model` say what
+  it ran on, which is how a cheap-role assignment can be shown to have paid
+  for itself.
+
+  `branch-id` and `turn` are optional: a call made on behalf of the run rather
+  than a branch is still the run's money."
+  [conn run-id {:keys [branch-id turn kind role model usage]}]
+  (db/with-writer
+    (db/execute! conn
+                 ["INSERT INTO side_calls (run_id, branch_id, turn, kind, role, model,
+                                           prompt_tokens, completion_tokens, total_tokens,
+                                           cache_hit_tokens, cache_miss_tokens, created_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+                  run-id branch-id turn (some-> kind name) (some-> role name)
+                  (some-> model str)
+                  ;; nil, not 0, when there was no response to cost — the same
+                  ;; rule record-turn! follows.
+                  (:prompt-tokens usage) (:completion-tokens usage)
+                  (total-of usage)
+                  (:cache-hit-tokens usage) (:cache-miss-tokens usage)
+                  (db/now)])))
+
+(defn run-usage
+  "What a run has spent so far: {:turns :side-calls :prompt-tokens
+  :completion-tokens :total-tokens :cache-hit-tokens :cache-miss-tokens
+  :cache-hit-rate}. A row with no usage — a provider error — counts as a call
+  and costs nothing. This is what the beam holds a run's token budget against
+  (karamazov-aqsr.3).
+
+  BOTH TABLES, because both are the run's money (karamazov-2rqb.1). `:turns`
+  still counts turns and nothing else — the progress guards read that number
+  — while the token columns are the whole bill, turns and side calls
+  together.
+
+  THE HIT RATE IS OVER THE CALLS THAT REPORTED ONE (karamazov-2rqb.2). The
+  denominator is the prompt tokens of rows carrying a cache lane, not of every
+  row: a run whose branch talks to a caching provider and whose reader talks to
+  a local llama.cpp would otherwise read as half as well-cached as it is, since
+  the reader's prompt tokens have no hit lane to match them. nil when nothing
+  reported a lane — unknown, not zero, the same rule the adapter follows when
+  it declines to write a 0 it did not measure."
+  [conn run-id]
+  (let [q (fn [table]
+            (first (db/fetch conn [(str "SELECT count(*) AS calls,
+                                                coalesce(sum(prompt_tokens), 0) AS prompt_tokens,
+                                                coalesce(sum(completion_tokens), 0) AS completion_tokens,
+                                                coalesce(sum(total_tokens), 0) AS total_tokens,
+                                                coalesce(sum(cache_hit_tokens), 0) AS cache_hit_tokens,
+                                                coalesce(sum(cache_miss_tokens), 0) AS cache_miss_tokens,
+                                                coalesce(sum(CASE WHEN cache_hit_tokens IS NOT NULL
+                                                                    OR cache_miss_tokens IS NOT NULL
+                                                                  THEN prompt_tokens END), 0)
+                                                  AS cached_prompt_tokens
+                                           FROM " table " WHERE run_id = ?")
+                                   run-id])))
+        t (q "turns")
+        s (q "side_calls")
+        both (fn [k] (+ (get t k) (get s k)))
+        reported (both :cached_prompt_tokens)]
+    {:turns (:calls t)
+     :side-calls (:calls s)
+     :prompt-tokens (both :prompt_tokens)
+     :completion-tokens (both :completion_tokens)
+     :total-tokens (both :total_tokens)
+     :cache-hit-tokens (both :cache_hit_tokens)
+     :cache-miss-tokens (both :cache_miss_tokens)
+     :cache-hit-rate (when (pos? reported)
+                       (double (/ (both :cache_hit_tokens) reported)))}))
 
 (defn turns
   "Every turn of a run, whole rows. `assistant_text` comes back with them, so
@@ -138,6 +244,158 @@
              run-id branch-id]))
 
 ;; --- artifacts --------------------------------------------------------------
+
+(defn- path-of
+  "The `path` argument of a recorded turn, or nil. Args are stored as the JSON
+  the model sent, so this reads them back the same way."
+  [row]
+  (try (some-> (json/read-str (str (:args row)) :key-fn keyword) :path str not-empty)
+       (catch Throwable _ nil)))
+
+(defn- writing-tools
+  "The tools that change a file, from gates.edn's `:file-write` vocabulary.
+
+  Read rather than restated. These queries used to name write_file and
+  edit_file inline, which silently excluded `patch` — a writing tool that has
+  been in the vocabulary all along — so an anchored edit by a sibling was
+  invisible to both the collaboration list and the staleness notice: two
+  workers in one file, one of them patching, and neither told. Reading the
+  vocabulary means a project that adds a writing tool gets these for free,
+  which is the drift that produced the gap.
+
+  No fallback list: gates.edn is the source, and a second copy here would be
+  the one nobody edits."
+  []
+  (vec (gates/tool-vocab :file-write)))
+
+(defn- placeholders
+  "`sql` with its `@tools` marker replaced by an IN list of `n` parameters.
+
+  A marker in ONE string literal rather than SQL concatenated around a
+  computed fragment: the vocabulary is data, so its length is not known
+  here, but splitting the query into pieces leaves half-sentences in the
+  source that read as prose to base-test — and, more to the point, makes the
+  query unreadable to whoever has to check it."
+  [sql n]
+  (str/replace sql "@tools" (str/join ", " (repeat n "?"))))
+
+(defn sibling-writes
+  "What OTHER branches on this run have done to the tree: one entry per path,
+  naming every branch that has changed it and the turn it was last touched,
+  most recently touched first, capped at `limit`.
+
+  Per PATH rather than per write, and naming every collaborator rather than
+  the latest: the question a worker has is `who else is in this file`, and a
+  list of the last writer alone answers a different one. Live, three branches
+  changed src/kit/core.clj and reporting only the most recent would have named
+  one of them.
+
+  THE MAILBOX CARRIES WHAT A SIBLING SAID; THIS CARRIES WHAT IT DID. Team
+  workers share one working tree by design — the parts of a feature belong in
+  the same files — and the only thing that told a worker about its siblings was
+  mail they chose to send. Live, three workers wrote src/kit/core.clj fifteen
+  times between them, full-file `write_file` overwrites interleaved with
+  surgical `edit_file`s, two of them landing on the same turn. The tree came
+  out coherent because the last writer happened to hold a complete picture,
+  which is not a mechanism.
+
+  Derived from the journal rather than reported by the branches, so it cannot
+  drift from what actually happened and costs no turn to produce."
+  [conn run-id branch-id limit]
+  (->> (let [tools (writing-tools)]
+         (db/fetch conn (into [(placeholders
+                                "SELECT branch_id, turn, tool_name, args FROM turns
+                                  WHERE run_id = ? AND branch_id <> ?
+                                    AND tool_name IN (@tools)
+                                    AND category = 'success'
+                                  ORDER BY turn DESC, id DESC"
+                                (count tools))
+                               run-id (str branch-id)]
+                              tools)))
+       (keep (fn [r] (when-let [p (path-of r)]
+                       {:branch (:branch_id r) :turn (:turn r) :path p})))
+       (reduce (fn [acc {:keys [path branch turn]}]
+                 (let [i (first (keep-indexed #(when (= path (:path %2)) %1) acc))]
+                   (if i
+                     (update-in acc [i :branches] (fn [bs] (if (some #{branch} bs) bs (conj bs branch))))
+                     (conj acc {:path path :turn turn :branches [branch]}))))
+               [])
+       (take limit)
+       vec))
+
+(defn run-writes
+  "Every path this run has changed: one entry per path, naming the branches
+  that touched it and the turn it was last changed, most recently first.
+
+  `sibling-writes` asks what the OTHER branches did, because a worker wants
+  to know who else is in a file. This asks what the RUN did, because someone
+  watching it wants to know what has changed on disk — the same query without
+  the branch exclusion, which is why they sit together."
+  [conn run-id limit]
+  (->> (let [tools (writing-tools)]
+         (db/fetch conn (into [(placeholders
+                                "SELECT branch_id, turn, tool_name, args FROM turns
+                                  WHERE run_id = ?
+                                    AND tool_name IN (@tools)
+                                    AND category = 'success'
+                                  ORDER BY turn DESC, id DESC"
+                                (count tools))
+                               run-id]
+                              tools)))
+       (keep (fn [r] (when-let [p (path-of r)]
+                       {:branch (:branch_id r) :turn (:turn r) :path p})))
+       (reduce (fn [acc {:keys [path branch turn]}]
+                 (let [i (first (keep-indexed #(when (= path (:path %2)) %1) acc))]
+                   (if i
+                     (update-in acc [i :branches]
+                                (fn [bs] (if (some #{branch} bs) bs (conj bs branch))))
+                     (conj acc {:path path :turn turn :branches [branch]}))))
+               [])
+       (take limit)
+       vec))
+
+(defn changed-since-read
+  "Whether a sibling changed `path` after this branch last READ it, and who.
+
+  Returns {:branch :turn :tool} for the most recent such change, or nil — nil
+  also when this branch has never read the path, because a branch writing a
+  file it has not looked at is a different problem and this one has nothing to
+  say about it.
+
+  This is the moment the shared tree actually bites: `write_file` replaces a
+  whole file, so a worker writing from its own picture of what belongs there
+  silently drops everything a sibling added since it last looked. The notice
+  is a NOTICE — the write goes through. Workers sharing a tree are
+  collaborating, and a harness that refuses the write decides for them which
+  version wins, which is exactly the judgement it does not have."
+  [conn run-id branch-id path]
+  (let [tools (writing-tools)
+        ;; What counts as having LOOKED: a read, or a write of your own —
+        ;; either way this branch has seen the file at that turn.
+        seen-tools (into ["read_file"] tools)
+        reads (db/fetch conn (into [(placeholders
+                                     "SELECT turn, args FROM turns
+                                       WHERE run_id = ? AND branch_id = ?
+                                         AND tool_name IN (@tools)
+                                       ORDER BY turn DESC, id DESC"
+                                     (count seen-tools))
+                                    run-id (str branch-id)]
+                                   seen-tools))
+        last-seen (some (fn [r] (when (= path (path-of r)) (:turn r))) reads)]
+    (when last-seen
+      (->> (db/fetch conn (into [(placeholders
+                                  "SELECT branch_id, turn, tool_name, args FROM turns
+                                    WHERE run_id = ? AND branch_id <> ? AND turn >= ?
+                                      AND tool_name IN (@tools)
+                                      AND category = 'success'
+                                    ORDER BY turn DESC, id DESC"
+                                  (count tools))
+                                 run-id (str branch-id) (long last-seen)]
+                                tools))
+           (keep (fn [r] (when (= path (path-of r))
+                           {:branch (:branch_id r) :turn (:turn r)
+                            :tool (:tool_name r)})))
+           first))))
 
 (defn record-artifact!
   "A machine-checked result.
@@ -283,6 +541,16 @@
 
 ;; --- gate firings -----------------------------------------------------------
 
+(defn- observe-session!
+  "Feed the live session tally — and the branch's own, when the caller can
+  name it. Wrapped because a counter must never be able to cost a turn: the
+  journal's own contract is that it cannot destroy the work it records, and a
+  tally is strictly less important than the journal."
+  ([path] (observe-session! path nil nil))
+  ([path run-id branch-id]
+   (try (session/observe! path (when (and run-id branch-id) [run-id branch-id]))
+        (catch Throwable _ nil))))
+
 (defn record-gate!
   "A gate fired, with what it expects to happen next.
 
@@ -304,15 +572,24 @@
              (db/last-insert-id conn))]
     (emit! conn run-id :gate {:branch-id branch-id :turn turn
                               :data {:gate gate :prediction prediction}})
+    (observe-session! [:gates (keyword (name gate)) :fired] run-id branch-id)
     id))
 
 (defn settle-gate!
   "Record whether a firing's prediction came true."
   [conn firing-id outcome settled-turn]
-  (db/with-writer
-    (db/execute! conn
+  (let [row (db/fetch-one conn ["SELECT gate, run_id, branch_id FROM gate_firings WHERE id = ?"
+                                firing-id])]
+    (db/with-writer
+      (db/execute! conn
                    ["UPDATE gate_firings SET outcome = ?, settled_at_turn = ? WHERE id = ?"
-                    (name outcome) settled-turn firing-id])))
+                    (name outcome) settled-turn firing-id]))
+    ;; The settlement, not just the firing: a gate that fires and is never
+    ;; obeyed is the pattern worth surfacing, and it is invisible from firings
+    ;; alone.
+    (when-let [g (:gate row)]
+      (observe-session! [:gates (keyword g) (keyword (name outcome))]
+                        (:run_id row) (:branch_id row)))))
 
 (defn unsettled-gates [conn run-id branch-id]
   (db/fetch conn ["SELECT * FROM gate_firings
@@ -326,16 +603,64 @@
   "Per gate: how often it fired, and how its predictions settled. A gate that
   never fires across a benchmark sweep is either dead or guarding something the
   probe set should be provoking; a gate whose predictions never settle is not
-  steering anything."
+  steering anything.
+
+  `met_late` is its own column rather than folded into either side: a gate
+  with a high late rate is one whose advice works and whose WINDOW is wrong,
+  which is a different repair from a gate nobody obeys."
   [conn run-id]
   (db/fetch conn
               ["SELECT gate,
                        count(*) AS fired,
                        sum(CASE WHEN outcome = 'met' THEN 1 ELSE 0 END) AS met,
+                       sum(CASE WHEN outcome = 'met-late' THEN 1 ELSE 0 END) AS met_late,
                        sum(CASE WHEN outcome = 'unmet' THEN 1 ELSE 0 END) AS unmet,
                        sum(CASE WHEN outcome IS NULL THEN 1 ELSE 0 END) AS open
                 FROM gate_firings WHERE run_id = ? GROUP BY gate ORDER BY fired DESC"
                run-id]))
+
+(defn retirement-candidates
+  "Gates that have earned the question of being DELETED: fired in at least
+  `:min-runs` distinct runs and never once met, most-fired first.
+
+  THE MIRROR OF knowledge/graduation-candidates, and it exists because the
+  supervisor could only ever add. `gate-tally` above already computes the
+  number — its own docstring says a gate whose predictions never settle is
+  not steering anything — but it is scoped to one run and goes only to the
+  residual report, so nothing crossed runs and nobody was shown it.
+
+  The precedent is in the tree. gates.edn records :reflection being deleted on
+  exactly this evidence: \"69 firings and 0 met across two models, five task
+  shapes and two harness generations\". A person read that off the record by
+  hand. Two of the four accepted edits in 2609.09153v1's evolution run were
+  also deletions, and pruning is how MultiChallenge recovered from a bad prior
+  there — a loop that can only add is half a loop.
+
+  DISTINCT RUNS, not firings, on corroborate!'s argument: one run goes wrong
+  for reasons that have nothing to do with the gate, and a gate that fired
+  forty times in one bad afternoon is one observation.
+
+  MET-LATE COUNTS AS MET here, deliberately. journal.clj's gate-tally keeps it
+  a separate column because a gate whose advice works and whose WINDOW is
+  wrong is a different repair from a gate nobody obeys; folding them would
+  nominate a gate for deletion when the fix is to widen its window.
+
+  SURFACES, NEVER RETIRES. Deleting a gate is a judgement about the loop and
+  it is the supervisor's, exactly as promoting an episode to a rule is."
+  [conn {:keys [min-runs limit] :or {min-runs 3 limit 8}}]
+  (vec (db/fetch conn
+                 ["SELECT gate,
+                          count(*) AS fired,
+                          count(DISTINCT run_id) AS runs,
+                          sum(CASE WHEN outcome = 'unmet' THEN 1 ELSE 0 END) AS unmet
+                     FROM gate_firings
+                    GROUP BY gate
+                   HAVING count(DISTINCT run_id) >= ?
+                      AND sum(CASE WHEN outcome IN ('met', 'met-late') THEN 1 ELSE 0 END) = 0
+                      AND sum(CASE WHEN outcome = 'unmet' THEN 1 ELSE 0 END) > 0
+                    ORDER BY fired DESC
+                    LIMIT ?"
+                  (long min-runs) (long limit)])))
 
 ;; --- events -----------------------------------------------------------------
 
@@ -352,16 +677,106 @@
   [conn run-id kind data]
   (emit! conn run-id kind data))
 
+(defn last-note
+  "The data of the most recent `kind` note on this run, parsed back from JSON,
+  or nil.
+
+  One stage reading another's conclusion out of the journal rather than out of
+  a data map is deliberate: the supervision STREAM runs beside the run and
+  hands its output to nobody, so the journal is the only place a pipeline
+  stage can meet it (karamazov-poe). Best effort on the parse — a note the
+  reader cannot make sense of is not worth failing a stage over."
+  [conn run-id kind]
+  (when-let [row (first (db/fetch conn
+                                  ["SELECT data FROM events
+                                     WHERE run_id = ? AND kind = ?
+                                     ORDER BY id DESC LIMIT 1"
+                                   run-id (name kind)]))]
+    (try (json/read-str (str (:data row)) :key-fn keyword)
+         (catch Throwable _ nil))))
+
+(defn notes
+  "Every note of `kind` on this run, oldest first, each parsed back from
+  JSON; one that will not parse is skipped rather than failing the read.
+
+  `last-note`'s plural, for the kinds that accumulate — a run's :stage-error
+  notes are the crashes its stages survived, and the supervisor stream wants
+  all of them, not the latest (RFC-012 F1: the crashes used to be shown to a
+  supervisor stage that no longer exists, so the stream reads them here)."
+  [conn run-id kind]
+  (into []
+        (keep (fn [row]
+                (try (json/read-str (str (:data row)) :key-fn keyword)
+                     (catch Throwable _ nil))))
+        (db/fetch conn ["SELECT data FROM events
+                          WHERE run_id = ? AND kind = ?
+                          ORDER BY id"
+                        run-id (name kind)])))
+
+(def ^:private record-tables
+  "The tables holding a run's account of itself, and how each one names its
+  run. Ordered so an FTS mirror goes before the rows it indexes — deleted the
+  other way round, the subquery that finds the rowids has nothing left to find
+  and the index keeps ranking against nothing."
+  [["DELETE FROM failures_fts WHERE rowid IN
+       (SELECT id FROM failures WHERE run_id IN (%s))" :fts]
+   ["DELETE FROM shared_artifacts_fts WHERE rowid IN
+       (SELECT id FROM shared_artifacts WHERE run_id IN (%s))" :fts]
+   ["DELETE FROM turns WHERE run_id IN (%s)" :rows]
+   ["DELETE FROM artifacts WHERE run_id IN (%s)" :rows]
+   ["DELETE FROM shared_artifacts WHERE run_id IN (%s)" :rows]
+   ["DELETE FROM failures WHERE run_id IN (%s)" :rows]
+   ["DELETE FROM gate_firings WHERE run_id IN (%s)" :rows]
+   ["DELETE FROM messages WHERE run_id IN (%s)" :rows]
+   ["DELETE FROM interventions WHERE run_id IN (%s)" :rows]
+   ["DELETE FROM events WHERE run_id IN (%s)" :rows]])
+
+(def ^:private finished-before
+  "Runs that ended before the cutoff. `status != 'running'` AND a non-null
+  `ended_at`, the same pair prune-finished! uses: a row that says it is
+  running is either live or a leftover reconcile-orphans! has not seen yet,
+  and neither is safe to strip."
+  "SELECT id FROM runs WHERE status != 'running' AND ended_at IS NOT NULL
+     AND ended_at < ?")
+
+(defn prune-run-record!
+  "Delete the RECORD of runs that ended before `cutoff`: turns, artifacts,
+  failures, gate firings, branch messages, interventions and events.
+
+  The `runs` and `branches` rows survive. What is left is an index — this run
+  existed, it ended this way, at this time — without the bulk, which is a
+  strictly better thing to have than a deleted row when somebody asks what
+  happened six months ago.
+
+  DESTRUCTIVE, and off unless an operator turns it on. RFC-009's central
+  property is that a resume rebuilds branch state by replay and that a crashed
+  run stays inspectable; this ends both for the runs it touches. It exists
+  because `events/prune-finished!` addressed only half of provenance R2-11 and
+  the other four tables grew forever in the one shared file — but a default
+  that quietly discarded the record would be the wrong reading of the same
+  finding.
+
+  Returns the number of runs whose record was removed."
+  [conn cutoff]
+  (let [ids (mapv :id (db/fetch conn [finished-before cutoff]))]
+    (when (seq ids)
+      (let [placeholders (str/join ", " (repeat (count ids) "?"))]
+        (db/with-writer
+          (doseq [[sql _] record-tables]
+            (db/execute! conn (into [(format sql placeholders)] ids))))))
+    (count ids)))
+
 (defn prune-finished!
   "Delete the events rows of runs that ended before `cutoff` (an ISO-8601
   timestamp). Events are a tail buffer for the live run — their only readers
   are the live tail and last-progress-at — and every kind that matters is
   also written to a durable table (turns, artifacts, failures,
   gate_firings). Nothing pruned them, so the one shared DB file grew
-  without bound (review2 #11). The sweep runs on run start, not at finish:
+  without bound (provenance R2-11). The sweep runs on run start, not at finish:
   a tailing client still reads a just-finished run's events to see the
   :run-finished entry — that is how it learns the run ended — so events
-  ride out a retention window (24h in start-run!) and go after that."
+  ride out a retention window (gates.edn :retention :events-hours) and go
+  after that."
   [conn cutoff]
   (db/with-writer
     (db/execute! conn

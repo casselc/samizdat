@@ -33,7 +33,13 @@
   A gate that fires records what it expects to happen next, and a later turn
   settles that prediction from the journal with no model in the path. A gate
   whose predictions never settle is not steering anything, and that is
-  measurable rather than arguable."
+  measurable rather than arguable.
+
+  MECHANISM, with nothing of its own to say. Every input to the choice is gate
+  DATA: which gates exist and their :when forms, their :priority, and the
+  budget key each spends against. This namespace filters on those, sorts on
+  those, and takes the first. So a project retunes what the harness says to a
+  branch, and when, by editing gates.edn — not by editing this."
   (:require [samizdat.agent.gates :as gates]
             [samizdat.agent.state :as state]
             [samizdat.util :as util]))
@@ -117,12 +123,37 @@
 
 ;; --- settling predictions ---------------------------------------------------
 
-(defn- progressed? [before after]
+(defn- progressed?
+  "Whether the branch advanced over this turn.
+
+  THE GATE MUST SETTLE ON WHAT IT ARMED ON. `progress-stalled` fires when
+  `:turns-since-progress` crosses a threshold, and that counter is reset by
+  any tool call reporting `:progress? true` — which on a coding run means
+  `write_file` and `edit_file`, because changing the tree is real work. It
+  used to settle on artifacts alone, and the only artifact a coding run
+  produces is a green test run through the ship gate. So the gate armed on one
+  definition of progress and was graded on a stricter one.
+
+  Measured across four live runs against a real project: `progress-stalled`
+  fired eight times and settled `unmet` eight times, and could not have
+  settled anything else — zero artifacts were produced in any of them. Turn 30
+  of one run fired the gate and turns 31 and 32 wrote files; the ledger
+  recorded the branch as ignoring it. That false zero is not cosmetic: it
+  feeds session findings, which feed the supervisor, which is the role that
+  retunes the loop. A GA mechanic reading a fabricated failure signal selects
+  against noise.
+
+  Artifacts still count — a green test is the strongest form of this — but a
+  reset counter counts too, and it is the one a coding branch can actually
+  reach."
+  [before after]
   (or (> (count (state/confirmed-artifacts after))
          (count (state/confirmed-artifacts before)))
-      (> (count (:artifacts after)) (count (:artifacts before)))))
+      (> (count (:artifacts after)) (count (:artifacts before)))
+      (< (or (:turns-since-progress after) 0)
+         (or (:turns-since-progress before) 0))))
 
-;; The tool names each gate's settle reads as compliance (review3 #6). Tier
+;; The tool names each gate's settle reads as compliance (provenance R3-6). Tier
 ;; 1a: the table lives in gates.edn as :tool-vocab :settle-called — data,
 ;; not inline strings in a case, so a test can walk it and assert every name
 ;; resolves to a registered run-tool: a settle name the loop can never
@@ -133,7 +164,7 @@
 
 (defn settle-called-names
   "Every tool name any settle rule reads as compliance, deduped. Exposed for
-  the vocabulary test (review3 #6)."
+  the vocabulary test (provenance R3-6)."
   []
   (distinct (mapcat seq (vals (gates/tool-vocab :settle-called)))))
 
@@ -143,7 +174,7 @@
   :settle-called vocabulary. Kept beside the `case` below and asserted
   against it by the coherence test, so a gate that falls out of both is
   caught at test time rather than by settling :unmet forever."
-  #{:stuck :prologue-cap :progress-stalled :human-directive})
+  #{:stuck :prologue-cap :progress-stalled :file-thrash :human-directive})
 
 (defn settle
   "Decide whether an open prediction came true, given what the branch did.
@@ -153,10 +184,20 @@
   consulted, because a judge asked to grade the harness's own steering is a
   judge with an opinion about the harness.
 
-  Returns :met, :unmet, or nil for still-open."
+  Returns :met, :met-late, :unmet, or nil for still-open.
+
+  THREE outcomes, not two, because two could not tell apart the gate nobody
+  obeys and the gate whose advice is sound but slow — and those want opposite
+  responses. A prediction's :window is in turns; anything a gate asks for
+  costs at least a turn to attempt and another to verify, so advice followed
+  on the third turn of a two-turn window used to settle :unmet and read
+  exactly like advice ignored. The window is now the promptness bar and the
+  grace (gates.edn :prediction-grace-turns) is the did-it-happen-at-all bar."
   [{:keys [gate turn window]} {:keys [current-turn tools-called branch-before branch-after]}]
   (let [settle-called (gates/tool-vocab :settle-called)
-        expired? (>= (- current-turn turn) window)
+        elapsed (- current-turn turn)
+        late? (> elapsed window)
+        expired? (>= elapsed (+ window (gates/threshold :prediction-grace-turns)))
         ;; `#{}` rather than nil for a gate the vocabulary does not name:
         ;; `(some nil tools-called)` calls nil as a predicate and throws, so a
         ;; gate added to gates.edn :gates without a :settle-called entry took
@@ -207,9 +248,16 @@
                          (some (set tools-called) (gates/tool-vocab :verification))
                          (zero? (or (:consecutive-mechanics-failures branch-after) 0))))
         (:prologue-cap :progress-stalled) (progressed? branch-before branch-after)
+        ;; Met when the streak actually broke: the branch touched a different
+        ;; file, a no-file call intervened, or the task closed. Reading the
+        ;; streak itself is the only settle that cannot be gamed by naming a
+        ;; tool — the nudge asks for divergence, and divergence is what the
+        ;; counter measures (karamazov-g86).
+        :file-thrash (< (get-in branch-after [:file-touch :streak] 0)
+                        (gates/threshold :file-thrash-threshold))
         :human-directive true
         (tools-met? gate))
-      :met
+      (if late? :met-late :met)
 
       expired? :unmet
       :else nil)))

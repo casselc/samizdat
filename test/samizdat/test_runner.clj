@@ -65,14 +65,42 @@
             [mycelium.validation-test]
             [mycelium.workflow-test]
             [samizdat.agent-test]
+            [samizdat.approval-test]
+            [samizdat.base-test]
+            [samizdat.boundary-test]
+            [samizdat.compaction-test]
+            [samizdat.collab-test]
+            [samizdat.acceptance-test]
+            [samizdat.select-test]
+            [samizdat.stats-test]
+            [samizdat.session-test]
+            [samizdat.reflect-test]
+            [samizdat.reflex-test]
+            [samizdat.symbolic-test]
+            [samizdat.symbolic.dispatch-test]
+            [samizdat.model.turn-journal-test]
+            [samizdat.model.ratelimit-teardown-test]
+            [samizdat.model.task-claim-test]
+            [samizdat.divergences-test]
+            [samizdat.cancel-test]
+            [samizdat.beam-cancel-test]
+            [samizdat.eval-deadline-test]
+            [samizdat.events-flow-test]
+            [samizdat.lsp-cancel-test]
             [samizdat.tasks-test]
+            [samizdat.kernel-write-test]
             [samizdat.knowledge-test]
+            [samizdat.export-test]
             [samizdat.messages-test]
             [samizdat.prompt-test]
             [samizdat.workflow-test]
             [samizdat.manifest-test]
             [samizdat.judge-test]
             [samizdat.team-test]
+            [samizdat.claims-test]
+            [samizdat.metrics-test]
+            [samizdat.symbolic-differential-test]
+            [samizdat.board-test]
             [samizdat.planner-test]
             [samizdat.decompose-test]
             [samizdat.decompose-run-test]
@@ -82,24 +110,71 @@
             [samizdat.supervisor-test]
             [samizdat.gitdiff-test]
             [samizdat.skills-test]
+            [samizdat.source-test]
             [samizdat.security.secrets-test]
             [samizdat.config-test]
             [samizdat.files-test]
             [samizdat.edit-test]
+            [samizdat.eval-mode-test]
             [samizdat.grep-test]
+            [samizdat.hashline-test]
             [samizdat.control-test]
             [samizdat.util-test]
             [samizdat.lisp-test]
             [samizdat.lsp-test]
             [samizdat.cells-test]
+            [samizdat.digest-test]
+            [samizdat.park-test]
+            [samizdat.events-test]
+            [samizdat.escapes-test]
+            [samizdat.exam-test]
+            [samizdat.cell-schema-test]
             [samizdat.mutation-test]
+            [samizdat.ratelimit-test]
+            [samizdat.repl-confinement-test]
+            [samizdat.retire-test]
+            [samizdat.schemacheck-test]
+            [samizdat.repl-guard-test]
             [samizdat.repl-test]
+            [samizdat.roles-test]
+            [samizdat.sandbox-test]
+            [samizdat.websearch-test]
+            [samizdat.toolerr-test]
+            [samizdat.tape-test]
+            [samizdat.image-test]
+            [samizdat.infer-test]
+            [samizdat.fork-test]
+            [samizdat.probe-test]
+            [samizdat.manual-test]
+            [samizdat.user-sim-test]
+            [samizdat.userspace-test]
+            [samizdat.beam-test]
+            [samizdat.kanban-test]
             [samizdat.security.policy-test]
             [samizdat.llm-test]
             [samizdat.prompt-test]
             [samizdat.server-test]
             [samizdat.adapter-test]
             [samizdat.proc-test]
+            [samizdat.board-bt-test]
+            [samizdat.finalization-test]
+            [samizdat.replroots-test]
+            [samizdat.oversight-test]
+            [samizdat.battery-test]
+            [samizdat.procedure-test]
+            [samizdat.replay-test]
+            [samizdat.mechanics-test]
+            [samizdat.repair-test]
+            [samizdat.split-test]
+            [samizdat.steps-test]
+            [samizdat.storm-test]
+            [samizdat.stubs-test]
+            [samizdat.tournament-test]
+            [samizdat.trajectory-test]
+            [samizdat.tui-layout-test]
+            [samizdat.tui-readmodel-test]
+            [samizdat.tui-state-test]
+            [samizdat.tui-widgets-test]
             [samizdat.store-test]
             [samizdat.gui-api-test]
             [samizdat.gui-ops-test]
@@ -152,17 +227,64 @@
     mycelium.validate-warn-test
     mycelium.validation-test
     mycelium.workflow-test
+    samizdat.board-bt-test
+    samizdat.finalization-test
+    samizdat.replroots-test
+    samizdat.oversight-test
+    samizdat.battery-test
+    samizdat.procedure-test
+    samizdat.replay-test
+    samizdat.mechanics-test
+    samizdat.repair-test
+    samizdat.split-test
+    samizdat.steps-test
+    samizdat.storm-test
+    samizdat.stubs-test
+    samizdat.tournament-test
+    samizdat.trajectory-test
+    samizdat.tui-layout-test
+    samizdat.tui-readmodel-test
+    samizdat.tui-state-test
+    samizdat.tui-widgets-test
     samizdat.store-test
     samizdat.llm-test
     samizdat.agent-test
+    samizdat.approval-test
+    samizdat.base-test
+    samizdat.boundary-test
+    samizdat.compaction-test
+    samizdat.collab-test
+    samizdat.acceptance-test
+    samizdat.select-test
+    samizdat.stats-test
+    samizdat.session-test
+    samizdat.reflect-test
+    samizdat.reflex-test
+    samizdat.symbolic-test
+    samizdat.symbolic.dispatch-test
+    samizdat.model.turn-journal-test
+    samizdat.model.ratelimit-teardown-test
+    samizdat.model.task-claim-test
+    samizdat.divergences-test
+    samizdat.cancel-test
+    samizdat.beam-cancel-test
+    samizdat.eval-deadline-test
+    samizdat.events-flow-test
+    samizdat.lsp-cancel-test
     samizdat.tasks-test
+    samizdat.kernel-write-test
     samizdat.knowledge-test
+    samizdat.export-test
     samizdat.messages-test
     samizdat.prompt-test
     samizdat.workflow-test
     samizdat.manifest-test
     samizdat.judge-test
     samizdat.team-test
+    samizdat.claims-test
+    samizdat.metrics-test
+    samizdat.symbolic-differential-test
+    samizdat.board-test
     samizdat.planner-test
     samizdat.decompose-test
     samizdat.decompose-run-test
@@ -172,18 +294,46 @@
     samizdat.supervisor-test
     samizdat.gitdiff-test
     samizdat.skills-test
+    samizdat.source-test
     samizdat.security.secrets-test
     samizdat.config-test
     samizdat.files-test
     samizdat.edit-test
+    samizdat.eval-mode-test
     samizdat.grep-test
+    samizdat.hashline-test
     samizdat.control-test
     samizdat.util-test
     samizdat.lisp-test
     samizdat.lsp-test
     samizdat.cells-test
+    samizdat.digest-test
+    samizdat.park-test
+    samizdat.events-test
+    samizdat.escapes-test
+    samizdat.exam-test
+    samizdat.cell-schema-test
     samizdat.mutation-test
+    samizdat.ratelimit-test
+    samizdat.repl-confinement-test
+    samizdat.retire-test
+    samizdat.schemacheck-test
+    samizdat.repl-guard-test
     samizdat.repl-test
+    samizdat.roles-test
+    samizdat.sandbox-test
+    samizdat.websearch-test
+    samizdat.toolerr-test
+    samizdat.tape-test
+    samizdat.image-test
+    samizdat.infer-test
+    samizdat.fork-test
+    samizdat.probe-test
+    samizdat.manual-test
+    samizdat.user-sim-test
+    samizdat.userspace-test
+    samizdat.beam-test
+    samizdat.kanban-test
     samizdat.security.policy-test
     samizdat.prompt-test
     samizdat.server-test

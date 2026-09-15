@@ -37,15 +37,54 @@
 
   Prior assistant turns lose their think blocks on the way out. See
   samizdat.llm.message."
-  (:require [clojure.data.json :as json]
+  (:require ;; the java.time.* host shim, before data.json — see samizdat.store.journal
+            [jolt.time]
+            [clojure.data.json :as json]
             [clojure.string :as str]
             [clojure.tools.logging :as log]
+            [ebb.core :as ebb]
             [jolt.http-client :as http]
+            [samizdat.cancel :as cancel]
+            [samizdat.lexicon :as lexicon]
             [samizdat.llm.adapter :as adapter]
-            [samizdat.llm.message :as message]))
+            [samizdat.llm.message :as message]
+            [samizdat.llm.ratelimit :as ratelimit]
+            [samizdat.util :as util]
+            [samizdat.session :as session]))
 
 (def default-max-retries 2)
 (def default-timeout-ms 300000)
+
+(def default-max-response-ms
+  "The ceiling on a derived read timeout, matching config's :llm
+  :max-response-ms default (samizdat.config). No read should be allowed to run
+  longer than the process-wide response cap, which is what actually unwinds a
+  trickling body."
+  600000)
+
+(def default-gen-floor-tps
+  "A conservative floor on generation speed, in tokens per second, used to size
+  the read timeout to the budget being asked for.
+
+  Neither provider streams a byte before the completion finishes (measured
+  2026-09-06: an 8s socket timeout is a `Read timed out` on both DeepSeek and
+  GLM), so the read timeout is a bound on TOTAL generation time, not the gap
+  between chunks the way dirge/deepseek-harness/opencode bound it. A fixed
+  300s therefore killed a legitimate long generation — a 32768-token budget at
+  the truncation retry needs ~360s on GLM and ~500s on deepseek-v4-pro — and
+  then billed it again on the retry ladder.
+
+  50 tok/s is below every hosted rate measured (flash 170, GLM 91, pro 65) with
+  margin, so at the default 16384-token budget the derived timeout lands near
+  the old 300s and only GROWS past it as the budget grows. A per-endpoint value
+  belongs in config where :timeout-ms already lives, and overrides this."
+  50)
+
+(def default-read-timeout-overhead-ms
+  "Fixed headroom added to the budget-derived read timeout: connect, prefill of
+  a long prompt, and first-token latency, none of which scale with the output
+  budget."
+  30000)
 
 (def default-conn-timeout-ms
   "A bound on the TCP handshake alone, separate from the per-read timeout.
@@ -79,7 +118,7 @@
   several OpenAI-compatible providers send instead. UNCLAMPED: the in-run cap
   check in `chat` must see the provider's real ask — clamping here hid a usage
   cap wearing a rate-limit's headers under a 60s ceiling that could never
-  cross the 300s window (code-review-2026-08 #2). The ceiling on what we
+  cross the 300s window (provenance CR1-2). The ceiling on what we
   actually sleep is applied in backoff-ms."
   [headers]
   (let [h (fn [k] (get headers k))
@@ -91,6 +130,42 @@
                       parse-long)]
     (when-let [s (or secs reset)]
       (* 1000 (max 0 s)))))
+
+(def ^:private context-overflow-re
+  ;; wordlists.edn :context-overflow — how endpoints word a window overflow.
+  ;; Data, because the wording is theirs to change and the supervisor's to
+  ;; track (karamazov-d41).
+  (util/generation-cache lexicon/gen
+                         #(re-pattern (lexicon/wordlist :context-overflow))))
+
+(defn context-overflow?
+  "Whether this response body says the prompt outgrew the context window.
+
+  A 500 wearing this message is DETERMINISTIC — the same oversized prompt
+  fails identically every time — so retrying it on backoff burns wall-clock
+  to learn nothing. Observed live on the Qwen baseline (run b8a2b72c,
+  llama-server -c 32768): a branch past the wall re-sent the same prompt
+  three times with up to 32s of backoff per turn (karamazov-d41). Matched on
+  the RAW body so an undecodable error page still classifies."
+  [raw-body]
+  (boolean (re-find (context-overflow-re) (str raw-body))))
+
+(defn effective-read-timeout-ms
+  "The read timeout for a call asking for `max-tokens` of output.
+
+  `max(floor, ceil(max-tokens / tps) + overhead)`, capped at the response
+  ceiling. The floor is config's :timeout-ms, so a small call (a side query,
+  a probe) is never bounded tighter than it is today; the derivation only
+  RAISES the bound for a large budget, so a genuine long generation is not cut
+  off mid-stream and then re-billed. See `default-gen-floor-tps`."
+  [config max-tokens]
+  (let [floor    (:timeout-ms config default-timeout-ms)
+        ceiling  (:max-response-ms config default-max-response-ms)
+        tps      (max 1 (:gen-floor-tps config default-gen-floor-tps))
+        overhead (:read-timeout-overhead-ms config default-read-timeout-overhead-ms)
+        derived  (+ (long (Math/ceil (* (/ (double (or max-tokens 0)) tps) 1000.0)))
+                    overhead)]
+    (min ceiling (max floor derived))))
 
 (defn classify
   "Decide what to do about a non-2xx response.
@@ -123,8 +198,45 @@
 (defn- decode [body]
   (try (json/read-str body :key-fn keyword) (catch Throwable _ nil)))
 
+(declare post-once*)
+
 (defn- post-once [adapter config request]
-  (let [url (adapter/chat-url adapter config)
+  (let [url (adapter/chat-url adapter config)]
+    ;; THE LATCH, before the socket. One account is one window, and the beam's
+    ;; branches do not know about each other — so without this the endpoint's
+    ;; exhaustion costs one 429 per branch, repeatedly. Refused here rather
+    ;; than slept on: the retry ladder above owns waiting and checks the abort
+    ;; flag between attempts (karamazov-2oc).
+    (if-let [left (ratelimit/latched-for url (System/currentTimeMillis))]
+      {:outcome :retry
+       :status 429
+       ;; The retry-after is not decoration. It carries the latch into the
+       ;; existing far-reset heuristic below, which turns a window longer than
+       ;; the in-run budget into a cap-shaped fatal rather than a sleep — so a
+       ;; long latch composes into the right answer without a special case.
+       :headers {"retry-after" (str (long (Math/ceil (/ left 1000.0))))}
+       ;; Carried from where the trouble was DETECTED, per the taxonomy: this
+       ;; is not a call that failed, it is a call that was never made.
+       :reason :rate-limit-latch
+       :error (str (adapter/display-name adapter) " is rate-limited for another "
+                   (long (Math/ceil (/ left 1000.0))) "s — not sent")}
+      ;; The blocking host call goes under via blk (RFC-013): the fiber is
+      ;; released for the read's duration, and a cancel that lands while it
+      ;; runs becomes Cancelled the moment it returns. The interrupt itself
+      ;; does not reach a :blocking recv (the spike), so the socket timeout
+      ;; remains the bound on this one wait.
+      (let [r (ebb/? (ebb/via ebb/blk (post-once* adapter config request url)))]
+        (cancel/after-blocking!)
+        r))))
+
+(defn- post-once* [adapter config request url]
+  (let [;; Whether the prefill in the request was actually sent — the adapter
+        ;; drops it where the endpoint cannot continue a trailing assistant
+        ;; message (GLM, DeepSeek /v1). Reported on the reply so the caller
+        ;; reattaches the opener only when it was really there, rather than
+        ;; storing a doubled fence on every steered GLM turn.
+        use-prefill? (boolean (and (:prefill request)
+                                   (adapter/prefill-support? adapter config)))
         payload (json/write-str (adapter/chat-body adapter config request))
         started (System/currentTimeMillis)
         resp (http/post url {:headers (merge (adapter/auth-headers adapter config)
@@ -138,6 +250,17 @@
         status (:status resp)
         decoded (decode (:body resp))]
     (log/debug (adapter/display-name adapter) "responded" status "in" elapsed "ms")
+    ;; A success is better evidence than our arithmetic about when the window
+    ;; would reopen, so it releases the latch outright.
+    (when (<= 200 status 299) (ratelimit/clear! url))
+    ;; And a DEFINITIVE signal — the provider stating when, by Retry-After or
+    ;; by a zero remaining-count with a reset — latches the host for everyone.
+    ;; A bare 429 does not: it may be a burst limit that clears in a second,
+    ;; and latching on it would stop every branch over one unlucky request.
+    (when-let [ms (ratelimit/definitive-signal status (:headers resp))]
+      (ratelimit/latch! url ms (System/currentTimeMillis))
+      (log/warn (adapter/display-name adapter) "rate-limited for"
+                (long (/ ms 1000)) "s — latched for every branch"))
     (if (<= 200 status 299)
       (if-let [err (adapter/error-message adapter decoded)]
         ;; Some providers return 200 with an error object in the body.
@@ -145,7 +268,12 @@
         (if-let [parsed (adapter/parse-chat adapter decoded)]
           (let [merged (message/merge-reasoning (:content parsed) (:reasoning parsed))]
             (if (str/blank? merged)
+              ;; The REASON travels from where it is detected. Re-deriving it
+              ;; downstream by matching this sentence would make the counter a
+              ;; measurement of the wording — reword the message and the
+              ;; provider-trouble finding silently stops firing.
               {:outcome :fatal
+               :reason :empty-reply
                :error (str (adapter/display-name adapter)
                            " returned neither content nor reasoning. This usually means"
                            " the model spent its entire output budget thinking; raise"
@@ -160,18 +288,41 @@
                           :reasoning (:reasoning parsed)
                           :finish-reason (:finish-reason parsed)
                           :usage (:usage parsed)
+                          ;; The prefill this reply CONTINUES, or nil when the
+                          ;; adapter did not send one. absorb reattaches the
+                          ;; opener iff this is non-nil, so a provider that
+                          ;; ignored the prefill (GLM) is not credited a fence
+                          ;; it never emitted (karamazov-0r8s).
+                          :prefilled (when use-prefill? (:prefill request))
                           :elapsed-ms elapsed}}))
           {:outcome :fatal
            :error (str (adapter/display-name adapter)
                        " reply had no completion in it: "
                        (subs (str (:body resp)) 0 (min 300 (count (str (:body resp))))))}))
-      {:outcome (classify adapter status decoded)
-       :headers (:headers resp)
-       :error (str (adapter/display-name adapter) " error " status
-                   (when-let [m (adapter/error-message adapter decoded)] (str " — " m))
-                   (when-not decoded
-                     (str " — " (subs (str (:body resp))
-                                      0 (min 300 (count (str (:body resp))))))))})))
+      ;; A context overflow outranks the status-code ladder: it is the one
+      ;; 5xx that is deterministic, and the reason travels from where it is
+      ;; detected so the loop can respond by compacting rather than retrying
+      ;; (karamazov-d41).
+      (let [overflow? (context-overflow? (:body resp))
+            ;; A wall, not a window: DeepSeek answers 402 "Insufficient
+            ;; Balance", and any status can carry the usage-cap wording the
+            ;; adapter knows. Retrying spends the run's budget against
+            ;; something that will not move (dirge PR 689), so it is fatal and
+            ;; the reason travels so a supervisor tells a wall from a bug.
+            cap? (and (not overflow?)
+                      (or (= 402 status)
+                          (adapter/usage-cap? adapter status decoded)))]
+        (cond-> {:outcome (if (or overflow? cap?)
+                            :fatal
+                            (classify adapter status decoded))
+                 :headers (:headers resp)
+                 :error (str (adapter/display-name adapter) " error " status
+                             (when-let [m (adapter/error-message adapter decoded)] (str " — " m))
+                             (when-not decoded
+                               (str " — " (subs (str (:body resp))
+                                                0 (min 300 (count (str (:body resp))))))))}
+          overflow? (assoc :reason :context-overflow)
+          cap?      (assoc :reason :usage-cap))))))
 
 ;; --- the public surface -----------------------------------------------------
 
@@ -182,7 +333,8 @@
   loop is bounded in attempts and each attempt is bounded in wall clock, so a
   stuck provider costs a known amount rather than the run."
   ([adapter config messages] (chat adapter config messages nil))
-  ([adapter config messages {:keys [max-tokens temperature max-retries prefill force-tool]}]
+  ([adapter config messages {:keys [max-tokens temperature max-retries prefill force-tool
+                                    cache-key reasoning-effort]}]
    (let [request {:messages (message/prepare messages)
                   :max-tokens (or max-tokens (:max-tokens config))
                   :temperature (or temperature (:temperature config))
@@ -194,15 +346,46 @@
                   ;; adapter sends this tool as a native OpenAI function with
                   ;; tool_choice, forcing the call on providers that don't honour
                   ;; assistant prefill (GLM). See samizdat.agent.arbiter.
-                  :force-tool force-tool}
+                  :force-tool force-tool
+                  ;; The stable conversation key an endpoint pins its prefix
+                  ;; cache to — a branch id. Adapters that have nowhere to put
+                  ;; it MUST ignore it; only the local one emits anything.
+                  :cache-key cache-key
+                  ;; This call's reasoning effort, overriding the run default
+                  ;; in config. Lets a cheap side call ask for less thinking
+                  ;; than the run is configured for; nil defers to config.
+                  :reasoning-effort reasoning-effort}
+         ;; The read timeout is sized to the budget being asked for: a big
+         ;; max-tokens legitimately takes longer than a small one, and a fixed
+         ;; bound cut off long generations and re-billed them (see
+         ;; effective-read-timeout-ms). A per-endpoint socket read bound, so it
+         ;; overrides config's :timeout-ms for THIS call only.
+         call-config (assoc config
+                            :timeout-ms
+                            (effective-read-timeout-ms config (:max-tokens request)))
          retries (or max-retries (:max-retries config) default-max-retries)]
      (loop [attempt 0, errors []]
+       ;; Before every attempt, not only between them: a cancel that landed
+       ;; while the previous attempt or its backoff ran ends the ladder here
+       ;; rather than being spent on one more request (RFC-013).
+       (cancel/check!)
        (let [result (try
-                      (post-once adapter config request)
+                      (post-once adapter call-config request)
                       (catch Throwable e
-                        ;; A transport failure — connection reset, TLS error,
-                        ;; socket timeout — is the case retrying exists for.
-                        {:outcome :retry :error (str "transport: " (ex-message e))}))
+                        (let [m (str (ex-message e))]
+                          (if (re-find #"(?i)read timed out" m)
+                            ;; The provider accepted the request and never
+                            ;; finished the body inside the budget-sized
+                            ;; window. Buffered all-or-nothing, so a retry
+                            ;; reproduces it at the same budget — fatal, and
+                            ;; tagged so the loop does not read it as a
+                            ;; transient blip.
+                            {:outcome :fatal :reason :timeout
+                             :error (str "read timeout: " m)}
+                            ;; A real transport failure — connection reset, TLS
+                            ;; error, connect timeout — is what retrying exists
+                            ;; for.
+                            {:outcome :retry :error (str "transport: " m)}))))
              errors (conj errors (:error result))]
          (cond
            (= :ok (:outcome result))
@@ -213,6 +396,13 @@
                                 (last errors))
                            {:provider (adapter/id adapter)
                             :attempts (inc attempt)
+                            ;; A KEYWORD reason beside the prose, carried from
+                            ;; where the trouble was DETECTED. An empty reply
+                            ;; and a refused connection want different
+                            ;; responses — more tokens versus wait and retry —
+                            ;; and deriving that from a sentence downstream is
+                            ;; how a counter ends up measuring the wording.
+                            :reason (or (:reason result) :call-failed)
                             :errors errors}))
 
            ;; A retryable error whose own reset is beyond the in-run window is
@@ -227,14 +417,90 @@
                                 (last errors))
                            {:provider (adapter/id adapter)
                             :attempts (inc attempt)
+                            :reason :usage-cap
                             :errors errors}))
 
            :else
            (let [wait (backoff-ms attempt (:headers result))]
+             ;; Retries are counted even when the call eventually succeeds. A
+             ;; run that got there on the third attempt every time is a run in
+             ;; trouble, and the outcome alone cannot say so.
+             (session/observe! [:provider :retried])
              (log/warn (adapter/display-name adapter) "attempt" (inc attempt)
                        "failed, retrying in" wait "ms:" (:error result))
-             (Thread/sleep wait)
+             ;; A park, not a Thread/sleep: on a task it sees a cancel at
+             ;; once, which is what makes an abort reach a sleeping ladder
+             ;; (samizdat.model.ratelimit-teardown-test enumerates the race
+             ;; the old sleep allowed).
+             (cancel/sleep! wait)
              (recur (inc attempt) errors))))))))
+
+(defn- file-stem
+  "`/a/b/Qwen3.8-27B-Q8_0.gguf` -> `Qwen3.8-27B-Q8_0`; a bare alias is itself."
+  [s]
+  (let [base (last (str/split (str s) #"/"))]
+    (str/replace base #"\.gguf$" "")))
+
+(defn llama-props->probe
+  "The probe result for a decoded /props body, or nil when the body is not a
+  llama.cpp server's (no `total_slots`).
+
+  `:model-id` is WHICH MODEL the server loaded — model_alias when the operator
+  set one, else the model_path's file stem — and it is absent, not guessed,
+  on a build that serves neither. It exists because :local's configured
+  :model is the placeholder \"local-model\": the provider says nothing about
+  the model, and the prompt file layer (.samizdat/prompts/<provider>/<model>/)
+  keys on the model. Pure, so it is testable without a server."
+  [body]
+  (when-let [slots (:total_slots body)]
+    (let [alias (:model_alias body)
+          path  (:model_path body)
+          id (cond
+               (and (string? alias) (not (str/blank? alias))) (file-stem alias)
+               (and (string? path) (not (str/blank? path)))   (file-stem path))]
+      (cond-> {:llama-cpp? true :total-slots slots}
+        id (assoc :model-id id)))))
+
+(defn probe-llama-cpp
+  "Ask an endpoint whether it is a llama.cpp server, how many KV slots it was
+  launched with, and which model it loaded. Returns
+  `{:llama-cpp? true :total-slots n :model-id s}` (model-id when the server
+  reports one) or nil.
+
+  IDENTIFY, DO NOT GUESS — and do not send hopefully either. RFC-005 recorded
+  that `:local` was decided by which config key the endpoint sat under, so a
+  llama-server configured as `:openai` silently got no prefix pinning. The
+  obvious repair is to send `cache_prompt` everywhere and let servers ignore
+  what they do not know, and that repair is wrong: an OpenAI-compatible server
+  that validates its body strictly rejects the WHOLE REQUEST over an unknown
+  field. dirge measured it (dirge-07ew) — Cerebras answered 422
+  `property 'body.prompt_cache_key' is unsupported`, Groq and Volcano Engine's
+  DeepSeek answer the same way — so a field sent hopefully is a session that
+  cannot make a single request. A probe asks; it does not hope.
+
+  `/props` is llama.cpp's own endpoint and `total_slots` is the field only it
+  serves. Anything else — a 404, a hosted provider's error page, a connection
+  refused — is `nil`, meaning `not llama.cpp`, which is the safe answer in
+  every direction.
+
+  `total_slots` is worth having on its own: RFC-005 said an explicit `:slots`
+  table was the only option because `a slot count is a property of how the
+  server was launched`. It is, and this is the server saying so."
+  [config]
+  (try
+    (let [base (str/replace (str (:base-url config)) #"/v1/?$" "")
+          resp (http/get (str base "/props")
+                         {:socket-timeout 5000
+                          :conn-timeout (:conn-timeout-ms config
+                                                          default-conn-timeout-ms)
+                          :throw-exceptions false})]
+      (when (<= 200 (:status resp) 299)
+        (llama-props->probe (decode (:body resp)))))
+    (catch Throwable _
+      ;; Unreachable, not-llama.cpp and malformed are the same answer here, and
+      ;; none of them is a reason not to start: the harness must come up
+      ;; against an endpoint that is merely slow to boot.
+      nil)))
 
 (defn list-models
   "Model ids the endpoint advertises, or [] when it has no such endpoint."

@@ -19,13 +19,22 @@
 (ns samizdat.manifest-test
   "Multiple named loop manifests: config selects which drives a run, and the
   manifest tool lists/shows/saves them behind a real compile."
-  (:require [clojure.java.io :as io]
+  (:require [samizdat.llm.client :as llm]
+            [samizdat.agent.gitdiff :as gitdiff]
+            [samizdat.agent.judge :as judge]
+            [samizdat.agent.beam :as beam]
+            [samizdat.manifests :as manifests]
+            [samizdat.cells :as cells]
+            [clojure.java.io :as io]
             [clojure.string :as str]
             [clojure.test :refer [deftest testing is]]
+            [mycelium.cell :as cell]
             [samizdat.agent.tools.base :as base]
             [samizdat.agent.tools.manifest]
             [samizdat.store.db :as db]
-            [samizdat.store.workflows :as workflows]
+            [samizdat.agent.state :as state]
+            [samizdat.store.userspace :as us]
+            [samizdat.userspace :as userspace]
             [samizdat.workflow :as wf]))
 
 (defn- with-db [f]
@@ -35,7 +44,7 @@
 (deftest factory-manifest-names-match-what-ships
   ;; wf/catalog used to glob a cwd-relative "resources/manifests", which found
   ;; nothing from a built binary or a process started elsewhere and silently
-  ;; served a catalogue with the factory half missing (the review3 #11 bug in
+  ;; served a catalogue with the factory half missing (the provenance R3-11 bug in
   ;; a second place). It now resolves an enumerated list through io/resource,
   ;; which cannot drift on its own — so pin the list against the directory.
   (let [on-disk (->> (file-seq (io/file "resources/manifests"))
@@ -58,9 +67,24 @@
   ;; what finally makes :run :loop reach a production run.
   (let [def' (wf/read-definition (slurp (io/resource "manifests/loop.edn")))
         turn (wf/turn-manifest def')]
-    (testing "the back edge and the finish hand-off both terminate the turn"
-      (is (= {:continue :end :done :end :abandoned :end :exhausted :end}
-             (:route (:edges turn)))))
+    (testing "the back edge terminates the turn"
+      (is (= :end (:continue (:route (:edges turn))))))
+    (testing "the slice is ONE turn — no path through it returns to :start"
+      ;; Stated as acyclicity rather than as a literal route map. The map
+      ;; version pinned {:done :end :abandoned :end :exhausted :end} and so
+      ;; failed the moment an ending was routed through a legitimate extra
+      ;; node (:distil) on its way out — a test that breaks on a correct
+      ;; change is a test that gets edited to match, which is no test. What
+      ;; the rewrite actually has to guarantee is that the slice terminates.
+      (let [targets (fn [to] (if (map? to) (vals to) [to]))
+            walk (fn walk [node seen]
+                   (cond
+                     (= :end node) true
+                     (contains? seen node) false
+                     :else (every? #(walk % (conj seen node))
+                                   (targets (get (:edges turn) node)))))]
+        (is (walk :start #{})
+            "every path from :start reaches :end without revisiting a node")))
     (testing "the finish node is dropped, not orphaned"
       (is (contains? (:cells def') :finish))
       (is (not (contains? (:cells turn) :finish)))
@@ -71,17 +95,99 @@
       (is (= (:dispatches def') (:dispatches turn)))
       (is (= (:constraints def') (:constraints turn))))))
 
-(deftest every-shipped-manifest-has-a-compilable-turn-slice
+(defn- shipped-definition [nm]
+  (wf/read-definition (slurp (io/resource (wf/manifest-resource nm)))))
+
+(deftest every-shipped-manifest-slices-or-says-it-cannot
   ;; The rewrite must leave a graph mycelium still accepts — reachable nodes,
   ;; covered dispatches, satisfied constraints — for every manifest, not just
   ;; the factory loop. A slice that fails to compile is a run that cannot
   ;; start, and the beam compiles this before POST /v1/runs answers.
-  (doseq [nm ["loop" "critic" "review" "worker" "reviewer" "supervisor"
-              "orchestrator" "team" "feature" "decompose"]]
+  ;;
+  ;; OVER THE DIRECTORY, not a hand-written list. The list this replaces named
+  ;; ten of seventeen and its docstring said "every manifest", which is how
+  ;; `repl` shipped catalogued and unsliceable: it routes :declare's :empty
+  ;; edge back to :start and does not iterate, so turn-manifest refused it,
+  ;; so `:run :loop "repl"` threw at run start under the beam. Being off
+  ;; gates.edn's selection whitelist was the only thing keeping it unreachable
+  ;; — the supervisor's SWITCH menu is the whole catalogue (karamazov-4sx).
+  (doseq [nm manifests/shipped-manifests]
     (testing nm
-      (let [d (wf/read-definition (slurp (io/resource (wf/manifest-resource nm))))]
-        (is (some? (wf/compile-loop (wf/turn-manifest d)))
-            (str nm "'s turn slice does not compile"))))))
+      (let [d (shipped-definition nm)]
+        (if (manifests/turn-sliceable? d)
+          (is (some? (wf/compile-loop (wf/turn-manifest d)))
+              (str nm "'s turn slice does not compile"))
+          (is (thrown? Exception (wf/turn-manifest d))
+              (str nm " declares itself unsliceable, so slicing it must be
+                       refused rather than quietly producing a turn")))))))
+
+(deftest exactly-two-shipped-manifests-declare-themselves-unsliceable
+  ;; Declaring it is a real decision and not a way out of fixing a graph, so
+  ;; the set is pinned: `beam` is the scheduler, which drives branches rather
+  ;; than being driven, and `repl` is a SHAPE — four pure cells classifying a
+  ;; branch, with the enforcement in phases.edn — that no driver should ever
+  ;; be pointed at. A third name here is a decision somebody has to make on
+  ;; purpose.
+  (is (= #{"beam" "repl"}
+         (set (remove #(manifests/turn-sliceable? (shipped-definition %))
+                      manifests/shipped-manifests)))))
+
+(deftest a-whole-run-manifest-never-routes-back-to-its-entry
+  ;; Run 3b8d2af5: the feature loop's revise edge went to :start, and under the
+  ;; BEAM driver every revision round ran as a separate turn with a fresh data
+  ;; map — the revision counter reset, branch ids collided, the guidance was
+  ;; lost. The single-branch driver the tests use carries data across that
+  ;; edge, so no behavioral test catches it; the SHAPE is the testable thing.
+  ;; turn-manifest redirects edges returning to :start into :end, which for an
+  ;; iterating loop is the definition of a turn — and for a whole-run workflow
+  ;; is silent data loss. A whole-run manifest that wants to re-enter its
+  ;; dispatch adds a node of its own (feature's :redispatch, orchestrator's
+  ;; :retry).
+  ;;
+  ;; Over the directory as well, for the same reason as the slice test above:
+  ;; the hand-written list of five is what let `repl` route :empty back to
+  ;; :start unnoticed. An unsliceable manifest is exempt because nothing ever
+  ;; cuts its edges.
+  (doseq [nm manifests/shipped-manifests]
+    (testing nm
+      (let [d (shipped-definition nm)
+            targets (mapcat (fn [[_ e]] (if (map? e) (vals e) [e])) (:edges d))]
+        (when (and (manifests/turn-sliceable? d) (not (wf/iterating? d)))
+          (is (not-any? #{:start} targets)
+              (str nm " routes an edge back to :start — under the beam driver "
+                   "that runs each cycle on a fresh data map")))))))
+
+(deftest an-unsliceable-manifest-is-not-on-the-supervisors-switch-menu
+  ;; The catalogue is what render-catalog feeds the supervisor as the set of
+  ;; workflows it may switch a run to, and a run's loop is turn-sliced. Left
+  ;; on the menu, `repl` was an offer that fails at run start — the trap
+  ;; beam-test's selectability test names and does not catch, because it
+  ;; compiles the whole-run form.
+  (let [menu (wf/render-catalog nil)]
+    (is (str/includes? menu "loop"))
+    (doseq [nm ["beam" "repl"]]
+      (is (not (str/includes? menu (str "- " nm " ")))
+          (str nm " is offered as a workflow to switch to, and cannot run as one")))))
+
+(deftest a-driver-refuses-an-unsliceable-manifest-as-a-runs-loop
+  ;; Both drivers, and the single-branch one is the reason this is not just
+  ;; turn-manifest's throw: `repl`'s four cells are pure functions of an
+  ;; unchanging branch, so :declare's :empty edge back to :start is an
+  ;; infinite pure cycle with no model call to break it and no step cap
+  ;; anywhere. Under workflow/run! `:run :loop "repl"` did not fail, it HUNG,
+  ;; which is worse than the beam's throw.
+  (let [conn (db/open! ":memory:")]
+    (doseq [nm ["repl" "beam"]]
+      (testing nm
+        (let [e (try (wf/compile-turn-loop conn nm) nil (catch Throwable t t))]
+          (is (some? e) (str nm " sliced"))
+          (is (str/includes? (str (ex-message e)) "cannot be turn-sliced")))
+        (let [e (try (wf/run! {:conn conn :config {:run {:loop nm}}
+                               :problem "p" :max-turns 1})
+                     nil
+                     (catch Throwable t t))]
+          (is (some? e) (str nm " was accepted as a run's loop"))
+          (is (str/includes? (str (ex-message e)) "cannot be turn-sliced")))))))
 
 (deftest iterating-classification-decides-width-and-deadline
   ;; A pass through the slice is one model call only when the slice contains
@@ -122,16 +228,21 @@
       (let [good (slurp (io/resource "manifests/loop.edn"))]
         (testing "a manifest that compiles is stored and then loads by name"
           (let [r (base/run-tool {:branch {:id "B1"} :conn conn :tool-name "manifest"
-                                  :args {:action "save" :name "loop2" :edn good}})]
+                                  :args {:action "save" :name "loop2" :edn good
+                                         :rationale "a second loop"}})]
             (is (= :neutral (:category r)))
-            (is (= 1 (:version (workflows/load-latest conn "loop2"))))
+            (is (= 1 (:version (us/load-latest conn :manifest "loop2"))))
             (is (= "loop2" (:name (wf/load-loop! conn "loop2"))))))
         (testing "a manifest that cannot compile is refused, not stored"
           (let [r (base/run-tool {:branch {:id "B1"} :conn conn :tool-name "manifest"
                                   :args {:action "save" :name "bad"
-                                         :edn "{:cells {:x :no-such-cell}}"}})]
-            (is (= :failure (:category r)))
-            (is (nil? (workflows/load-latest conn "bad")) "nothing broken was stored")))))))
+                                         :edn "{:cells {:x :no-such-cell}}"
+                                         :rationale "a bad save on purpose"}})]
+            ;; :mechanics since karamazov-gn64 — a refused edit is correctable,
+            ;; not evidence about the branch's line of inquiry. What this test
+            ;; is actually about is the second assertion.
+            (is (= :mechanics (:category r)))
+            (is (nil? (us/load-latest conn :manifest "bad")) "nothing broken was stored")))))))
 
 (deftest a-composed-manifest-registers-and-compiles-its-sub-loops
   (with-db
@@ -165,7 +276,7 @@
         (is (re-find #":cells" (:result shown)) "shows the manifest as data")))))
 
 (deftest show-and-save-missing-their-name-are-mechanics-complaints
-  ;; code-review-2026-08 #1, same shape as the skill tool: base/missing was
+  ;; provenance CR1-1, same shape as the skill tool: base/missing was
   ;; handed `branch` instead of ctx and its string returned raw, dropping
   ;; :category/:branch from the result map.
   (with-db
@@ -179,3 +290,287 @@
         (is (= :mechanics (:category save)))
         (is (str/includes? (:result save) "Missing required argument(s): name"))
         (is (str/includes? (:result save) "\"manifest\"") "the skeleton names the tool")))))
+
+(deftest an-unseeded-factory-manifest-is-readable-before-any-run
+  ;; list/show read only the store, and seeding happens per-manifest on the
+  ;; run that drives it — so `manifest show worker` before any worker run
+  ;; answered "No manifest worker": the agent could not read the thing it is
+  ;; invited to tune (karamazov-blt.4).
+  (with-db
+    (fn [conn]
+      (let [shown (base/run-tool {:branch {:id "B1"} :conn conn :tool-name "manifest"
+                                  :args {:action "show" :name "worker"}})]
+        (is (= :neutral (:category shown)))
+        (is (str/includes? (str (:result shown)) ":cells")
+            "the factory template is served, not a refusal"))
+      (let [lst (base/run-tool {:branch {:id "B1"} :conn conn :tool-name "manifest"
+                                :args {:action "list"}})]
+        (is (str/includes? (str (:result lst)) "worker")
+            "the listing names shipped manifests before they are seeded")))))
+
+(deftest a-manifest-that-cannot-run-cannot-be-saved
+  ;; The tool validated with a bare pre-compile, skipping the ctx-key
+  ;; requires check and the derived constraints that load-loop! runs — a
+  ;; manifest that could not run saved fine and threw at the next run start
+  ;; (karamazov-blt.6). Validation now goes through the loader's own
+  ;; pipeline.
+  (with-db
+    (fn [conn]
+      (cell/register-spec! :test/bad-requires
+                           {:id :test/bad-requires :doc "x" :pure true
+                            :requires [:no-such-ctx-key]
+                            :handler (fn [_ d] d)})
+      (try
+        (let [bad (pr-str '{:cells {:start :test/bad-requires}
+                            :edges {:start :end}})
+              r (base/run-tool {:branch {:id "B1"} :conn conn :tool-name "manifest"
+                                :args {:action "save" :name "badreq" :edn bad
+                                       :rationale "a bad require on purpose"}})]
+          ;; :mechanics since karamazov-gn64, like every other refused edit.
+          (is (= :mechanics (:category r)))
+          (is (str/includes? (str (:result r)) "ctx key")
+              "the refusal names the loader check that would have thrown")
+          (is (nil? (us/load-latest conn :manifest "badreq")) "nothing was stored"))
+        (finally (cell/remove-cell! :test/bad-requires))))))
+
+(deftest a-parent-can-compose-a-stored-only-child
+  ;; register-subworkflows! read children from io/resource, so a parent whose
+  ;; :subworkflows named a manifest the agent authored (store-only) threw
+  ;; "has no resource" — composing new manifests, which the tool advertises,
+  ;; was impossible for the nested case (karamazov-blt.6). Children now
+  ;; resolve through the userspace seam.
+  (with-db
+    (fn [conn]
+      (userspace/bind! conn)
+      (try
+        (userspace/save! :manifest "authored-child"
+                         (pr-str '{:cells {:start :journal/record}
+                                   :edges {:start :end}}))
+        (let [parent (pr-str '{:cells {:start :child-cell}
+                               :edges {:start :end}
+                               :subworkflows {:child-cell "authored-child"}})
+              r (base/run-tool {:branch {:id "B1"} :conn conn :tool-name "manifest"
+                                :args {:action "save" :name "composed" :edn parent
+                                       :rationale "compose a stored child"}})]
+          (is (= :neutral (:category r)) (str "save refused: " (:result r)))
+          (is (some? (us/load-latest conn :manifest "composed"))))
+        (finally (userspace/unbind!))))))
+
+(deftest a-non-iterating-manifest-may-not-route-back-to-its-entry
+  ;; The other half of a-whole-run-manifest-never-routes-back-to-its-entry
+  ;; above. That test pins the SHIPPED manifests; this refuses the shape at
+  ;; COMPILE time, so an agent-authored manifest saved at runtime cannot
+  ;; reintroduce it — the mutation protocol compiles before it stores
+  ;; (karamazov-emw).
+  (cells/load-cells!)
+  (testing "a whole-run manifest routing an edge to :start is refused, and the
+            refusal names the fix rather than only the fault"
+    (let [e (try (manifests/turn-manifest
+                  {:cells {:start :loop/assemble :work :feature/route}
+                   :edges {:start :work :work {:again :start :done :end}}
+                   :dispatches {:work [[:again (fn [d] true)] [:done (fn [d] true)]]}})
+                 nil
+                 (catch Throwable t t))]
+      (is (some? e) "accepted a shape that silently resets the data map")
+      (is (str/includes? (str (ex-message e)) "fresh data map"))
+      (is (str/includes? (str (ex-message e)) "re-entry node"))))
+  (testing "an ITERATING loop routing back to :start is fine — that IS the
+            definition of a turn, and the slice cuts it deliberately"
+    (doseq [nm ["loop" "worker" "supervisor" "reviewer"]]
+      (is (some? (manifests/compiled-manifest nm)) nm)))
+  (testing "and every shipped whole-run manifest still compiles"
+    (doseq [nm ["feature" "team" "board" "decompose" "orchestrator"]]
+      (is (some? (manifests/compiled-manifest nm)) nm)))
+  (testing "the scheduler's OWN manifest routes :tick back to :start and is
+            non-iterating by the same test — it schedules the branches that
+            make model calls rather than making one — and is never sliced, so
+            checking this at compile time was wrong and caught it"
+    (is (some? (manifests/compiled-manifest "beam")))))
+
+(deftest the-beam-driver-runs-a-whole-run-manifest-end-to-end
+  ;; THE STRUCTURAL BLIND SPOT karamazov-emw names: every other test of these
+  ;; flows drives workflow/run!, which carries data across a back edge, while
+  ;; POST /v1/runs drives beam/run!, which turn-slices. That is how the :start
+  ;; back edge shipped — no behavioural test could see it.
+  (with-redefs [judge/deterministic-block (constantly nil)
+                judge/parse-verdict (constantly :complete)
+                judge/blocking-findings (constantly nil)
+                gitdiff/changed-files (constantly ["src/example.clj" "test/example_test.clj"])
+                llm/chat (fn [_ _ msgs & _]
+                           (let [c (str/join " " (map :content msgs))]
+                             {:content
+                              (str "```tool-call\n{\"name\":\"done\",\"args\":{\"answer\":\""
+                                   (cond
+                                     (str/includes? c "Your role: reviewer")
+                                     "PASS: the implementors' work satisfies the feature and the tests pass."
+                                     (str/includes? c "Your role: supervisor")
+                                     "CONTINUE: the implementors shipped and the reviewer passed."
+                                     :else "built the part as asked; the suite is green")
+                                   "\"}}\n```")
+                              :finish-reason "stop"}))]
+    (let [conn (db/open! ":memory:")
+          r (beam/run! {:conn conn
+                        :llm-adapter :a :llm-config {:max-tokens 16384}
+                        :problem "the feature" :max-turns 6 :beam-width 1
+                        :config {:run {:loop "feature" :subtasks ["alpha"]
+                                       :max-revisions 2 :max-revisions-hard 1}}})]
+      (is (contains? #{:completed :abandoned :done} (:status r))
+          (str "a beam-driven feature run reached a real ending, not a crash: "
+               (pr-str (:status r))))
+      (is (some? (:run-id r))))))
+
+(deftest a-refused-edit-is-not-charged-to-the-branch
+  ;; karamazov-gn64. A manifest that does not compile is a CORRECTABLE edit:
+  ;; the branch produced no claim and tested nothing about its line of
+  ;; inquiry, it wrote something that did not hold together and was told
+  ;; exactly why, before anything was stored. Charging that to
+  ;; :consecutive-failures is the vf-jki mistake — base/refusal's docstring
+  ;; counts five earlier places, and this is the seventh.
+  ;;
+  ;; What made it sting here: the edit-fix cycle is the one the whole mutation
+  ;; protocol exists to invite. A supervisor that writes a manifest, is told
+  ;; it does not compile, fixes it and saves again had done the right thing
+  ;; twice and been billed two failures for it — enough to trip the stuck gate
+  ;; on its third round of honest work.
+  (with-db
+    (fn [conn]
+      (let [refused (base/run-tool {:branch {:id "B1"} :conn conn
+                                    :tool-name "manifest"
+                                    :args {:action "save" :name "bad"
+                                           :edn "{:cells {:x :no-such-cell}}"
+                                           :rationale "a bad save on purpose"}})]
+        (is (= :mechanics (:category refused))
+            "a manifest that does not compile is mechanics, not failure")
+        (is (str/includes? (str (:result refused)) "no-such-cell")
+            "and it names the actual fault, so the next attempt can fix it
+             rather than guess — a refusal the model cannot act on is a
+             failure whatever it is scored as")
+        (is (nil? (us/load-latest conn :manifest "bad"))))
+
+      (testing "the counters agree: mechanics is bounded, failures untouched"
+        ;; The count is still KEPT — a branch looping on edits that never
+        ;; compile is still spending turns, and :consecutive-mechanics-failures
+        ;; bounds exactly that. What changed is which counter, and therefore
+        ;; whether the stuck gate reads it as evidence about the branch's work.
+        (let [b (state/new-branch {:id "B1" :problem "p"})
+              after (state/record-outcome b {:category :mechanics :tool "manifest"})]
+          (is (= 1 (:consecutive-mechanics-failures after)))
+          (is (zero? (or (:consecutive-failures after) 0))
+              "a refused edit did not move the counter that decides whether the
+               branch lives")))
+
+      (testing "a manifest that DOES compile is still progress"
+        (let [ok (base/run-tool {:branch {:id "B1"} :conn conn
+                                 :tool-name "manifest"
+                                 :args {:action "save" :name "fine"
+                                        :edn (slurp (io/resource "manifests/loop.edn"))
+                                        :rationale "a good save"}})]
+          (is (= :neutral (:category ok)))
+          (is (:progress? ok)))))))
+
+(deftest a-shadowed-dispatch-branch-is-refused-with-the-pattern-rules
+  ;; Dispatch entries are patterns now (karamazov-41a.3), and a pattern table
+  ;; can be analysed where a table of closures could not: a branch an earlier
+  ;; pattern makes unreachable is refused at save. The refusal names both
+  ;; branches and is rendered from a template that carries the pattern rules,
+  ;; because the author here is the model, and a refusal that only states the
+  ;; error sends it guessing at a language it has never been shown.
+  (with-db
+    (fn [conn]
+      (let [def (manifests/read-definition (slurp (io/resource "manifests/loop.edn")))
+            bad (pr-str (assoc-in def [:dispatches :parse]
+                                  '[[:tool _]
+                                    [:provider-error {:call {:ok false}}]
+                                    [:no-call {:parsed nil}]]))
+            r (base/run-tool {:branch {:id "B1"} :conn conn :tool-name "manifest"
+                              :args {:action "save" :name "shadow" :edn bad
+                                     :rationale "a shadowed branch on purpose"}})
+            out (str (:result r))]
+        (is (= :mechanics (:category r)))
+        (is (str/includes? out "can never fire"))
+        (is (str/includes? out ":tool") "names the branch in front")
+        (is (str/includes? out "first match wins") "and the pattern rules, from the template")
+        (is (nil? (us/load-latest conn :manifest "shadow")) "nothing was stored")))))
+
+(deftest saving-and-showing-report-where-branch-order-decides
+  ;; Two branches that overlap with neither more specific are legal — the
+  ;; loop's own :parse table has them — but the order is then the only thing
+  ;; deciding, and the moment to say so is when the author is looking at the
+  ;; table: on save, and on show.
+  (with-db
+    (fn [conn]
+      (let [good (slurp (io/resource "manifests/loop.edn"))
+            saved (base/run-tool {:branch {:id "B1"} :conn conn :tool-name "manifest"
+                                  :args {:action "save" :name "loop4" :edn good
+                                         :rationale "the factory loop under another name"}})
+            shown (base/run-tool {:branch {:id "B1"} :conn conn :tool-name "manifest"
+                                  :args {:action "show" :name "loop4"}})]
+        (is (= :neutral (:category saved)))
+        (is (str/includes? (str (:result saved)) "Order-dependent"))
+        (is (str/includes? (str (:result saved)) ":provider-error"))
+        (is (str/includes? (str (:result shown)) "Order-dependent"))))))
+
+(deftest a-manifests-prompt-reaches-the-driver-that-production-uses
+  ;; karamazov-ioo.20's leftover, and the same shape its own commit message
+  ;; describes: the two drivers were unified for what a TURN is and left
+  ;; apart for how a BRANCH OPENS. `workflow-prompt` had exactly one caller,
+  ;; the single-branch workflow/run!, so `:run :loop "review"` through
+  ;; POST /v1/runs — which drives beam/run! — ran the review GRAPH under the
+  ;; build-a-feature system prompt. review.edn's own comment says "the
+  ;; manifest declares the ROLE"; in production it declared the routing and
+  ;; nothing else.
+  (let [seen (atom [])]
+    (with-redefs [llm/chat (fn [_ _ msgs & _]
+                             (swap! seen conj msgs)
+                             {:content "```tool-call\n{\"name\":\"done\",\"args\":{\"answer\":\"no defects found\"}}\n```"
+                              :finish-reason "stop"})
+                  judge/deterministic-block (constantly nil)
+                  judge/parse-verdict (constantly :complete)
+                  judge/blocking-findings (constantly nil)]
+      (let [conn (db/open! ":memory:")]
+        (beam/run! {:conn conn :llm-adapter :a :llm-config {:max-tokens 4096}
+                    :problem "review src/example.clj" :max-turns 2 :beam-width 1
+                    :config {:run {:loop "review"}}})
+        (is (seq @seen) "the run reached the model at least once")
+        (let [system (->> @seen first (filter #(= "system" (:role %))) first :content)]
+          (is (str/includes? system "CODE REVIEW")
+              "the review manifest's :prompt is appended to the system prompt")
+          (is (str/includes? system "read_file")
+              "and it is APPENDED — the base prompt with its tool surface is still there"))
+        (is (str/includes? (str (:prompt_suffix (db/fetch-one conn ["SELECT prompt_suffix FROM branches WHERE id = 'B1'"])))
+                           "CODE REVIEW")
+            "and the row records it, so a rebuild opens on the same text (v24)")))))
+
+(deftest an-edited-manifest-governs-the-next-beam-run
+  ;; karamazov-ioo.20's third acceptance criterion, which nothing held: "a
+  ;; manifest edit changes beam-run behavior in a live run". Every other test
+  ;; here proves an edit VALIDATES and STORES; this one proves it is then what
+  ;; production runs. Across 26 recorded live runs every `manifest` tool call
+  ;; was `show` or `list`, so the one capability this project exists for — the
+  ;; agent rewriting the loop it is running — had never once been exercised
+  ;; end to end, by an agent or by a test.
+  ;;
+  ;; The edit is a :prompt swap because it is the cheapest change with a
+  ;; visible effect on the model's own view: same graph, different framing.
+  (let [seen (atom [])]
+    (with-redefs [llm/chat (fn [_ _ msgs & _]
+                             (swap! seen conj msgs)
+                             {:content "```tool-call\n{\"name\":\"done\",\"args\":{\"answer\":\"done\"}}\n```"
+                              :finish-reason "stop"})
+                  judge/deterministic-block (constantly nil)
+                  judge/parse-verdict (constantly :complete)
+                  judge/blocking-findings (constantly nil)]
+      (let [conn (db/open! ":memory:")
+            edited (-> (slurp (io/resource "manifests/loop.edn"))
+                       (str/replace "{:description" "{:prompt \"review\"\n :description"))
+            saved (base/run-tool {:branch {:id "B1"} :conn conn :tool-name "manifest"
+                                  :args {:action "save" :name "loop" :edn edited
+                                         :rationale "frame the same graph as a review"}})]
+        (is (not= :mechanics (:category saved))
+            (str "the edited factory loop compiles and stores: " (:result saved)))
+        (beam/run! {:conn conn :llm-adapter :a :llm-config {:max-tokens 4096}
+                    :problem "build the thing" :max-turns 2 :beam-width 1
+                    :config {:run {:loop "loop"}}})
+        (let [system (->> @seen first (filter #(= "system" (:role %))) first :content)]
+          (is (str/includes? system "CODE REVIEW")
+              "the beam ran the EDITED version, not the factory file it seeds from"))))))

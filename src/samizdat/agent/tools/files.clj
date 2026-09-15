@@ -30,26 +30,89 @@
   (files/read-file ctx))
 
 (defmethod base/run-tool "write_file" [ctx]
-  (files/write-file ctx))
+  ;; The sibling notice rides the RESULT rather than gating the call: workers
+  ;; sharing a tree are collaborating, and which version should win is not the
+  ;; harness's judgement to make. See samizdat.agent.files/stale-note.
+  (files/with-stale (files/write-file ctx) ctx))
 
 (defmethod base/run-tool "edit_file" [ctx]
-  (files/edit-file ctx))
+  (files/with-stale (files/edit-file ctx) ctx))
+
+(defmethod base/run-tool "patch" [ctx]
+  ;; Anchored editing (karamazov-0kk). Beside edit_file rather than replacing
+  ;; it: clojure-mcp made the same bet on addressed editing and later demoted
+  ;; its own to a fallback, so which one a model actually reaches for is a
+  ;; question to MEASURE, not to assume.
+  (files/with-stale (files/patch-file ctx) ctx))
+
+(defmethod base/run-tool "glob" [{:keys [branch root] :as ctx}]
+  ;; Find files by NAME (karamazov-fn68). :neutral — locating establishes
+  ;; nothing, exactly like grep and read_file.
+  ;;
+  ;; It pages for the same reason grep does: a tool that silently truncates
+  ;; teaches the model that its answer was complete (karamazov-2py). The limit
+  ;; and the continuation are grep's, reused rather than reinvented, so the two
+  ;; search tools answer in one shape.
+  (if-let [m (base/missing ctx :pattern)]
+    (base/malformed branch m)
+    (let [pattern (str (base/arg ctx :pattern))
+          offset (or (some-> (base/arg ctx :offset) str parse-long) 0)
+          hits (try (files/glob-project (or root ".") pattern
+                                        {:paths (base/arg ctx :paths)})
+                    (catch Throwable e [::error (ex-message e)]))]
+      (cond
+        (and (seq hits) (= ::error (first hits)))
+        (base/malformed branch (files/glob-msg {:bad-pattern true :pattern pattern
+                                                :detail (second hits)}))
+
+        (empty? hits)
+        (base/ok branch (files/glob-msg {:no-matches true :pattern pattern}))
+
+        :else
+        (let [{:keys [hits from total next]} (files/grep-page hits offset (files/grep-limit))]
+          (base/ok branch
+                   (str (files/glob-msg {:found true :total total :pattern pattern
+                                         :from (inc from) :to (+ from (count hits))})
+                        "\n"
+                        (str/join "\n" hits)
+                        (when next
+                          (files/glob-msg {:more true :remaining (- total (+ from (count hits)))
+                                           :next next :pattern (pr-str pattern)})))))))))
 
 (defmethod base/run-tool "grep" [{:keys [branch root] :as ctx}]
   ;; Search the project's Clojure sources for a regex. :neutral — searching
   ;; establishes nothing, like read_file. The search logic (files/grep-project)
   ;; was written by the agent itself in a supervised self-building run.
+  ;;
+  ;; It PAGES, for the reason read_file pages: it used to take the first 200
+  ;; hits and say nothing about the rest, and carried no offset to continue
+  ;; from, so a wide search was a dead end the model could only walk into
+  ;; again (karamazov-2py).
   (if-let [m (base/missing ctx :pattern)]
     (base/malformed branch m)
-    (let [hits (try (files/grep-project (or root ".") (str (base/arg ctx :pattern)))
+    (let [pattern (str (base/arg ctx :pattern))
+          offset (or (some-> (base/arg ctx :offset) str parse-long) 0)
+          hits (try (files/grep-project (or root ".") pattern
+                                        {:paths (base/arg ctx :paths)
+                                         ;; So "grep the examples" is one call
+                                         ;; rather than a shell loop.
+                                         :refs (files/ctx-reference-roots ctx)})
                     (catch Throwable e [::error (ex-message e)]))]
       (cond
         (and (vector? hits) (= ::error (first hits)))
-        (base/malformed branch (str "Bad grep pattern: " (second hits)))
+        (base/malformed branch (files/grep-msg {:bad-pattern true :detail (second hits)}))
 
         (empty? hits)
-        (base/ok branch (str "No matches for " (pr-str (base/arg ctx :pattern)) "."))
+        (base/ok branch (files/grep-msg {:no-matches true :pattern (pr-str pattern)}))
 
         :else
-        (base/ok branch (str/join "\n" (for [{:keys [path line text]} (take 200 hits)]
-                                    (str path ":" line ": " (str/trim text)))))))))
+        (let [{:keys [hits from total next]} (files/grep-page hits offset (files/grep-limit))]
+          (base/ok branch
+                   (str (files/grep-msg {:found true :total total :pattern (pr-str pattern)
+                                         :from (inc from) :to (+ from (count hits))})
+                        "\n"
+                        (str/join "\n" (for [{:keys [path line text]} hits]
+                                         (str path ":" line ": " (str/trim text))))
+                        (when next
+                          (str "\n" (files/grep-msg {:more true :pattern pattern
+                                                     :next next :total total}))))))))))

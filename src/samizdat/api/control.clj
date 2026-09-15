@@ -25,11 +25,15 @@
   exactly the one that will never reach another boundary — that is the RAX
   manager pattern, and it is why the stop path does not share machinery with
   the steer path."
-  (:require [clojure.string :as str]
+  (:require [samizdat.lexicon :as lexicon]
+            [clojure.string :as str]
             [clojure.tools.logging :as log]
             [samizdat.agent.beam :as beam]
             [samizdat.agent.resume :as resume]
+            [samizdat.approval :as approval]
+            [samizdat.cancel :as cancel]
             [samizdat.llm.registry :as registry]
+            [samizdat.prompt :as prompt]
             [samizdat.store.grants :as grants]
             [samizdat.store.interventions :as interventions]
             [samizdat.store.runs :as runs]))
@@ -82,73 +86,97 @@
   (let [problem (or (:problem body) (get body "problem"))
         max-turns (or (:max_turns body) (:max-turns body))
         beam-width (or (:beam_width body) (:beam-width body))
+        token-budget (or (:token_budget body) (:token-budget body))
         seed-run (or (:seed_run body) (:seed-run body))
         quarantine (or (:quarantine body) (get body "quarantine"))]
+  ;; A {} body used to start a REAL run on a nil problem — a selection model
+  ;; call plus a full beam of provider spend answering nothing, while
+  ;; /v1/chat/completions 400s the same input (blt.38).
+  (if (str/blank? (str problem))
+    {:status 400
+     :body {:error {:message "a run needs a non-blank `problem`"
+                    :type "invalid_request_error"}}}
   (let [llm-config (run-llm-config (:llm config) body)
         adapter (registry/adapter-for (:provider llm-config))
         abort (atom false)
         promised (promise)
-        fut (future
-              (try
-                (let [r (beam/run! {:conn conn :config config
-                                    :llm-adapter adapter :llm-config llm-config
-                                    :problem problem
-                                    :max-turns max-turns
-                                    :beam-width beam-width
-                                    :seed-run seed-run
-                                    :quarantine quarantine
-                                     :abort abort
-                                     ;; Registered inside the run's own
-                                     ;; thread, BEFORE the run can finish:
-                                     ;; assoc'ing from the request thread
-                                     ;; after the future completes strands
-                                     ;; the entry, and the stranded entry
-                                     ;; let abort! rewrite a finished run
-                                     ;; to :aborted (code-review-2026-08 #3).
-                                     :on-start (fn [rid]
-                                                 (swap! active assoc rid {:abort abort})
-                                                 (deliver promised rid))})]
-                  (swap! active dissoc (:run-id r))
-                  r)
-                (catch Throwable e
-                  (log/error "run failed:" (ex-message e))
-                  ;; beam/run! has already marked the row failed and journaled
-                  ;; the error; this only drops the in-memory handle, which is
-                  ;; otherwise leaked and leaves abort! reporting a dead run as
-                  ;; abortable. deref with 0 because by here the id has long
-                  ;; been delivered — unless the throw beat on-start, in which
-                  ;; case there is no id to forget.
-                  (when-let [rid (deref promised 0 nil)]
-                    (swap! active dissoc rid))
-                  {:status :error :error (ex-message e)})))
-        run-id (deref promised 30000 nil)]
+        cancel* (atom nil)
+        ;; The run is a TASK (RFC-013): abort cancels it, and the cancel is
+        ;; observed at the round's next step or a turn's next check. The abort
+        ;; flag stays beside it for the waits a cancel cannot reach.
+        started (cancel/start!
+                 (cancel/spawn
+                  (fn []
+                    (try
+                      (let [r (beam/run! {:conn conn :config config
+                                          :llm-adapter adapter :llm-config llm-config
+                                          :problem problem
+                                          :max-turns max-turns
+                                          :beam-width beam-width
+                                          :token-budget token-budget
+                                          :seed-run seed-run
+                                          :quarantine quarantine
+                                          :abort abort
+                                          :on-start (fn [rid]
+                                                      (swap! active assoc rid
+                                                             {:abort abort
+                                                              :cancel (fn [] (some-> @cancel* (apply [])))})
+                                                      (deliver promised rid))})]
+                        (swap! active dissoc (:run-id r))
+                        ;; Release anything parked on a question this run
+                        ;; asked. Without it an aborted or finished run
+                        ;; leaves threads waiting on an answer nobody will
+                        ;; ever give, and the process never gets them back.
+                        (approval/abandon! (:run-id r))
+                        r)
+                      (catch Throwable e
+                        (if (cancel/control-signal? e)
+                          (log/info "run aborted:" (ex-message e))
+                          (log/error "run failed:" (ex-message e)))
+                        (when-let [rid (deref promised 0 nil)]
+                          (swap! active dissoc rid)
+                          (approval/abandon! rid))
+                        {:status :error :error (ex-message e)})))))
+        _ (reset! cancel* (:cancel started))
+        ;; How long the request waits for the run row before answering 503.
+        ;; gates.edn :run-start-deadline-ms: the selection model call runs
+        ;; BEFORE the row exists, and on GLM-5.3 with thinking it took 28 s
+        ;; live (2026-09-07), so a 30 s literal here answered 503 to a run
+        ;; that then started anyway.
+        start-deadline (lexicon/policy :run-start-deadline-ms)
+        run-id (deref promised start-deadline nil)]
     (if run-id
       ;; Wrapped in :body like resume, so one route shape serves both the
       ;; success and the refusal and neither has to be special-cased.
       {:body {:run_id run-id :status "running"
               :beam_width (or beam-width (get-in config [:run :beam-width]))
-              :max_turns (or max-turns (get-in config [:run :max-turns]))}}
+              :max_turns (or max-turns (get-in config [:run :max-turns]))
+              :token_budget (or token-budget (get-in config [:run :token-budget]))}}
       ;; 503, not 200: the request was well formed and the server could not
       ;; service it. Answering 200 with an error body made a caller that checks
       ;; the status code read this as a started run, which is why gui.api's
       ;; start-run! had to unwrap the body to find out otherwise.
       {:status 503
-       :body {:error {:message "the run did not start within 30s"}}}))))
+       :body {:error {:message (str/trim
+                                (prompt/render "run-start-timeout"
+                                               {:seconds (quot start-deadline 1000)}))}}})))))
 
 (defn abort!
-  "Stop a run without asking it to cooperate. The flag is checked at the top of
-  every scheduling round, and the run's finally block disposes every engine
-  session regardless of how it ended."
+  "Stop a run without asking it to cooperate. Cancels the run task, which is
+  observed at the round's next step or a turn's next check (RFC-013), and sets
+  the flag the waits a cancel cannot reach still read. The run's finally block
+  disposes every engine session regardless of how it ended."
   [conn run-id]
-  (if-let [{:keys [abort]} (get @active run-id)]
+  (if-let [{:keys [abort cancel]} (get @active run-id)]
     (do (reset! abort true)
+        (when cancel (cancel))
         (if (pos? (runs/finish-run! conn run-id :aborted nil))
           ;; :body, not a bare map: the run's own :status is the string
           ;; "aborting", and a route reading (:status r) as an HTTP code would
           ;; have sent that.
           {:body {:run_id run-id :status "aborting"}}
           ;; The run finished between the registry read and the store write;
-          ;; the row guard refused the rewrite (review2 #4). Same refusal
+          ;; the row guard refused the rewrite (provenance R2-4). Same refusal
           ;; shape as an unknown run — the abort did not land.
           {:status 409
            :body {:error {:message (str "run " run-id " already finished")}
@@ -181,23 +209,28 @@
           adapter (registry/adapter-for (:provider llm-config))
           abort (atom false)
           max-turns (or (:max_turns body) (:max-turns body))]
-      (future
-        (try
-          ;; Registered inside the run's thread before any work, for the same
-          ;; reason as start-run! (code-review-2026-08 #3): an assoc on the
-          ;; caller racing a completion dissoc stranded the entry.
-          (swap! active assoc run-id {:abort abort})
-          (let [r (resume/resume! {:conn conn :config config
-                                   :llm-adapter adapter
-                                   :llm-config llm-config
-                                   :run-id run-id :abort abort
-                                   :max-turns max-turns})]
-            (swap! active dissoc run-id)
-            r)
-          (catch Throwable e
-            (log/error "resume failed:" (ex-message e))
-            (swap! active dissoc run-id)
-            {:status :error :error (ex-message e)})))
+      (let [cancel* (atom nil)
+            started (cancel/start!
+                     (cancel/spawn
+                      (fn []
+                        (try
+                          (swap! active assoc run-id
+                                 {:abort abort
+                                  :cancel (fn [] (some-> @cancel* (apply [])))})
+                          (let [r (resume/resume! {:conn conn :config config
+                                                   :llm-adapter adapter
+                                                   :llm-config llm-config
+                                                   :run-id run-id :abort abort
+                                                   :max-turns max-turns})]
+                            (swap! active dissoc run-id)
+                            r)
+                          (catch Throwable e
+                            (if (cancel/control-signal? e)
+                              (log/info "resume aborted:" (ex-message e))
+                              (log/error "resume failed:" (ex-message e)))
+                            (swap! active dissoc run-id)
+                            {:status :error :error (ex-message e)})))))]
+        (reset! cancel* (:cancel started)))
       ;; The budget this resume is running under, from what the caller asked
       ;; for, falling back to the row as it stood BEFORE the future started.
       ;; Reading the row here unconditionally raced the resume that is
@@ -224,7 +257,7 @@
   the shell policy consults on every command, so there is no boundary to wait
   for. This is the one production write path into the grants table — a human
   surface, never a tool — and without it every deliberate `ask` (interpreters,
-  git push, curl, installs) blocked a run forever (a#2, docs/code-review.md)."
+  git push, curl, installs) blocked a run forever (provenance A-2, docs/provenance.md)."
   [conn run-id body]
   (if (= "grant" (:kind body))
     (if-let [pattern (grant-pattern (:payload body))]
@@ -235,13 +268,24 @@
       {:status 400
        :body {:error {:message "a grant intervention needs payload.pattern — the shell glob to allow"
                      :run_id run-id}}})
+    (if-let [run (let [r (runs/get-run conn run-id)]
+                   (when (or (nil? r) (runs/terminal? r))
+                     (or r ::absent)))]
+      ;; A directive against a run that does not exist or has ended would sit
+      ;; `pending` forever — the UI showing an intervention that will never
+      ;; resolve (blt.38).
+      (if (= ::absent run)
+        {:status 404 :body {:error {:message (str "no run " run-id)}}}
+        {:status 409 :body {:error {:message (str "run " run-id " is already "
+                                                  (:status run))
+                                    :run_id run-id}}})
     (if-not (contains? interventions/kinds (:kind body))
-      ;; review3 #12: this reached submit!'s throw and surfaced as the
+      ;; provenance R3-12: this reached submit!'s throw and surfaced as the
       ;; server's catch-all 500. An unknown kind is the client's mistake.
       {:status 400
        :body {:error {:message (str "Unknown intervention kind " (pr-str (:kind body))
                                     "; known: "
-                                    (str/join ", " (sort (keys interventions/kinds))))}
+                                    (str/join ", " (sort interventions/kinds)))}
               :run_id run-id}}
       (let [id (interventions/submit! conn run-id
                                       {:branch-id (:branch_id body)
@@ -253,6 +297,10 @@
           :status "pending"
           ;; Said plainly rather than implied, because the difference between
           ;; accepted and applied is the thing a UI most easily lies about.
-          :note "Queued. It applies at the branch's next turn boundary, not now."}}))))
+          :note "Queued. It applies at the branch's next turn boundary, not now."}})))))
 
-(defn kinds [] {:kinds interventions/kinds})
+(defn kinds
+  "Every directive kind with what it does — the names from the store, the
+  words from wordlists.edn :directive-kinds."
+  []
+  {:kinds (lexicon/wordlist :directive-kinds)})

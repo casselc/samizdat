@@ -28,7 +28,7 @@
   a journal row — catching vendor-prefix tokens, URL passwords, and any value
   the run is known to hold.
 
-  The security-model diagram (docs/security.md) is the specification: env and
+  The security-model diagram (docs/RFCS/RFC-003-security-model.md) is the specification: env and
   secrets reach the model, messages, or journal ONLY through redact, verified
   by chiasmus. These functions are the redact node and the scrub node."
   (:require [clojure.string :as str]))
@@ -79,10 +79,16 @@
   #"(?i)([a-z][a-z0-9+.-]*://[^:@/]+:)([^@\s]{1,512})(@)")
 
 (def ^:private vendor-gates
-  ["sk-" "AKIA" "ghp_" "github_pat_" "hf_" "xox" "xai-" "AIza"])
+  ;; gh[opusr]_ is the whole GitHub token family: ghp_ (classic PAT) plus the
+  ;; gho_/ghu_/ghs_/ghr_ OAuth-flow tokens `gh auth login` issues. The family
+  ;; matters doubly because GITHUB_TOKEN/GH_TOKEN are SAFE_EXACT — their
+  ;; values never enter known-values, so this regex rail is the only thing
+  ;; between `echo $GITHUB_TOKEN` and the journal (karamazov-blt.30).
+  ["sk-" "AKIA" "ghp_" "gho_" "ghu_" "ghs_" "ghr_" "github_pat_" "hf_"
+   "xox" "xai-" "AIza"])
 
 (def ^:private vendor-prefix-re
-  #"(?x)\b(?:sk-(?:live_|test_|proj-)?[a-zA-Z0-9+/=]{20,512}(?:-[a-zA-Z0-9+/=]{1,64}){0,16}|sk-ant-api[0-9]{2}-[A-Za-z0-9+/=]{90,512}[_-][A-Za-z0-9]{5}|AKIA[A-Z0-9]{16}|ghp_[A-Za-z0-9]{36,255}|github_pat_[A-Za-z0-9]{22,64}_[A-Za-z0-9]{59,255}|hf_[A-Za-z0-9]{34,255}|xox[bpras]-[0-9]{2,20}-[0-9]{2,20}-[0-9]{2,20}-[a-zA-Z0-9]{32,255}|xai-[A-Za-z0-9+/=]{20,512}(?:\.[A-Za-z0-9+/=]{1,128}){0,16}|AIza[0-9A-Za-z_-]{35})")
+  #"(?x)\b(?:sk-(?:live_|test_|proj-)?[a-zA-Z0-9+/=]{20,512}(?:-[a-zA-Z0-9+/=]{1,64}){0,16}|sk-ant-api[0-9]{2}-[A-Za-z0-9+/=]{90,512}[_-][A-Za-z0-9]{5}|AKIA[A-Z0-9]{16}|gh[opusr]_[A-Za-z0-9]{36,255}|github_pat_[A-Za-z0-9]{22,64}_[A-Za-z0-9]{59,255}|hf_[A-Za-z0-9]{34,255}|xox[bpras]-[0-9]{2,20}-[0-9]{2,20}-[0-9]{2,20}-[a-zA-Z0-9]{32,255}|xai-[A-Za-z0-9+/=]{20,512}(?:\.[A-Za-z0-9+/=]{1,128}){0,16}|AIza[0-9A-Za-z_-]{35})")
 
 (defn- has-vendor-gate? [s]
   (boolean (some #(str/includes? s %) vendor-gates)))
@@ -124,7 +130,20 @@
                  (str/replace s v redacted)
                  s))
              t
-             (remove str/blank? (distinct (or known-values [])))))))
+             ;; `(into [] …)` and NOT `(distinct …)`. `distinct` on a SET
+             ;; returns the first element as nil under this runtime —
+             ;; (distinct #{"a" "b"}) => (nil "b") — and `known-values`
+             ;; returns a set, so this whole pass iterated over nothing: the
+             ;; substring boundary, which exists precisely for opaque secrets
+             ;; with no recognizable shape, was dead on every real call path.
+             ;;
+             ;; It looked tested. The canary in
+             ;; secrets-test/spec-a-planted-canary-never-reaches-model-space
+             ;; starts with `sk-`, so the VENDOR-PREFIX REGEX caught it and the
+             ;; test passed while asserting nothing about the pass it was
+             ;; written for. A set is already distinct, so dedupe was never
+             ;; needed here. RFC-003 F4.
+             (remove str/blank? (into [] (or known-values [])))))))
 
 ;; --- scrubbing the child environment ----------------------------------------
 
@@ -137,16 +156,33 @@
        (remove str/blank?)
        set))
 
+(def parent-only-vars
+  "Variables that describe THE PARENT PROCESS and are wrong for any child.
+
+  JOLT_PWD: jolt's source-tree wrapper (bin/jolt) exports it as the directory
+  that is THE PROJECT, and the runtime resolves relative files against it and
+  reads deps.edn from it. The installed binary sets none of it, so a harness
+  run from `/opt/homebrew/bin/jolt` never leaked it — and a harness run from a
+  checkout handed every child the harness's OWN checkout as its project. A
+  project image rooted at the run's root then answered `(slurp \"README.md\")`
+  with the harness's README, and `jolt -M:test` inside it would have run the
+  harness's suite as the run's verification. That is the confinement the image
+  exists to provide, quietly inverted. Dropped here rather than overwritten
+  because scrub-env does not know the child's root; the child's own wrapper
+  sets JOLT_PWD from the cwd `:dir` gave it, which is the right answer."
+  #{"JOLT_PWD"})
+
 (defn scrub-env
-  "The environment a subprocess is allowed to see. Name-sensitive vars are
-  removed; any remaining var whose value is credential-shaped OR contains a
-  known stripped value is replaced with [REDACTED]. Pure over the env map so
-  it is testable without a spawn."
+  "The environment a subprocess is allowed to see. Name-sensitive vars and
+  `parent-only-vars` are removed; any remaining var whose value is
+  credential-shaped OR contains a known stripped value is replaced with
+  [REDACTED]. Pure over the env map so it is testable without a spawn."
   [env]
   (let [known (stripped-values env)]
     (into {}
           (keep (fn [[k v]]
                   (cond
+                    (contains? parent-only-vars (str k)) nil
                     (sensitive-name? k) nil
                     (or (sensitive-value? v)
                         (some #(str/includes? (str v) %) known))

@@ -1,0 +1,500 @@
+;; samizdat - a self-hosting agentic harness
+;; Copyright (C) 2026 Dmitri Sotnikov
+;;
+;; This program is free software: you can redistribute it and/or modify
+;; it under the terms of the GNU General Public License as published by
+;; the Free Software Foundation, either version 3 of the License, or
+;; (at your option) any later version.
+;;
+;; This program is distributed in the hope that it will be useful,
+;; but WITHOUT ANY WARRANTY; without even the implied warranty of
+;; MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+;; GNU General Public License for more details.
+;;
+;; You should have received a copy of the GNU General Public License
+;; along with this program.  If not, see <https://www.gnu.org/licenses/>.
+;;
+;; SPDX-License-Identifier: GPL-3.0-or-later
+
+(ns samizdat.userspace
+  "THE BASE / USERSPACE SEAM.
+
+  The harness is two layers. `src/` is the BASE: how to talk to a provider,
+  how to run a tool, how to reach the db, how to render a template, how to
+  compile and validate a workflow. Lego pieces — capabilities with no
+  opinions. Nothing in the base decides what the harness does.
+
+  USERSPACE is how those pieces snap together into an agentic loop: the cells,
+  the manifests that wire them, the policy tables they read, and the prompts
+  they speak. It belongs to the PROJECT, not to the harness. `resources/`
+  ships a template; a project seeds its own copy on first use and evolves it
+  from there, so two projects running the same binary can work differently and
+  neither can break the other.
+
+  This namespace is the READ seam. Every loader in the base — the cell loader,
+  the manifest loader, the gate and phase tables, the prompt renderer — comes
+  through here instead of reaching for `io/resource` directly, and gets:
+
+    the project's current version, if the project has one
+    else the shipped template, seeded into the project as version 1
+
+  WHY A BOUND CONNECTION rather than a threaded argument. The readers are
+  called from everywhere — a selmer render deep inside a gate message, a cell
+  reload from a tool, a threshold lookup inside a compiled predicate — and
+  threading a conn through all of it would put the store in the signature of
+  every function that reads a number. `bind!` is called once, by
+  system/start!, with the project's connection.
+
+  UNBOUND IS A VALID STATE, and it reads the template. A test, a REPL session,
+  or a tool that has no run behind it gets exactly the behaviour the harness
+  had before this existed. That is what keeps the seam addable without a flag
+  day: nothing has to know whether a project store is present."
+  (:require [clojure.edn :as edn]
+            [clojure.java.io :as io]
+            [clojure.string :as str]
+            [clojure.tools.logging :as log]
+            [samizdat.store.outcomes :as outcomes]
+            [samizdat.store.userspace :as store]))
+
+;; --- the bound project -------------------------------------------------------
+
+(defonce ^:private project (atom nil))
+
+;; {[kind name] body} for the bound project.
+;;
+;; Reads are HOT: a prompt is rendered on every gate message and every turn
+;; assembly, and a threshold is read inside compiled predicates. One db query
+;; per read would put SQLite in the path of string interpolation. The cache is
+;; invalidated wholesale on any write and on any (un)bind — coarse on purpose,
+;; because the alternative is reasoning about which read a write could have
+;; affected, and a stale cell is the bug that looks like the supervisor's edit
+;; silently not taking.
+(defonce ^:private cache (atom {}))
+
+;; Bumped by every invalidation. `body` records the generation BEFORE it reads
+;; and refuses to cache a value read under an older one — otherwise a write
+;; landing between the read and the cache fill re-installed the pre-edit body,
+;; which then served until the next write: exactly the "supervisor's edit
+;; silently not taking" failure the cache comment warns about
+;; (karamazov-blt.8).
+(defonce ^:private generation (atom 0))
+
+(defn invalidate!
+  "Drop the read cache. Called on every write; public so a caller that changed
+  the store behind this namespace's back can say so."
+  []
+  (swap! generation inc)
+  (reset! cache {})
+  nil)
+
+(defn bind!
+  "Point userspace reads at this project's store. Called once by
+  system/start! with the project's db connection.
+
+  Returns the previous binding, so a caller that needs to restore it (a test,
+  a tool operating on another project) can."
+  [conn]
+  (let [prev @project]
+    (reset! project conn)
+    (invalidate!)
+    prev))
+
+(defn unbind!
+  "Detach from the project store — reads fall back to the shipped template.
+  The state a test and a bare REPL run in."
+  []
+  (reset! project nil)
+  (invalidate!)
+  nil)
+
+(defn conn
+  "The bound project connection, or nil."
+  []
+  @project)
+
+(defn bound? [] (some? @project))
+
+;; --- the project DIRECTORY ---------------------------------------------------
+;;
+;; The connection above says which store userspace reads; this says which tree
+;; the run is working IN. Prompt assembly needs it and cannot be handed it:
+;; `initial-messages` is called from a dozen cells and drivers, and the shipped
+;; system prompt has to know whether the project under work is the harness
+;; itself. Bound once by `system/start!` from the same config the drivers take
+;; their `:root` from.
+
+(defonce ^:private root (atom nil))
+
+(defn bind-root!
+  "Point userspace at the directory this process works on. Returns the previous
+  value."
+  [dir]
+  (let [prev @root]
+    (reset! root (some-> dir str))
+    prev))
+
+(defn project-root
+  "The bound project directory, or nil when nothing has bound one — a test, a
+  bare REPL."
+  []
+  @root)
+
+(def ^:private harness-markers
+  "Files that exist in a samizdat checkout and nowhere else. Two rather than
+  one, from opposite layers, so a directory that merely vendored a copy of the
+  loop manifest is not mistaken for the harness."
+  ["src/samizdat/workflow.clj" "resources/manifests/loop.edn"])
+
+;; --- the MODEL ---------------------------------------------------------------
+;;
+;; Which provider and model this run speaks to, for the prompt file layer
+;; below: .samizdat/prompts/<provider>/<model>/ is consulted for the running
+;; model and no other. Bound by system/start! from the run config, after the
+;; endpoint probe has said what a local server actually loaded.
+
+(defonce ^:private model (atom nil))
+
+(defn bind-model!
+  "Point the prompt file layer at this run's `{:provider kw :model string}`.
+  nil unbinds — the provider/model directories are then not consulted at
+  all, and only the plain project files and the store answer. Returns the
+  previous value."
+  [m]
+  (let [prev @model]
+    (reset! model (when (map? m) m))
+    prev))
+
+(defn model-context
+  "The bound `{:provider :model}`, or nil."
+  []
+  @model)
+
+(defn model-dir-matches?
+  "Whether a `.samizdat/prompts/<provider>/<dir>/` directory applies to
+  `model-id`: a case-insensitive PREFIX match, so `qwen3` covers
+  `Qwen3.8-27B-Q8_0` and `glm` covers `glm-5.3`. A prefix rather than an
+  exact id because the trait a per-model prompt accommodates is a family's
+  training, and an exact key would need re-authoring on every point release."
+  [dir model-id]
+  (boolean
+   (and (string? dir) (string? model-id)
+        (not (str/blank? dir))
+        (str/starts-with? (str/lower-case model-id) (str/lower-case dir)))))
+
+(defn self-hosting?
+  "Whether the project being worked on IS a samizdat checkout.
+
+  The system prompt spends several sections on this harness's own
+  architecture — cells and manifests, src-is-mechanism vs
+  resources-are-behaviour, `use what you build`. All of it is load-bearing
+  when the run's target is samizdat and all of it is standing instruction
+  about the wrong codebase when the target is anything else, in the
+  most-weighted part of the context (karamazov-8zk).
+
+  UNKNOWN READS AS TRUE. With no root bound there is nothing to go on, and the
+  shipped prompt is the harness's own; defaulting the other way would delete
+  whole instruction blocks from every run whose driver forgot to bind, which
+  is a silent failure rather than a loud one."
+  ([] (if-let [r (project-root)] (self-hosting? r) true))
+  ([dir]
+   (boolean (and dir (every? #(.exists (io/file (str dir) %)) harness-markers)))))
+
+;; --- the template ------------------------------------------------------------
+
+(def ^:private resource-path
+  "Where the shipped template for each kind lives on the classpath. The
+  extension is part of the kind, because the kind is what says how to read a
+  body: Clojure for a cell, EDN for a manifest or a policy table, markdown for
+  a prompt."
+  {:cell     (fn [name] (str "cells/" name ".clj"))
+   :manifest (fn [name] (str "manifests/" name ".edn"))
+   :policy   (fn [name] (str name ".edn"))
+   :prompt   (fn [name] (str "prompts/" name ".md"))})
+
+(defn template-path
+  "The classpath resource holding the shipped template for `kind`/`name`."
+  [kind name]
+  (if-let [f (get resource-path kind)]
+    (f name)
+    (throw (ex-info (str "no template path for userspace kind " (pr-str kind))
+                    {:kind kind :name name}))))
+
+(defn template
+  "The shipped template body for `kind`/`name`, or nil when nothing ships
+  under that name.
+
+  nil is not an error here. A project may hold userspace the harness never
+  shipped — a cell the supervisor wrote, a manifest it authored — and those
+  have no template by definition."
+  [kind name]
+  (some-> (io/resource (template-path kind name)) slurp))
+
+;; --- prompt FILES ------------------------------------------------------------
+;;
+;; A project carries prompt overrides as files a human and the agent can both
+;; read and edit in place, under <root>/.samizdat/prompts/:
+;;
+;;   <name>.md                       every provider, every model
+;;   <provider>/<name>.md            every model on that provider
+;;   <provider>/<model-dir>/<name>.md  one model family (prefix match)
+;;
+;; Most specific first; among model directories the LONGEST match wins, so a
+;; project can special-case a sub-family beneath a general one. A file, when
+;; present, IS the newest version — it beats a stored row, and `prompt-source`
+;; says so, because two sources of truth that silently shadow each other is
+;; the drift this project keeps finding. Read fresh on every call (a few
+;; stats, against a render that costs far more): the point of a file is that
+;; someone edits it in place, and a cache would pin the first content it saw.
+
+(defn- prompts-dir
+  "The project's prompt file directory, or nil when no root is bound."
+  []
+  (when-let [r (project-root)]
+    (io/file r ".samizdat" "prompts")))
+
+(defn- present-file
+  "`f` when it is a readable file, else nil."
+  [^java.io.File f]
+  (when (and f (.isFile f)) f))
+
+(defn- model-dirs
+  "Subdirectories of <prompts>/<provider>/ that apply to `model-id`, most
+  specific (longest name) first."
+  [^java.io.File provider-dir model-id]
+  (when (and provider-dir (.isDirectory provider-dir))
+    (->> (.listFiles provider-dir)
+         (filter #(.isDirectory ^java.io.File %))
+         (filter #(model-dir-matches? (.getName ^java.io.File %) model-id))
+         (sort-by #(- (count (.getName ^java.io.File %)))))))
+
+(defn prompt-file
+  "The file that overrides prompt `name` for the bound root and model, as
+  `{:path :layer}` — :layer being :model, :provider or :project — or nil when
+  no file applies."
+  [name]
+  (when-let [dir (prompts-dir)]
+    (let [{:keys [provider model]} (model-context)
+          pname (str name ".md")
+          provider-dir (when provider (io/file dir (clojure.core/name provider)))]
+      (or (some (fn [^java.io.File md]
+                  (when-let [f (present-file (io/file md pname))]
+                    {:path (.getPath f) :layer :model}))
+                (model-dirs provider-dir model))
+          (when-let [f (present-file (some-> provider-dir (io/file pname)))]
+            {:path (.getPath f) :layer :provider})
+          (when-let [f (present-file (io/file dir pname))]
+            {:path (.getPath f) :layer :project})))))
+
+(defn prompt-variants
+  "Every prompt file the project holds, as {name [variant …]} — each variant
+  `{:layer :path}` plus :provider and :model-dir where they apply. What the
+  `prompt` tool lists, so a per-model wording is a thing the supervisor can
+  see rather than a shadow it has to know to look for. {} with no root."
+  []
+  (if-let [^java.io.File dir (prompts-dir)]
+    (if-not (.isDirectory dir)
+      {}
+      (let [md? (fn [^java.io.File f] (and (.isFile f) (.endsWith (.getName f) ".md")))
+            nm (fn [^java.io.File f] (subs (.getName f) 0 (- (count (.getName f)) 3)))
+            project (for [f (.listFiles dir) :when (md? f)]
+                      [(nm f) {:layer :project :path (.getPath f)}])
+            provider (for [^java.io.File p (.listFiles dir) :when (.isDirectory p)
+                           f (.listFiles p) :when (md? ^java.io.File f)]
+                       [(nm f) {:layer :provider :provider (.getName p) :path (.getPath ^java.io.File f)}])
+            model (for [^java.io.File p (.listFiles dir) :when (.isDirectory p)
+                        ^java.io.File m (.listFiles p) :when (.isDirectory m)
+                        f (.listFiles m) :when (md? ^java.io.File f)]
+                    [(nm f) {:layer :model :provider (.getName p) :model-dir (.getName m)
+                             :path (.getPath ^java.io.File f)}])]
+        (reduce (fn [acc [n v]] (update acc n (fnil conj []) v))
+                {}
+                (sort-by (fn [[n v]] [n (:path v)])
+                         (concat project provider model)))))
+    {}))
+
+;; --- reads -------------------------------------------------------------------
+
+(declare cached-body)
+
+(defn- read-body
+  [kind name]
+  (if-let [c (conn)]
+    (if-let [t (template kind name)]
+      ;; Through seed! even when the project already has a row: seed! is what
+      ;; carries a harness upgrade into a project whose copy is still the
+      ;; factory one. Reading the row first and returning early is what pinned
+      ;; a project to whatever shipped the day it first ran.
+      (:body (store/seed! c kind name t))
+      ;; No template — a cell or manifest the supervisor wrote, which has one
+      ;; by definition only if the project holds it.
+      (:body (store/load-latest c kind name)))
+    (template kind name)))
+
+(defn body
+  "The body of `kind`/`name` for the current project.
+
+  The project's newest version when it has one; otherwise the shipped
+  template, seeded into the project as version 1 on the way past. Unbound,
+  the template with no seeding.
+
+  Returns nil when neither the project nor the template has it — the caller
+  decides whether that is an error, because it is one for a cell the manifest
+  references and not one for an optional prompt.
+
+  A :prompt is first looked for as a FILE under the project's
+  .samizdat/prompts/ (see `prompt-file`); the file layer is not cached, the
+  store/template layer below it is.
+
+  Cached per (kind, name) and invalidated on every write; see `cache`."
+  [kind name]
+  (or (when (= :prompt kind)
+        (some-> (prompt-file name) :path slurp))
+      (cached-body kind name)))
+
+(defn- cached-body
+  [kind name]
+  (let [k [kind name]
+        hit (get @cache k ::miss)]
+    (if (= ::miss hit)
+      (let [gen @generation
+            v (read-body kind name)]
+        ;; nil is cached too: an absent name is looked up on every render of a
+        ;; prompt block that may not exist, and re-querying for a row that is
+        ;; not there is the same cost as one that is.
+        ;;
+        ;; Cache only if no invalidation landed while we were reading — a
+        ;; stale fill after a concurrent save! would serve the pre-edit body
+        ;; until the NEXT write. The value itself is still returned: stale is
+        ;; fine for the read that raced, poisonous for every read after.
+        (swap! cache (fn [c] (if (= gen @generation) (assoc c k v) c)))
+        v)
+      hit)))
+
+(defn body!
+  "`body`, failing loud when it is absent. For a caller whose whole operation
+  is meaningless without it — a manifest node's cell, the system prompt."
+  [kind name]
+  (or (body kind name)
+      (throw (ex-info (str "no userspace " (clojure.core/name kind) " named "
+                           (pr-str name) ": the project has no version and"
+                           " nothing ships at " (template-path kind name))
+                      {:kind kind :name name}))))
+
+(defn prompt-source
+  "Where the text of prompt `name` comes from, for the `prompt` tool:
+  `{:source :file :layer … :path …}` for a project file, `{:source :project
+  :version n}` for a stored row, `{:source :template}` for the shipped file,
+  nil for a name nobody has."
+  [name]
+  (or (when-let [f (prompt-file name)]
+        {:source :file :layer (:layer f) :path (:path f)})
+      ;; A bound project SEEDS a shipped prompt as a factory row on first read,
+      ;; so "there is a row" does not mean the project authored anything. A
+      ;; row whose body is still the template's is reported as the template:
+      ;; that is where the words come from, and it is what a reader deciding
+      ;; whether to edit a file or `save` a version needs to know.
+      (when-let [c (conn)]
+        (when-let [row (store/load-latest c :prompt name)]
+          (if (= (:body row) (template :prompt name))
+            {:source :template}
+            {:source :project :version (:version row)})))
+      (when (template :prompt name)
+        {:source :template})))
+
+(defn edn-body
+  "`body` parsed as EDN — a manifest or a policy table. nil stays nil."
+  [kind name]
+  (some-> (body kind name) edn/read-string))
+
+(defn edn-body!
+  [kind name]
+  (edn/read-string (body! kind name)))
+
+;; --- writes ------------------------------------------------------------------
+
+(defn save!
+  "Append a new version of `kind`/`name` for the current project. Returns the
+  new version number, or nil when no project is bound.
+
+  nil rather than a throw on an unbound write: a tool that edits userspace
+  outside a run is a real situation (a REPL session, a test), and it should
+  hear that nothing was stored rather than crash.
+
+  `rationale` — why the edit was made — is stored with the version and shown
+  in the history; see store/save!."
+  ([kind name new-body] (save! kind name new-body nil))
+  ([kind name new-body rationale]
+   (if-let [c (conn)]
+     (let [v (store/save! c kind name new-body "project" rationale)]
+       (invalidate!)
+       (log/info "userspace" (clojure.core/name kind) name "saved as version" v)
+       v)
+     (do (log/warn "userspace save ignored — no project store is bound:"
+                   (clojure.core/name kind) name)
+         nil))))
+
+(defn revert!
+  "Re-append an older version as the newest — the rollback, recorded with the
+  caller's stated reason. Returns the new version number, or nil."
+  ([kind name version] (revert! kind name version nil))
+  ([kind name version rationale]
+   (when-let [c (conn)]
+     (let [v (store/revert! c kind name version rationale)]
+       (invalidate!)
+       v))))
+
+(defn record-run-outcome!
+  "Stamp a run's ending — :shipped, :failed or :error (samizdat.store.outcomes)
+  — onto the project-authored versions that were current for it: their
+  standing, read back through `versions`. A quiet nil when no project is
+  bound, like every other unbound write; an outcome outside the vocabulary
+  throws whether bound or not."
+  [outcome]
+  (outcomes/column outcome)
+  (when-let [c (conn)]
+    (store/record-run-outcome! c outcome)
+    true))
+
+(defn versions
+  "The edit history of one piece of userspace, oldest first. Empty when
+  unbound: the template has no history, which is the point of copying it."
+  [kind name]
+  (if-let [c (conn)] (store/versions c kind name) []))
+
+(defn names
+  "Every name the project holds at `kind`, with its latest version. Empty when
+  unbound."
+  [kind]
+  (if-let [c (conn)] (store/names c kind) []))
+
+(defn prescription-mass
+  "This project's accumulated prescription: which kinds it has overridden and
+  by how much. `{}` when unbound or when nothing has been overridden, which is
+  the honest answer for a project still running the shipped template."
+  []
+  (if-let [c (conn)] (store/prescription c) {}))
+
+(defn seed-all!
+  "Seed every named template of `kind` into the project, and return the
+  project's bodies for that kind as {name body}.
+
+  `template-names` is enumerated by the caller rather than globbed, for the
+  reason every other resource list in this codebase is: a classpath has no
+  directory listing and an embedded resource has no filesystem path, so a glob
+  finds nothing inside a built binary and the layer silently comes up empty.
+
+  What comes back is the PROJECT's bodies, not the templates: a name the
+  project has evolved returns its own version, and a name it has authored that
+  no template covers is included too. Seeding and loading in one motion,
+  because the only way to be sure a project has its copy is to try."
+  [kind template-names]
+  (if-let [c (conn)]
+    (do (doseq [n template-names]
+          (when-let [t (template kind n)]
+            (store/seed! c kind n t)))
+        (invalidate!)
+        (store/latest-bodies c kind))
+    ;; Unbound: the template IS the layer.
+    (into {}
+          (keep (fn [n] (when-let [t (template kind n)] [n t])))
+          template-names)))

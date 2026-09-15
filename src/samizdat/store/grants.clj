@@ -22,7 +22,7 @@
   override a hard deny.
 
   The write side (`grant!`) is a HUMAN-ONLY surface — nothing the model emits
-  reaches it. That is property 4 of the security model (docs/security.md): the
+  reaches it. That is property 4 of the security model (docs/RFCS/RFC-003-security-model.md): the
   model has no edge into the grants table. Enforced structurally by never
   exposing grant! through a tool; the model can only ever produce a
   needs-approval result that a person acts on."

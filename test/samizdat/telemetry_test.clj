@@ -5,6 +5,7 @@
   "The run-health digest the supervisor introspects on — pure over journal rows."
   (:require [clojure.string :as str]
             [clojure.test :refer [deftest testing is]]
+            [samizdat.agent.tools.introspect :as introspect]
             [samizdat.agent.telemetry :as telemetry]))
 
 (defn- row [branch turn tool cat]
@@ -50,3 +51,263 @@
     (is (str/includes? d "Reviewer: pass"))
     (is (str/includes? d "Critic: ship"))
     (is (str/includes? d "revision 1"))))
+
+;; --- failure exemplars: the digest leads with the problem, not the rate -----
+
+(deftest failure-exemplars-carry-the-turn-and-the-words
+  (let [rows [{:id 1 :turn 1 :branch_id "B1" :tool_name "shell"
+               :category "success" :result "ok"}
+              {:id 2 :turn 2 :branch_id "B1" :tool_name "__parse_error__"
+               :category "mechanics"
+               :parse_error "JSON error (end-of-file inside string)"}
+              {:id 3 :turn 3 :branch_id "B1" :tool_name "__provider_error__"
+               :category "neutral"
+               :result "local error 500 — Context size has been exceeded"}
+              {:id 4 :turn 4 :branch_id "B1" :tool_name "shell"
+               :category "failure" :result "make: no rule to make target"}]
+        out (telemetry/failure-exemplars rows {:per-kind 3 :chars 120})]
+    (testing "each kind appears in its own words with a fetchable row id"
+      (is (str/includes? (get-in out [:parse :lines]) "row 2"))
+      (is (str/includes? (get-in out [:parse :lines]) "end-of-file inside string"))
+      (is (str/includes? (get-in out [:provider :lines]) "row 3"))
+      (is (str/includes? (get-in out [:provider :lines]) "Context size"))
+      (is (str/includes? (get-in out [:tool :lines]) "row 4"))
+      (is (str/includes? (get-in out [:tool :lines]) "make: no rule")))
+    (testing "successes are not failures"
+      (is (not-any? #(str/includes? (str (get-in out [% :lines])) "row 1")
+                    [:parse :provider :tool])))))
+
+(deftest failure-exemplars-cap-newest-last-and-count-the-rest
+  (let [rows (for [i (range 10)]
+               {:id i :turn i :branch_id "B1" :tool_name "__parse_error__"
+                :category "mechanics" :parse_error (str "boom-" i)})
+        out (telemetry/failure-exemplars rows {:per-kind 2 :chars 60})]
+    (is (= 10 (get-in out [:parse :count]))
+        "the count survives the cap, so the scale is never hidden")
+    (is (str/includes? (get-in out [:parse :lines]) "boom-9") "newest kept")
+    (is (not (str/includes? (get-in out [:parse :lines]) "boom-0"))
+        "oldest dropped")))
+
+(deftest a-clean-run-has-no-failures-section
+  (is (nil? (telemetry/failure-exemplars
+             [{:id 1 :turn 1 :branch_id "B1" :tool_name "shell"
+               :category "success" :result "ok"}]
+             {:per-kind 3 :chars 120}))))
+
+(deftest the-digest-leads-with-the-failures
+  (let [d (telemetry/digest {:results [{:status :exhausted}]
+                             :review :revise :critic nil :revision 0}
+                            [{:id 7 :turn 3 :branch_id "T0"
+                              :tool_name "__parse_error__" :category "mechanics"
+                              :parse_error "JSON error (missing entry in object)"}])]
+    (is (str/includes? d "Failures this run"))
+    (is (str/includes? d "row 7"))
+    (is (str/includes? d "missing entry in object"))
+    (is (str/includes? d "fetch_turn"))))
+
+;; --- layer attribution (karamazov-i1u) --------------------------------------
+
+(deftest failures-are-attributed-to-a-layer
+  (testing "a base frame is the base — unreachable from a role loop"
+    (is (= :base (telemetry/layer-of
+                  "UNIQUE constraint failed: branches.id at samizdat.store.runs/open-branch!")))
+    (is (= :base (telemetry/layer-of "samizdat.agent.loop/tool-step threw"))))
+  (testing "a cell, manifest, prompt or policy is userspace — the tools reach it"
+    (is (= :userspace (telemetry/layer-of "cells.board/next threw: boom")))
+    (is (= :userspace (telemetry/layer-of "cells/feature.clj:112 nil pointer")))
+    (is (= :userspace (telemetry/layer-of "the board manifest has no :review edge")))
+    (is (= :userspace (telemetry/layer-of "gates.edn :storm-threshold is not a number"))))
+  (testing "userspace wins a tie: a cell frame means the cell is what can
+            actually be edited, whatever base code it called into"
+    (is (= :userspace (telemetry/layer-of
+                       "cells.board/next → samizdat.store.runs/open-branch! failed"))))
+  (testing "silence rather than a guess when the text does not say"
+    (is (nil? (telemetry/layer-of "something went wrong")))
+    (is (nil? (telemetry/layer-of nil)))))
+
+(deftest the-digest-tells-the-supervisor-which-layer-owns-a-crash
+  (let [base (telemetry/digest
+              {:results [] :revision 0
+               :errors ["boom at samizdat.store.runs/open-branch!"]}
+              [])
+        user (telemetry/digest
+              {:results [] :revision 0 :errors ["boom in cells.board/next"]}
+              [])]
+    (is (str/includes? base "layer: base"))
+    (is (str/includes? base "record it with"))
+    (is (str/includes? user "layer: userspace"))
+    (is (str/includes? user "yours"))))
+
+(deftest the-digest-shows-what-worked-not-only-what-broke
+  ;; Metan App. D: a failures-only diet "strips out positive exemplars and
+  ;; produces overfit constraints".
+  (let [rows [{:id 1 :turn 1 :branch_id "T0" :tool_name "write_file"
+               :category "success" :result "wrote src/mdlite/core.clj"}
+              {:id 2 :turn 2 :branch_id "T0" :tool_name "shell"
+               :category "failure" :result "1 test failed"}
+              {:id 3 :turn 3 :branch_id "T0" :tool_name "read_file"
+               :category "neutral" :result "..."}]
+        out (telemetry/failure-exemplars rows {:per-kind 3 :chars 120 :wins 2})]
+    (is (str/includes? (get-in out [:wins :lines]) "wrote src/mdlite/core.clj"))
+    (is (= 1 (get-in out [:wins :count])))
+    (is (not (str/includes? (str (get-in out [:wins :lines])) "row 3"))
+        "a neutral read is not a win worth reporting"))
+  (testing "a clean run still reports nothing — wins alone are not trouble"
+    (is (nil? (telemetry/failure-exemplars
+               [{:id 1 :turn 1 :branch_id "T0" :tool_name "write_file"
+                 :category "success" :result "ok"}]
+               {:per-kind 3 :chars 120 :wins 2}))))
+  (testing "and the digest renders them"
+    (let [d (telemetry/digest
+             {:results [] :revision 0}
+             [{:id 1 :turn 1 :branch_id "T0" :tool_name "write_file"
+               :category "success" :result "wrote core.clj"}
+              {:id 2 :turn 2 :branch_id "T0" :tool_name "shell"
+               :category "failure" :result "boom"}])]
+      (is (str/includes? d "what WORKED"))
+      (is (str/includes? d "wrote core.clj")))))
+
+(deftest the-digest-shows-each-branch-the-fitness-the-cull-reads
+  ;; RFC-012 F3: one number for selection and evaluation. The supervisor is
+  ;; shown per branch what the cull reads, on the same scale it judges its
+  ;; own changes by.
+  (let [d (telemetry/digest {:results [{:status :done}] :review :pass
+                             :critic :ship :revision 1
+                             :fitness {"W0" 1.25 "W1" -0.5}}
+                            [(row "W0" 1 "done" "success")
+                             (row "W1" 1 "shell" "failure")])]
+    (is (str/includes? d "W0: 1 turns, 0 thrash, shipped=true, fitness 1.25/turn"))
+    (is (str/includes? d "W1: 1 turns, 0 thrash, shipped=false, fitness -0.50/turn")))
+  (testing "a branch with no measurement shows none rather than a zero"
+    (let [d (telemetry/digest {:results [] :fitness {}} [(row "W0" 1 "shell" "success")])]
+      (is (str/includes? d "W0: 1 turns, 0 thrash, shipped=false"))
+      (is (not (str/includes? d "shipped=false, fitness"))))))
+
+;; --- the shape of the failures, not just the newest few (karamazov-7mo M7) --
+
+(deftest a-signature-collapses-instances-of-one-failure
+  (testing "the parts that differ between instances are stripped"
+    (is (= (telemetry/failure-signature "No such file: /a/b/core.clj at line 12")
+           (telemetry/failure-signature "No such file: /x/y/other.clj at line 907"))))
+  (testing "quoted text is one of those parts"
+    (is (= (telemetry/failure-signature "String to replace not found: \"foo bar\"")
+           (telemetry/failure-signature "String to replace not found: \"baz qux\""))))
+  (testing "different failures stay different"
+    (is (not= (telemetry/failure-signature "connection reset by peer")
+              (telemetry/failure-signature "String to replace not found")))))
+
+(deftest patterns-appear-only-once-there-is-a-stack
+  (let [tool-row (fn [n] {:turn n :branch_id "B1" :id n :tool_name "edit_file"
+                          :category "failure"
+                          :result (str "String to replace not found: \"x" n "\"")})
+        opts {:floor 6 :patterns 6 :chars 160}]
+    (testing "below the floor the exemplars already say everything"
+      (is (nil? (telemetry/failure-patterns (map tool-row (range 1 5)) opts))))
+    (testing "at the floor the distribution appears, collapsed to one line"
+      (let [ps (telemetry/failure-patterns (map tool-row (range 1 9)) opts)]
+        (is (= 1 (count ps)))
+        (is (= 8 (:count (first ps))))
+        (is (= :tool (:kind (first ps))))))))
+
+(deftest patterns-are-ordered-by-how-much-they-matter
+  (let [rows (concat
+              (for [n (range 1 11)]
+                {:turn n :branch_id "B1" :id n :tool_name "__parse_error__"
+                 :parse_error (str "unbalanced delimiter at " n)})
+              (for [n (range 11 14)]
+                {:turn n :branch_id "B1" :id n :tool_name "shell"
+                 :category "failure" :result "command not found"}))
+        ps (telemetry/failure-patterns rows {:floor 6 :patterns 6 :chars 160})]
+    (is (= 10 (:count (first ps))) "the commonest shape leads")
+    (is (= :parse (:kind (first ps))))
+    (is (= 3 (:count (second ps))))
+    (testing "and they render with their counts"
+      (is (str/includes? (telemetry/pattern-lines ps) "10x parse")))))
+
+(deftest the-digest-carries-the-distribution
+  (let [rows (for [n (range 1 9)]
+               {:turn n :branch_id "B1" :id n :tool_name "edit_file"
+                :category "failure"
+                :result (str "String to replace not found: \"x" n "\"")})
+        out (telemetry/digest {:results [{:status :done}]} rows)]
+    (is (str/includes? (str out) "8x tool"))
+    (is (str/includes? (str out) "one fix, not many"))))
+
+;; --- accumulated prescription in the brief (karamazov-7mo M9) --------------
+
+(deftest a-project-that-has-tuned-little-is-not-lectured-about-it
+  (is (nil? (telemetry/prescription-report {} 3)))
+  (is (nil? (telemetry/prescription-report {:prompt {:names 2 :versions 2 :chars 100 :factory-chars 100}} 3))
+      "below the floor it says nothing")
+  (is (nil? (telemetry/prescription-report {:prompt {:names 9 :chars 1 :factory-chars 1}} nil))
+      "and with no floor given it decides nothing on its own"))
+
+(deftest prescription-reports-what-the-project-made-its-own-and-how-much-bigger
+  (let [r (telemetry/prescription-report
+           {:prompt {:names 3 :versions 5 :chars 1500 :factory-chars 1000}
+            :policy {:names 1 :versions 1 :chars 500 :factory-chars 500}}
+           3)]
+    (is (= 4 (:names r)))
+    (is (str/includes? (:kinds r) "1 policy"))
+    (is (str/includes? (:kinds r) "3 prompt"))
+    (is (= 133 (:pct r)) "growth against the templates is the point")
+    (testing "it returns data, never a sentence"
+      (is (map? r)))))
+
+(deftest the-digest-warns-before-the-tenth-rule
+  (let [out (telemetry/digest
+             {:results [{:status :done}]
+              :prescription {:prompt {:names 4 :versions 9 :chars 4000 :factory-chars 2000}}}
+             [])]
+    (is (str/includes? (str out) "already tuned itself"))
+    (is (str/includes? (str out) "200% the size"))))
+
+;; --- what the run cost, in the health block -----------------------------------
+
+(deftest run-health-shows-the-whole-bill-and-the-cache-rate
+  ;; karamazov-2rqb.1 and .2. The supervisor's own view of the run showed turn
+  ;; counts and nothing about money: not what the side models spent, and not
+  ;; whether the prefix was caching — the two numbers that decide whether a
+  ;; loop is affordable. Both are now summed for it (journal/run-usage), so
+  ;; this only has to render them.
+  (let [rows [(row "W0" 1 "read_file" "neutral")]
+        out (introspect/render-health rows 10
+                                      {:turns 1 :side-calls 3
+                                       :total-tokens 91234
+                                       :cache-hit-rate 0.87})]
+    (is (str/includes? out "turns: 1 of 10"))
+    (is (str/includes? out "91234") "the whole bill, turns and side calls alike")
+    (is (str/includes? out "side calls: 3"))
+    (is (str/includes? out "87%") "rounded — a hit rate is read, not computed with")))
+
+(deftest run-health-says-unknown-when-the-provider-reports-no-cache-lane
+  ;; A 0% would assert every token missed the cache. llama.cpp and ollama
+  ;; report no lane at all, and the honest answer there is that we do not know.
+  (let [out (introspect/render-health [(row "W0" 1 "read_file" "neutral")] nil
+                                      {:turns 1 :side-calls 0
+                                       :total-tokens 500
+                                       :cache-hit-rate nil})]
+    (is (not (str/includes? out "0%")))
+    (is (str/includes? out "cache hit: n/a"))))
+
+(deftest run-health-without-usage-is-what-it-always-was
+  ;; The two-arity call still works: a context with no run database renders
+  ;; the tallies alone rather than a row of zeroes that look measured.
+  (let [out (introspect/render-health [(row "W0" 1 "read_file" "neutral")] 10)]
+    (is (str/includes? out "turns: 1 of 10"))
+    (is (not (str/includes? out "cache hit")))))
+
+(deftest the-context-block-rendering-names-cost-and-silence
+  ;; karamazov-2rqb.3. Two questions, and only the first is about size: which
+  ;; part is spending the turn, and which parts had nothing to say. A part that
+  ;; rendered nothing is named as silent rather than shown as 0, because a 0
+  ;; reads as a measurement of a part that is present and empty.
+  (let [out (introspect/render-context [[:task 40] [:ledger 1200] [:failures 300]])]
+    (is (str/includes? out "total: 1540 chars"))
+    (is (str/includes? out "ledger: 1200"))
+    (is (str/includes? out "rendered nothing: memories, inbox, shared-tree, artifacts")
+        "in reading order, and only the ones that were absent"))
+  (is (str/includes? (str/lower-case (introspect/render-context nil))
+                     "no context block")
+      "a branch that has not taken a turn yet says so, in words a project can
+       reword — prompts/context-empty.md, not a literal in src"))

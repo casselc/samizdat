@@ -30,13 +30,18 @@
   server-pushed notifications go to the diagnostics store. This is what
   makes the client safe across concurrent callers — each request reading the
   shared stream itself let two callers steal each other's frames
-  (code-review-2026-08 #4). Each request is bounded by a timeout so a
+  (provenance CR1-4). Each request is bounded by a timeout so a
   wedged server costs a known amount rather than the run."
-  (:require [clojure.data.json :as json]
+  (:require ;; the java.time.* host shim, before data.json — see samizdat.store.journal
+            [jolt.time]
+            [clojure.data.json :as json]
             [clojure.java.io :as io]
             [clojure.string :as str]
+            [ebb.core :as ebb]
             [jolt.process :as jp]
-            [samizdat.engine.proc :as proc])
+            [samizdat.cancel :as cancel]
+            [samizdat.engine.proc :as proc]
+            [samizdat.security.secrets :as secrets])
   (:import [java.io BufferedInputStream OutputStream]))
 
 ;; root -> {:proc :out :in :next-id :opened :diagnostics :pending}
@@ -92,7 +97,7 @@
   nobody else can consume it by mistake.
 
   Any exit — EOF, a read failure, or a throw while routing a frame (which
-  used to kill the loop with waiters still parked, review2 #17) — releases
+  used to kill the loop with waiters still parked, provenance R2-17) — releases
   every pending waiter with ::closed and evicts the client from the
   registry by its :root, so a later call starts a fresh server instead of
   reusing a corpse and waiting out the full timeout."
@@ -110,7 +115,7 @@
                     (catch Throwable _ false)))]
         (when (and msg ok?)
           (recur true))))
-    ;; any exit: release every waiter, evict the corpse (review2 #17)
+    ;; any exit: release every waiter, evict the corpse (provenance R2-17)
     (doseq [[_ p] @pending] (deliver p ::closed))
     (when-let [root (:root client)]
       (swap! clients dissoc root)))
@@ -123,27 +128,35 @@
     (let [uri (get-in msg [:params :uri])
           diags (get-in msg [:params :diagnostics])
           ;; Version the push so a waiter can tell a push that answers ITS
-          ;; request from one that predates it (review2 #10).
+          ;; request from one that predates it (provenance R2-10).
           n (swap! (:diag-n client) inc)]
       (swap! (:diagnostics client) assoc uri {:n n :diags diags}))))
 
 (defn- request!
   "Send a request and park on its id until the reader delivers the response
   (or the timeout / a server close intervenes). Returns the :result, throws
-  on an :error, a timeout, or the server closing."
+  on an :error, a timeout, or the server closing.
+
+  The wait is a park on the caller's fiber, not a blocking deref on its
+  carrier (RFC-013): the deref runs under `via blk` with the read timeout as
+  its deadline, so a cancelled turn gets its thread back at once — a promise
+  deref is interruptible — rather than when the timeout expires. The pending
+  entry is released on every exit, a cancel included."
   [client method params]
   (let [id (swap! (:next-id client) inc)
         p (promise)]
     (swap! (:pending client) assoc id p)
-    (send-frame! client {:jsonrpc "2.0" :id id :method method :params params})
-    (let [msg (deref p read-timeout-ms ::timeout)]
-      (swap! (:pending client) dissoc id)
-      (cond
-        (= ::timeout msg) (throw (ex-info (str "lsp: no response to " method) {:method method}))
-        (= ::closed msg) (throw (ex-info (str "lsp: server closed during " method) {:method method}))
-        :else (if-let [e (:error msg)]
-                (throw (ex-info (str "lsp error: " (:message e)) {:error e}))
-                (:result msg))))))
+    (try
+      (send-frame! client {:jsonrpc "2.0" :id id :method method :params params})
+      (let [[tag msg] (cancel/with-deadline (ebb/via ebb/blk (deref p)) read-timeout-ms)]
+        (cond
+          (= :timeout tag) (throw (ex-info (str "lsp: no response to " method) {:method method}))
+          (= :err tag) (throw msg)
+          (= ::closed msg) (throw (ex-info (str "lsp: server closed during " method) {:method method}))
+          :else (if-let [e (:error msg)]
+                  (throw (ex-info (str "lsp error: " (:message e)) {:error e}))
+                  (:result msg))))
+      (finally (swap! (:pending client) dissoc id)))))
 
 (defn- notify! [client method params]
   (send-frame! client {:jsonrpc "2.0" :method method :params params}))
@@ -152,11 +165,23 @@
 
 (defn- uri [path] (str "file://" (.getAbsolutePath (io/file path))))
 
+(defn spawn-spec
+  "What start! spawns, as data, so a test can hold the seam without a server.
+
+  The environment is the SCRUBBED one — the same seam the shell tool, verify
+  and gitdiff spawn through. clojure-lsp was the one subprocess inheriting the
+  full parent environment, and it re-spawns children of its own (classpath
+  resolution) that inherit whatever it got (karamazov-blt.27)."
+  []
+  {:cmd ["clojure-lsp" "listen"]
+   :opts {:env (secrets/scrubbed-process-env)}})
+
 (defn start!
   "Spawn clojure-lsp for `root` and run the initialize/initialized
   handshake. Returns the client map."
   [root]
-  (let [p (jp/process ["clojure-lsp" "listen"])
+  (let [{:keys [cmd opts]} (spawn-spec)
+        p (jp/process cmd opts)
         ^java.lang.Process osproc (:proc p)
         client {:proc p
                 :root root
@@ -235,7 +260,7 @@
   "The problems clojure-lsp reports for `path`. didOpen/didChange trigger a
   publishDiagnostics push; the reader stores each push versioned per uri, so
   this takes the version at entry and waits for a push newer than it
-  (review2 #10) — another caller on the same file cannot erase what this one
+  (provenance R2-10) — another caller on the same file cannot erase what this one
   is waiting for, and this one cannot return a push that predates its own
   request. A push that never arrives is an error, not a silent [] `clean`."
   [client path]

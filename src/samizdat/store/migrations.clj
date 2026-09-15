@@ -287,7 +287,7 @@
   ;; human, the grant persists here scoped to its run and is consulted ahead of
   ;; the base rules on later commands. Human-only writes: nothing the model
   ;; emits reaches this table (the model has no edge into grants — see the
-  ;; security model, docs/security.md). A grant can never override a hard deny.
+  ;; security model, docs/RFCS/RFC-003-security-model.md). A grant can never override a hard deny.
   ["CREATE TABLE IF NOT EXISTS grants (
       id         INTEGER PRIMARY KEY AUTOINCREMENT,
       run_id     TEXT NOT NULL,
@@ -302,12 +302,40 @@
   ;; did), a knowledge row is a claim extracted as worth keeping — content is
   ;; the searchable text, kind separates notes from other kinds later. Recall
   ;; is a LIKE scan, so content is the index and needs no extra one.
+  ;;
+  ;; A ROW IS A VERSION OF A BELIEF, NOT THE BELIEF. `restate!` used to
+  ;; UPDATE content in place, and you cannot retract what you overwrote: once
+  ;; the previous wording was gone nothing could ask what we believed or what
+  ;; made us believe it, so a premise that turned out false left no trace and
+  ;; everything downstream of it kept standing (karamazov-oov). That is the
+  ;; 238-turn run — every re-read CONFIRMED the code was fine, which is
+  ;; exactly why it read again.
+  ;;
+  ;; `lineage_id` is the subject; `current` says which version speaks for it
+  ;; now. A FLAG rather than MAX(version), because max-version cannot express
+  ;; "retracted with no replacement" and that is the shape a disproven belief
+  ;; has — the run needed its premise withdrawn, not edited into another one.
+  ;; A lineage with no current row is a retraction.
+  ;;
+  ;; `cause` is why the row was written. The model can only act on what it
+  ;; knows about, so "this is false" is a dead end where "this is false, and
+  ;; here is what made us believe it" is a lead. Nullable like
+  ;; userspace.rationale: most writes have nothing to say about their origin,
+  ;; and inventing text would make the history lie.
   ["CREATE TABLE IF NOT EXISTS knowledge (
-      id         TEXT PRIMARY KEY,
-      content    TEXT NOT NULL,
-      kind       TEXT NOT NULL DEFAULT 'note',
-      created_at TEXT NOT NULL
-    )"])
+      id             TEXT PRIMARY KEY,
+      content        TEXT NOT NULL,
+      kind           TEXT NOT NULL DEFAULT 'note',
+      created_at     TEXT NOT NULL,
+      lineage_id     TEXT,
+      current        INTEGER NOT NULL DEFAULT 1,
+      cause          TEXT,
+      supersedes     TEXT,
+      retired_at     TEXT,
+      retired_reason TEXT
+    )"
+   "CREATE INDEX IF NOT EXISTS idx_knowledge_lineage ON knowledge(lineage_id)"
+   "CREATE INDEX IF NOT EXISTS idx_knowledge_current ON knowledge(current)"])
 
 (def ^:private v10
   ;; Agent mailbox: durable messages between branches working one feature.
@@ -327,6 +355,419 @@
 
    "CREATE INDEX IF NOT EXISTS idx_messages_run ON messages(run_id, read_at)"])
 
+(def ^:private v11
+  ;; THE USERSPACE LAYER, per project.
+  ;;
+  ;; The harness ships a userspace TEMPLATE in resources/ — the cells, the
+  ;; manifests, the policy tables, the prompts. A project seeds its own copy
+  ;; from that template on first use and then evolves it: every edit the
+  ;; supervisor makes is a new version HERE, in this project's database, and
+  ;; the shipped files are never written. That is what lets two projects
+  ;; running the same harness diverge in how they work, which is the whole
+  ;; point of the split — src/ is capability, userspace is the loop that
+  ;; assembles capabilities, and the loop belongs to the project.
+  ;;
+  ;; One table, four kinds ('cell', 'manifest', 'policy', 'prompt'), because
+  ;; the lifecycle is identical for all of them: seed from the template, load
+  ;; the latest version, append a version on edit, roll back by pointing at an
+  ;; older row. Append-only for the same reason the workflows table was — the
+  ;; edit history of a system that rewrites itself is the most valuable thing
+  ;; in the database.
+  ;;
+  ;; `body` is TEXT for every kind: Clojure source for a cell, EDN for a
+  ;; manifest or a policy table, markdown for a prompt. The kind says how to
+  ;; read it; nothing here parses it.
+  ["CREATE TABLE IF NOT EXISTS userspace (
+      kind       TEXT NOT NULL,
+      name       TEXT NOT NULL,
+      version    INTEGER NOT NULL,
+      body       TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      PRIMARY KEY (kind, name, version)
+    )"
+
+   ;; Manifests were the one layer that already worked this way. Fold them in
+   ;; rather than leaving two mechanisms: the workflows table keeps its rows
+   ;; (nothing is dropped, and a rollback to a pre-migration version still
+   ;; resolves). store/workflows.clj was a thin shim over this table and has
+   ;; since been retired; callers use samizdat.store.userspace directly
+   ;; so samizdat.workflow and the manifest tool keep their call sites.
+   "INSERT OR IGNORE INTO userspace (kind, name, version, body, created_at)
+      SELECT 'manifest', name, version, edn, created_at FROM workflows"
+
+   ;; Reads are always 'the newest version of this name' — the index the
+   ;; loader hits on every compile.
+   "CREATE INDEX IF NOT EXISTS idx_userspace_latest
+      ON userspace(kind, name, version DESC)"])
+
+(def ^:private v12
+  ;; WHO holds a task, not just which run.
+  ;;
+  ;; claim! guarded on `(run_id IS NULL OR run_id = ?)` and set run_id, which
+  ;; makes the claim exclusive BETWEEN runs and a no-op WITHIN one. In a team
+  ;; workflow the competing agents are branches of a single run — several
+  ;; implementors fanned out over one feature — so two workers both claimed the
+  ;; same task and both believed they held it. The docstring cited provenance A-4 (two beam
+  ;; branches whose reads both saw the unclaimed row) and had fixed the
+  ;; read-then-write race while leaving the granularity wrong for exactly the
+  ;; case it named.
+  ;;
+  ;; run_id keeps its meaning — which board a task is on, NULL for the backlog —
+  ;; and branch_id says who is working it. Both are needed: the board is shared
+  ;; by the run, the work is done by a branch.
+  ["ALTER TABLE tasks ADD COLUMN branch_id TEXT"
+
+   ;; Existing claimed rows predate the distinction. Left with branch_id NULL,
+   ;; which reads as "on this run's board, nobody holding it" — claimable,
+   ;; which is the safe reading: the alternative is a task no branch can ever
+   ;; take because it is attributed to a branch that no longer exists.
+   "CREATE INDEX IF NOT EXISTS idx_tasks_holder ON tasks(run_id, branch_id)"])
+
+(def ^:private v13
+  ;; An index for long-term memory.
+  ;;
+  ;; `recall` was a LIKE scan and the docstring said so — "content is the whole
+  ;; searchable payload, so no extra index" — which is fine at a hundred rows
+  ;; and is not a plan. Knowledge is the one table that deliberately OUTLIVES
+  ;; every run, so it is the one whose row count only goes up, and a substring
+  ;; scan degrades exactly as the memory becomes worth having.
+  ;;
+  ;; Standalone FTS5 like failures_fts and shared_artifacts_fts: the indexed
+  ;; text is a projection, external-content deletes would require the exact
+  ;; indexed values back, and sync is app-managed in store.knowledge with no
+  ;; triggers. Same shape, same reasons, third time.
+  ;;
+  ;; Backfilled here rather than lazily, so a project that has been running for
+  ;; months does not have a search that silently covers only what it learned
+  ;; after the upgrade — the failure mode of a lazy backfill on a recall path
+  ;; is a confident empty answer.
+  ["CREATE VIRTUAL TABLE IF NOT EXISTS knowledge_fts USING fts5(content)"
+   "INSERT INTO knowledge_fts (rowid, content) SELECT rowid, content FROM knowledge"])
+
+(def ^:private v14
+  ;; Memory that learns from being used.
+  ;;
+  ;; A knowledge row was content + kind + a timestamp: everything ever
+  ;; remembered, equally, forever. Recall could rank by text relevance (v13)
+  ;; but not by whether a memory had ever been WORTH recalling — so the note
+  ;; that saved three runs and the note nobody ever read again looked the same,
+  ;; and the supervisor reading them had no way to tell which was which.
+  ;;
+  ;; The axes are dirge's (src/extras/salience.rs), which are in turn the
+  ;; converged LangMem/MemoryOS taxonomy:
+  ;;
+  ;;   salience    — how important, decayed by disuse and reinforced by use
+  ;;   confidence  — how likely to be TRUE, which is a different question
+  ;;   use_count / last_used_at — being looked up IS the relevance signal
+  ;;   success_count / failure_count — did acting on it actually work
+  ;;   pinned      — never decayed, never evicted
+  ;;
+  ;; salience and confidence are separate on purpose: a fact can be important
+  ;; but contested, or trivial but certain, and collapsing them loses exactly
+  ;; the distinction a supervisor needs when two memories disagree.
+  ;;
+  ;; run_id records which run formed the memory, so a claim can be traced back
+  ;; to the evidence that produced it.
+  ["ALTER TABLE knowledge ADD COLUMN salience REAL NOT NULL DEFAULT 0.5"
+   "ALTER TABLE knowledge ADD COLUMN confidence REAL NOT NULL DEFAULT 0.6"
+   "ALTER TABLE knowledge ADD COLUMN use_count INTEGER NOT NULL DEFAULT 0"
+   "ALTER TABLE knowledge ADD COLUMN last_used_at TEXT"
+   "ALTER TABLE knowledge ADD COLUMN success_count INTEGER NOT NULL DEFAULT 0"
+   "ALTER TABLE knowledge ADD COLUMN failure_count INTEGER NOT NULL DEFAULT 0"
+   "ALTER TABLE knowledge ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0"
+   "ALTER TABLE knowledge ADD COLUMN run_id TEXT"
+   "CREATE INDEX IF NOT EXISTS idx_knowledge_salience ON knowledge(salience DESC)"])
+
+(def ^:private v15
+  ;; Corroboration: how many DISTINCT runs have seen this.
+  ;;
+  ;; A memory could already say how often acting on it worked, and could not
+  ;; say how many independent runs produced it in the first place. Those are
+  ;; different questions and the second is the one that separates a pattern
+  ;; from a bad afternoon: a single run can go wrong for reasons that have
+  ;; nothing to do with the loop — a flaky provider, an unlucky task — and a
+  ;; supervisor that retunes the harness on one run's evidence is fitting the
+  ;; noise.
+  ;;
+  ;; The mechanic is backpass's (VISION.md, `Evidence is the only currency`):
+  ;; a new instruction needs corroboration from at least two distinct
+  ;; sessions, one session never counts twice however often it is re-analysed,
+  ;; and corroboration accumulates in a ledger across runs rather than
+  ;; resetting each time.
+  ;;
+  ;; `last_run_id` is what makes `distinct` real: a second distillation within
+  ;; the same run confirms nothing, and without it a long run would corroborate
+  ;; its own findings by repetition.
+  ["ALTER TABLE knowledge ADD COLUMN corroborations INTEGER NOT NULL DEFAULT 1"
+   "ALTER TABLE knowledge ADD COLUMN last_run_id TEXT"])
+
+(def ^:private v16
+  ;; Identity as a COLUMN, which is the whole reason this is a database.
+  ;;
+  ;; Distillation had to answer `have I written this pattern down before`, and
+  ;; answered it by scanning every row of a kind and prefix-matching a marker
+  ;; embedded in the content text. That is what backpass has to do — its memory
+  ;; is a markdown file, an instruction has no id, so `is this the same gap` is
+  ;; a Sorensen-Dice similarity question at a tuned threshold, with a side-car
+  ;; JSON ledger keyed by hashed phrasings to hold the count.
+  ;;
+  ;; None of that is necessary here. A row has a key. Reproducing text-identity
+  ;; matching on top of a table with a primary key inherits a constraint we do
+  ;; not have, and it is fragile in the way text matching always is: the
+  ;; verdict marker embedded the change description, so `beam width 5 -> 2` and
+  ;; `beam-width 5→2` were two different levers with two different records.
+  ;;
+  ;; `pattern_key` is that identity. NULL for an ordinary memory somebody typed
+  ;; — those have no pattern, they are just facts — so the index is sparse and
+  ;; the column costs nothing on the common row.
+  ["ALTER TABLE knowledge ADD COLUMN pattern_key TEXT"
+   "CREATE INDEX IF NOT EXISTS idx_knowledge_pattern ON knowledge(pattern_key)"])
+
+(def ^:private v17
+  ;; WHOSE COPY IS THIS. A project seeds its own row for every shipped
+  ;; template on first read, and that row was authoritative from then on — so
+  ;; a harness upgrade could never reach a project again. Live: a project
+  ;; seeded gates.edn on its first read, a threshold added afterwards was
+  ;; missing from that project's table, and the rule reading it threw rather
+  ;; than finding the key absent. Because entries seed lazily at first USE, a
+  ;; long-lived project ends up on a sediment of whatever harness version
+  ;; happened to touch each one first.
+  ;;
+  ;; The fix needs to tell `the factory copy, untouched` from `the
+  ;; supervisor's own work`, and the version number cannot: `seed!` writes
+  ;; version 1, but so does a `save!` of a name that was never seeded. Getting
+  ;; that wrong overwrites the supervisor's work with the template, which is
+  ;; the one thing userspace exists to prevent — so it is a column, not an
+  ;; inference.
+  ;;
+  ;; Backfilled to 'factory' for a SOLE version-1 row, which is what every
+  ;; seeded row looks like today; anything with a version above it is the
+  ;; project's own and defaults to 'project'. Agent-authored names have no
+  ;; shipped template, so refresh never reaches them either way.
+  ["ALTER TABLE userspace ADD COLUMN source TEXT NOT NULL DEFAULT 'project'"
+   "UPDATE userspace SET source = 'factory'
+     WHERE version = 1
+       AND NOT EXISTS (SELECT 1 FROM userspace u2
+                        WHERE u2.kind = userspace.kind
+                          AND u2.name = userspace.name
+                          AND u2.version > 1)"])
+
+(def ^:private v18
+  ;; A branch's OWN problem. Sub-workflow branches do not work the run-level
+  ;; problem: a decompose unit's branch opens on its unit CONTRACT, a team
+  ;; worker on its sub-task. Nothing durable recorded that, so a resume
+  ;; rebuilt every branch on the top-level feature text with no role framing —
+  ;; re-aiming every worker at the wrong job (karamazov-blt.23). NULL means
+  ;; "the run's problem", which is what every branch before this column meant.
+  ["ALTER TABLE branches ADD COLUMN problem TEXT"])
+
+(def ^:private v19
+  ;; WHY an edit was made, and what it has survived.
+  ;;
+  ;; Run c2260271: one supervisor landed prompt tuning as v3, and thirteen
+  ;; minutes later the next supervisor of the same run reverted it to v2 —
+  ;; the history showed bodies and timestamps but never a reason, so a
+  ;; successor confronted with an unfamiliar delta had no way to judge it and
+  ;; restored what it recognized. Self-tuning without a rationale column is
+  ;; self-oscillation (karamazov-c58).
+  ;;
+  ;; `rationale` is the commit message of self-modification: nullable, because
+  ;; seeding and mechanical writes have nothing to say, and inventing text
+  ;; would make the history lie. The mutation tools are what demand it.
+  ;;
+  ;; success/failure counts are the version's STANDING: how many runs ended
+  ;; shipped or not while this row was the current version of its name. A
+  ;; tuning that has survived green runs has earned something a fresh
+  ;; supervisor should weigh before reverting it — the same argument that gave
+  ;; knowledge rows outcome columns in v14.
+  ["ALTER TABLE userspace ADD COLUMN rationale TEXT"
+   "ALTER TABLE userspace ADD COLUMN success_count INTEGER NOT NULL DEFAULT 0"
+   "ALTER TABLE userspace ADD COLUMN failure_count INTEGER NOT NULL DEFAULT 0"])
+
+(def ^:private v20
+  ;; The run's token budget, so a resume enforces the same bound the run
+  ;; started under — max_turns is on the row for exactly that reason. NULL
+  ;; is unbounded, which is what every run before this column was
+  ;; (karamazov-aqsr.3).
+  ["ALTER TABLE runs ADD COLUMN token_budget INTEGER"])
+
+(def ^:private v21
+  ;; WHAT A DELEGATED PIECE OWES, addressably (karamazov-ioo.15).
+  ;;
+  ;; `contract` already held the delegation spec as text, which is right for
+  ;; the model — it is pinned into the child's tape and says what to build.
+  ;; It is useless to the harness, which has to answer a different question:
+  ;; did this piece deliver. That question is `stubs/filled?` over specific
+  ;; names in a specific file, and neither was addressable.
+  ;;
+  ;; `stub_file` and `stubs` (a comma-separated name list) make the contract
+  ;; CHECKABLE rather than merely readable. They are how a child's ship gate
+  ;; asks whether the functions its parent delegated are implemented, instead
+  ;; of trusting that green tests imply it — a test can pass around a hollow
+  ;; stub, and a child that DELETED its stub can be greener still.
+  ;;
+  ;; `attempts` is the count that has to outlive the process. The recursion
+  ;; counted attempts in memory, so a resumed run re-litigated every unit from
+  ;; zero and "is this making progress" could only be asked of a live branch,
+  ;; never of the task. Escalating a piece that keeps failing into a split is
+  ;; the design's own fallback, and it needs a number that survives a crash.
+  ["ALTER TABLE tasks ADD COLUMN stub_file TEXT NOT NULL DEFAULT ''"
+   "ALTER TABLE tasks ADD COLUMN stubs TEXT NOT NULL DEFAULT ''"
+   "ALTER TABLE tasks ADD COLUMN attempts INTEGER NOT NULL DEFAULT 0"])
+
+(def ^:private v22
+  ;; AGE IN RUNS (karamazov-h27r, measured in karamazov-4ay9).
+  ;;
+  ;; The salience model decayed a memory by the wall clock: unused for more
+  ;; than N days, lose a step. Measured across every campaign db, that window
+  ;; never fired — no row was older than it — while 1073 of 1117 rows in the
+  ;; ten-run db had sunk to within 0.2 of the floor anyway, because curate!
+  ;; read a never-set last_used_at as stale and took a step off every unread
+  ;; memory at the end of the run that wrote it. The most-corroborated
+  ;; findings in the store ranked below `pwd works`.
+  ;;
+  ;; A run is an opportunity for a memory to be needed; a day is not. A
+  ;; harness idle for a month should not forget, and one that ran ten times
+  ;; without needing a memory has evidence about it. `idle_runs` counts the
+  ;; run ends a memory existed through without being used — bumped by
+  ;; knowledge/age! at distil-session!, reset by touch! and corroborate! —
+  ;; and both the recent-use bonus and decay read it instead of the clock.
+  ;; Zero for every existing row: nothing has aged until a run ends.
+  ["ALTER TABLE knowledge ADD COLUMN idle_runs INTEGER NOT NULL DEFAULT 0"])
+
+(def ^:private v23
+  ;; WHICH ROLE A BRANCH RAN AS (karamazov-5ge3).
+  ;;
+  ;; A branch's role scopes its tool surface and picks its system prompt
+  ;; (roles.edn, loop/system-prompt-for), and it lived only on the in-memory
+  ;; branch map. Every rebuild from the journal — resume, and now the
+  ;; training-data export — rendered every branch as the unrestricted default:
+  ;; a resumed supervisor came back holding the implementor's catalogue, and
+  ;; an exported supervisor tape opened with "You are a Clojure developer".
+  ;; NULL is the unscoped default every branch before this column was.
+  ["ALTER TABLE branches ADD COLUMN role TEXT"])
+
+(def ^:private v24
+  ;; WHAT A BRANCH OPENED ON (karamazov-kgvg).
+  ;;
+  ;; A branch's opening messages are initial-messages(problem, suffix, role).
+  ;; The problem went on the row in v18 and the role in v23; the SUFFIX — the
+  ;; board's owner prompt, a decompose unit's attempt framing, a team worker's
+  ;; role prompt, the supervisor's role text — was built by the cell at open
+  ;; time and never written down. Every rebuild from the journal opened the
+  ;; branch on the run manifest's :prompt instead: a resumed unit lost its
+  ;; attempt framing, an exported supervisor tape opened on the supervisor
+  ;; system prompt without the supervisor role text.
+  ;;
+  ;; open-branch! writes the suffix it is handed, and "" when handed none, so
+  ;; the row is authoritative: "" is a recorded none. NULL is a row older
+  ;; than this column, and only that falls back to the manifest's :prompt —
+  ;; which is what every rebuild used before, and what the beam's own
+  ;; branches did open on.
+  ["ALTER TABLE branches ADD COLUMN prompt_suffix TEXT"])
+
+(def ^:private v25
+  ;; WHAT THE SIDE MODELS SPENT (karamazov-2rqb.1).
+  ;;
+  ;; run-usage summed the turns table, and the turns table holds only the
+  ;; committed turn. Everything else the harness asks a model — the reader
+  ;; behind read_digest, the critic scoring a beam, the end-of-task reflection,
+  ;; the trajectory scorer — spent provider tokens no query could reach, so
+  ;; HARNESS_TOKEN_BUDGET bounded one call per turn and nothing else. The
+  ;; digest shunt makes it worse the more it works: its whole purpose is to
+  ;; move reading onto a second model, and every read it moves left the bill.
+  ;;
+  ;; A SEPARATE TABLE, not a kind column on turns. `turns` is what resume
+  ;; replays a crashed run from and what every progress guard counts over;
+  ;; a row in it that is not a turn would have to be filtered out of each of
+  ;; those, and the one that got missed would be the bug.
+  ;;
+  ;; Nullable branch_id and turn: a side call made between turns, or on behalf
+  ;; of the run rather than a branch, is still the run's money.
+  ["CREATE TABLE IF NOT EXISTS side_calls (
+      id                INTEGER PRIMARY KEY,
+      run_id            TEXT NOT NULL REFERENCES runs(id),
+      branch_id         TEXT,
+      turn              INTEGER,
+      kind              TEXT NOT NULL,
+      role              TEXT,
+      model             TEXT,
+      prompt_tokens     INTEGER,
+      completion_tokens INTEGER,
+      total_tokens      INTEGER,
+      cache_hit_tokens  INTEGER,
+      cache_miss_tokens INTEGER,
+      created_at        TEXT NOT NULL
+    )"
+
+   "CREATE INDEX IF NOT EXISTS side_calls_run ON side_calls(run_id)"])
+
+(def v26
+  "WHAT SUPPORTS A MEMORY, not just how much (karamazov-ei6t.5).
+
+  `corroborations` is a count, so the store can say a memory was seen three
+  times and cannot say BY WHAT. For a store whose failure mode is a
+  confidently false standing claim (karamazov-ko5b), \"show me the support\" is
+  the one diagnostic that was missing: the claim read as authoritative and
+  nothing could ask which run and which turn it came from.
+
+  A JSON array of run ids on the row rather than a join table. The set is
+  small and bounded by how many runs touch one memory, it is written on the
+  same UPDATE that bumps the count, and a memory is never queried BY its
+  supports — only shown with them. A table would buy a query nobody makes and
+  cost a write nobody wants on the corroboration path.
+
+  Nullable, so every row that predates this reads as \"support not recorded\"
+  rather than as \"no support\", which are different facts."
+  ["ALTER TABLE knowledge ADD COLUMN supported_by TEXT"])
+
+(def v27
+  "THE APPROVED PLAN, as the task's contract (karamazov-vale).
+
+  A task claimed under the plan phase has an implementation plan the critic —
+  and, when attended, a human — signed off on before construction. Persisting
+  it on the task makes it the contract that construction is judged against and
+  that the post-construction diff critic reads, so what was planned and what is
+  reviewed cannot drift apart. It also survives a resume: a run that planned,
+  crashed, and resumed does not re-plan from nothing.
+
+  Nullable: a trivial task the triage skipped has no plan, and a pre-v27 row
+  has none either. Absent is not the same as empty."
+  ["ALTER TABLE tasks ADD COLUMN plan TEXT"])
+
+(def v28
+  "WHAT KIND of plan a task carries (karamazov-dq1r): \"rfc\" when the plan is a
+  full RFC that decomposed into child tasks, otherwise unset for a lightweight
+  Goal/Files/Tests plan.
+
+  It is what tells the board an epic was RFC-planned without sniffing the plan
+  text — so a decomposed epic's children skip their own RFC, and the
+  end-of-phase critic knows to validate the whole diff against the RFC. Nullable
+  for the same reason plan is: a skipped or lightweight-planned task has none."
+  ["ALTER TABLE tasks ADD COLUMN plan_kind TEXT"])
+
+(def v29
+  "A CRASH IS AN OUTCOME OF ITS OWN (karamazov-a6mj.1).
+
+  Both standing records — a workflow's row in `knowledge` (what select reads
+  to choose how a run drives itself) and a project-authored `userspace`
+  version (what the next supervisor reads before reverting a tuning) — had
+  two buckets, shipped and not. A Throwable escaping the beam's rounds was
+  written into the second, so a provider outage or a jolt bug taught the
+  chooser that the MANIFEST fails this project and taught the supervisor that
+  the current tuning fails runs. That is evidence about the harness filed as
+  evidence about the thing being judged.
+
+  It still has to be written down — five crashes reading as \"no runs\" taught
+  nothing (blt.38) — so it gets a third counter rather than silence. A reader
+  can then tell 3 green / 0 failed / 4 crashed from 3 / 4 / 0.
+
+  Not nullable: a pre-v29 row has had no crash recorded, and zero is the true
+  count."
+  ["ALTER TABLE knowledge ADD COLUMN error_count INTEGER NOT NULL DEFAULT 0"
+   "ALTER TABLE userspace ADD COLUMN error_count INTEGER NOT NULL DEFAULT 0"])
+
 (def migrations
   "Ordered. Index 0 is migration 1; PRAGMA user_version holds the count applied."
-  [v1 v2 v3 v4 v5 v6 v7 v8 v9 v10])
+  [v1 v2 v3 v4 v5 v6 v7 v8 v9 v10 v11 v12 v13 v14 v15 v16 v17 v18 v19 v20 v21 v22 v23 v24
+   v25 v26 v27 v28 v29])

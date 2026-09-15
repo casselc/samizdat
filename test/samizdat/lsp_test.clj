@@ -1,10 +1,14 @@
 (ns samizdat.lsp-test
   (:require [clojure.java.io :as io]
+            [clojure.string :as str]
             [clojure.test :refer [deftest is testing use-fixtures]]
             [samizdat.agent.tools.base :as base]
              [samizdat.agent.tools.lsp]
+             ;; the java.time.* host shim, before data.json — see samizdat.store.journal
+             [jolt.time]
              [clojure.data.json :as json]
-             [samizdat.lsp.client :as client]))
+             [samizdat.lsp.client :as client]
+             [samizdat.security.secrets :as secrets]))
 
 ;; clojure-lsp is not installed on CI; every lsp-touching assert is gated so the
 ;; suite is trivially green there and meaningful on a machine that has it.
@@ -49,7 +53,7 @@
     (.write out header) (.write out body) (.flush out)))
 
 (deftest concurrent-requests-correlate-their-own-responses
-  ;; code-review-2026-08 #4: every caller read the shared stream itself, so
+  ;; provenance CR1-4: every caller read the shared stream itself, so
   ;; two concurrent requests could steal each other's frames — the response
   ;; landed by whichever reader got there first was dropped by the other.
   ;; One dedicated reader thread routes frames by id instead.
@@ -75,7 +79,7 @@
         (is (= "hover" (deref f1 5000 ::timeout)))))))
 
 (deftest client-for-starts-one-client-per-root-under-race
-  ;; review2 #9: client-for was get-then-start, so two branches sharing a
+  ;; provenance R2-9: client-for was get-then-start, so two branches sharing a
   ;; machine could both miss and both start! — the loser leaked a clojure-lsp
   ;; process and the registry only remembered one of them.
   (let [started (atom 0)
@@ -109,7 +113,7 @@
    :pending (atom {})})
 
 (deftest a-late-diagnostics-caller-does-not-erase-a-waiting-caller-s-push
-  ;; review2 #10: diagnostics dissoc'd the uri at entry, so a second caller
+  ;; provenance R2-10: diagnostics dissoc'd the uri at entry, so a second caller
   ;; on the same file erased the push the first caller was still waiting for
   ;; — the first caller timed out and [] read as "clean". The store is
   ;; version-keyed per uri instead, and a timeout is an error, not silence.
@@ -145,7 +149,7 @@
       (swap! @#'client/clients dissoc (:root c)))))
 
 (deftest a-dead-reader-releases-waiters-and-evicts-the-client
-  ;; review2 #17: the reader's routing ran outside any guard, so a throw
+  ;; provenance R2-17: the reader's routing ran outside any guard, so a throw
   ;; there killed the loop without releasing parked requests — and even a
   ;; clean EOF left the corpse in the registry, so every later call reused a
   ;; dead client and waited out the full 20s timeout.
@@ -173,3 +177,31 @@
     (client/shutdown-all!)
     (is (empty? @(deref (var client/clients)))
         "every entry is gone, and the junk fake clients did not throw")))
+
+(deftest the-lsp-server-spawns-with-a-scrubbed-environment
+  ;; Every other subprocess seam (shell, verify, gitdiff) passes
+  ;; scrubbed-process-env; clojure-lsp inherited the whole parent environment,
+  ;; and it re-spawns children for classpath resolution that inherit whatever
+  ;; it got (karamazov-blt.27). RFC-003's flow graph gains the lsp node with
+  ;; this — a check cannot fail against a graph that omits its subject.
+  (let [{:keys [cmd opts]} (client/spawn-spec)]
+    (is (= ["clojure-lsp" "listen"] cmd))
+    (is (contains? opts :env) "the child environment is explicit, not inherited")
+    (is (= (secrets/scrubbed-process-env) (:env opts))
+        "and it is the scrubbed one — same seam as the shell tool")))
+
+(deftest the-lsp-tool-refuses-a-path-that-escapes-the-root
+  ;; read_file refuses ../..; the lsp tool resolved with a bare io/file, then
+  ;; slurped the result and handed the text to clojure-lsp (karamazov-blt.28).
+  (let [root (io/file "/tmp" "samizdat-lsp-escape-root")]
+    (.mkdirs root)
+    (with-redefs [client/available? (constantly true)]
+      (doseq [path ["../outside.clj" "/etc/hosts"]]
+        (let [r (base/run-tool {:tool-name "lsp"
+                                :branch {:id "B1"}
+                                :root (str root)
+                                :args {:op "diagnostics" :file path}})]
+          (is (= :mechanics (:category r))
+              (str path " is refused before anything is read"))
+          (is (str/includes? (str (:result r)) "root")
+              "the refusal names the boundary"))))))

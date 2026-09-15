@@ -30,7 +30,13 @@
   require the exact indexed values back. Sync is app-managed here, no triggers."
   (:require [clojure.string :as str]
             [clojure.tools.logging :as log]
+            ;; db.jdbc registers the java.sql shim clojure.jdbc compiles against and
+            ;; points connection construction at the native driver; it has to load
+            ;; before jdbc.core.
+            [db.jdbc]
             [jdbc.core :as jdbc]
+            [samizdat.lexicon :as lexicon]
+            [samizdat.prompt :as prompt]
             [samizdat.store.db :as db]
             [samizdat.store.journal :as journal]))
 
@@ -55,10 +61,10 @@
 
   FTS5's query language treats several characters as operators, so raw model
   prose is not a safe query string. Words are extracted and quoted; anything
-  shorter than three characters is dropped as noise."
+  below the lexicon's search-token floor is dropped as noise."
   [text]
   (->> (str/split (str/lower-case (or text "")) #"[^a-z0-9]+")
-       (filter #(>= (count %) 3))
+       (filter #(>= (count %) (lexicon/tuning :claim-matching :min-search-token-length)))
        distinct
        (take 12)
        (map #(str "\"" % "\""))
@@ -85,7 +91,7 @@
                        q run-id limit])
           (catch Throwable e
             ;; Empty stays the contract (a quiet FTS miss must not cost a
-            ;; turn), but a persistent fault must leave a trace (review2 #15).
+            ;; turn), but a persistent fault must leave a trace (provenance R2-15).
             (log/warn "failures/similar failed; returning empty:" (ex-message e))
             []))))))
 
@@ -99,8 +105,9 @@
   "Failures as the block that goes into a branch's next-turn context."
   [entries]
   (when (seq entries)
-    (str "## Already disproven — do not retry\n\n"
-         (str/join "\n"
-                   (for [{:keys [branch_id turn tool_name claim reason]} entries]
-                     (str "- [" branch_id " t" turn " " tool_name "] " claim
-                          "\n  → " reason))))))
+    (prompt/render
+     "failure-log"
+     {:entries (str/join "\n"
+                         (for [{:keys [branch_id turn tool_name claim reason]} entries]
+                           (str "- [" branch_id " t" turn " " tool_name "] " claim
+                                "\n  → " reason)))})))

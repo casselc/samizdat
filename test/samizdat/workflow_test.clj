@@ -21,18 +21,24 @@
   mycelium's checks, and the manifest-driven driver produces the same runs the
   hand-written loop did. Editing the stored definition changes the next run —
   that is the whole point."
-  (:require [clojure.data.json :as json]
+  (:require ;; the java.time.* host shim, before data.json — see samizdat.store.journal
+            [jolt.time]
+            [clojure.data.json :as json]
             [samizdat.agent.beam :as beam]
+            [samizdat.agent.tools.base :as base]
+            [samizdat.agent.tools.introspect]
             [samizdat.cells :as cells]
             [clojure.edn :as edn]
             [clojure.string :as str]
             [clojure.test :refer [deftest testing is use-fixtures]]
             [samizdat.agent.state :as state]
             [samizdat.llm.client :as llm]
+            [samizdat.manifests :as manifests]
             [samizdat.store.db :as db]
             [samizdat.store.journal :as journal]
             [samizdat.store.runs :as runs]
-            [samizdat.store.workflows :as workflows]
+            [samizdat.store.userspace :as us]
+            [samizdat.userspace :as userspace]
             [samizdat.workflow :as workflow]
             [mycelium.workflow :as wf]))
 
@@ -62,22 +68,31 @@
 
 ;; --- the store --------------------------------------------------------------
 
+(defn- seed-loop!
+  "Seed the shipped loop manifest into `c` as version 1. Was
+  `workflows/seed! c \"loop\" \"manifests/loop.edn\"` — the shim's one
+  convenience was slurping the resource for you, so that moves here rather
+  than into every call site."
+  [c]
+  (us/seed! c :manifest "loop"
+            (slurp (clojure.java.io/resource "manifests/loop.edn"))))
+
 (deftest workflow-store-roundtrip-and-versioning
   (with-db [c]
-    (is (nil? (workflows/load-latest c "loop")))
-    (is (= 1 (workflows/save! c "loop" "{:cells {}}")))
-    (is (= 2 (workflows/save! c "loop" "{:cells {:a :b}}")))
-    (let [w (workflows/load-latest c "loop")]
+    (is (nil? (us/load-latest c :manifest "loop")))
+    (is (= 1 (us/save! c :manifest "loop" "{:cells {}}")))
+    (is (= 2 (us/save! c :manifest "loop" "{:cells {:a :b}}")))
+    (let [w (us/load-latest c :manifest "loop")]
       (is (= 2 (:version w)))
-      (is (= "{:cells {:a :b}}" (:edn w))))
-    (is (= "{:cells {}}" (:edn (workflows/load-version c "loop" 1))))))
+      (is (= "{:cells {:a :b}}" (:body w))))
+    (is (= "{:cells {}}" (:body (us/load-version c :manifest "loop" 1))))))
 
 (deftest seeding-is-idempotent
   (with-db [c]
-    (is (= 1 (:version (workflows/seed! c "loop" "manifests/loop.edn"))))
-    (is (= 1 (:version (workflows/seed! c "loop" "manifests/loop.edn")))
+    (is (= 1 (:version (seed-loop! c))))
+    (is (= 1 (:version (seed-loop! c)))
         "a second seed does not stack versions")
-    (is (some? (:edn (workflows/load-latest c "loop"))))))
+    (is (some? (:body (us/load-latest c :manifest "loop"))))))
 
 ;; --- the definition ---------------------------------------------------------
 
@@ -94,9 +109,11 @@
   (let [def (workflow/read-definition (slurp (clojure.java.io/resource "manifests/loop.edn")))
         ;; Route the tool path around the journal while keeping :journal
         ;; reachable from the no-call path, so the unreachable check cannot
-        ;; catch it first — only the constraint can.
+        ;; catch it first — only the constraint can. Around the journal ONLY:
+        ;; skipping :settle as well would be caught earlier by the schema
+        ;; chain, since the arbiter requires what settle writes.
         broken (-> def
-                   (assoc-in [:edges :dispatch] :arbiter)
+                   (assoc-in [:edges :dispatch] :settle)
                    (assoc-in [:edges :no-call] :journal))]
     (is (thrown-with-msg? Exception #"must-follow"
                           (workflow/compile-loop broken)))))
@@ -186,13 +203,13 @@
                                     :args {:goal "g" :technique "t"}}))]
       ;; Seed v1, then write a v2 that routes every response down the no-call
       ;; path — a visible behavior change made purely by editing stored EDN.
-      (workflows/seed! c "loop" "manifests/loop.edn")
-      (let [v1 (edn/read-string (:edn (workflows/load-latest c "loop")))
+      (seed-loop! c)
+      (let [v1 (edn/read-string (:body (us/load-latest c :manifest "loop")))
             v2 (assoc-in v1 [:dispatches :parse]
                          '[[:provider-error (fn [d] (not (:ok (:call d))))]
                            [:no-call (fn [d] true)]
                            [:tool (fn [d] false)]])]
-        (workflows/save! c "loop" (pr-str v2))
+        (us/save! c :manifest "loop" (pr-str v2))
         (let [r (workflow/run! {:conn c :config {:run {}}
                                 :llm-adapter :a :llm-config {:max-tokens 16384}
                                 :problem "p" :max-turns 1})]
@@ -263,3 +280,81 @@
         "each carries its :description")
     (is (str/includes? (workflow/render-catalog conn) "decompose")
         "and renders as a text menu for the supervisor")))
+
+(deftest a-definition-with-no-cells-is-refused-at-compile
+  ;; Found by a real failure, and the failure is the argument for the guard.
+  ;; store/workflows.clj renamed the body column to :edn on the way out; when
+  ;; it was retired, load-loop! kept reading :edn from a raw userspace row and
+  ;; got nil. read-definition returned nil, mycelium compiled it without
+  ;; complaint, and the run died four frames into the driver with
+  ;; "class nil cannot be cast to class clojure.lang.IFn" — nothing in the
+  ;; message pointing at the manifest, the column, or the loader.
+  ;;
+  ;; A compile that accepts a non-workflow is worse than one that rejects a
+  ;; workflow: the mutation protocol's whole first line of defence is that a
+  ;; definition which cannot run cannot be stored.
+  (doseq [d [nil {} {:edges {:start :end}} {:cells {}}]]
+    (is (thrown-with-msg? Exception #"no :cells" (workflow/compile-loop d))
+        (str "compiled a definition that is not a workflow: " (pr-str d)))))
+
+(deftest load-loop-reads-the-body-column
+  ;; The specific regression, pinned: a stored manifest must round-trip
+  ;; through load-loop! as a real definition, not a nil one.
+  (with-db [c]
+    (seed-loop! c)
+    (let [{:keys [definition compiled version]} (workflow/load-loop! c "loop")]
+      (is (= 1 version))
+      (is (seq (:cells definition)) "the definition came back with its cells")
+      (is (some? compiled))
+      (is (= :loop/assemble (get-in definition [:cells :start]))))))
+
+(deftest a-stored-role-manifest-is-what-compiles-and-what-the-catalog-serves
+  ;; compiled-manifest (the seam every role sub-loop runs through) read the
+  ;; FACTORY resource, so `manifest save "worker"` landed in userspace and was
+  ;; never read back — the self-tuning story held only for the run's top-level
+  ;; manifest (karamazov-blt.3). The catalog likewise served the factory
+  ;; :description for an evolved manifest (karamazov-blt.4).
+  (with-db [c]
+    (userspace/bind! c)
+    (try
+      (let [d (assoc (edn/read-string (userspace/body :manifest "worker"))
+                     :description "tuned-by-test")]
+        (userspace/save! :manifest "worker" (pr-str d)))
+      (is (str/includes? (str (manifests/manifest-body "worker")) "tuned-by-test")
+          "the role seam serves the stored version")
+      (is (some? (workflow/compiled-manifest "worker"))
+          "and the stored version is what compiles as the role sub-loop")
+      (is (= "tuned-by-test"
+             (:description (some #(when (= "worker" (:name %)) %)
+                                 (workflow/catalog c))))
+          "the catalog describes the version that will actually run")
+      (finally (userspace/unbind!)))))
+
+(deftest introspect-renders-the-driving-manifest-not-the-factory-loop
+  ;; The self-observation tool dumped manifests/loop.edn whatever was running,
+  ;; ignoring both the stored version and the run's actual manifest — the
+  ;; supervisor diagnosed from a wiring dump that was wrong twice over
+  ;; (karamazov-blt.4). The beam's ctx :turn-workflow is the version-true
+  ;; wiring, and introspect now renders it.
+  (let [r (base/run-tool {:tool-name "introspect" :branch {:id "B1"}
+                          :turn-workflow {:name "custom" :version 7
+                                          :definition {:cells {:start :x/one}
+                                                       :edges {:start :end}}}})]
+    (is (str/includes? (str (:result r)) "custom v7")
+        "the header names the manifest and version that drive the run")
+    (is (str/includes? (str (:result r)) "x/one")
+        "and the wiring rendered is that manifest's, not loop.edn's")))
+
+(deftest introspect-falls-back-when-the-turn-workflow-carries-no-definition
+  ;; karamazov-2ld, found (and hot-patched live) by the harness's own
+  ;; supervisor during the todomvc dogfood run: the beam destructures
+  ;; compile-turn-loop's COMPILED slice into ctx :turn-workflow, which has no
+  ;; :definition — so introspect showed the supervisor an EMPTY loop wiring at
+  ;; exactly the moment it was diagnosing the loop. A :turn-workflow without a
+  ;; :definition falls back to the stored manifest body rather than rendering
+  ;; nothing.
+  (let [r (base/run-tool {:tool-name "introspect" :branch {:id "B1"}
+                          :config {:run {:loop "loop"}}
+                          :turn-workflow {:compiled-fsm {} :input-schema-raw {}}})]
+    (is (str/includes? (str (:result r)) "loop/assemble")
+        "the wiring shown is the stored loop manifest's, not an empty dump")))

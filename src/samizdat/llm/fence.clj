@@ -35,8 +35,13 @@
   and only the capability tier. Per the rule from dirge PR 740, a signal may
   tune a guard that fires on the same thing the signal measures, so these may
   adjust repair budgets and may never relax a verification gate."
-  (:require [clojure.data.json :as json]
-            [clojure.string :as str]))
+  (:require ;; the java.time.* host shim, before data.json — see samizdat.store.journal
+            [jolt.time]
+            [clojure.data.json :as json]
+            [clojure.string :as str]
+            [instaparse.combinators :as c]
+            [instaparse.core :as insta]
+            [samizdat.prompt :as prompt]))
 
 ;; Any opener paired with any closer.
 ;;
@@ -67,6 +72,58 @@
 ;; A general-purpose ```json fence, which a model also uses to show data. Only
 ;; counts when the body is the DOCUMENTED shape, checked in json-fence below.
 (def ^:private json-fence-re #"(?s)```json\s*\r?\n(.*?)```")
+
+(defn close-unbalanced
+  "Append the `}` and `]` a tool-call body is missing, or return it unchanged.
+
+  Counts braces and brackets OUTSIDE string literals, with the same state
+  machine `repair-control-chars` uses — a `{` inside a content string is text,
+  not structure, and a naive count is wrong in exactly the case that matters
+  (a tool call whose argument is source code).
+
+  WHY THIS EXISTS. Observed live, twice in one fourteen-turn run: the model
+  emitted a complete `write_file` call whose body ended
+  `…\\n\"}` — the args object closed and the outer object did not. One
+  character missing, a whole turn lost, twice, on the two calls that carried
+  the run's actual work. The reply was not truncated (it finished cleanly
+  inside the fence); the model simply miscounted, which is what a model does
+  when the closing braces are eight hundred characters of escaped Clojure away
+  from their openers.
+
+  REFUSES TO REPAIR A BODY THAT ENDS INSIDE A STRING, and that guard is the
+  load-bearing half. A reply cut off by the token cap stops mid-content — the
+  string never closes — and appending braces there would produce a perfectly
+  valid `write_file` carrying HALF A FILE, which the tool would then write over
+  the whole one and report as a success. A parse error costs a turn; a silently
+  truncated file costs the work. Ending inside a string is precisely the shape
+  of a truncated reply, so it is where the repair stops.
+
+  Only ever ADDS closers: an unbalanced-the-other-way body (more closers than
+  openers) is a different mistake and is reported rather than guessed at. The
+  caller must still parse the result — this makes a parse possible, it does not
+  assert one succeeded — and a repaired call is flagged `:auto-repaired?`,
+  because a branch whose calls need repairing is a fact the mechanics tally
+  should see."
+  [^String input]
+  (let [n (count input)]
+    (loop [i 0, in-string? false, escaped? false, stack []]
+      (if (>= i n)
+        (if (and (seq stack) (not in-string?))
+          (str input (str/join (reverse stack)))
+          input)
+        (let [ch (.charAt input i)]
+          (cond
+            escaped? (recur (inc i) in-string? false stack)
+            (= \\ ch) (recur (inc i) in-string? true stack)
+            (= \" ch) (recur (inc i) (not in-string?) false stack)
+            in-string? (recur (inc i) true false stack)
+            (= \{ ch) (recur (inc i) false false (conj stack "}"))
+            (= \[ ch) (recur (inc i) false false (conj stack "]"))
+            (or (= \} ch) (= \] ch))
+            ;; A closer with nothing open is the other kind of imbalance and
+            ;; is not repairable by appending: bail out unchanged.
+            (if (empty? stack) input (recur (inc i) false false (pop stack)))
+            :else (recur (inc i) in-string? false stack)))))))
 
 (defn repair-control-chars
   "Escape literal control characters appearing INSIDE JSON string literals.
@@ -106,8 +163,160 @@
             :else
             (do (.append sb ch) (recur (inc i) in-string? false))))))))
 
+(defn strip-trailing-commas
+  "Remove commas that sit directly before a `}` or `]`, outside strings —
+  `{\"a\": 1,}` is how a model writes an object it assembled incrementally,
+  and RFC 8259 refuses it. Interior ones too, not only at the end (dirge
+  scavenge.rs, karamazov-avk): a trailing comma mid-body survives any
+  repair that only looks at the input's tail. Same state machine as every
+  scanner in this namespace; a comma inside a string is text and is kept."
+  [^String input]
+  (let [n (count input)
+        sb (StringBuilder.)]
+    (loop [i 0, in-string? false, escaped? false]
+      (if (>= i n)
+        (.toString sb)
+        (let [ch (.charAt input i)]
+          (cond
+            escaped? (do (.append sb ch) (recur (inc i) in-string? false))
+            (= \\ ch) (do (.append sb ch) (recur (inc i) in-string? true))
+            (= \" ch) (do (.append sb ch) (recur (inc i) (not in-string?) false))
+            (and (not in-string?) (= \, ch))
+            ;; Look past whitespace: a comma whose next significant character
+            ;; closes a container is dropped; any other comma is kept.
+            (let [j (loop [j (inc i)]
+                      (if (and (< j n) (Character/isWhitespace (.charAt input j)))
+                        (recur (inc j))
+                        j))]
+              (if (and (< j n) (or (= \} (.charAt input j)) (= \] (.charAt input j))))
+                (recur (inc i) false false)
+                (do (.append sb ch) (recur (inc i) false false))))
+            :else (do (.append sb ch) (recur (inc i) in-string? false))))))))
+
+(defn fill-dangling-key
+  "Complete a body that stops right after `\"key\":` with a `null`, so the
+  closers can then be appended and the call parses (dirge truncation.rs,
+  karamazov-avk). The filled call carries a null argument, which the tool's
+  own missing-argument check then names precisely — a far better error than
+  a parse failure, because it tells the model WHICH argument it lost rather
+  than that its punctuation is broken.
+
+  Only at the very end of the body, and only OUTSIDE a string — a body that
+  stops inside a string is the truncation shape, and close-unbalanced's
+  refusal to touch it is load-bearing (half a file written as a success
+  costs the work). Nothing is invented: null is the one value that says
+  'absent'."
+  [^String input]
+  (let [n (count input)
+        end-state (loop [i 0, in-string? false, escaped? false]
+                    (if (>= i n)
+                      in-string?
+                      (let [ch (.charAt input i)]
+                        (cond
+                          escaped? (recur (inc i) in-string? false)
+                          (= \\ ch) (recur (inc i) in-string? true)
+                          (= \" ch) (recur (inc i) (not in-string?) false)
+                          :else (recur (inc i) in-string? false)))))]
+    (if (and (not end-state)
+             (re-find #"\"[^\"]*\"\s*:\s*\z" input))
+      (str input " null")
+      input)))
+
+(defn default-repair
+  "The built-in repair ladder, cheapest and safest first: control characters
+  inside strings, trailing commas, a dangling key at the end, then
+  unbalanced closers. Order matters — every later scan has to see the string
+  boundaries the control-char pass leaves intact, and the closers must be
+  appended after the dangling key is filled or they would close an object
+  mid-entry.
+
+  This is the FALLBACK composition. The rungs are mechanism — lego blocks —
+  but which rungs run, and in what order, is a composition, and composition
+  is the workflow layer's business: resources/manifests/repair.edn wires the
+  same rungs as cells, the system installs it below, and a project can
+  reorder, drop, or add a rung at runtime through the ordinary manifest
+  mutation path. This chain exists so a bare REPL, a unit test, or a broken
+  repair manifest still parses calls."
+  [^String input]
+  (-> input
+      repair-control-chars
+      strip-trailing-commas
+      fill-dangling-key
+      close-unbalanced))
+
+(def ^:private installed-repair (atom nil))
+
+(defn install-repair!
+  "Install the workflow-layer repair composition — a fn from body to
+  repaired body, typically one that runs the project's `repair` manifest.
+  nil uninstalls. The seam is an install point rather than a require because
+  fence sits below the workflow layer in the require graph and must not
+  reach up into it."
+  [f]
+  (reset! installed-repair f))
+
+(defn repair-json
+  "One repair pass over a tool-call body: the installed composition when a
+  system has installed one, else the built-in default. FAIL-OPEN, and that
+  is load-bearing: a repair manifest the agent broke mid-edit must degrade
+  to the default chain, never take parsing down with it — the mutation
+  protocol validates saves, but the seam does not get to assume it."
+  [^String input]
+  (if-let [f @installed-repair]
+    (let [out (try (f input) (catch Throwable _ nil))]
+      (if (string? out) out (default-repair input)))
+    (default-repair input)))
+
 (defn- parse-error [msg extra]
   (merge {:name "__parse_error__" :args {} :parse-error msg} extra))
+
+;; --- locating a JSON failure ------------------------------------------------
+;;
+;; data.json under jolt reports a failure's KIND — "(end-of-file inside
+;; string)", "(missing `:` in object)" — and nothing about where. The model
+;; was told what category of mistake it made and left to find the character
+;; in a body that can run to thousands of them. This grammar exists only to
+;; answer WHERE. It is not the parser of record: data.json and the repair
+;; pass decide whether a body parses, and the grammar runs after both have
+;; said no, against the text the model wrote, so the excerpt it quotes is
+;; text the model can recognise (karamazov-aqsr.1).
+
+(def ^:private json-grammar
+  {:doc    (c/cat (c/hide (c/regexp #"\s*")) (c/nt :value) (c/hide (c/regexp #"\s*")))
+   :value  (c/hide-tag (c/ord (c/nt :object) (c/nt :array) (c/nt :string)
+                              (c/nt :number) (c/nt :true) (c/nt :false) (c/nt :null)))
+   :object (c/cat (c/hide (c/regexp #"\{\s*"))
+                  (c/opt (c/cat (c/nt :pair)
+                                (c/star (c/cat (c/hide (c/regexp #"\s*,\s*")) (c/nt :pair)))))
+                  (c/hide (c/regexp #"\s*\}")))
+   :pair   (c/cat (c/nt :string) (c/hide (c/regexp #"\s*:\s*")) (c/nt :value))
+   :array  (c/cat (c/hide (c/regexp #"\[\s*"))
+                  (c/opt (c/cat (c/nt :value)
+                                (c/star (c/cat (c/hide (c/regexp #"\s*,\s*")) (c/nt :value)))))
+                  (c/hide (c/regexp #"\s*\]")))
+   :string (c/regexp #"\"(?:[^\"\\\x00-\x1f]|\\[\"\\/bfnrt]|\\u[0-9a-fA-F]{4})*\"")
+   :number (c/regexp #"-?(?:0|[1-9][0-9]*)(?:\.[0-9]+)?(?:[eE][+-]?[0-9]+)?")
+   :true   (c/string "true")
+   :false  (c/string "false")
+   :null   (c/string "null")})
+
+(def ^:private json-parser (insta/parser json-grammar :start :doc))
+
+(def ^:private excerpt-chars 40)
+
+(defn locate-json-failure
+  "Where `s` stops being JSON: {:index :line :column :before :after}, or nil
+  when it parses. :before is the text just before the failure and :after the
+  text from it on, each cut to a few dozen characters — enough to find the
+  spot in what the model wrote, not enough to echo a whole file back."
+  [^String s]
+  (let [tree (json-parser s)]
+    (when (insta/failure? tree)
+      (let [{:keys [index line column]} (insta/get-failure tree)
+            index (min (or index 0) (count s))]
+        {:index index :line line :column column
+         :before (subs s (max 0 (- index excerpt-chars)) index)
+         :after (subs s index (min (count s) (+ index excerpt-chars)))}))))
 
 (defn- read-json [s]
   (try
@@ -117,6 +326,40 @@
 
 (def ^:private opener-re #"```tool-call\s*\r?\n|<tool-call>\s*")
 (def ^:private closer-re #"```|</tool[-_]calls?>")
+
+(def ^:private closer-tokens
+  ["```" "</tool-call>" "</tool_call>" "</tool-calls>" "</tool_calls>"])
+
+(defn- closer-token-at
+  "The closer token starting at index i and ending by `bound`, or nil."
+  [^String s i bound]
+  (some (fn [^String t]
+          (let [e (+ i (count t))]
+            (when (and (<= e bound) (= t (subs s i e)))
+              t)))
+        closer-tokens))
+
+(defn- string-aware-closer
+  "Index of the first closer OUTSIDE a JSON string literal in s[from..to),
+  or nil.
+
+  Same state machine as close-unbalanced, for the same reason: a ``` inside
+  a content string is text, not structure. The mdlite dogfood run
+  (karamazov-hpv) made this concrete — the file being written was a MARKDOWN
+  CONVERTER, its code contained literal ``` in its own fence handling, and
+  the raw closer scan cut six valid calls mid-string, each reported back as
+  a parse error the model had not made. Any task whose files mention code
+  fences (markdown tooling, docs, READMEs) produces this shape."
+  [^String s from to]
+  (loop [i from, in-string? false, escaped? false]
+    (when (< i to)
+      (let [ch (.charAt s i)]
+        (cond
+          escaped? (recur (inc i) in-string? false)
+          (= \\ ch) (recur (inc i) in-string? true)
+          (= \" ch) (recur (inc i) (not in-string?) false)
+          (and (not in-string?) (closer-token-at s i to)) i
+          :else (recur (inc i) in-string? false))))))
 
 (defn extract-fences
   "Every tool-call fence body in the response, in order.
@@ -144,8 +387,16 @@
            :let [next-open (if (< (inc i) (count opens))
                              (first (nth opens (inc i)))
                              n)
-                 m (re-matcher closer-re (subs s body-start next-open))
-                 closer (when (.find m) (+ body-start (.start m)))]
+                 ;; String-aware first: a closer inside a JSON string literal
+                 ;; is content (karamazov-hpv). The raw scan stays as the
+                 ;; fallback for a body whose string never closes — an
+                 ;; unterminated string ahead of a real closer is the
+                 ;; truncation shape, and it must keep earning its parse
+                 ;; error rather than quietly becoming a no-call.
+                 closer (or (string-aware-closer s body-start next-open)
+                            (let [m (re-matcher closer-re
+                                                (subs s body-start next-open))]
+                              (when (.find m) (+ body-start (.start m)))))]
            :when closer]
        (str/trim (subs s body-start closer))))))
 
@@ -203,7 +454,21 @@
   #"(?s)<invoke\s+name=\"([^\"]+)\"[^>]*>(.*?)</invoke>")
 
 (def ^:private parameter-re
-  #"(?s)<parameter\s+name=\"([^\"]+)\"[^>]*>(.*?)</parameter>")
+  ;; The close is `</parameter` plus ANYTHING up to the `>`, not the exact tag.
+  ;;
+  ;; A model that opened with `<parameter name="path">` mirrors the `name=`
+  ;; into the close and writes `</parameter-name>`. With an exact-tag pattern
+  ;; the value does not stop there — it runs on to the NEXT parameter's close,
+  ;; so `path` swallowed `</parameter-name>\n<parameter name="content">(ns …`
+  ;; and `content` disappeared entirely. Live in run c377260b: the model's one
+  ;; correct write in 300 turns, a complete boundary test, was destroyed here
+  ;; and then reported back to it as "write_file needs `content`".
+  ;;
+  ;; Tolerating the drift costs nothing — no legitimate parameter value
+  ;; contains a literal `</parameter` — and silently merging two parameters is
+  ;; the worst available failure: it produces a call that looks well-formed and
+  ;; is wrong.
+  #"(?s)<parameter\s+name=\"([^\"]+)\"[^>]*>(.*?)</param(?:eter)?[^>]*>")
 
 (defn- xml-value
   "A parameter's value. Verbatim, except that something which is entirely a
@@ -251,6 +516,28 @@
          :args (reduce (fn [acc [_ k v]] (assoc acc (keyword k) (xml-value v)))
                        {} (re-seq parameter-re (or body "")))}))))
 
+;; Qwen's chat template wraps its native calls in <tool_call> tags around
+;; plain JSON. Under a prefilled fence the model emits prose then its native
+;; wrapper (arm-1, run e0c7662f: eight straight reviewer turns), and the
+;; fence's closer scan consumes the CLOSING tag as the fence closer — so the
+;; body carries an unclosed opener, which is why the pattern accepts
+;; end-of-input as the terminator.
+(def ^:private tagged-call-re
+  #"(?s)<tool[-_]call>\s*(.*?)\s*(?:</tool[-_]calls?>|\z)")
+
+(defn- tagged-call
+  "The last <tool_call>-tagged JSON object in `s`, as {:name :args}, or nil.
+  The same validation a fence body gets — it must parse and carry a name —
+  so tags wrapping prose stay a non-call rather than becoming one."
+  [s]
+  (when-let [m (last (re-seq tagged-call-re (or s "")))]
+    (let [{:keys [ok value]} (read-json (repair-control-chars
+                                         (str/trim (str (second m)))))]
+      (when (and ok (map? value) (string? (:name value))
+                 (not (str/blank? (:name value))))
+        {:name (:name value)
+         :args (let [a (:args value)] (if (map? a) a {}))}))))
+
 (defn reattach
   "The complete assistant turn, given what the request was prefilled with.
 
@@ -270,7 +557,7 @@
     (str prefill response)
     (str response)))
 
-(declare parse-tool-call* strip-think)
+(declare parse-tool-call* strip-think reasoning-of)
 
 (defn parse-tool-call
   "Parse a model response into a tool call.
@@ -295,8 +582,48 @@
   blindly would produce two openers whose first fence body is empty."
   ([response] (parse-tool-call response nil))
   ([response {:keys [prefill]}]
-   (parse-tool-call* (strip-think
-                      (if (seq prefill) (reattach response prefill) response)))))
+   (let [whole (if (seq prefill) (reattach response prefill) response)
+         parsed (parse-tool-call* (strip-think whole))]
+     ;; SCAVENGE, and only as a fallback. `strip-think` drops the reasoning
+     ;; before parsing for a good reason — after a prefilled opener the
+     ;; thinking lands INSIDE the fence and its stray quotes corrupt the JSON —
+     ;; but a reasoning model sometimes puts the call itself in there and
+     ;; emits nothing outside, and stripping then destroys the only call the
+     ;; turn produced.
+     ;;
+     ;; The two needs conflict and the resolution is an ORDER, not a choice
+     ;; (dirge scavenge.rs): parse normally first, so nothing that works today
+     ;; changes, and look inside the reasoning only when that found NOTHING.
+     ;; This can corrupt no call it did not already lose — every input it sees
+     ;; is one the harness was about to answer with "No ```tool-call block in
+     ;; your response".
+     ;;
+     ;; Measured across runs a3566c73 and f2014821: 10 no-call turns whose
+     ;; text contained a fence, `parse_error` empty and lengths well under the
+     ;; token cap, so neither a parse failure nor a truncation. The harness
+     ;; had already learned this lesson once for unfenced JSON — see the note
+     ;; in parse-tool-call* about 23 of 34 turns lost to punctuation.
+     (if (some? parsed)
+       parsed
+       (some-> (parse-tool-call* (reasoning-of whole))
+               (assoc :scavenged? true))))))
+
+(def ^:private think-open-re #"(?s)<think>(.*?)</think>")
+(def ^:private think-open-unclosed-re #"(?s)<think>(.*)\z")
+
+(defn reasoning-of
+  "The text INSIDE the reasoning blocks, concatenated — the inverse of
+  `strip-think`.
+
+  Both shapes, because a reply cut off mid-thought carries an opener whose
+  closer never came, and that is exactly the reply most likely to have spent
+  its whole budget reasoning."
+  [s]
+  (let [t (str s)
+        closed (map second (re-seq think-open-re t))
+        open (when (empty? closed)
+               (some-> (re-find think-open-unclosed-re t) second vector))]
+    (str/join "\n" (or (seq closed) open []))))
 
 (def ^:private think-re #"(?s)<think>.*?</think>")
 
@@ -344,20 +671,23 @@
     ;; reason :unfenced? is — a run where the model never once used the
     ;; documented format is a fact about the arm, not a detail.
     (if (empty? bodies)
-      (when-let [x (xml-call response)]
-        (assoc x :fences 0 :xml-call? true))
+      (or (when-let [x (xml-call response)]
+            (assoc x :fences 0 :xml-call? true))
+          (when-let [x (tagged-call response)]
+            (assoc x :fences 0 :tagged-call? true)))
       (when (seq bodies)
       (let [body (peek bodies)
             n (count fenced)
-            repaired (repair-control-chars body)
+            repaired (repair-json body)
             ;; Computed from the TEXT, not from which parse path succeeded.
             ;; clojure.data.json accepts raw newlines and tabs inside string
             ;; values where JSON.parse rejects them, so keying this off the
             ;; fallback firing would leave the counter permanently zero — a
             ;; signal that is never fed reads identically to a behaviour that
             ;; never happens (dirge PR 740). What we want to measure is that
-            ;; the model emitted unescaped control characters, which is true
-            ;; whichever parser tolerated it.
+            ;; the model emitted a body needing repair — unescaped control
+            ;; characters, or a missing closer — which is true whichever
+            ;; parser tolerated it.
             needed-repair? (not= repaired body)
             base (cond-> {:fences n}
                    needed-repair? (assoc :auto-repaired? true)
@@ -383,21 +713,38 @@
           ;; One repair pass. If the repair changed nothing there is no point
           ;; re-parsing, and the error message should name the causes the
           ;; repair does not cover.
+          ;; The guidance the model reads is prompts/ data (parse-error-causes,
+          ;; parse-error-repaired), like every other word it sees — the
+          ;; prose-backlog ratchet in base-test is what moved it out of here.
+          ;; A fence body that is not JSON but carries a complete <invoke> is
+          ;; the call it unmistakably is — the same reasoning that accepts
+          ;; mixed fence wrappers. Live on arm-1 (run e0c7662f): after a
+          ;; parse error the recovery PREFILLS the fence open, and a model
+          ;; following the multi-line guidance writes its XML call inside
+          ;; it; reading that as broken JSON looped the recovery on its own
+          ;; advice. Tried only where the JSON path has already failed, so a
+          ;; well-formed JSON fence never reaches it.
+          ;; WHERE, against the body the model wrote — never the repaired
+          ;; one, whose positions have drifted by every character the repair
+          ;; inserted. The same location serves both complaints below, which
+          ;; is why it is computed once here.
+          (let [where (locate-json-failure body)
+                complaint (merge {:error (:error first-try)} where)
+                fail (fn [msg]
+                       (if-let [x (or (some-> (tagged-call body)
+                                              (assoc :tagged-call? true))
+                                      (some-> (xml-call body)
+                                              (assoc :xml-call? true)))]
+                         (merge base x)
+                         (parse-error msg (cond-> base
+                                            where (assoc :position where)))))]
           (if-not needed-repair?
-            (parse-error
-             (str (:error first-try)
-                  ". Common causes: (a) a raw newline inside a string value — use \\n,"
-                  " (b) an unescaped quote inside a string — use \\\","
-                  " (c) an unescaped backslash — use \\\\.")
-             base)
+            (fail
+             (prompt/render "parse-error-causes" complaint))
             (let [second-try (read-json repaired)]
               (if-not (:ok second-try)
-                (parse-error
-                 (str (:error first-try)
-                      ". The harness auto-repaired literal control characters inside"
-                      " string values and the result still did not parse — escape"
-                      " \\n, \\r, \\t, \\\\ and \\\" inside string values.")
-                 base)
+                (fail
+                 (prompt/render "parse-error-repaired" complaint))
                 (let [parsed (:value second-try)]
                   (if (and (map? parsed)
                            (string? (:name parsed))
@@ -406,7 +753,7 @@
                            {:name (:name parsed)
                             :args (let [a (:args parsed)] (if (map? a) a {}))})
                     (parse-error "tool-call body must be a JSON object with a non-empty `name` string"
-                                 base))))))))))))
+                                 base)))))))))))))
 
 (defn signals
   "The mechanics signals from one parse, for the capability tier.
@@ -422,4 +769,10 @@
      :truncated truncated
      :parse-error (= "__parse_error__" (:name parsed))
      :auto-repaired (boolean (:auto-repaired? parsed))
+     ;; The call was recovered from INSIDE the reasoning. Its own signal, not
+     ;; folded into :auto-repaired: a repair fixed text the model got slightly
+     ;; wrong, this recovered a call it put somewhere the parser does not look.
+     ;; A run where this is common wants the PROMPT changed — the model is
+     ;; reasoning its way into the fence — not the parser loosened further.
+     :scavenged (boolean (:scavenged? parsed))
      :multiple-fences (> (or (:fences parsed) 0) 1)}))

@@ -23,7 +23,9 @@
   (:require [clojure.test :refer [deftest testing is use-fixtures]]
             [jolt.fs :as fs]
             [mycelium.cell :as cell]
-            [samizdat.cells :as cells]))
+            [samizdat.cells :as cells]
+            [samizdat.store.db :as db]
+            [samizdat.userspace :as userspace]))
 
 (def ^:private tmp (atom nil))
 
@@ -69,6 +71,13 @@
   ;; "Could not locate … on the source roots". samizdat.cell-prelude exists to
   ;; pull those onto the compile graph; samizdat.agent.decompose had fallen
   ;; off it. Walk the requires rather than trusting the list stays current.
+  ;;
+  ;; Reachability is FROM THE BINARY'S ENTRY: `jolt build -m samizdat.core`
+  ;; embeds that namespace's require closure and nothing else, so that is what
+  ;; must already have loaded these. Without this require the test only
+  ;; passed after other namespaces in the suite had loaded the harness, and
+  ;; failed 23 times on its own.
+  (require 'samizdat.core)
   (let [required (->> cells/shipped-cells
                       (keep clojure.java.io/resource)
                       (mapcat #(re-seq #"\[(samizdat\.[a-z0-9.-]+)" (slurp %)))
@@ -130,10 +139,61 @@
     (cells/load-cells! [d])
     (is (= 2 (:v ((:handler (cell/get-cell :hot/x)) {} {}))))))
 
+;; --- an unchanged load does no work ------------------------------------------
+
+(defn- token-of
+  "The per-load token a generated cell closes over: a load-string makes a new
+  one, a skipped load keeps the old one — proof of a reload that no jolt
+  version can fake by handing back the same fn object."
+  [id]
+  (:token ((:handler (cell/get-cell id)) {} {})))
+
+(def ^:private tokened "(let [t (Object.)] (fn [_ data] (assoc data :token t)))")
+
+(deftest an-unchanged-source-set-is-not-reloaded
+  ;; compile-loop reloads the cells before EVERY compile, and a reload that
+  ;; re-evaluated twelve files when nothing had changed cost about a second —
+  ;; 168 times over in three test namespaces alone (karamazov-3n4n). The
+  ;; unchanged case must be free.
+  (let [d (str @tmp "/cells")]
+    (cell-file! d :same/a tokened)
+    (let [first-load (cells/load-cells! [d])
+          t1 (token-of :same/a)]
+      (is (= first-load (cells/load-cells! [d])) "the second load reports the same cells")
+      (is (identical? t1 (token-of :same/a)) "and did not re-evaluate the file")
+      (testing "an edit still reloads"
+        (cell-file! d :same/a "(let [t (Object.)] (fn [_ data] (assoc data :token t :v 2)))")
+        (cells/load-cells! [d])
+        (is (not (identical? t1 (token-of :same/a))))
+        (is (= 2 (:v ((:handler (cell/get-cell :same/a)) {} {}))))))))
+
+(deftest a-registry-touched-by-someone-else-is-reloaded
+  ;; The registry is global mutable state, and unchanged files are not proof
+  ;; the LOOP's cells are present: a test or another workflow may have
+  ;; registered its own under one of our ids, or removed one. Only a registry
+  ;; still holding exactly what the last load registered may be skipped.
+  (let [d (str @tmp "/cells")]
+    (cell-file! d :ours/a tokened)
+    (cell-file! d :ours/b tokened)
+    (cells/load-cells! [d])
+    (let [t1 (token-of :ours/a)]
+      (testing "an id re-registered by another party"
+        (cell/defcell :ours/a {:doc "an impostor" :pure true}
+          (fn [_ data] (assoc data :who :them)))
+        (is (= :them (:who ((:handler (cell/get-cell :ours/a)) {} {}))))
+        (cells/load-cells! [d])
+        (is (nil? (:who ((:handler (cell/get-cell :ours/a)) {} {}))) "ours is back")
+        (is (not (identical? t1 (token-of :ours/a))) "by a real reload"))
+      (testing "an id removed by another party"
+        (cell/remove-cell! :ours/b)
+        (is (nil? (cell/get-cell :ours/b)))
+        (cells/load-cells! [d])
+        (is (some? (cell/get-cell :ours/b)))))))
+
 ;; --- the shipped loop cells load from resources -----------------------------
 
 (deftest the-shipped-cells-dir-follows-the-classpath
-  ;; review3 #11: default-dirs carried the relative "resources/cells", so a
+  ;; provenance R3-11: default-dirs carried the relative "resources/cells", so a
   ;; built binary started outside the project root found no cells and ran no
   ;; loop — silently, with zero registrations. The shipped entry must be the
   ;; classpath answer (which follows the binary), not a cwd-relative guess.
@@ -147,9 +207,33 @@
   ;; whole loop. This is the acceptance — the kernel is cell-agnostic.
   (cells/load-cells!)
   (doseq [id [:loop/assemble :llm/infer :llm/parse :tool/dispatch
-              :journal/record :gate/arbiter :loop/route :loop/finish]]
+              :journal/record :gate/settle :gate/arbiter :loop/route :loop/finish]]
     (is (some? (cell/get-cell id)) (str id " loaded from resources")))
   (testing "every loaded loop cell declares its effects (pure or a set)"
     (doseq [id (keys (cells/loaded))]
       (is (cell/effects-declared? (cell/get-cell id))
           (str id " must declare :pure or :effects")))))
+
+(deftest a-project-cell-overrides-a-shipped-id-whatever-its-name-sorts-as
+  ;; Store-mode loading sorted bodies alphabetically by store name, so whether
+  ;; a project cell's redefinition of a shipped cell-id won depended on how
+  ;; its name happened to sort against the template basenames — "aaa-custom"
+  ;; loaded FIRST and the shipped template silently overrode it
+  ;; (karamazov-blt.8). Shipped templates now load first, project extras
+  ;; after, so the project wins by construction.
+  (let [c (db/open! ":memory:")]
+    (try
+      (userspace/bind! c)
+      (userspace/save! :cell "aaa-custom"
+                       (str "(ns cells.custom (:require [mycelium.cell :as cell]))\n"
+                            "(cell/defcell :gate/arbiter"
+                            " {:doc \"overridden-by-project\" :pure true}\n"
+                            "  (fn [_ d] d))\n"))
+      (cells/load-cells!)
+      (is (= "overridden-by-project" (:doc (cell/get-cell :gate/arbiter)))
+          "the project's redefinition wins regardless of its store name")
+      (finally
+        (userspace/unbind!)
+        (db/close c)
+        ;; restore the template registry for whatever runs next
+        (cells/load-cells!)))))

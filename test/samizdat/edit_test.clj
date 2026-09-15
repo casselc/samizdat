@@ -84,13 +84,24 @@
       (is (str/includes? (:result r) "line-trimmed"))
       (is (str/includes? (read* root "a.clj") "(let [x 2]")))))
 
-(deftest an-edit-that-unbalances-clojure-is-flagged
+(deftest an-edit-that-unbalances-clojure-is-refused
+  ;; This used to assert that the broken edit was WRITTEN and flagged. It is
+  ;; now refused outright and the file is left alone (karamazov-2d3): writing
+  ;; it scored :success with :progress? true, so a branch earned credit for
+  ;; breaking the tree, and the flag it carried was write_file's past-tense
+  ;; repair note about a repair the edit path never applies.
   (with-root [root]
     (write root "a.clj" "(defn f [] (+ 1 2))\n")
     (let [r (files/edit-file (ctx root {:path "a.clj"
                                         :old_text "(+ 1 2))" :new_text "(+ 1 2)"}))]
-      ;; removed a closing paren → the file no longer reads
-      (is (str/includes? (:result r) "does not balance")))))
+      ;; removed a closing paren → the file no longer reads.
+      ;; Asserts the CONSEQUENCE the model has to act on, not the wording:
+      ;; the sentence lives in prompts/file-tool.md and a project may reword it.
+      (is (= :mechanics (:category r)))
+      (is (not (:progress? r)))
+      (is (str/includes? (:result r) "Nothing was written"))
+      (is (= "(defn f [] (+ 1 2))\n" (read* root "a.clj"))
+          "the file is exactly as it was"))))
 
 (deftest edit-a-missing-or-escaping-file
   (with-root [root]
@@ -98,3 +109,29 @@
                                   (ctx root {:path "nope.clj" :old_text "a" :new_text "b"})))))
     (is (= :mechanics (:category (files/edit-file
                                   (ctx root {:path "../escape.clj" :old_text "a" :new_text "b"})))))))
+
+(deftest a-drifted-unicode-escape-in-the-replacement-is-decoded
+  ;; karamazov-b9v.1. A model that means an em dash sometimes writes the six
+  ;; characters —, and they used to land on disk exactly like that. The
+  ;; decode is on the model's OWN text — the replacement — and never on the
+  ;; assembled file, so an edit cannot rewrite lines it did not touch.
+  (with-root [root]
+    (write root "a.clj" ";; heading — note\n(defn f [] :old)\n")
+    (let [r (files/edit-file (ctx root {:path "a.clj" :old_text ":old"
+                                        :new_text ":new \\u2192 done"}))
+          after (read* root "a.clj")]
+      (is (= :success (:category r)))
+      (is (str/includes? after ":new → done") "the escape became the arrow")
+      (is (not (str/includes? after "\\u2192")))
+      (testing "and the untouched line keeps its own six characters, because
+                only the replacement is decoded"
+        (is (str/includes? after ";; heading — note"))))))
+
+(deftest an-escaped-escape-in-a-replacement-is-left-alone
+  ;; The backslash must itself be unescaped. Text ABOUT an escape is not drift.
+  (with-root [root]
+    (write root "b.clj" "(def s :old)\n")
+    (let [r (files/edit-file (ctx root {:path "b.clj" :old_text ":old"
+                                        :new_text "\"\\\\u2014\""}))]
+      (is (= :success (:category r)))
+      (is (str/includes? (read* root "b.clj") "\\\\u2014")))))

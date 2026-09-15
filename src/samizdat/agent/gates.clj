@@ -35,16 +35,23 @@
   (:require [clojure.edn :as edn]
             [clojure.java.io :as io]
             [clojure.string :as str]
+            [samizdat.agent.roles :as roles]
             [samizdat.agent.state :as state]
             [samizdat.agent.supervisor :as supervisor]
             [samizdat.prompt :as sp]
+            [samizdat.userspace :as userspace]
             [samizdat.util :as util]))
 
 (defn load-config
-  "Gate thresholds from resources/gates.edn. Read through io/resource so the
-  path works interpreted and inside an AOT binary."
+  "The gate thresholds for the current project.
+
+  Through the userspace seam: gates.edn is a policy TABLE, which is userspace —
+  a project that learned its cull threshold is too tight should be able to move
+  it for itself without moving it for every other project on the same binary.
+  The shipped file is the template a project seeds from. Unbound (a test, a
+  bare REPL) this is the resource read it always was."
   []
-  (edn/read-string (slurp (io/resource "gates.edn"))))
+  (userspace/edn-body! :policy "gates"))
 
 (defonce ^:private config-cache (atom nil))
 
@@ -70,19 +77,130 @@
 (defn threshold [k]
   (get-in (config) [k :value]))
 
+(def self-grading-keys
+  "The gate entries that decide how a run is SCORED rather than how it behaves.
+
+  `:fitness` is the weight table session fitness is computed from, which is the
+  number selection and evaluation share. `:verify-unknown` decides whether the
+  ship gate trusts or refuses when it cannot tell, and `:trust` is how a run
+  once shipped with five test errors.
+
+  IN src/ AND NOT IN gates.edn, deliberately. Everything else about a gate is
+  data the agent may rewrite at runtime, and that is the project's whole
+  premise. But a list of 'the keys we watch for self-grading' living inside the
+  file being watched could be edited by the party it watches — the same
+  reasoning that put the run-config protection in src/ (karamazov-kvw). This
+  does not PREVENT the edit; nothing here refuses anything. It only makes the
+  edit nameable so a run that regraded itself says so in its own record
+  (karamazov-7mo M10)."
+  #{:fitness :verify-unknown})
+
+(defn self-graded-changes
+  "The `self-grading-keys` whose values differ between two gate configs, as a
+  map of key -> {:from :to}. Empty when a proposed edit leaves the run's own
+  scoring alone.
+
+  Pure over two parsed configs so it is testable without a save. Compares the
+  `:value` only: a reworded `:doc` is not a regrade."
+  [current proposed]
+  (into {}
+        (keep (fn [k]
+                (let [before (get-in current [k :value])
+                      after (get-in proposed [k :value])]
+                  (when (not= before after)
+                    [k {:from before :to after}]))))
+        self-grading-keys))
+
+(defn provenance-problems
+  "Every `:provenance` in a gates config that is not a non-empty vector of
+  non-blank strings, as [name value] — nil when the config is clean.
+
+  `:provenance` names the bead, review finding, or run that justified an
+  entry or a steer (karamazov-h66o). The shape is checked HERE, for the
+  policy tool's save-time validation, and not in `load-config`: a loader
+  that refused the file would brick the next reload after a runtime edit
+  dropped the key, and the base-test ratchet is what keeps the shipped
+  defaults honest."
+  [config]
+  (let [bad? (fn [p] (not (and (vector? p) (seq p)
+                                (every? #(and (string? %) (not (str/blank? %))) p))))
+        entries (for [[k v] config
+                      :when (and (map? v) (contains? v :provenance) (bad? (:provenance v)))]
+                  [k (:provenance v)])
+        steers (for [g (:gates config)
+                     :when (and (map? g) (contains? g :provenance) (bad? (:provenance g)))]
+                 [(:gate g) (:provenance g)])]
+    (not-empty (vec (concat entries steers)))))
+
 (defn tool-vocab
   "The tool vocabulary `k` (:verification, :shipping, :file-write,
   :settle-called) from gates.edn. The vocabularies the gates read are
   runtime-tunable data, like the thresholds; the vocabulary test in
-  agent-test walks every name against the registered run-tools (review3 #6)."
+  agent-test walks every name against the registered run-tools (provenance R3-6)."
   [k]
   (get-in (config) [:tool-vocab k]))
+
+(defn storm-policy
+  "The storm guard's policy, assembled from the thresholds and vocabularies
+  above (karamazov-ekk). One map so the detector (samizdat.agent.storm, pure)
+  and its consumers — the phases.edn refusal rules, tool-step's window
+  bookkeeping, resume's window rebuild — all read the same tunable values.
+  Every number here is a gates.edn edit away from different behaviour, which
+  is the point: dirge hardcodes its window and threshold, and the standing
+  rule says a decision the agent cannot retune at runtime is in the wrong
+  place."
+  []
+  {:enabled? (boolean (threshold :storm-enabled))
+   :window-size (threshold :storm-window-size)
+   :threshold (threshold :storm-threshold)
+   :timeout-floor (threshold :storm-timeout-floor)
+   :min-cycles (threshold :storm-min-cycles)
+   :strikes-to-force (threshold :storm-strikes-to-force)
+   :verify-exempt? (boolean (threshold :storm-verify-exempt))
+   :error-digest-chars (threshold :storm-error-digest-chars)
+   :exempt-tools (or (tool-vocab :storm-exempt) #{})
+   :mutating-tools (or (tool-vocab :storm-mutating) #{})})
+
+(defn digest-policy
+  "The read digest's policy (karamazov-b76m), gates.edn :digest as one map:
+  :min-lines, the length past which an untargeted read_file is refused
+  toward read_digest (the phases.edn rule); :budget-chars, how long a digest
+  may be; :input-chars, how much file the reader is sent in one call. One
+  map so the rule, the tool and the reader's prompt read the same numbers."
+  []
+  (threshold :digest))
+
+(defn trajectory-policy
+  "The trajectory-scoring policy (gates.edn :trajectory-score): repeats,
+  stride, criteria, and the not-yet-consulted :abandon-below threshold.
+  See samizdat.agent.trajectory for why the threshold ships before anything
+  reads it."
+  []
+  (threshold :trajectory-score))
 
 (defn- prompt [name]
   (sp/prompt name))
 
-(defn- fired-count [branch gate]
-  (count (filter #(= gate (:gate %)) (:gate-history branch))))
+(defn- fired-count
+  "How often `gate` has fired on this branch SINCE ITS LAST MET SETTLEMENT.
+
+  Since, not ever. A budget exists so one episode of nagging cannot become the
+  thing the model answers instead of the work — that is a bound on the
+  EPISODE, and counting from the start of the run made it a bound on the
+  gate's whole lifetime. Live in run bd56a286: :no-edits spent its three on an
+  early stall, was obeyed once, and was then silent while the branch went 143
+  turns without writing a file.
+
+  A met settlement is the episode boundary because it is exactly the statement
+  that the condition cleared — the branch did the thing the gate asked for.
+  Firings before it belong to a stall that is over (karamazov-gez)."
+  [branch gate]
+  (let [mine (filter #(= gate (:gate %)) (:gate-history branch))
+        after-met (->> mine
+                       reverse
+                       (take-while #(not= :met (:settled %)))
+                       reverse)]
+    (count after-met)))
 
 
 
@@ -96,6 +214,45 @@
 ;; the accessors are ordinary calls, so (threshold k) reads the config atom
 ;; at FIRE time — tuning a threshold stays runtime-editable; only the form
 ;; structure compiles at load.
+
+(defn message-context
+  "The render context a gate's prose is selmer-rendered against.
+
+  ONE context for both ways a gate produces its message — the plain
+  `:message-file` and the `:message-form` that wraps `sp/render-str` around a
+  prompt — because a template that behaves differently depending on which
+  key a gate happened to use is a trap, and `{% if %}` silently reaching the
+  model as literal text is how it springs."
+  [branch max-turns]
+  ;; `goal` is in EVERY gate's render context, so any message template can
+  ;; re-anchor the branch to what it said it was doing. Eighteen of nineteen
+  ;; gates used to steer without it — "you are doing badly" with no "at
+  ;; WHAT" — and a model cannot compare an outcome against an intention it
+  ;; is expected to remember. Opt-in per template rather than appended
+  ;; everywhere: a gate that does not need it should not carry it.
+  (let [f (state/last-failure branch)]
+    {:turn-count (state/turn-count branch)
+     :max-turns max-turns
+     ;; THE TWO THINGS A DECISION NEEDS, in every gate's context so any
+     ;; template can use them: what this branch said it is doing, and — when
+     ;; it is being steered because something broke — what broke, in the
+     ;; failure's own words, with the turn number that makes it fetchable.
+     :goal (state/stated-goal branch)
+     ;; WHETHER THIS BRANCH IS PLANNING OR BUILDING, so a template can say
+     ;; "declare it with plan" to the one and "land it" to the other. The
+     ;; turn-budget notice told every design branch to land what it could
+     ;; verify; the branch had nothing to land (karamazov-ee72).
+     :planning (state/planning? branch)
+     :failed-tool (:tool f)
+     :failed-error (:error f)
+     :failed-turn (:turn f)
+     ;; WHAT THIS BRANCH MAY ACTUALLY CALL, for the steers that have to name
+     ;; a tool. A stall gate's job is to say what to do instead, and the move
+     ;; for a task that turned out to be several things is `split` — which
+     ;; only some surfaces carry. Through the same predicate loop.clj refuses
+     ;; calls with, so a gate can neither advertise a tool the branch would be
+     ;; refused for using nor stay silent about one it holds (karamazov-ioo.15.2).
+     :can-split (roles/may-use? (:role branch) "split")}))
 
 (defn- compile-form
   "Compile an EDN form into (fn [ctx] form) with the gate-context keys bound
@@ -130,7 +287,7 @@
   every other prompt seam."
   [{:keys [message-file message-suffix]}]
   (fn [{:keys [branch max-turns]}]
-    (let [ctx {:turn-count (state/turn-count branch) :max-turns max-turns}]
+    (let [ctx (message-context branch max-turns)]
       (str (some-> message-file sp/prompt (sp/render-str ctx))
            (some-> message-suffix (sp/render-str ctx))))))
 

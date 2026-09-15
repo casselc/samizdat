@@ -36,3 +36,28 @@
 
 (deftest parse-plan-drops-blank-and-whitespace-bullets
   (is (= ["real"] (planner/parse-plan "- real\n- \n-    " 4))))
+
+(deftest parse-plan-reads-the-answer-not-the-thinking
+  ;; karamazov-6a3, observed live: the prompt says "no preamble", but GLM
+  ;; opened with an analysis monologue whose OWN bullets came first — a list
+  ;; of stack nouns it was reasoning about — and the parser harvested those,
+  ;; then (take max-parts) dropped the real parts list entirely. Four workers
+  ;; were tasked with fragments of the planner's musing. The answer a model
+  ;; formats last is the answer; the last contiguous bullet block is what the
+  ;; prompt asked it to end with.
+  (testing "preamble bullets are not the plan — the final block is"
+    (is (= ["build the storage layer" "build the handlers"]
+           (planner/parse-plan
+            (str "Let me think about the stack first:\n"
+                 "- jolt (build tool? something like Leiningen)\n"
+                 "- ring-chez-adapter — hmm, Chez Scheme?\n"
+                 "\nOK. The split:\n"
+                 "- build the storage layer\n"
+                 "- build the handlers")
+            4))))
+  (testing "max-parts bounds the FINAL block, not the whole reply"
+    (is (= ["a" "b"]
+           (planner/parse-plan
+            "- noise one\n- noise two\n- noise three\n\nParts:\n- a\n- b" 2))))
+  (testing "a reply that is one contiguous list still parses whole"
+    (is (= ["x" "y" "z"] (planner/parse-plan "- x\n- y\n- z" 4)))))

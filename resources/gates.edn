@@ -17,6 +17,16 @@
 ;; to move the number. The tier observes tool-call mechanics only, so it may
 ;; tune argument-hygiene budgets and may never relax a verification or
 ;; progress guard (dirge PR 740).
+;;
+;; `:provenance` names the bead, review finding, or run that justified an
+;; entry or a steer (karamazov-h66o): a number somebody chose for a reason,
+;; with the reason where a test can see it. Optional on the entries that
+;; predate it and required on every new one — base-test's ratchet
+;; `a-new-gate-entry-names-the-finding-that-justified-it` holds the list of
+;; the grandfathered ones, and a shape that is not a vector of identifiers is
+;; refused at save time by the policy tool, never by the loader. A runtime
+;; edit's own reason lives on the userspace version it creates (its rationale,
+;; karamazov-c58); this key is the reason behind the shipped default.
 
 {:cull-threshold
  {:value 3 :kind :threshold :capability-tunable? false
@@ -28,6 +38,7 @@
 
  :stuck-threshold
  {:value 2 :kind :threshold :capability-tunable? false
+  :provenance ["vf-31m"]
   :doc "Consecutive unproductive verifications before the stuck gate fires.
 
         STRICTLY BELOW cull-threshold, and that is the whole point (vf-31m).
@@ -44,6 +55,7 @@
 
  :reframe-grace
  {:value 4 :kind :threshold :capability-tunable? false
+  :provenance ["vf-31m"]
   :doc "Turns a branch is spared the consecutive-failure cull after the stuck
         gate has dropped it into a reframe, and the window the withheld
         approach stays withheld for.
@@ -67,6 +79,7 @@
 
  :prologue-cap
  {:value 8 :kind :threshold :capability-tunable? false
+  :provenance ["dirge PR 739" "dirge-t5dh"]
   :doc "Turns a branch may take having produced nothing at all. The stall
         counter arms on a progress event, so a run that produced nothing never
         armed it and the monitor was structurally blind to the one case it most
@@ -76,8 +89,194 @@
  {:value 2 :kind :re-fire-guard :capability-tunable? true
   :doc "How often the stall nudge may re-fire on one branch."}
 
+ :oversight-note-chars
+ {:value 400 :kind :threshold :capability-tunable? true
+  :doc "How much of the supervisor's conclusion is kept on the pass record.
+
+        Enough to read back what it decided without storing a whole reply per
+        pass. The full reasoning lives in its branch's messages; this is the
+        index into it."}
+
+ :oversight-unmet-floor
+ {:value 2 :kind :threshold :capability-tunable? true
+  :doc "Gate firings a run may leave UNMET before the supervisor stream spends
+        a model call looking at it.
+
+        An unmet firing is the harness having said something the branch did not
+        act on — the single most direct evidence that the harness's own words
+        are wrong, which is the supervisor's actual subject. One is noise; two
+        is a pattern worth the call."}
+
+ :oversight-idle-floor
+ {:value 25 :kind :threshold :capability-tunable? true
+  :doc "Turns a run may go without writing a file before the supervisor stream
+        looks at it.
+
+        Set well above :orient-turns (60 is the gate that speaks TO the branch;
+        this is the threshold at which the harness starts examining ITSELF).
+        Every stalled run in this project's history shows this signal, and it
+        is the cheapest reliable one there is."}
+
+ :orient-turns
+ {:value 60 :kind :threshold :capability-tunable? true
+  :doc "Turns a branch may READ without declaring a plan or writing anything.
+
+        Reading is how a branch decides what to declare, so orientation is
+        free — but not endless. Three branches across three runs read for 316,
+        148 and 87 turns without ever entering the repl contract, invisible to
+        every gate because all three arming conditions require having entered
+        it first.
+
+        60 is set ABOVE the one branch that got this right, which declared at
+        turn 40 after reading from turn 1. A floor below that would interrupt
+        the behaviour we want. Raise it for a project whose codebase genuinely
+        takes longer to read into; lowering it below ~45 will start nagging
+        orientation that was going to succeed on its own."}
+
+ :no-edit-turns
+ {:value 4 :kind :threshold :capability-tunable? true
+  :doc "Turns a branch may work WITHOUT writing to a file before the no-edits
+        nudge fires, once it has written at least one.
+
+        Distinct from :studying-turns, and much shorter, because it catches a
+        different failure. Studying is a branch that stopped doing anything —
+        read, grep, read again. This is a branch that is BUSY: prototyping in
+        the REPL, form after form, learning things it never commits. Run
+        c99c6fd6 spent turns 45-50 that way, six evals around a single arity
+        bug in a function it had not written down, while write_file sat at 3
+        from turn 25 onward.
+
+        Four is deliberately tight. The nudge is cheap, bounded by
+        :max-no-edit-nudges, and the cost it prevents is a whole run's turns
+        spent in a REPL whose state dies with the run."}
+
+ :max-no-edit-nudges
+ {:value 3 :kind :re-fire-guard :capability-tunable? true
+  :doc "How often the no-edits nudge may re-fire on one branch. Bounded for
+        dirge's reason: a nudge that can repeat forever becomes the thing the
+        model is responding to instead of the work."}
+
+ :same-failure-turns
+ {:value 4 :kind :threshold :capability-tunable? true
+  :provenance ["run bd56a286"]
+  :doc "How many times a branch may run the code and get back the SAME failure,
+        without having changed the code in between, before the suspect-the-test
+        steer fires.
+
+        Four, not one: a genuinely broken implementation also fails repeatedly,
+        and telling a model to doubt a correct test is strictly worse than
+        silence. Four identical failures across an unchanged implementation is
+        no longer a branch converging — it is a branch confirming.
+
+        Run bd56a286 would have tripped it around turn 160 and did not, and
+        spent the 238 turns to 390 reading the file the bug was not in."}
+
+ :same-failure-chars
+ {:value 400 :kind :budget :capability-tunable? true
+  :doc "How much of the repeated failure the steer quotes back. Enough for the
+        assertion and its message, which is the pair the branch has to compare;
+        a whole suite's output would bury the one line that matters."}
+
+ :mutation-diff-lines
+ {:value 40 :kind :budget :capability-tunable? true
+  :provenance ["karamazov-mpd"]
+  :doc "How many lines of a REJECTED cell edit are kept, per side, when the
+        mutation protocol rolls it back.
+
+        The record has to be small enough that it is always kept — a diff
+        nobody keeps is the failure it exists to fix. Common prefix and suffix
+        are dropped before this applies, so a one-line change inside a
+        three-hundred-line cell costs one line and this cap only bites on a
+        rewrite. A clipped span is marked :truncated so it never reads as the
+        whole change.
+
+        From WikiSkill (research/2608.27454v1 s3.2.4): their skill-impact.md
+        keeps every proposal's diff with its accept/reject outcome, and their
+        case study turns on it — the rejection at iteration 0 is what lets
+        iteration 1 propose something different and be accepted. samizdat kept
+        the reason and restored the files over the attempt (karamazov-mpd)."}
+
+ :max-suspect-test-nudges
+ {:value 2 :kind :re-fire-guard :capability-tunable? true
+  :doc "How often suspect-the-test may re-fire in one episode — and an episode
+        ends when the branch writes a file, which is what clears the gate's own
+        precondition (see gates/fired-count).
+
+        Two rather than three: this steer hands over a hypothesis, and a
+        hypothesis repeated becomes an instruction. If the branch has checked
+        its tests twice and still believes them, it is not going to be talked
+        out of them by a third telling, and the honest next move is the
+        implementation."}
+
+ :image-interrupt-grace-ms
+ {:value 2000 :kind :threshold :capability-tunable? true
+  :provenance ["RFC-013"]
+  :doc "How long a project-image eval that passed its deadline is given to
+        answer the interrupt before the image is restarted (RFC-013). The
+        image is started with jolt's interruptible nREPL, which aborts even a
+        tight loop at its next engine tick and replies in milliseconds, so the
+        image survives with its defs; an eval blocked in a foreign call (a
+        socket read, a sleep) aborts only when that call returns, and past
+        this grace the restart is the only way to get the image back.
+
+        Tunable because the trade is a project's: a longer grace keeps more
+        images alive through a slow foreign call, at the cost of a branch
+        waiting that much longer for a REPL that may never answer."}
+
+ :run-start-deadline-ms
+ {:value 120000 :kind :threshold :capability-tunable? true
+  :provenance ["karamazov-iev2"]
+  :doc "How long POST /v1/runs waits for the run row to exist before answering
+        503. The run itself is not stopped by this — it goes on in the
+        background either way — so the deadline only decides whether the
+        caller gets the run id or a refusal it then has to reconcile with a
+        run that started.
+
+        The row is created AFTER the workflow-selection model call, which on
+        GLM-5.3 with thinking took 28 s live (2026-09-07, karamazov-iev2), so
+        the 30 s literal this replaces answered 503 to a run that then ran.
+        Two minutes covers a slow selection call under load without letting a
+        client hang forever on a provider that never answers."}
+
+ :git-snapshot-ttl-ms
+ {:value 3000 :kind :threshold :capability-tunable? true
+  :provenance ["karamazov-uk77" "dirge-vuzz"]
+  :doc "How long GET /v1/harness/project may serve a cached git snapshot.
+
+        The endpoint shells out to git three times — symbolic-ref, log -1,
+        status --porcelain — and the TUI's poller asks every 1.5 s per
+        connected front end. The tree does not change that fast, and dirge
+        learned the same thing the harder way: it read .git/HEAD once per
+        PAINTED FRAME and froze its UI on large repos until it cached the
+        lookup (dirge-vuzz). Three seconds keeps the branch fresh enough to
+        notice a checkout while taking git off the poll path.
+
+        Raise it on a slow filesystem or a very large repo; 0 disables the
+        cache and reads on every request."}
+
+ :image-connect-ms
+ {:value 20000 :kind :threshold :capability-tunable? true
+  :provenance ["karamazov-zrq"]
+  :doc "How long to wait for the sandboxed project image's nREPL port to
+        answer before giving up on it. A cold jolt start is a second or two;
+        this is generous for a loaded machine and short enough that a broken
+        profile fails a run rather than hanging it. Tunable because a large
+        project on a slow box legitimately needs longer.
+
+        Shrinking this cannot buy an escape: an image that fails to start
+        fails the eval, and NEVER falls back to the harness image
+        (karamazov-zrq). That is what makes it safe to leave in userspace."}
+
+ :image-reap-ms
+ {:value 3000 :kind :threshold :capability-tunable? true
+  :doc "How long to wait for a killed project image to actually be gone.
+        Destroying is asynchronous — the kill is unconditional either way, so
+        this only decides how long teardown watches before it warns that it
+        may have leaked a port."}
+
  :studying-turns
  {:value 10 :kind :threshold :capability-tunable? true
+  :provenance ["karamazov-j5t"]
   :doc "Consecutive inspection-only turns (read/grep/eval/…), after the branch
         has shipped at least once, before the supervisor's studying gate fires.
         High enough that opening exploration is never nagged; a live run
@@ -109,8 +308,33 @@
   :doc "How often `done` may be refused before the branch is told to give up.
         A cost ceiling because each refusal spends another model turn."}
 
+ :max-give-up-blocks
+ {:value 3 :kind :cost-ceiling :capability-tunable? false
+  :provenance ["karamazov-ylte.1"]
+  :doc "How often `give_up` may be refused before it is accepted anyway.
+
+        THE RELIEF IS THE POINT, and without it the give_up rungs are a trap.
+        :max-done-blocks reads 'how often `done` may be refused before the
+        branch is told to give up' — giving up IS the escape hatch from a
+        refused done, so gating it with no ceiling leaves a stuck branch
+        refused at both exits, spending its whole budget being told no. That
+        is the quiet spin the rungs exist to stop, rebuilt one door along.
+
+        Found by team-test/supervisor-retries-a-worker-that-gave-up, whose
+        workers said `stuck`, were refused, and never gave up — so the
+        supervisor had nothing to retry.
+
+        Fail-open on the same reasoning cells/critic.clj gives for the
+        finalization judge: bounded so it cannot block forever, because a
+        backstop that can wedge the loop is worse than no backstop. What the
+        branch cannot do is end CHEAPLY: three refusals, each carrying a
+        message naming what an account is, and the record then shows an
+        abandonment whose reason never came — which is a finding rather than
+        a silence."}
+
  :turn-budget-notices
  {:value [0.6 0.85] :kind :threshold :capability-tunable? false
+  :provenance ["dirge PR 738"]
   :doc "Fractions of the turn cap at which the model is told where it stands.
         The cap was enforced but invisible to the model (dirge PR 738)."}
 
@@ -129,6 +353,7 @@
 
  :last-call-window
  {:value 2 :kind :threshold :capability-tunable? true
+  :provenance ["karamazov-pab"]
   :doc "How many of a branch's final turns the last-call rung fires in. The
         wind-down rung asks a branch to ship and is a soft nudge a model can
         ignore — a live team run (karamazov-pab) had every worker burn its whole
@@ -246,22 +471,195 @@
         cull: this rung spends a hard-capped abort and, in a non-advisory
         mode, rebuilds an engine process."}
 
+ ;; --- the storm guard (karamazov-ekk, after dirge storm.rs) ---------------
+ ;; Detection is samizdat.agent.storm (pure fns over a per-branch window of
+ ;; (tool, canonical-args) signatures); the withhold itself is the phases.edn
+ ;; :storm / :storm-oscillation refusal rules; the words are
+ ;; resources/prompts/storm*.md. Everything tunable is HERE, because dirge
+ ;; hardcodes its 6/3 window and cannot tune it at runtime — we can.
+
+ :no-call-ladder
+ {:value {:withhold-at 3 :end-at 8}
+  :kind :threshold :capability-tunable? true
+  :provenance ["run 89f6487a"]
+  :doc "WHAT HAPPENS WHEN A BRANCH KEEPS PRODUCING NO USABLE CALL.
+
+        The no-call route reaches neither :dispatch nor :arbiter, and that is
+        deliberate — the arbiter reads what the turn DID and a no-call turn did
+        nothing, which loop.edn's :must-precede invariant says in its own
+        :protects text. So no gate can answer this, and the only response was
+        the complaint appended in no-call-step. On run 89f6487a that complaint
+        went 0-FOR-42: branch T0 spent turns 193-250 emitting nothing, every
+        turn correctly diagnosed as a compaction-digest imitation and told so.
+
+        A ladder inside the step instead, since that is where the streak is
+        already known:
+
+        :withhold-at   drop the [unloaded] digests from the branch's context.
+                       A model copying them is copying what is in front of it,
+                       so this takes the exemplar away rather than asking
+                       again. Bookkeeping only; fetch_turn reopens any of it.
+        :end-at        end the branch honestly. The work goes back with an
+                       account rather than the branch burning to its cap
+                       emitting nothing — the same outcome :mechanics-streak
+                       predicts, on the path that gate cannot reach.
+
+        Counted on :consecutive-mechanics-failures, which record-outcome zeroes
+        the moment any real call lands, so an isolated no-call costs nothing."}
+
+ :storm-enabled
+ {:value true :kind :threshold :capability-tunable? true
+  :doc "Whether the storm guard withholds calls at all. The off switch is
+        policy, not a rebuild: a project whose workflow legitimately repeats
+        identical calls (polling a build, say) can turn the guard off or
+        widen the threshold instead of fighting it."}
+
+ :storm-window-size
+ {:value 6 :kind :threshold :capability-tunable? true
+  :doc "How many recent dispatched calls the storm window remembers per
+        branch. Exempt (read-only) tools never enter; a mutating call clears
+        the non-mutating entries, so a check-fix-check cycle does not
+        accumulate."}
+
+ :storm-threshold
+ {:value 3 :kind :threshold :capability-tunable? true
+  :doc "The Nth identical (tool, canonical-args) call is withheld: at 3 the
+        first two run — one call plus one honest retry — and the third is
+        refused with the reflect-then-pivot prompt. Must be at least 2. The
+        guard withholds rather than warns: the begin-reframe experience is
+        that gates which merely suggest went 0-for-4, and dirge found the
+        bare don't-repeat-yourself nudge reinforces the failing chain of
+        thought (degeneration-of-thought), which is why the message demands
+        named assumptions and fundamentally different alternatives instead."}
+
+ :storm-timeout-floor
+ {:value 2 :kind :threshold :capability-tunable? true
+  :doc "The effective threshold for a signature that has TIMED OUT: a hung
+        call burned its whole time budget, so it does not get the full retry
+        allowance — the second identical copy is withheld, not the third."}
+
+ :storm-verify-exempt
+ {:value true :kind :threshold :capability-tunable? true
+  :doc "Whether a shell call running the project's :run :verify-cmd is
+        invisible to the storm guard. The verify loop IS repetition — red,
+        edit, rerun the identical suite command — and the best run of the
+        GLM campaign (4e785664) contained exactly one identical repeat: its
+        verify command. Blocking the third suite run would punish TDD
+        itself. Rerunning a red suite with NO edit between stays the
+        failure-keyed guards' business: repeating-failure? sees the
+        identical error, the stuck gate sees the streak."}
+
+ :storm-min-cycles
+ {:value 2 :kind :threshold :capability-tunable? true
+  :doc "Full A-B-A-B cycles between exactly two signatures before the call
+        that would extend the alternation is withheld. Exactly two distinct
+        signatures, deliberately: near-alternation among three or more calls
+        is divergence, and counting it manufactures phantom oscillation."}
+
+ :mechanics-streak-threshold
+ {:value 6 :kind :threshold :capability-tunable? true
+  :provenance ["karamazov-068"]
+  :doc "Consecutive turns producing no usable tool call before the
+        mechanics-streak rung forces an honest give_up. Matched to the bar
+        the beam already uses to cull on mechanics (cull-threshold ×
+        cull-mechanics-multiple = 6), because it is the same judgement: a
+        branch that cannot work the protocol six turns running is not going
+        to. It exists as a GATE rather than only as a cull because a cull
+        happens in the beam, and a role sub-loop — the supervisor, the
+        reviewer — does not run under one. A live supervisor emitted eight
+        unusable replies in a row with nothing to stop it (karamazov-068);
+        gates fire wherever the arbiter does, which is every turn-shaped
+        manifest."}
+
+ :max-mechanics-forces
+ {:value 2 :kind :re-fire-guard :capability-tunable? true
+  :doc "How often the mechanics-streak rung may force a give_up on one
+        branch."}
+
+ :storm-strikes-to-force
+ {:value 3 :kind :threshold :capability-tunable? true
+  :doc "Consecutive storm-withheld calls before the :storm gate forces an
+        honest give_up. Withholding blocks the repeat; this rung answers the
+        model that keeps asking for it anyway — the run is spending turns
+        re-requesting a result it already has, and an honest give_up hands
+        the task back where a silent grind hands back nothing. Any
+        dispatched (non-withheld) tracked call resets the count."}
+
+ :max-storm-forces
+ {:value 2 :kind :re-fire-guard :capability-tunable? true
+  :doc "How often the :storm gate may force a give_up on one branch."}
+
+ :storm-error-digest-chars
+ {:value 160 :kind :threshold :capability-tunable? true
+  :doc "How much of a failed call's error text the storm window remembers per
+        entry, quoted back when the same call is retried (retry-diagnosis).
+        A digest, not the whole error: the window lives on the branch and
+        rides every checkpoint."}
+
+ :file-thrash-threshold
+ {:value 8 :kind :threshold :capability-tunable? true
+  :doc "Consecutive file-touching calls whose path sets overlap before the
+        file-thrash gate reminds the branch what it set out to do (dirge
+        context_depth.rs, its recommended value). Counts calls, not turns;
+        the tracked set narrows to the intersection so divergent touches
+        break the streak on their own; a no-file call resets it."}
+
+ :max-file-thrash-nudges
+ {:value 1 :kind :re-fire-guard :capability-tunable? true
+  :doc "How often the file-thrash gate may fire on one branch. One-shot per
+        run by default: it is a reminder, and a reminder repeated is a nag
+        the settle table will record being ignored."}
+
+ :timeout-failure-weight
+ {:value 2 :kind :threshold :capability-tunable? true
+  :doc "What a timed-out call adds to consecutive-failures, where an ordinary
+        failure adds 1. A timeout is the most expensive failure there is —
+        it burned a whole time budget — and counting it like a millisecond
+        error made a branch stuck retrying a hang the weakest possible
+        signal, one cheap-looking failure per 120s. The streak gates
+        (:stuck, :safe-state) read the counter unchanged and so trip sooner
+        on expensive loops."}
+
+ :trajectory-score
+ {:value
+  {:repeats 4
+   :stride 5
+   :abandon-below 0.05
+   :criteria
+   ["concrete-output: look only at files written or edited and commands run.
+     HIGH: new or corrected code landing on disk that serves the goal. LOW:
+     steps that read, list, or plan without producing anything on disk.
+     Ignore the agent's own narration."
+    "verification-signal: look only at test and verify command results. HIGH:
+     the suite or a focused test moving from red toward green. LOW: repeated
+     red with the same error, or no verification at all. Ignore claims of
+     success not backed by an actual run."
+    "convergence: look at the sequence of recent steps. HIGH: each step
+     builds on the previous step's result. LOW: repeats of the same call,
+     alternation between two calls, or unconnected jumps. Ignore verbosity."]}
+  :kind :threshold :capability-tunable? true
+  :provenance ["karamazov-fut"]
+  :doc "Continuous trajectory scoring (karamazov-fut, llm-as-a-verifier's
+        ProgressTracker): every :stride-th step judged on steps-so-far,
+        :repeats letter-scale asks averaged, criteria per the verifier
+        TEMPLATE rules (2-4 narrow ones beating one broad one; each says
+        where to look, what is HIGH, what is LOW, what to ignore).
+        :abandon-below is the eventual flat-low-curve decision threshold —
+        shipped as data from day one, CONSULTED BY NOTHING until the signal
+        is validated on baseline runs (samizdat.agent.trajectory/score-run):
+        a completed and an exhausted run must actually separate before any
+        gate or cull reads the number."}
+
  :max-branch-theses
  {:value 4 :kind :cost-ceiling :capability-tunable? false
   :doc "Most theses one branch_theses call may propose. A cost ceiling:
         every proposal beyond the first becomes a sibling branch — a
         concurrent provider call per turn plus its own process."}
 
- :reflection-cadence
- {:value 15 :kind :threshold :capability-tunable? false
-  :doc "Turns between reflection nudges. Not capability-tunable: the nudge
-        invites the branch to reshape its own loop (reload_cells), and the
-        tier under observation should not loosen the cadence at which it is
-        invited to mutate the machinery observing it."}
-
  :share
  {:value {:statuses #{:confirmed} :require-relevance? true}
   :kind :threshold :capability-tunable? false
+  :provenance ["drg-4026 #5" "vf-8fl"]
   :doc "The shared-pool entry condition (drg-4026 #5): which claim statuses
         an artifact must carry to export to sibling branches, and whether the
         relevance filter (advances-thesis?) additionally gates it. Engine-
@@ -270,6 +668,1746 @@
         that engages neither the branch's thesis nor the problem cost its
         own branch a turn, exported it becomes every branch's context
         (vf-8fl). require-relevance? off admits any confirmed artifact."}
+
+ :fork-inherit
+ {:value {:inherit? true :depth nil}
+  :kind :threshold :capability-tunable? false
+  :doc "What a forked child inherits from its parent (LR-1).
+
+        :inherit? — whether the child opens on its parent's CONVERSATION or
+        on a fresh [system, problem] tape. Fresh was the old behaviour and it
+        was not a decision anyone made: a fork discarded everything its
+        parent had learned and re-derived it from the problem statement,
+        while the crossover block's own prose claimed the child carried its
+        parent's history. Inheriting is nearly free — the tape is an
+        immutable value, so a child shares structure with its parent — and on
+        a local endpoint the shared prefix is also a warm KV cache
+        (:cache_prompt, LR-5).
+
+        :depth — how many MESSAGES of the parent to carry, nil for all of
+        them. Two per exchange, so 8 is four exchanges. This is the
+        branch-an-older-turn knob: when a parent went wrong at turn 6, a
+        child forked at depth 10 retries from before the mistake instead of
+        from zero. Only the gate counters are reset either way — a child is
+        never culled for its parent's failures.
+
+        A depth past the parent's own length cannot lengthen the tape, so a
+        stale number degrades to a full inherit rather than an error."}
+
+ :probe
+ {:value {:width 3 :on-mechanics-failures 2 :variants []}
+  :kind :cost-ceiling :capability-tunable? false
+  :provenance ["dirge PR 740"]
+  :doc "The non-committing probe's budget (LR-2, LR-3).
+
+        :width — how many candidate framings :probe/next-move tries against
+        the branch's current tape before the real turn. Each is one
+        completion, so this is spend: 0 turns the probe off entirely. On a
+        local endpoint every bounce reuses the same warm prefix
+        (:cache_prompt), so a scan costs N completions and ONE prefill;
+        against a metered provider it costs N calls, which is why the default
+        is small.
+
+        :on-mechanics-failures — how many consecutive malformed or unusable
+        calls a branch must have produced before probing is worth it. A branch
+        emitting well-formed calls needs no help, and probing it is pure
+        spend. This is a :cost-ceiling, so it is never scaled UP for a
+        struggling run — a branch in trouble is the last one to spend more on.
+
+        :variants — the role keys :probe/ab-model fans one question across,
+        resolved through config :run :role-models. Empty turns the A/B off.
+        Recording the comparison is the point; nothing routes on it yet.
+
+        NOT capability-tunable, even though both knobs are keyed on tool-call
+        mechanics and the tier's remit is exactly that. It is a cost ceiling,
+        and the tier could only ever want to raise :width — which is spending
+        MORE on the branch already in trouble, the one thing the cost-ceiling
+        kind exists to forbid (dirge PR 740). gate-config-is-coherent asserts
+        it, and caught this entry claiming otherwise."}
+
+ :turn-deadline-ms
+ {:value 900000 :kind :cost-ceiling :capability-tunable? false
+  :doc "A hard ceiling on ONE branch turn, independent of the HTTP layer's own
+        timeout.
+
+        Found by the first live beam: B1's provider call hung, and because the
+        scheduler is a barrier the whole beam sat still behind it for fifteen
+        minutes. The socket timeout does not always fire — the connection sits
+        ESTABLISHED with zero throughput and the caller waits forever. This is
+        the RAX-manager principle applied to a branch: the stop path must not
+        depend on the component's cooperation.
+
+        Sized to the worst LEGITIMATE turn rather than the typical one, because
+        forfeiting a turn that was about to succeed is expensive twice over —
+        the branch loses the turn AND the failure is logged for other branches
+        to avoid. The worst legitimate turn is a provider call at its 300000ms
+        socket timeout followed by an engine call at its own 300000ms, so the
+        old 420000ms could not fit one without a false kill.
+
+        A project whose checks are slower should raise it, which is exactly why
+        it is here rather than a constant in code. Skipped entirely for a
+        non-iterating manifest (team, feature, decompose), where one 'turn' is
+        the branch's whole job.
+
+        HARNESS_TURN_DEADLINE_MS still overrides, for an operator who needs it
+        for one run without editing the project's policy."}
+
+ :crossover
+ {:value {:statuses #{"confirmed"} :limit 8}
+  :kind :threshold :capability-tunable? false
+  :doc "What a newly forked child is shown of what OTHER lineages have proved.
+
+        This is the recombination half of the beam: a child that inherits only
+        its parent's history deepens one line, while a child opened holding
+        what its aunts and uncles confirmed can COMBINE lineages. :statuses is
+        which claim statuses qualify — engine-confirmed only, by default, since
+        the whole value is that the child can build on it without re-checking.
+        :limit bounds how many, newest first, because this lands in the child's
+        opening context and an unbounded block would crowd out its own thesis."}
+
+ :verify-timeout-ms
+ {:value 600000 :kind :cost-ceiling :capability-tunable? false
+  :doc "Wall-clock bound on one verification run — the project's own test
+        command. Was a 600000 default inside verify.clj, which is the wrong
+        place for it twice over: it is the single most project-specific number
+        in the harness (a suite that takes twelve minutes and one that takes
+        four seconds are both normal), and a branch whose verification is
+        guillotined reads as a branch that cannot get its tests green.
+
+        Never scaled UP for a struggling run: a run in trouble spending longer
+        per check is how a turn budget disappears into one command."}
+
+ :judge-verify?
+ {:value true :kind :threshold :capability-tunable? false
+  :provenance ["karamazov-ylte.1" "dirge code_review.rs" "roborev"]
+  :doc "Whether a review runs its second pass: the judge re-reads its own
+        candidate findings against the diff and drops what the diff does not
+        support.
+
+        ON, because one pass is what a single-shot judge FIRST thought. The
+        review on run dbe64eea-successor emitted five findings, of which two
+        were style opinions and one was a bullet it argued itself out of and
+        left in anyway. dirge and roborev have both run two passes from the
+        start; this is the port.
+
+        It costs a second model call per review that found anything — and
+        NOTHING on a clean review, which skips it. Off is a legitimate stance
+        for a project that would rather pay one call and read the noise."}
+
+ :rubric
+ {:value {:threshold 0.7
+          ;; Which RFC section holds the criteria — the reader's half of the
+          ;; format prompts/rfc-brief.md asks for; change both together.
+          :heading-regex "(?i)^#+\\s*acceptance criteria\\b"
+          ;; THE RUBRIC'S OWN DIFF BUDGET. An epic's diff is the sum of its
+          ;; tasks' diffs, and the first rubric scored on a real epic (run
+          ;; 5f8de58c) was shown it under the per-branch :context-budget
+          ;; :diff-chars: 20417 chars cut at 12000, exactly at the header of
+          ;; the file five of the fifteen criteria were about — eight NO
+          ;; ratings for evidence never shown, reward 0.4 (karamazov-0way).
+          ;; :diff-fetch-chars bounds the raw fetch (a runaway diff is still
+          ;; a runaway prompt); each question then sees the diff reordered
+          ;; by relevance to it (judge/focus-diff) and cut at :diff-chars.
+          :diff-chars 40000
+          :diff-fetch-chars 200000
+          ;; And the current sources of the files the run changed, ordered
+          ;; the same way (judge/focus-sources) — a question about the tree
+          ;; ('the wind is one field') is answered from what the code IS,
+          ;; which a diff of what changed cannot show.
+          :sources-chars 30000}
+  :kind :threshold :capability-tunable? false
+  :provenance ["karamazov-a6mj.4" "thinkingbox docs/rubrics_judge.md"]
+  :doc "The end-of-phase RUBRIC (karamazov-a6mj.4). When an approved RFC lists
+        acceptance criteria (its '## Acceptance criteria' bullets), epic-review
+        puts each to the critic as ONE narrow yes/no and scores them as
+        thinkingbox's RubricJudge does: positive criteria earn their weight on
+        YES, a [-N] deduction costs N on YES, an [xM] multiplicative penalty
+        scales the reward by (1 - M) on YES, reward = clamp((earned -
+        deductions) / positive weight) x the multipliers. :threshold is the
+        pass mark: reward below it is a blocking gap, and the failed criteria
+        become the fix child's problem text.
+
+        0.7 is thinkingbox's own worked example and a starting point, not a
+        measurement. A judge that decides nothing (every rating undecided)
+        passes — fail-open, like every judge here — and says so in the note.
+        One call PER CRITERION, so an RFC with eight criteria costs eight small
+        calls at the epic's end; the two-pass review still runs beside it."}
+
+ :review-severities
+ {:value ["critical" "high" "medium" "low"] :kind :threshold
+  :capability-tunable? false
+  :provenance ["karamazov-ylte.1" "dirge code_review.rs" "dirge-uz95"]
+  :doc "EVERY severity a finding may carry, blocking or not — the vocabulary
+        prompts/judge.md asks for, written down where the reader can see it.
+
+        This is the parse protocol, not policy in its own right: a finding is
+        one SEGMENT of a findings block, and a segment starts at each line
+        carrying one of these tags. The verify pass needs that granularity to
+        attribute VERIFIED / FALSE_POSITIVE per finding rather than per block
+        — without it one drop clears a whole block, including findings the
+        judge explicitly kept (dirge-uz95). So it travels with the template:
+        change the tags judge.md asks for and change this in the same edit.
+
+        :review-blocking-severities below is the SUBSET that blocks a ship,
+        which is a genuine project judgement and stays separate."}
+
+ :review-blocking-severities
+ {:value ["critical" "high"] :kind :threshold :capability-tunable? false
+  :doc "The finding severities a review BLOCKS a ship on. Anything else is
+        advisory — passed back to the branch, not grounds for undoing a done.
+
+        Was a regex literal in judge.clj, which encoded two project judgements
+        as code: that a reviewer says [critical]/[high] rather than [P0]/[P1] or
+        [blocker], and that medium never blocks. Both are the project's call. An
+        empty list makes every finding advisory, which is a legitimate stance
+        for a codebase where the reviewer is a second opinion rather than a
+        gate."}
+
+ :planner-max-parts
+ {:value 4 :kind :threshold :capability-tunable? false
+  :doc "How many parts the planner may split a task into — the team fan-out
+        width. Kept small because parallel workers share ONE workspace, and a
+        wide split multiplies collision risk faster than it buys speed. That is
+        a judgement about a project's workspace: a repo of independent packages
+        tolerates a much wider split than one with a single build. Config
+        :run :max-subtasks still overrides for one run."}
+
+ :board-owner-turns
+ {:value 150 :kind :threshold :capability-tunable? false
+  :provenance ["karamazov-ghti" "run e1b765e7"]
+  :doc "How many turns one board owner may spend on one task before it is
+        exhausted and the task goes back to the board unowned.
+
+        Until this the owner's cap was the run's :max-turns, and on a
+        board-driven run that number bounds the beam's rounds rather than
+        any owner, so every owner in effect had the whole run: on run
+        e1b765e7 (GLM-5.3, 2026-09-07) parts 1 and 2 of a four-part task
+        shipped in 55 and 34 turns and part 3 ran past 140 with the fourth
+        part never started, every steer a suggestion and nothing able to end
+        it (karamazov-ghti). An exhausted owner is the case board-review's
+        give-up already handles: the task stays open, unattributed, and the
+        board moves on. A RUNAWAY GUARD, not a plan — it is above the
+        longest honest part this project has seen ship (~115 turns), and
+        the run's own cap still applies when it is lower."}
+
+ :board-max-tasks
+ {:value 40 :kind :threshold :capability-tunable? false
+  :doc "How many tasks one board run will work before it stops and reports what
+        is left. The board loop is open-ended by design — an owner may split its
+        task into more tasks, and those may split again — so the only structural
+        bound is this one. It is a RUNAWAY GUARD, not a plan: a run that reaches
+        it has produced 40 owned, reviewed changes and should be looked at, not
+        quietly continued. Raise it for a genuinely large migration."}
+
+ :board-attempts-scope
+ {:value :claim
+  :kind :policy :capability-tunable? false
+  :provenance ["karamazov-yjbp"]
+  :doc "WHAT :board-review-attempts COUNTS.
+
+        `:claim` — revisions within one claim. The round's own counter, seeded
+        to 0 every time a task is claimed. An owner gets N revisions; a task
+        given up and re-claimed next round starts over, so the number of
+        CLAIMS is unbounded and only the run's turn budget stops it.
+
+        `:task` — attempts on the task itself, the durable tasks.attempts
+        column. N attempts total across every claim, every round and every
+        resume; past that the task is left open and the loop stops paying for
+        it.
+
+        The two differ only when a task is given up and comes back, which is
+        exactly the case that matters and exactly the one a single round never
+        exercises. Run b8ae2b1f: task sz-218ca4 spent 113 turns, was given up
+        one test error from green, was released, and was re-claimed with the
+        counter back at zero.
+
+        MEASURED, and the answer was the opposite of the intuition that
+        raised the question. Across every run database on the machine: 17 runs
+        used a board, 27 tasks were claimed, and 4 of the 27 (15%) were
+        claimed more than once — so the case the two readings disagree about
+        is common, not rare. Of those four, two eventually landed, and BOTH
+        landed on their SECOND claim:
+
+          b8ae2b1f sz-218ca4  3 claims  unfinished
+          e1491f04 sz-3b7c4b  2 claims  unfinished
+          7857c6e7 sz-a3f3e1  2 claims  DONE on the second
+          ba7c9c32 sz-13c01c  2 claims  DONE on the second
+
+        Under `:task` at this threshold a task arriving on its second claim
+        already carries a durable count of 2, so `spent?` fires before its
+        owner works it. Both observed successes would have been killed to save
+        the wasted claims on the two failures — two saved failures against two
+        destroyed successes, and a success is what the loop is for.
+
+        So `:claim` is the default on evidence rather than on inertia. `:task`
+        stays because the harshness is a product of :board-review-attempts
+        being 2, and at a higher cap the trade could look different; anyone
+        flipping it should re-run that count over the run databases first. A
+        live A/B (runs 2ec1df03 and 075e783a) could NOT decide this: both arms
+        put the whole problem in one top-level task whose children were worked
+        inside a single claim, so neither reached a re-claim and `spent?`
+        never fired on either side."}
+
+ :board-review-attempts
+ {:value 2 :kind :threshold :capability-tunable? false
+  :doc "How many times a critic may send one task back to its owner before the
+        loop leaves it open and moves on. A calibrated critic blocks rarely;
+        this caps what a miscalibrated one can spend on a single task. The task
+        is NOT closed when this trips — it goes back to the board, because a
+        task the board still shows is a truer record than one closed because the
+        loop got tired of it."}
+
+ :retention
+ {:value {:events-hours 24
+          :run-record-days nil}
+  :kind :policy :capability-tunable? false
+  :provenance ["RFC-009"]
+  :doc "HOW LONG THE DATABASE KEEPS A FINISHED RUN. One project, one file, and
+        it only ever grew.
+
+        :events-hours — the tail buffer. Events are not a record: every kind
+        that matters is also written to a durable table, and their only readers
+        are the live tail and last-progress-at. The window exists because a
+        client tailing a run reads its :run-finished entry to learn the run
+        ended, so events have to outlive the run itself by long enough for
+        that. This was (* 24 3600) inline in store/runs.clj.
+
+        :run-record-days — the RECORD: turns, artifacts, failures, gate
+        firings and the messages between branches. nil means keep forever, and
+        that is the default, deliberately.
+
+        Deleting these is not the same kind of act as deleting events, and the
+        difference is the whole reason one defaults on and the other defaults
+        off. RFC-009's central property is that a resume rebuilds branch state
+        by REPLAY — everything a gate reads is journalled — and that a crashed
+        run stays inspectable. Pruning turns ends both for that run: it becomes
+        a row saying something happened, with no account of what.
+
+        So this is an operator's decision about disk, not a default anyone
+        should inherit. When it is set, only runs that are finished AND older
+        than the window are touched, the `runs` row itself always survives (an
+        index of what happened, without the bulk), and the FTS mirrors go with
+        their rows — an orphaned index entry would keep ranking against
+        nothing, which is worse than either keeping or deleting cleanly."}
+
+ :corroboration
+ {:value {:min-runs 2}
+  :kind :threshold :capability-tunable? false
+  :doc "HOW MANY DISTINCT RUNS A PATTERN NEEDS BEFORE IT JUSTIFIES CHANGING THE
+        LOOP.
+
+        One run is an observation, not a pattern. A single run can go wrong for
+        reasons that have nothing to do with the harness — a flaky provider, an
+        unlucky task, a model having a bad day — and a supervisor that retunes
+        on one run's evidence is fitting the noise. It will then measure the
+        retune against the next run, which is also one run, and so on.
+
+        Adopted from backpass (VISION.md): `a new instruction needs
+        corroboration from at least two distinct sessions, and one session
+        never counts twice however often it is re-analyzed`. The DISTINCT is
+        the load-bearing word — a second sighting inside the same run is the
+        same evidence counted twice.
+
+        Two is deliberately the lowest bar that is still a bar. It is not a
+        claim that two runs prove anything; it is the difference between a
+        pattern and an afternoon, and raising it costs the supervisor its
+        ability to react at all on a short campaign.
+
+        Below the bar a finding is still SHOWN — it may be the only warning
+        anyone gets — and it is marked as uncorroborated, so acting on it is a
+        deliberate choice rather than a mistake."}
+
+ :exam-ratchet
+ {:value {:mode :detect :min-drop 2}
+  :kind :policy :capability-tunable? false
+  :provenance ["karamazov-fgsb"]
+  :doc "WHAT HAPPENS WHEN A WRITE TAKES ASSERTIONS OUT OF A TEST FILE.
+
+        A run that cannot pass its tests can always pass them by changing
+        them, and it does not look like cheating from the inside. Run
+        170f4ec9 replaced four contract assertions (mul(2,3)==6 and three
+        more) with a bare `mul(1, 1)`, under a rewritten docstring explaining
+        that the contract assertions would come later, and shipped green.
+
+        :mode — :off, :detect or :refuse.
+
+        :detect is the default and the measurement is why. Across every run
+        database on the machine (22 runs, 190 writes to test files), counting
+        assertions only, the detector flags 6 events of which 5 landed and 3
+        are real: the gutting above; an entire `blank-titles` deftest deleted
+        as collateral in an edit whose purpose was repairing a different test
+        (a3ba69bb); and one assertion reduced to its bare call (a3c9fd3d).
+
+        :min-drop — how many assertions must go before it counts. TWO, and
+        this is the number the corpus decided. Both false alarms were drops of
+        exactly one — a line duplicated verbatim, and two assertions replaced
+        by one CORRECT one — while both severe cases were drops of two or
+        more. At >= 2 the rule caught both severe cases with no false alarm;
+        at >= 1 it was 3 true to 2 false. A warning that cries wolf teaches a
+        supervisor to skip the real one, so precision buys more here than
+        recall.
+
+        :refuse is NOT the default, and that is a decision rather than
+        caution. 100% precision over three true positives is not a mandate to
+        start declining writes, and the rule already misses a single-assertion
+        deletion, so refusing would trade a known miss for an unknown one. The
+        value exists so the call can be made again on more runs.
+
+        The comparison is of the FILE before and after the write, not of the
+        tool's arguments: 22 patch spans in that corpus are invisible at the
+        argument layer, because a patch names anchors rather than the text it
+        replaces. A detector reading arguments is blind to the tool a careful
+        model reaches for."}
+
+ :fitness
+ {:value
+  {:weights {:tool-success     1.0
+             :tool-failure    -1.0
+             :tool-mechanics  -1.5
+             :parse-error     -2.0
+             :no-fence        -2.0
+             :truncated       -1.0
+             :auto-repaired   -0.25
+             :verify-green     3.0
+             :verify-red      -1.0
+             :verify-skipped  -2.0
+             :gate-met         0.5
+             :gate-met-late    0.25
+             :gate-unmet      -0.5
+             :provider-empty  -2.0
+             :provider-failed -1.5
+             :provider-retry  -0.5}
+   :min-turns-for-verdict 6
+   :meaningful-delta 0.15
+   :max-open-experiments 1}
+  :kind :policy :capability-tunable? false
+  :provenance ["RFC-012 F3"]
+  :doc "THE SELECTION PRESSURE. One number per turn saying how well the loop is
+        running, so that a change to the loop can be judged against something
+        other than a feeling.
+
+        The supervisor mutates the loop — a cell, a manifest, a prompt, a
+        threshold — and userspace keeps every version. That is variation and
+        heredity. Without a fitness function there is no SELECTION: nothing
+        distinguishes a change that helped from one that was merely made, and a
+        supervisor accumulates edits the way a codebase accumulates workarounds.
+
+        The weights are the value judgements, and they are here rather than in
+        code because they are exactly the thing a project should argue with.
+        The ones worth defending:
+
+        :tool-mechanics is worse than :tool-failure. A failed call TESTED
+        something and came back negative; a malformed one produced no evidence
+        at all and cost the same turn. A loop that cannot tell those apart will
+        optimise toward making no claims.
+
+        :parse-error and :no-fence are the heaviest negatives. A turn that
+        never reached a tool is a turn spent entirely on the harness's own
+        overhead, and it is the failure mode most within the harness's power to
+        fix.
+
+        :verify-skipped is worse than :verify-red. Red means the gate ran and
+        caught something — that is the gate WORKING. Skipped means it was asked
+        and could not answer, and the work shipped anyway.
+
+        :truncated is negative but light, and separate from the parse errors it
+        resembles: the repair is more tokens, not more steering, so it should
+        push on a different lever.
+
+        :provider-empty is as heavy as a parse error and for the same reason —
+        a reply with neither content nor reasoning is a turn spent entirely on
+        overhead. It is separate from :provider-failed because the responses
+        differ: an empty reply means the model spent its budget thinking and
+        wants more tokens or reasoning off, while a failed call wants waiting.
+        A retry that eventually succeeded still costs, so it counts, lightly.
+
+        Per TURN, not per run, so runs of different lengths compare.
+
+        PER BRANCH AS WELL AS PER SESSION (RFC-012 F3). The same counters
+        are kept cut per branch, and session/branch-fitness scores them with
+        these weights. That per-branch number is what the beam's cull reads
+        as a measured objective beside the critic's judged ones, and what
+        the supervisor's digest shows for each branch — one scale for the
+        selection step and the evaluation step, so retuning a weight here
+        moves both.
+
+        :max-open-experiments — how many measured-but-unsettled changes may be
+        in flight. One, because two changes measured over the same interval
+        tell you nothing about either, and this is ENFORCED rather than asked:
+        the prompt has always said one change per round, and a rule the model
+        can decline is not a rule. Settling a verdict (revert or keep) frees
+        the slot.
+
+        :min-turns-for-verdict — below this, a delta is noise and the honest
+        verdict is `too early`. :meaningful-delta — how much per-turn fitness
+        must move before a change counts as having done anything, rather than
+        the supervisor reading its own preferences into the third decimal."}
+
+ :oversight
+ {:value {:enabled? true
+          :poll-ms 5000
+          ;; A pass may be a model call, so the spacing is minutes and the
+          ;; budget is small. The stream is meant to be the thing that
+          ;; notices, not the thing that runs.
+          :every-ms 120000
+          :budget 12
+          ;; The read timeout for the supervisor's OWN model calls, in ms;
+          ;; nil keeps the run's. Its brief is a run-health digest plus a
+          ;; carried context, and on GLM-5.3 with thinking those calls ran
+          ;; past the run's 300 s three times running (run e1b765e7,
+          ;; 2026-09-07): every later pass ended abandoned with no note and
+          ;; the stream never steered again (karamazov-cz90).
+          :timeout-ms 600000}
+  :kind :policy :capability-tunable? false
+  :provenance ["RFC-012 F2" "karamazov-cz90"]
+  :doc "THE SUPERVISOR STREAM: the harness reasoning about itself, in parallel
+        with the run, in its own context. The ONE supervisor a run has
+        (RFC-012): the feature loop no longer runs a second one as a stage.
+
+        Distinct from :watch, which is the stream's REFLEX — rule-based, every
+        poll, steering only, and never a model call. This is DELIBERATION: it
+        runs the supervisor role over the run's health and may tune the
+        harness (prompts, thresholds, manifests, cells) as well as steer the
+        run — including the feature loop's own levers, `switch`, `budget` and
+        `stop`, through `intervene`. Different costs, so different evidence
+        bars: a steer is wrong for one turn, a userspace edit is wrong for
+        every run until somebody changes it back.
+
+        WHEN A PASS RUNS (RFC-012 F2): on the run's TURN BOUNDARY. A pass
+        evaluates the turn that just ended, so it is due when one has — a
+        turn record on the event bus — and not before. :every-ms is the
+        minimum spacing between passes, not a trigger: it used to fire a pass
+        every two minutes whether or not the implementer had done anything.
+        Zero means every turn. The first pass is immediate regardless.
+
+        :budget bounds the model calls one run may spend supervising itself;
+        a pass that looked and found nothing worth a call is free. Twelve
+        binds unconditionally — a bound a distress signal can lift is not a
+        bound."}
+
+ :watch
+ {:value {:enabled? true
+          :poll-ms 4000
+          :severities ["high"]
+          :max-interventions 3}
+  :kind :policy :capability-tunable? false
+  :provenance ["RFC-012"]
+  :doc "THE REFLEX: the supervisor stream's cheap phase (RFC-012). It looks
+        every poll at what the run's events say the implementer just did and
+        speaks when something is going wrong, the way a person watching a
+        coding harness does — rule-based, no model call, steering only.
+
+        It exists because a supervisor that only reasons on a boundary misses
+        the run that never reaches one: a run losing every turn to empty
+        provider replies. This is the other half: continuous observation,
+        reacting while the pattern is still forming.
+
+        It intervenes through the same interventions queue a human and the
+        supervisor's reasoning pass use, so a directive still lands on a turn
+        boundary and never touches a branch mid-turn. `issued-by` is `watch`,
+        and the branch is told so; nothing else differs.
+
+        :poll-ms here is unused — the reflex runs on the stream's own poll
+        (:oversight :poll-ms); it is kept so a project that tuned it does not
+        lose the number.
+
+        :severities — only these are worth interrupting for. Most findings are
+        worth SEEING and only some are worth a turn: a supervisor reading a
+        block can weigh a medium finding, while a branch mid-task handed one is
+        just distracted.
+
+        :max-interventions — per run. Every directive costs the branch a turn
+        reading it, so an observer with no budget is an observer that can spend
+        the whole run explaining why the run is going badly. Three, and a
+        finding is raised at most once either way.
+
+        :poll-ms — how often it looks. Fast enough to catch a pattern while it
+        is forming, slow enough that it is not re-deciding on every turn.
+
+        :enabled? false turns it off entirely, which is the right setting for a
+        run whose whole purpose is to reproduce a failure."}
+
+ :session-findings
+ {:value {:mechanics-rate 0.25
+          :repair-rate 0.2
+          :truncation-rate 0.15
+          :verify-skip-rate 0.5
+          :tool-failure-rate 0.5
+          :min-tool-calls 4
+          :min-gate-firings 3
+          :min-total-gate-firings 5
+          :gate-met-rate 0.2
+          :min-green-runs 2
+          :min-culled-with-evidence 2
+          :provider-trouble-rate 0.2
+          :details
+          {:calls-not-parsing "a large share of turns produce no usable tool call"
+           :calls-need-repair "the harness is repairing the model's tool calls often — the calls work, but the model is not writing them cleanly"
+           :replies-truncated "replies are hitting the token cap before emitting a call. The fix is MORE TOKENS, not more steering: the model never got far enough to call anything"
+           :shipping-unverified "the ship gate is being asked and cannot answer — work is shipping without its tests having been run"
+           :verification-working "the ship gate is running the tests and they are passing"
+           :tool-failing "`{{tool}}` fails more often than it works"
+           :gate-ignored "the `{{gate}}` gate has fired {{fired}} times and nothing it asked for has happened"
+           :steering-ignored "the branch is not responding to steering AT ALL — {{fired}} gate firings across the run and {{met}} of them got what they asked for. More nagging will not help; the loop itself, or the model, is the thing to change"
+           :provider-empty-replies "the provider keeps returning replies with neither content nor reasoning — the model is spending its whole output budget thinking and never reaching a tool call. The fix is MORE TOKENS or reasoning turned off for this endpoint, not more steering: raise :context-budget, or set :thinking? false if this is a local llama.cpp endpoint"
+           :provider-unreliable "provider calls are failing or needing retries often. This is the endpoint, not the loop — no prompt or manifest change will help, and turns spent here are turns the run does not get back"
+           :selection-losing-evidence "branches are being culled while holding CONFIRMED artifacts — the beam found evidence and the retention rule threw it away. This is a SHARPENING failure, not an expansion one: widening the beam will not help, and the fix is the critic rubric or the cull thresholds"}}
+  :kind :threshold :capability-tunable? false
+  :doc "WHEN A LIVE SESSION TALLY BECOMES SOMETHING THE SUPERVISOR SHOULD SEE.
+
+        samizdat.session counts what happens as it happens — turns, tools by
+        outcome, fences that did not parse, gates that fired and whether what
+        they asked for happened, whether the ship gate could run. These are
+        the thresholds at which a count stops being noise and becomes a
+        finding.
+
+        They are thresholds and not judgement, deliberately. What to DO about
+        a quarter of turns producing no usable call is the supervisor's call
+        and depends on the run; noticing that it is happening should not be.
+        A supervisor that has to measure before it can think will mostly not
+        bother, which is how a harness ends up guessing where its problems
+        are.
+
+        :mechanics-rate    share of turns yielding no usable tool call
+        :repair-rate       share the harness had to repair to use
+        :truncation-rate   share cut off by the token cap. Its own signal
+                           because the fix is more tokens, not more steering —
+                           reading it as a model too weak to call a tool would
+                           be the wrong repair entirely.
+        :verify-skip-rate  share of ship attempts where the gate was asked and
+                           could not answer
+        :tool-failure-rate a single tool failing more often than it works
+        :min-tool-calls    before a tool's rate means anything
+        :min-gate-firings  before a gate's silence means anything
+        :min-green-runs    before `verification is working` is worth saying
+
+        The last one is not symmetry for its own sake: a supervisor shown only
+        what is broken will keep changing things that are working."}
+
+ :verify-unknown
+ {:value :trust
+  :kind :policy :capability-tunable? false
+  :doc "WHAT TO DO WHEN THE SHIP GATE CANNOT TELL. `:trust` ships, `:refuse`
+        blocks and says why.
+
+        The case: verification is configured, but the tests could not be run —
+        git could not say what changed, or nothing among the changed files was
+        a test namespace and no :verify-cmd was set. The gate has no evidence
+        either way.
+
+        `:trust` was a hardcoded fallthrough, on the reasoning that refusing
+        would deadlock a loop whose git happened to fail. That reasoning is
+        sound and it is also exactly how a misconfiguration became a false
+        green: a live run shipped {:test 19 :pass 49 :error 5} because the
+        baseline was never captured, the rung was silently inert, and the
+        gate trusted.
+
+        Which way this should default is a JUDGEMENT ABOUT THIS PROJECT, not
+        a fact about harnesses, and it is the supervisor's to make. In a
+        project where git is reliable and the tests are the point, :refuse
+        turns a silent false green into a loud complaint. In one where the
+        verify command is flaky or the tree is not a git checkout, :trust
+        keeps the loop moving. The supervisor has the evidence to tell those
+        apart — how often runs shipped and were wrong, whether the gate ever
+        actually ran — and `remember` to carry the finding to the next run.
+
+        Whichever it is, the decision is now RECORDED: the ship-verify note
+        fires with :ran false and a reason whether or not the tests ran, so a
+        run that shipped unverified is no longer indistinguishable in the
+        record from one that shipped green."}
+
+ :tool-clip
+ {:value
+  {:message "\n… [{{shown}} of {{total}} chars shown — the rest was clipped. Ask for the part you still need (a narrower command, a `read_file` with an `offset`, or a filter), not the same call again.]"}
+  :kind :policy :capability-tunable? false
+  :doc "WHAT A CLIPPED TOOL RESULT SAYS AT ITS CUT.
+
+        It used to say `… [truncated]` and stop. That names a problem and no
+        way out of it, and a model that cannot see a way out repeats the call.
+        Live, against a 7KB file: six reads through four different tools, the
+        same first 4014 characters every time, then four more turns spent
+        writing a chunked reader by hand — ten turns of forty.
+
+        So the line carries the two numbers that let a reader decide what to
+        do (how much it got, how much exists) and says plainly that repeating
+        the call is not the move. `read_file` does better than this and pages
+        properly; this is the floor for every other tool, where the harness
+        cannot know what a narrower request would look like."}
+
+ :workflow-selection
+ {:value
+  {:enabled?          true
+   :candidates        #{"loop" "decompose" "team" "critic"}
+   :fallback          "loop"
+   :min-problem-chars 120}
+  :kind :policy :capability-tunable? false
+  :doc "WHICH WORKFLOW DRIVES A RUN THAT DID NOT ASK FOR ONE.
+
+        `workflow/catalog` was written as the menu the self-healing loop
+        chooses from, and nothing chose from it — every caller was in test/. A
+        run read :run :loop once from config and nothing ever wrote it, so
+        `decompose`, whose whole name is decompose-on-stuck, could only be
+        picked BEFORE anything was stuck. Four consecutive live runs of a task
+        with obvious separable parts exhausted the factory loop's budget with
+        both alternatives sitting unreachable in the catalogue.
+
+        :candidates is a WHITELIST, not the whole catalogue. Several manifests
+        say in their own descriptions that they are components — `worker`,
+        `reviewer` and `supervisor` are pieces of the feature loop — and a menu
+        offering those invites a run driven by half a workflow. `beam`,
+        `probe`, `review`, `orchestrator` and `feature` are left off for now
+        not because they are wrong but because nothing has yet measured them
+        against the four that are on: widening this list is a claim about
+        which workflow suits which task, and it should be made on evidence.
+
+        :fallback is what a run uses when selection is off, the call fails, or
+        the reply names nothing on the menu. It is the factory loop — what the
+        run would have used anyway — so a failure to choose costs nothing.
+
+        An explicit :run :loop (HARNESS_LOOP, or a project's config.edn) always
+        wins over selection. This fills the gap where a caller said nothing; it
+        never overrides one who did.
+
+        :min-problem-chars is the floor below which no call is made. A one-line
+        problem is the factory loop's case by definition — nothing to split,
+        nothing to decompose — and being told so is not worth a round trip. At
+        0 every run is chosen for.
+
+        Not capability-tunable: the tier under observation should not widen
+        the set of machinery it may be driven by."}
+
+ :beam-contention
+ {:value {:provider-concurrency nil :expected-turn-ms nil :expected-turn-tokens nil}
+  :kind :policy :capability-tunable? false
+  :provenance ["karamazov-aqsr.3"]
+  :doc "WHAT THE PROVIDER CAN SERVE AT ONCE, and what a turn costs, so the
+        beam is no wider than one turn deadline can carry or the run's token
+        budget could ever pay for.
+
+        A local llama-server answers one call at a time; five branches then
+        queue, a round takes five turn-times of wall clock, and the turn
+        deadline abandons whichever branches are still waiting — the run
+        finds out it oversubscribed by failing the tail of every round. With
+        both numbers set, beam/run! narrows the width to the widest that
+        fits: ceil(width / concurrency) turn-times within :turn-deadline-ms,
+        solved by samizdat.symbolic/widest-beam in core.logic.fd, in process,
+        once per run start. Either nil means unknown, and an unknown provider
+        is not a constraint: the requested width stands.
+
+        The token budget is the second limit (karamazov-aqsr.3). A run
+        started with a budget (config :run :token-budget, HARNESS_TOKEN_BUDGET,
+        or token_budget on POST /v1/runs) is ended :exhausted by the beam once
+        the journal's summed usage crosses it — that is the enforcement, and
+        it needs no estimate. With :expected-turn-tokens set as well, the
+        width is ALSO narrowed at start to what width * max-turns *
+        expected-turn-tokens keeps within the budget: a projection at the
+        cap, so the beam never opens wider than the budget could carry if
+        every branch ran to it.
+
+        :provider-concurrency  calls the endpoint serves concurrently
+        :expected-turn-ms      a typical turn's wall time against it, which
+                               the events table can tell you for a past run
+        :expected-turn-tokens  a typical turn's total_tokens, which the turns
+                               table can tell you for a past run
+
+        Not capability-tunable: it describes the provider, not the branch."}
+
+ :schema-validation
+ {:value {:mode :strict}
+  :kind :policy :capability-tunable? false
+  :provenance ["karamazov-6y7" "karamazov-6y7.5"]
+  :doc "WHAT A CELL WHOSE DATA DOES NOT MATCH ITS DECLARED SHAPE COSTS AT RUN
+        TIME.
+
+        :warn   record it on :mycelium/warnings and run on
+        :strict  halt the workflow with the schema error
+        :off     do not check
+
+        THIS IS THE RUNTIME KNOB ONLY. mycelium checks the schema CHAIN — does
+        every cell's required input get produced by something upstream on every
+        path — inside validate-workflow, unconditionally, and this mode does
+        not reach it. An edit that breaks the graph is still refused at
+        `manifest save` and inside propose-cell! whatever this says, which is
+        the half that must never be switchable by the thing being validated.
+
+        :warn is the shipped default because the cells only began declaring
+        their shapes in karamazov-6y7 and a declaration is a guess until a run
+        has exercised it. A schema that is merely imprecise should cost a line
+        in the journal, not a dead run. The warnings carry :key-diff
+        {:missing :extra} and :failed-keys, which is the part worth reading —
+        it names the rename rather than reporting that something did not match.
+
+        NOW :strict, on the evidence the staging was built to collect. Run
+        89f6487a (2026-09-03, Qwen3.8-27B-Q8_0 via llama-server, the feature
+        loop over mdlite) ran 280 turns across 3 branches under :warn and
+        emitted ZERO schema warnings — real model responses, real tool
+        results, real compaction, and a branch that degenerated into a 57-turn
+        no-call loop, which is the ugliest shape the shapes get. The suite had
+        already shown zero across 1860 mocked tests; this is the half the
+        suite could not give, because a declaration that is right for a
+        stubbed response can still be wrong for a live one.
+
+        Going straight to :strict without that would have made every imprecise
+        declaration an outage. If one turns up now it halts a run, and
+        karamazov-6y7.5 made that land as a clean branch outcome rather than
+        an FSM dump — put the mode back to :warn and file what halted.
+
+        Not capability-tunable: a tier under observation should not be able to
+        stop its own shapes being checked."}
+
+ :project-facts
+ {:value
+  {:cmd-works   "In this project `{{cmd}}` works."
+   :cmd-refused "In this project `{{cmd}}` is refused by the shell policy — do not spend a turn on it."
+   :workflow    "The `{{cmd}}` workflow has driven a run on this project."}
+  :kind :policy :capability-tunable? false
+  :doc "THE WORDS A DERIVED PROJECT MEMORY IS WRITTEN IN.
+
+        These two lines are read by the model on every later run, so they are
+        prose the model sees and they belong here rather than compiled into
+        the store. `{{cmd}}` is the only substitution.
+
+        They are phrased as standing facts about the project rather than as
+        reports of an episode — \"works\", not \"worked once\" — because that is
+        what they are: a command that ran clean here is a property of this
+        checkout, and the next run should read it as one. The refusal line
+        carries its own instruction because a refusal the reader does not
+        recognise as final is a refusal they will spend a turn re-testing.
+
+        :workflow is the row that carries a workflow's record on this project.
+        Its own text barely matters — what a reader acts on is the success and
+        failure counts behind it, which samizdat.agent.select renders as
+        `shipped N of M runs`. It is here rather than compiled for the same
+        reason as the other two: it is a sentence the model reads."}
+
+ :reflection
+ {:value
+  {:args-chars   160
+   :result-chars 240}
+  :kind :policy :capability-tunable? false
+  :doc "HOW MUCH OF A TURN THE REFLECTOR SEES, per turn of the transcript it
+        is asked to distil into project memories.
+
+        The two are separate because they are truncating different things.
+        :args-chars is the CALL — a path, a command, a patch header; 160 is
+        enough to identify what was done and not enough to paste a file into
+        the prompt. :result-chars is the OUTCOME, and it is larger because
+        the gotchas worth recording live in error text: a transcript of calls
+        without their outcomes cannot say what wasted time, which is most of
+        what a reflection is for.
+
+        Raising them buys fidelity and costs context on a prompt that already
+        carries every turn of the task. Lowering :result-chars is the one
+        that quietly hurts — the reflector stops seeing why a call failed and
+        writes vaguer memories, which is the failure mode this whole schema
+        exists to avoid."}
+
+ :plan-phase
+ {:value {:enabled true
+          :skip-under-words 40
+          :rfc-min-words 120
+          :rfc-when-listy true
+          :max-design-attempts 2
+          :design-turns 10}
+  :kind :threshold :capability-tunable? false
+  :provenance ["karamazov-vale" "AI-DLC" "karamazov-dq1r"]
+  :doc "The pre-construction plan phase: an implementation plan produced and
+        critiqued BEFORE any code, mirroring the post-construction diff critic
+        at the elaboration boundary.
+
+        WHY IT EXISTS. Every gate the implementer had fired AFTER construction —
+        the diff critic, the ship gate, the line budget — so a run spent its
+        whole budget building the wrong or incomplete thing and learned so only
+        at review. Four recordings on four tasks produced zero splits, and one
+        shipped 89-146 turns with a requirement silently dropped. This asks
+        'would this plan satisfy the requirement' while the answer is still
+        cheap to act on.
+
+        :enabled false takes the whole phase out, which is the control arm for
+        measuring whether it pays (an arena A/B, like :memory?).
+
+        TRIAGE IS THREE-WAY (karamazov-dq1r). :skip-under-words is the floor: a
+        task shorter than this that names no list is obviously one small change,
+        and planning it is the tax the heuristic exists to avoid. Above the
+        floor a task gets a lightweight plan (Goal/Files/Tests). A task that is
+        multi-part gets a full RFC instead — a document with a mermaid
+        call-graph, a work-item breakdown and acceptance criteria, which then
+        decomposes into child tasks and becomes the contract the end-of-phase
+        critic validates the whole diff against. :rfc-when-listy makes an
+        explicit bulleted/numbered list trigger the RFC tier (a list is several
+        things wearing one title); :rfc-min-words makes a long statement trigger
+        it regardless. Reserving the RFC's cost for work that decomposes is the
+        point — an RFC per ordinary task does not pay.
+
+        :design-turns caps the owner's planning exploration: it reads the code
+        and declares a plan, it does not build. :max-design-attempts bounds the
+        plan-critic loop so a plan the critic keeps refusing cannot spin — the
+        same bound the diff critic has.
+
+        WHO APPROVES is not here: it is :approval :mode. Unattended (:refuse),
+        the critic is the gate and construction proceeds on a clear contract.
+        Attended (:block), the plan also goes to the person, on the same queue
+        ask_human uses."}
+
+ :board-design-turns
+ {:value 10 :kind :threshold :capability-tunable? false
+  :provenance ["karamazov-vale"]
+  :doc "The owner's turn cap while PLANNING, distinct from :board-owner-turns
+        which caps construction. Small: reading enough code to name the files
+        and tests a change needs is not the change itself. Never wider than the
+        run's own cap, like the owner cap."}
+
+ :task-line-budget
+ {:value 500 :kind :threshold :capability-tunable? false
+  :provenance ["karamazov-5ot9" "karamazov-fn68"]
+  :doc "How many lines of change one task is expected to fit in, added plus
+        deleted, before it should have been split.
+
+        WHY A NUMBER AT ALL. prompts/task-claimed.md already asks the right
+        question — is this ONE thing, or several wearing one title — and gives
+        no way to answer it. Measured across four live recordings on four
+        tasks: zero splits, zero calls to `task` or `split`, including on a
+        task whose own statement said 'Three changes to the feel of the flight,
+        and they interact' and numbered them. A judgement call with no
+        criterion is reliably answered 'one thing'.
+
+        A LINE BUDGET IS CHECKABLE FROM BOTH ENDS, which is why it is this and
+        not something more principled. Up front the model can estimate it; in
+        flight the harness can MEASURE it (gitdiff/changed-lines), so the
+        second half does not depend on the model agreeing with itself.
+
+        ADDED PLUS DELETED, not net: a change that rewrites two hundred lines
+        into two hundred different ones is not small, and net would score it
+        zero.
+
+        500 is a starting point, not a finding. The run this came from spent
+        120 turns and landed a nine-file plan of which the named files were
+        never written — so the number wants to be small enough to catch that
+        before the budget is gone, and large enough that an ordinary feature
+        is not split into rubble. Re-tune it against measured runs; that is
+        what it is data for."}
+
+ :code-quality
+ {:value {:cc-fn-limit 10
+          :verbosity-max 0.21
+          :verbosity-block 0.40
+          :erosion-max 0.48
+          :erosion-block 0.68
+          :clone-min-forms 5
+          :decision-heads ["if" "if-not" "if-let" "if-some" "when" "when-not"
+                           "when-let" "when-some" "when-first" "cond" "condp"
+                           "case" "and" "or" "while" "for" "doseq"]}
+  :kind :threshold :capability-tunable? false
+  :provenance ["karamazov-dq1r.2"]
+  :doc "Code-quality acceptance limits, checked on the code a run CHANGED
+        (samizdat.metrics, wired into the diff critics). The three heuristics
+        are SlopCodeBench's, which separate established repos from LLM-slop:
+
+          erosion  — the fraction of the changed mass held by functions whose
+                     cyclomatic complexity is over :cc-fn-limit, where
+                     mass(f) = cc(f) * sqrt(sloc(f)). Established repos measured
+                     0.31 +/- 0.17, agents 0.68 +/- 0.20; :erosion-max 0.48 is
+                     the human mean+1sd (an advisory finding over it) and
+                     :erosion-block 0.68 the agent level (a blocking finding).
+          verbosity — duplicated / unnecessarily-verbose lines over LOC. Repos
+                     0.15 +/- 0.06, agents 0.33; :verbosity-max 0.21 is the
+                     advisory line, :verbosity-block 0.40 (vibe-coded level)
+                     the blocking one. CLONE-ONLY here: the paper unions
+                     ast-grep-flagged lines with clone lines and ast-grep is
+                     not reachable in-process, so this is the duplication half
+                     alone (see samizdat.metrics).
+
+        ADVISORY vs BLOCKING is the distance over the line, not a hard gate on
+        the number itself — the article's own caveat is that once you optimize
+        for such a measure it stops measuring anything, so only the egregious
+        (agent/vibe level) case refuses; a marginal breach rides along as a
+        medium finding for the model to weigh. Excess per-function complexity
+        is a [low] pointer at the hotspots, since erosion already prices it.
+
+        :decision-heads is what counts as a branch for cyclomatic complexity,
+        and :clone-min-forms the smallest run of lines that counts as a clone —
+        both here so the measure can be retuned without a rebuild. Every number
+        is a starting point from the paper, not a finding; re-tune against
+        measured runs (karamazov-dq1r.2)."}
+
+ :webfetch
+ {:value {:timeout-ms 30000
+          :max-timeout-ms 120000
+          :max-chars 60000
+          :user-agent "samizdat"}
+  :kind :threshold :capability-tunable? false
+  :provenance ["karamazov-fn68.2" "opencode webfetch.ts"]
+  :doc "What one `webfetch` may spend. opencode's numbers, converted to this
+        harness's units: 30 s default and 120 s ceiling on the request, and a
+        cap on what comes back.
+
+        :max-chars is in CHARACTERS rather than opencode's 5 MB of bytes,
+        because the reader is a context window and not a disk — 60k characters
+        is roughly 15k tokens, which is already a large fraction of a turn.
+        The truncation is SAID in the result, never silent, for the reason
+        grep and read_file page: a model cannot tell a cut answer from a
+        complete one unless the tool tells it.
+
+        The CONFINEMENT is not here. Which hosts may be reached is mechanism
+        in samizdat.agent.webfetch, in src/, because a guard the agent can
+        retune at runtime is not a guard — the same argument db's
+        required-columns makes."}
+
+ :memory
+ {:value
+  {:kind-salience {:working 0.3 :episodic 0.45 :procedural 0.5
+                   :semantic 0.6 :identity 0.75 :overview 0.95
+                   :note 0.5}
+   :default-confidence 0.6
+   ;; WHEN TWO MEMORIES ARE JUDGED TO CONTRADICT (karamazov-ei6t.8). Both
+   ;; numbers make the test NARROWER as they rise, and narrow is the safe
+   ;; direction: a wide contradiction detector fires on every refinement of an
+   ;; existing memory, which is most of what a store learns, and a detector
+   ;; that refuses refinements is worse than none.
+   ;;
+   ;; :contradiction-min-word ignores short words before comparing subjects, so
+   ;; two memories sharing only "the" and "this" are not about the same thing.
+   ;; :contradiction-min-shared is how many substantive words they must share
+   ;; before their disagreement counts as being about one subject.
+   :contradiction-min-word 4
+   :contradiction-min-shared 2
+   :use-reinforcement 0.05
+   :recent-use-bonus 0.15
+   :recent-use-window-runs 3
+   :disuse-decay 0.05
+   :decay-floor 0.1
+   :salience-cap 0.95
+   :effectiveness-weight 0.15
+   :effectiveness-cap 0.3
+   :corroboration-weight 0.15
+   :corroboration-cap 0.3
+   :confidence-weight 0.25
+   :recall-limit 8
+   :max-current-per-kind {:semantic 400 :procedural 300 :episodic 150
+                          :working 20 :note 100}
+   :graduation-min-runs 3
+   :graduation-limit 8}
+  :kind :policy :capability-tunable? false
+  :provenance ["karamazov-h27r" "karamazov-4ay9"]
+  :doc "HOW A MEMORY EARNS ITS PLACE. Adopted from dirge's salience model
+        (src/extras/salience.rs), with one deliberate difference: there the
+        constants are compiled, and here they are not — the supervisor is the
+        role that reads memories and acts on them, so it is the role that
+        should be able to retune what counts as worth remembering.
+
+        Effective salience is
+          salience
+          + recent-use-bonus   (used within the last recent-use-window-runs)
+          + effectiveness      (log-damped net of success over failure,
+                                weighted and capped)
+          + corroboration      (log-damped count of DISTINCT runs that
+                                re-observed the pattern, weighted and capped
+                                the same way; one sighting is zero)
+          + confidence         ((confidence - default) * confidence-weight)
+
+        :kind-salience is the base by KIND, and the ordering is the claim:
+        who we are outranks what is true, which outranks how to do things,
+        which outranks what happened once, which outranks what we are doing
+        right now. :overview sits above all of it — the one orientation note
+        per project — and :note is the unclassified default, parked with
+        :procedural because an uncategorised memory is almost always a
+        how-to.
+
+        SALIENCE AND CONFIDENCE ARE DIFFERENT AXES and collapsing them loses
+        the distinction that matters: a fact can be important but contested,
+        or trivial but certain. Confidence is weighted low (0.25 over a [0,1]
+        range is a ±0.1 swing) so it acts as a tiebreak within a tier rather
+        than letting a contested claim jump above a durable one.
+
+        Effectiveness is the axis that makes memory a LOOP rather than a
+        list: acting on a memory and reporting whether it worked moves it.
+        Log-damped so the first confirmation counts for most of what
+        confirmation can buy (+1 ≈ +0.045, +9 ≈ +0.15) and a memory cannot
+        be voted to the top by repetition.
+
+        Reinforcement and decay are small on purpose — 0.05 a step means a
+        memory needs to be used repeatedly to climb a tier, and needs to be
+        ignored for a long time to fall one. A memory system that moved
+        faster than the evidence would be a memory system that forgets what
+        it learned last week because this week is busy.
+
+        THE CLOCK IS RUNS, NOT DAYS (karamazov-h27r). A run is an opportunity
+        for a memory to be needed; a day is not. `idle_runs` counts the run
+        ends a memory existed through without being used, and it is what the
+        recent-use bonus and decay read. Decay begins only PAST the window:
+        with a window of 3 and a step of 0.05, a memory nobody needs falls
+        from a semantic 0.6 to the floor over thirteen runs, and a memory
+        written this run is not aged by it. The wall-clock window this
+        replaced never fired across a whole campaign, while a null
+        last_used_at was being read as stale and 96% of the store had sunk
+        to the floor by the tenth run (karamazov-4ay9).
+
+        Corroboration is the analogue of a slot's accumulated importance in
+        a bounded associative memory: the store already counted distinct-run
+        sightings and ranked by them nowhere, so a finding confirmed by
+        seven runs sat at the floor under a command that worked once.
+
+        :max-current-per-kind bounds the WORKING SET, per kind. Over the cap,
+        the lowest-standing unpinned rows of that kind are retired with the
+        reason `evicted` — readable by id and in their lineage, no longer
+        recalled. A kind not named here (identity, overview) is unbounded.
+        Sized from the measured campaign: the ten-run store held 705
+        semantic rows, most of them one `works here` fact per spelling of
+        the same command before those were normalised.
+
+        :graduation-min-runs is how many distinct runs an EPISODE must be
+        seen in before the supervisor is shown it as a candidate for a rule;
+        :graduation-limit caps the list. The store never promotes on its
+        own — distill! is right that turning an episode into a rule is a
+        judgement — it hands over the episodes that have earned the
+        question."}
+
+ :retirement
+ {:value {:min-runs 3 :limit 5}
+  :provenance ["karamazov-ylte.3" "2609.09153v1"]
+  :kind :policy :capability-tunable? false
+  :doc "WHEN A GATE HAS EARNED THE QUESTION OF BEING DELETED, mirroring
+        :memory :graduation-min-runs for episodes.
+
+        journal/retirement-candidates surfaces gates that fired in at least
+        :min-runs DISTINCT runs and were never once met. Distinct runs, not
+        firings, on corroborate!'s argument — a gate that fired forty times in
+        one bad afternoon is one observation. met-late does not count as never
+        met: a gate whose advice works and whose window is wrong is a window
+        to widen, not a gate to delete, which is why gate-tally keeps that
+        column separate in the first place.
+
+        The precedent this generalises is :reflection, deleted by hand on
+        '69 firings and 0 met across two models, five task shapes and two
+        harness generations'. The supervisor could only ever ADD before this;
+        two of the four accepted edits in 2609.09153v1's evolution run were
+        deletions, and a loop that cannot prune is half a loop.
+
+        The store surfaces and the supervisor judges — it never retires a gate
+        itself (karamazov-ylte.3)."}
+
+ :drift
+ {:value {:window-runs 10 :top-names 3}
+  :kind :policy :capability-tunable? false
+  :doc "HOW FAR BACK THE SUPERVISOR IS SHOWN WHAT HAS BEEN TUNED, and how many
+        names per surface.
+
+        The drift block (prompts/drift.md, from store.userspace/drift) is the
+        analogue of measuring per-layer parameter drift after an adaptation:
+        per surface — cell, manifest, prompt, policy — how many names were
+        edited, how many saves and reverts, and the standing those versions
+        earned. It is what lets a supervisor see that prompts are being
+        reverted as often as they are saved, or that every edit for ten runs
+        has gone to one cell, which no single name's history shows.
+
+        :window-runs is measured in RUNS, like the memory clock: the last N
+        runs' worth of versions, bounded by the Nth most recent run's start.
+        A store with fewer runs than the window is read whole. :top-names
+        caps the most-edited list per surface so the block stays a
+        paragraph."}
+
+ :export
+ {:value {:statuses ["completed"]
+          :require-verified? true
+          :branches :shipped
+          :skip-categories ["mechanics"]
+          ;; The VERDICTS projection (`jolt export --verdicts`): every
+          ;; judgement the harness made, labelled by what happened next. From
+          ;; EVERY run, whatever its status — a failed run is where the labels
+          ;; that say "this verdict was wrong" come from. :kinds names which
+          ;; journal kinds count as a judgement.
+          :verdicts {:kinds ["gate" "critic-score" "cull-spared" "critic"
+                             "board-review" "critique" "epic-review"]}}
+  :kind :policy :capability-tunable? false
+  :provenance ["karamazov-5ge3" "karamazov-3htz"]
+  :doc "WHICH RUNS ARE WORTH IMITATING, when the journal is exported as
+        training data (samizdat.export, karamazov-5ge3), and which
+        judgements go out when it is exported as verdicts (karamazov-3htz).
+
+        Two projections, with opposite selection rules. A TRAJECTORY is the
+        tape a model saw and is worth imitating only when the run shipped
+        and verified, so it is filtered hard. A VERDICT is a judgement the
+        harness made — a gate's prediction, a critic's score, a review's
+        pass — and is only worth anything WITH the outcome beside it: whether
+        the prediction settled, whether the scored branch shipped or was
+        culled, whether the round's tests went green. That label needs the
+        failed runs as much as the good ones, so verdicts come from every
+        run. Trained on its own verdicts without the outcome, a judge learns
+        to imitate its guesses.
+
+        The mechanism turns a run into the tape its model saw; this decides
+        which tapes go out. :statuses names the terminal states that
+        qualify — `completed` only, because an exhausted or aborted run is
+        what NOT to learn. :require-verified? demands a green ship
+        verification on the run: a completion the ship gate never checked
+        has no evidence it was right, and training on it teaches confident
+        claims. :branches is `shipped` (the branch whose verification was
+        green, or failing that the one that finished with a successful
+        done) or `all`. :skip-categories drops turns of those categories
+        together with the complaint they drew — mechanics is a no-call or a
+        parse error, and neither is behaviour to imitate.
+
+        The system message exported is the CURRENT template, not the run's
+        — the journal keeps a digest of it — which is the prompt a trained
+        model will meet at inference."}
+
+ :verdict-record
+ {:value {:situation-chars 6000 :reply-chars 4000}
+  :kind :budget :capability-tunable? true
+  :provenance ["karamazov-3htz"]
+  :doc "How much of a judgement's INPUT and of the judge's REPLY the journal
+        keeps beside the verdict.
+
+        A verdict on its own — four SCORE lines, a PASS, a :blocked flag —
+        says nothing about whether the judge was right, and until this the
+        journal kept exactly that: the beam critic's summary was rebuilt from
+        live state on every call and never stored, its reply was parsed down
+        to the scores, and the finalization judge's findings went to the
+        branch and nowhere durable. Now every judgement journals what it was
+        shown (:situation-chars) and what it said (:reply-chars), clipped
+        head-and-tail so a critic's closing SCORE lines survive the clip.
+        The cap is what keeps a rambling judge from growing the events table
+        without bound; it is not what makes the record useful, which is the
+        outcome `jolt export --verdicts` labels each row with."}
+
+ :prediction-grace-turns
+ {:value 4
+  :kind :threshold :capability-tunable? false
+  :doc "How many turns past its window a gate's prediction stays open, waiting
+        to see whether the advice was taken LATE.
+
+        A prediction's :window is in turns, and a gate whose advice takes
+        longer than its window to follow used to settle :unmet regardless of
+        whether it eventually worked — so the tally could not tell a gate
+        nobody obeys from one whose advice is sound and slow. Those want
+        opposite responses: the first should be reworded or removed, the
+        second should have its window widened.
+
+        Within the window a prediction settles :met. Within the grace it
+        settles :met-late — the advice worked, later than asked. Past both it
+        settles :unmet, which now means what it says: it did not happen.
+
+        Four turns because most of what a gate asks for costs at least one
+        turn to attempt and one to verify, and a branch that has not moved on
+        it in four is not moving on it."}
+
+ :pause-poll-ms
+ {:value 500
+  :kind :cost-ceiling :capability-tunable? false
+  :doc "How often a paused run checks whether it has been resumed.
+
+        `pause` is applied at a round boundary and the scheduler then waits at
+        the top of the next round, so nothing is scheduled while it holds and
+        whatever was in flight has already finished — which is exactly what
+        interventions/kinds promises a human.
+
+        There is nothing to wait on but a row another process writes, so this
+        is a poll. Short enough that a resume feels immediate to the person who
+        clicked it; long enough that a run left paused overnight is not
+        spinning. The abort flag is read on the same pass, so a paused run
+        stays stoppable."}
+
+ :approval
+ {:value {:mode :refuse :wait-ms 300000 :on-timeout :deny}
+  :kind :threshold :capability-tunable? false
+  :provenance ["karamazov-whbw.3"]
+  :doc "Whether a command the policy wants to ASK about waits for a person.
+
+        `:refuse` is the default and is what this harness has always done:
+        the call is refused, the refusal teaches the retry, and a human adds
+        a grant afterwards without the run ever stopping. Runs are
+        unattended by design and a feature landing must not change that —
+        an upgrade that silently started blocking would hang every campaign.
+
+        `:mode :block` parks the branch on the question instead, for when
+        somebody is watching. What makes that safe is the other two keys.
+        `wait-ms` bounds every wait — five minutes, long enough for someone
+        to come back to the terminal, short enough that a run left alone
+        loses one command rather than the night. `on-timeout` says what an
+        unanswered question resolves to: `:deny` keeps the refusal (and the
+        model is told nobody was there, so it reads as an absence rather
+        than a rule), `:allow` lets an unattended run proceed for a project
+        that would rather have that.
+
+        A run that ends releases its waiters regardless — see
+        samizdat.approval/abandon!."}
+
+ :modified-files-shown
+ {:value 60
+  :kind :cost-ceiling :capability-tunable? false
+  :provenance ["karamazov-whbw.8"]
+  :doc "How many changed paths the run detail reports.
+
+        A cap on a response, not a judgement about the work: a long run
+        touches hundreds of files and a front end draws a panel's worth.
+        Newest first, so what the cap drops is the oldest change — the one
+        least likely to be what someone is looking at."}
+
+ :step-ring
+ {:value {:capacity 512 :max-runs 16 :pump-ms 250}
+  :kind :cost-ceiling :capability-tunable? false
+  :provenance ["karamazov-whbw.2"]
+  :doc "The live manifest-state trace a front end draws: how many steps are
+        kept per run, and how many runs' rings the process holds at once.
+
+        Memory, not truth. The durable record of what a turn did is the turns
+        table; a step is the implementer moving between cells and is worth a
+        frame of a UI and nothing after that. So this bounds an in-memory ring
+        and the loss is a UI that says it fell behind, never a run that
+        forgets what it did.
+
+        `capacity` at 512 is roughly forty turns of the factory loop, which
+        walks about fourteen cells a turn — enough that a client attaching to
+        a run in progress sees real history rather than the current cell.
+
+        `max-runs` exists because forget! is called when a run ends and a
+        server that is never told must still not grow. The oldest ring goes.
+
+        `pump-ms` is how often the bus is drained into the rings. Well under
+        any client's poll interval, so the wait a person sees is their own
+        poll and not this; short enough that the bus's own sliding window
+        cannot overflow between drains on a wide beam."}
+
+ :run-health
+ {:value
+  {:thrash-min-turns 4
+   :thrash-mechanics-rate 0.33
+   :signals
+   {:stage-crashed "STAGE CRASHED — {{detail}}{% if layer %} [layer: {{layer}}{% if base? %} — the base is compiled and unreachable from here: name it, record it with `remember` so a later run inherits it, and move on. Do NOT go looking for the source{% endif %}{% if userspace? %} — userspace, so this one IS yours: the cell/manifest/prompt tools can fix it{% endif %}]{% endif %}"
+    :hollow "NO FILES CHANGED — done was called but the working tree is unchanged; nothing was actually built"
+    :self-graded "YOU CHANGED HOW THIS RUN IS SCORED — this run edited {{keys}} in its own gates. That is allowed and it is on the record. Say in your answer why the old scoring was wrong, so a reader can tell a real correction from a run grading itself green."
+    :nobody-shipped "NO IMPLEMENTOR SHIPPED — the implement round produced nothing verified"
+    :tests-failing "TESTS FAILING — {{detail}}"
+    :tests-failing-fallback "the tests did not pass"
+    :revision-cap "REVISION CAP REACHED — {{revision}} revisions (soft cap {{soft-cap}}) with no verified solution. This is a soft stop for YOU to decide: keep solving with a new approach, or STOP if it is a genuine dead end."
+    :thrash "THRASH — a branch spent a third+ of its turns on empty/mis-parsed calls"
+    :reviewer-bounced "REVIEWER BOUNCED — the reviewer sent the work back"
+    :revising "REVISING — this feature is on revision {{revision}}"
+    :heading "## Run health (revision {{revision}})"}}
+  :kind :policy :capability-tunable? false
+  :doc "WHAT THE SUPERVISOR IS TOLD ABOUT A RUN'S HEALTH, and the two numbers
+        behind the one signal that is a judgement rather than a fact.
+
+        Every signal here was a string literal in telemetry.clj. They are the
+        supervisor's whole picture of how a run is going — the sentences it
+        decides on — and a project working on something other than a
+        feature/implement/review loop wants different ones. A sentence in
+        compiled code is exactly as unreachable as a threshold in compiled
+        code.
+
+        :thrash-min-turns       a branch must have taken this many turns
+                                before its mechanics rate means anything. Below
+                                it, one malformed call out of two reads as 50%
+                                thrash and says nothing.
+        :thrash-mechanics-rate  the fraction of a branch's turns spent on
+                                empty or mis-parsed calls that counts as
+                                thrashing.
+
+        The signals are selmer templates. {{detail}} carries the specific —
+        which stage crashed, what the verifier said — and the rest is the
+        framing. :tests-failing-fallback is what {{detail}} becomes when the
+        verifier left no note, so the sentence still reads as a sentence.
+
+        Not capability-tunable: these are what the supervisor SEES, and a run
+        in trouble is the last one that should be shown less of it."}
+
+ :supervisor-digest
+ {:value {:per-kind 4 :chars 220 :wins 2 :floor 6 :patterns 6
+          :prescription-floor 3}
+  :kind :threshold :capability-tunable? true
+  :doc "How many failure exemplars of each kind the run-health digest shows
+        the supervisor, and how much of each failure's text. The digest used
+        to carry only RATES — 'this branch thrashed 8 times' — and a rate
+        says something is wrong where the exemplar says what: the parse
+        error's own complaint, the provider's own words, the failing tool's
+        result, each with the journal row id fetch_turn takes. Newest last,
+        per kind, because the three kinds are fixed in different places (a
+        parse failure in the prompt/format, a provider failure at the
+        endpoint, a tool failure in the work itself).
+
+        :floor and :patterns are the DISTRIBUTION half (Metan App. E.2, M7).
+        Below :floor failures the exemplars already say everything and a
+        histogram of ones is noise; at or above it the digest also shows the
+        commonest :patterns failure shapes with their counts, so twelve
+        instances of one bug read as one fix rather than as four arbitrary
+        recent lines. Signatures are crude on purpose — numbers, quoted
+        strings and paths are stripped — because over-merging costs one
+        fetch_turn and under-merging costs the pattern.
+
+        :wins is how many SUCCESSES ride along with them, and it is not
+        decoration. Metan (research/2608.24735v1, App. D) ablated the ratio
+        of failures to successes in what it feeds its improver and found
+        that a diet of failures alone \"strips out positive exemplars and
+        produces overfit constraints\" — an improver shown only what broke
+        writes rules against breakage rather than rules for working. Their
+        settled ratio is 3:1 failure-to-success, which is what 4-per-kind
+        against 2 wins approximates. A supervisor that has seen what
+        WORKING looks like on this run can tell a loop that is struggling
+        from one that is fine."}
+
+ :context-squeeze
+ {:value {:factor 0.5 :min-keep-pairs 1 :min-compaction-chars 5000}
+  :kind :threshold :capability-tunable? true
+  :provenance ["karamazov-d41"]
+  :doc "How hard a context-overflow squeezes a branch's compaction budget
+        (karamazov-d41). When the provider reports the prompt outgrew its
+        window — a DETERMINISTIC failure the retry ladder must not touch —
+        the loop bumps the branch's squeeze level instead of appending a
+        retry message, and render scales :context-budget's :keep-pairs and
+        :compaction-chars by :factor per level, floored at the minimums so
+        a squeezed branch still sees its current exchange. Observed live on
+        the Qwen baseline against llama-server -c 32768: the GLM-sized
+        budget assembled ~33k-token prompts and the branch re-sent them on
+        backoff, burning wall-clock against a wall."}
+
+ :context-pressure
+ {:value {:operating-ceiling 24000
+          :advisory 0.75
+          :urgent 0.90}
+  :kind :threshold :capability-tunable? false
+  :provenance ["karamazov-d41" "karamazov-3y5"]
+  :doc "WHEN A PROMPT IS GETTING TOO BIG, MEASURED BEFORE IT IS FATAL.
+
+        TWO CEILINGS. The HARD one is the endpoint's context window — the
+        size a request is rejected above. The OPERATING ceiling is this
+        number: the size a request should stay under so there is room left to
+        work. They are not the same question, and pricing pressure against
+        the hard one means noticing only once it is already too late. vis
+        puts it well: on a 1M-window model, 150k of handled context reads as
+        15% saturation with 850k headroom while its own hint is already
+        saying FOLD SOON.
+
+        :operating-ceiling  prompt tokens one request should stay under.
+                            NOT the context window — leave room for the
+                            reply, the tool result, and the next exchange.
+                            24000 suits a 32k local endpoint; raise it with
+                            the window.
+        :advisory           fraction of the ceiling that counts as close
+        :urgent             fraction at which the branch's compaction budget
+                            is squeezed a notch, one turn BEFORE the wall
+
+        Squeezing at :urgent rather than on overflow is the whole point. The
+        provider reports the size of every request it accepted, so the wall
+        is visible a turn early; recovery used to begin only after a request
+        had already failed and the backoff had been spent (karamazov-d41,
+        karamazov-3y5)."}
+
+ :anchor
+ {:value {:drift-tolerance 40}
+  :kind :threshold :capability-tunable? false
+  :doc "HOW FAR AN ANCHOR MAY HAVE DRIFTED AND STILL BE HONOURED.
+
+        An anchor is `<line>:<hash>` — the line locates, the hash verifies.
+        When the hash no longer sits at the stated line, this is how many
+        lines away its content may be found before the anchor is called
+        MISPLACED and the write refused.
+
+        Deliberately tight, and asymmetric on purpose: a false refuse costs
+        one re-read, a false accept corrupts a file. The common path never
+        reaches it — an anchor spent right after the read that minted it
+        resolves exactly — so this only forgives small drift when anchors are
+        reused across several edits without re-reading. Raising it past a
+        screenful trades the wrong-line guard for convenience."}
+
+ :thinking-budget
+ {:value {:factor 2 :floor 8192 :fallback 65536 :chars-per-token 4
+          :off-value "none"}
+  :kind :threshold :capability-tunable? true
+  :doc "THE RUNAWAY-REASONING BREAKER (dirge thinking_budget.rs).
+
+        The cap is DERIVED: factor x whatever the turn was granted, floored.
+        A flat constant is what dirge shipped first and it was wrong by
+        inspection — a high-effort turn was granted a large budget by the
+        request and cut off below it by the breaker, the harness truncating
+        reasoning it had just asked for. Traces of tens of thousands of tokens
+        are ordinary on a hard turn; that is the feature working.
+
+        fallback applies when the grant is unknown, and is deliberately the
+        most permissive value rather than a guess at a typical one: a missed
+        runaway costs a turn, a truncated good turn costs the work in it.
+
+        off-value is what :reasoning-effort becomes once the breaker fires —
+        for the rest of the TASK, because a model that just spent a whole
+        budget deliberating will spend the next one the same way."}
+
+ :tool-retry
+ {:value {:max-attempts 3 :base-backoff-ms 250}
+  :kind :threshold :capability-tunable? true
+  :doc "RETRYING A TRANSIENTLY-FAILED TOOL CALL, where re-running it cannot
+        duplicate an effect (dirge tool_retry.rs).
+
+        max-attempts 3 means the original plus two retries. Small on purpose:
+        this sits INSIDE the branch's turn, and a read still failing on its
+        third try is reporting a real condition rather than a blip.
+
+        base-backoff-ms doubles per attempt — 250 then 500. A beat, not a
+        rate-limit backoff: the condition it waits out is a language server
+        still indexing, and a minute-long pause mid-turn is indistinguishable
+        from a hang.
+
+        WHICH tools may be retried is wordlists.edn :retry-safe-tools, and it
+        is a positive allowlist. The error class says retrying could work; the
+        tool says retrying is allowed to be tried; both must hold."}
+
+ :compaction
+ {:value
+  {;; THE BUDGET LADDER, as fractions of the model's context window. Ported
+   ;; from dirge's context_manager (itself a port of Reasonix's
+   ;; context-manager.ts). Fractions rather than character counts so one
+   ;; policy is right on an 8k local model and a 200k hosted one — the old
+   ;; :compaction-chars was a fixed size that could not be both.
+   ;;
+   ;; PROACTIVE. A fold at 0.75 happens while the branch is still working
+   ;; well; a fold at 0.98 happens after the model has lost the thread. The
+   ;; cheapest rung runs first and often makes the rest unnecessary.
+   :ladder {:aggressive-cap  0.60   ; tighten the per-result cap
+            :fold            0.75   ; fold older history into a summary
+            :aggressive-fold 0.78   ; the normal fold bought too little
+            :force           0.80   ; force a summary and end the turn
+            :turn-start      0.90}  ; fold before the first call of a turn
+
+   ;; Rough token estimate. Bytes over this, the same method the session
+   ;; meter uses, so the two cannot disagree about what they are measuring.
+   :chars-per-token 4
+
+   ;; Messages never folded. The HEAD is the system prompt and the opening
+   ;; statement of the problem — fold those and the branch is working from a
+   ;; summary of its own instructions. The TAIL is what is still in play.
+   :protect-head 2
+   :protect-tail 5
+   ;; The aggressive rung halves the tail it keeps.
+   :aggressive-tail 2
+
+   ;; Per-tool-result caps, in tokens. The model that CALLED the tool saw the
+   ;; whole result on its dispatch turn; later turns see head+tail with the
+   ;; dropped count, and can call again for the middle.
+   :result-cap {:normal 3000 :aggressive 1000}
+   ;; A result shorter than this is left alone: summarising it costs more
+   ;; than it saves and loses something readable at a glance.
+   :prune-min-chars 500
+   ;; When capping frees this fraction of the window, a NORMAL fold can be
+   ;; skipped — the snip already bought the headroom. Never applies to an
+   ;; aggressive tier: past that point the summary is the thing needed.
+   :snip-sufficient 0.10
+
+   ;; The summary's own size: a fraction of what is folded, floored so a
+   ;; small fold still carries its load-bearing facts, capped so a summary
+   ;; approaching the size of what it replaced is not called compaction.
+   :summary {:ratio 0.20 :floor 2000 :ceiling 12000}
+   ;; How many of the template's sections must carry a real body before the
+   ;; result is treated as a summary. The caller acts on that by DROPPING
+   ;; history, so this is the guard on destroying turns for a stub. Two, not
+   ;; fourteen: rejecting a usable summary forces prune-only folding, which
+   ;; walks the branch into the overflow the fold existed to prevent.
+   :min-summary-sections 2
+   ;; Section bodies that say nothing.
+   :empty-bodies #{"" "none" "n/a" "na" "-" "—" "unknown" "nothing" "todo" "tbd"}
+   ;; How much of a pruned result's text survives as a preview.
+   :preview-chars 80
+   ;; Which message roles hold tool results. In this harness a tool result
+   ;; comes back as a "user" turn, which is why capping and pruning key on it
+   ;; — a project whose loop shapes messages differently retunes this rather
+   ;; than editing a cell.
+   :result-roles #{"user"}
+   ;; What a clipped result says about its missing middle. Prose, and it has
+   ;; to name the way back: a truncation marker that does not is a dead end.
+   :clip-note "\n… [{{chars}} chars dropped — fetch_turn to reopen this turn in full] …\n"
+   ;; The one-line stand-in a pruned tool result becomes, keyed by tool. The
+   ;; useful line differs per tool, which is the whole reason this is a table
+   ;; and not one format string.
+   :prune-lines {"shell"      "[shell] ran `{{first-line}}` → {{lines}} lines, {{chars}} chars"
+                 "eval"       "[eval] {{lines}} lines, {{chars}} chars — {{preview}}"
+                 "read_file"  "[read_file] {{chars}} chars, {{lines}} lines"
+                 "read_digest" "[read_digest] {{lines}} lines of digest, {{chars}} chars"
+                 "grep"       "[grep] {{lines}} lines of matches, {{chars}} chars"
+                 "lsp"        "[lsp] {{lines}} lines"
+                 "write_file" "[write_file] wrote {{chars}} chars"
+                 "edit_file"  "[edit_file] patched {{chars}} chars"
+                 "patch"      "[patch] patched {{chars}} chars"
+                 "task"       "[task] {{preview}}"
+                 "recall"     "[recall] {{lines}} memories, {{chars}} chars"}
+   :prune-line-default "[{{tool}}] {{preview}} ({{chars}} chars)"
+
+   ;; What a fold leaves behind in the knowledge store. A folded region is
+   ;; not discarded — it is distilled into memories the breadcrumb index then
+   ;; surfaces on every later turn, one line each, expandable with `recall`.
+   ;; Without this a fold is lossy and the branch has only `fetch_turn`, which
+   ;; requires already knowing which turn to reopen.
+   ;; `episodic` — a specific thing that happened in this run, which is what
+   ;; a folded region is. Ranked below semantic and procedural in recall, and
+   ;; correctly so: the durable lesson is the supervisor's to record, not the
+   ;; fold's to claim.
+   :distil {:max-memories 5 :min-chars 40 :kind "episodic"}}
+  :kind :threshold :capability-tunable? true
+  :doc "WHEN A BRANCH COMPACTS, HOW HARD, AND WHAT IT KEEPS.
+
+        Every rung is a fraction of the model's context window, so the policy
+        travels across models. See samizdat.agent.compaction for what each
+        rung does and why the head and tail are protected.
+
+        The old single :compaction-chars threshold is still read by the
+        in-place digest path; this governs the LADDER, which decides whether
+        that path runs at all and whether a fold is needed on top of it."}
+
+ :digest
+ {:value {:min-lines 350 :budget-chars 2000 :input-chars 120000}
+  :kind :policy :capability-tunable? false
+  :provenance ["karamazov-b76m"]
+  :doc "THE READ THAT RETURNS AN ANSWER INSTEAD OF A PAGE (karamazov-b76m,
+        after Spotify's shunt). Most of what a branch does with a large file
+        is moving its text through the model, not reasoning about it, and
+        every page it reads is resent on every later turn.
+
+        :min-lines    an untargeted read_file — no offset, no limit — of a
+                      file at least this long is refused toward read_digest
+                      by the phases.edn rule :large-read-needs-a-digest.
+                      350 is Spotify's measured crossover: below it the
+                      reader's round trip costs more than the tokens it
+                      saves. A targeted read always passes; that is the
+                      branch fetching the section it means to edit.
+        :budget-chars how long a digest may be. Bullets, not prose.
+        :input-chars  how much file the reader is sent in one call; past it
+                      the material is clipped with a note saying so. Sized
+                      for a local reader with a 32k window at ~4 chars a
+                      token, with room for the answer.
+
+        The reader is config :run :role-models :reader, a cheap model; with
+        no assignment the branch's own model reads, which still keeps the
+        file out of the branch's context. :summarizer, likewise, is the
+        role the compaction fold's summary call runs on."}
+
+ :context-budget
+ {:value {:tool-result-chars   4000
+          :file-read-chars     60000
+          :test-output-lines   25
+          :judge-rules-chars   6000
+          :judge-transcript-chars 12000
+          :grep-ranges         20
+          ;; How many matching lines one grep reports before handing back an
+          ;; offset to continue from. Was a literal 200 in the tool with no
+          ;; way to continue past it (karamazov-2py).
+          :grep-hits           200
+          ;; One search result, clipped. An unbounded result is a context
+          ;; leak dressed as an answer — the cost this tool must not become.
+          :websearch-chars     3000
+          ;; How many results one search asks for by default, the ceiling a
+          ;; caller may raise it to, and how long to wait. All three are the
+          ;; cost of a search against its usefulness, which is exactly the
+          ;; trade a project should be able to retune.
+          :websearch-results   5
+          :websearch-max-results 20
+          :websearch-timeout-ms 20000
+          ;; How much of a failed search's body the model is shown. Enough to
+          ;; diagnose (a rate-limit note, an auth complaint), not so much that
+          ;; a failure costs more context than a success.
+          :websearch-error-chars 200
+          :inbox-lines         3
+          :tree-lines          8
+          :keep-pairs          10
+          :compaction-chars    50000
+          :diff-chars          12000
+          :shell-output-chars  8000
+          :shared-code-chars   700
+          :ledger-claim-chars  180
+          :critic-claim-chars  400
+          ;; The base output budget a truncation RETRY doubles from when the
+          ;; provider config sets no :max-tokens of its own — without it the
+          ;; "retry at a doubled budget" contract silently degraded to a
+          ;; same-budget repeat, reproducing the truncation it exists to
+          ;; escape (blt.38).
+          :retry-base-tokens   8192}
+  :kind :cost-ceiling :capability-tunable? false
+  :doc "HOW MUCH THE MODEL GETS TO SEE. Every one of these was a constant in
+        code, and together they are the most project-specific numbers in the
+        harness: a codebase of 200-line namespaces read by a 200k-context model
+        wants nothing like the same values as one with generated files read by a
+        small local model.
+
+        They are also the numbers most likely to be the real cause of a run
+        going wrong, and the hardest to diagnose from the outside — a branch
+        that cannot see the line its test failed on looks exactly like a branch
+        that cannot read a stack trace.
+
+        :tool-result-chars      one tool result, before it is truncated
+        :file-read-chars        one `read` of a file
+        :test-output-lines      the TAIL of a failing test run a branch is
+                                shown; the tail rather than the head because a
+                                failure names itself at the end
+        :judge-rules-chars      the harness's own rules, as the judge sees them
+        :judge-transcript-chars the transcript under judgement
+        :tree-lines             files the shared-tree block names — the paths
+                                OTHER branches on this run have changed. Team
+                                workers share one working tree on purpose (the
+                                parts of a feature belong in the same files),
+                                and the mailbox only ever carried what a
+                                sibling chose to announce. One line per file
+                                rather than per write, so eight is a wide tree
+                                rather than eight edits.
+        :grep-ranges            distinct line ranges a search reports
+        :inbox-lines            unread messages previewed in the context block
+        :keep-pairs             recent exchanges kept VERBATIM before
+                                compaction unloads them (LR-4)
+        :compaction-chars       total content before compaction engages at all
+        :diff-chars             the working-tree diff a branch and the judge
+                                are shown
+        :shell-output-chars     one shell command's output. Separate from
+                                :tool-result-chars, and larger, because a
+                                build log's useful part is at the end of a
+                                great deal of noise
+        :shared-code-chars      how much of a sibling's artifact CODE the
+                                shared block carries. A theorem STATEMENT is
+                                what a sibling needs in order to build on a
+                                lemma; the proof body is not
+        :ledger-claim-chars     how much of a claim the settled-state ledger
+                                shows. gen-18 averaged ~340 characters per
+                                claim and its 79 confirmed artifacts render to
+                                ~6,800 tokens unabridged; the ledger's job is
+                                to let a branch see WHAT is settled, and the
+                                exact statement is one `fetch_artifact` away
+        :critic-claim-chars     how much of a claim the critic is shown per
+                                artifact when scoring a branch
+
+        The ANSWER under judgement is deliberately absent from this list: it is
+        the thing being judged, and truncating it could hide the very flaw the
+        judge is looking for. A key here that nothing reads would be worse than
+        no key at all — `:run :loop` was documented, parsed from an env var and
+        read by no live code for a whole phase — so a test asserts every key in
+        this map is referenced somewhere in src.
+
+        A :cost-ceiling, so the capability tier may not raise them: every one
+        trades context for evidence, and a struggling run is the last one that
+        should be handed more context on the harness's own initiative. A
+        PROJECT raising them deliberately is a different act."}
+
+ :critic-cumulative-objectives
+ {:value [:progress]
+  :kind :threshold :capability-tunable? false
+  :doc "The objectives that ACCUMULATE over a branch's life, and which a cull
+        decision therefore must not compare on.
+
+        A cumulative score rises with age and nothing else, so comparing on it
+        lets any mature branch dominate any young one indefinitely — the age
+        bias the juvenile grace period only postpones. It is also the wrong
+        question: what a branch already confirmed is in the log and cannot be
+        lost by culling it, so survival turns on where the line is GOING and
+        on what it uniquely covers.
+
+        Derived, not listed: the survival set is :critic-objectives minus
+        this. It was a second hardcoded vector, so retuning the rubric left
+        the cull reading the old one."}
+
+ :critic-scale
+ {:value {:min 1 :max 5}
+  :kind :threshold :capability-tunable? false
+  :doc "The range a critic score may take. Read by BOTH halves of the loop —
+        prompts/critic.md asks for it and critic.clj's parser accepts it —
+        so widening the rubric cannot leave the parser behind. It was a
+        `[1-5]` literal inside the parser's regex while the objective NAMES
+        were already data here, which meant :critic-objectives was
+        advertised as retunable and was not: adding a fifth objective left
+        the pattern matching only the original four, and parse-scores fails
+        CLOSED, so every scoring silently returned nil and the retention
+        cascade fell through to its no-scores rule."}
 
  :critic-objectives
  {:value [:progress :momentum :distinctness :viability] :kind :threshold
@@ -296,6 +2434,16 @@
  {:value 4 :kind :cost-ceiling :capability-tunable? false
   :doc "Most sub-units the architect may split one unit into."}
 
+ :split-parts
+ {:value {:min-parts 2 :max-parts 4}
+  :kind :cost-ceiling :capability-tunable? false
+  :doc "How many pieces the `split` tool accepts. The floor is the definition
+        of a split rather than a budget: one piece is not a decomposition, it
+        is the same task with a new name, and accepting it would let an agent
+        recurse without ever getting smaller. The ceiling is the cost one, and
+        it matches :decompose-max-parts — each piece is an agent, and a parent
+        that lists eight has not thought about the boundary."}
+
  :judge-rules
  ;; drg-4026 #55: the judge's deterministic finalization rules — what counts
  ;; as a test run, a code edit, an outside claim — as data. A fixed
@@ -304,7 +2452,39 @@
  ;; touching src. Regexes are stored as strings (EDN has no regex literal);
  ;; re-pattern at read.
  {:value
-  {:test-run-regex
+  {;; What the judge's REPLY is expected to look like. The prompt asking for
+   ;; this shape is prompts/judge.md, which is userspace — so while these
+   ;; lived in judge.clj a supervisor could reword the request and silently
+   ;; break the parser reading the answer, with no error anywhere: an
+   ;; unmatched verdict falls through to :complete, which fails OPEN. The
+   ;; two halves are one decision and belong in one editable place.
+   :verdict-line-regex "(?i)\\bVERDICT\\b"
+   :findings-regex "(?is)FINDINGS:\\s*(.+)$"
+   ;; The test runner's summary line, as judge/evidence reports the last one
+   ;; a shell run printed — clojure.test's shape here; a project on another
+   ;; runner retunes it like :test-run-regex (karamazov-0way).
+   :test-summary-regex "(?m)^Ran \\d+ tests, \\d+ assertions, \\d+ failures, \\d+ errors\\.?"
+   ;; What a second-pass reply says when it cleared every candidate. Paired
+   ;; with prompts/judge-verify.md, which asks for exactly this phrase, and
+   ;; load-bearing: it is the one signal that separates "the judge checked and
+   ;; found nothing" from "the judge produced nothing parseable", and those
+   ;; two must not be treated alike — the first clears the findings, the
+   ;; second keeps them.
+   :verify-clean-regex "(?i)\\bno issues found\\b"
+   ;; Ordered, first match wins, and each entry is a verdict with the words
+   ;; that must ALL appear on the verdict line for it to apply. The order IS
+   ;; the precedence rule: negative before abstain before positive, because
+   ;; INCOMPLETE contains COMPLETE and "NOT COMPLETE" negates it. A plain
+   ;; word-set per verdict could not express either.
+   :verdict-rules [[:incomplete ["INCOMPLETE"]]
+                   [:incomplete ["NOT" "COMPLETE"]]
+                   [:abstain ["ABSTAIN"]]
+                   [:complete ["COMPLETE"]]]
+   ;; What an empty or tokenless reply means. FAIL-OPEN on purpose: a judge
+   ;; that cannot answer must never be able to wedge the loop.
+   :verdict-default :complete
+
+   :test-run-regex
    "(?i)-M:test|-A:test|run-tests|\\bjolt\\s+test\\b|\\bpytest\\b|\\bcargo\\s+test\\b|\\bnpm\\s+test\\b"
    :code-ext-regex "(?i)\\.(clj|cljc|cljs|edn|py|ts|js|rs|go)$"
    :claim-regex "(?i)\\b(tested|all tests pass|passing|verified|ran the (tests|suite))\\b"
@@ -334,7 +2514,7 @@
   ;; time. :cmd-prefix is concatenated with the derived expression and a
   ;; closing single quote for sh -c; the expression's namespaces come
   ;; through :ns-whitelist-regex, so the quoted payload genuinely contains
-  ;; no single quotes (review3 #1).
+  ;; no single quotes (provenance R3-1).
   {:value
    {:test-file-regex "(?i)(^|/)(test|spec)s?/|[_-](test|spec)\\.[a-z]+$"
     :root-strip-regex "^(test|gui|src)/"
@@ -354,51 +2534,232 @@
   ;; check against: a coding run's proof is its test run, not confirmed
   ;; claims, so empty evidence must not refuse every figure (the first
   ;; self-modification run did the work correctly and could not ship it).
+  ;; On a coding run that evidence is what the branch MEASURED — the output
+  ;; of its own eval and shell calls (ship.clj observed-output) — beside any
+  ;; artifacts; before that was added the rung checked a branch's figures
+  ;; against its siblings' accepted answers and nothing else (karamazov-3s54).
   {:value
    [{:name :answer-exists
      :when (str/blank? (str answer))
-     :message "Supply an `answer` to ship."}
+     ;; Shows the CALL, not just the missing name. base/missing already works
+     ;; this way, on the reasoning that a bare list of argument names teaches
+     ;; nothing — gen-20 B1 called proof_start without its arguments five
+     ;; times, three producing the byte-identical message, and was culled for
+     ;; it. This rung was the last place still saying only the name, and it
+     ;; cost two live runs: both did the work, passed their tests, closed
+     ;; their task, then spent their remaining turns calling `done` empty and
+     ;; ended :exhausted with nothing shipped.
+     :message-form (str "`done` needs an `answer` — the text a person reads as"
+                        " the result of this run. Not a status line: say what"
+                        " you built and what shows it works.\n\n"
+                        "```tool-call\n"
+                        "{\"name\": \"done\", \"args\": {\"answer\":"
+                        " \"<what you built, and the evidence for it>\"}}\n"
+                        "```")}
     {:name :figure-coverage
      :when (and (seq evidence) (seq uncovered-numbers))
+     ;; Says what COVERS a figure, not only that these are uncovered. Run
+     ;; 9ead0638's cloud-wrap owner read "verify these or remove them",
+     ;; grepped its own test file for the coordinates it had quoted, and was
+     ;; refused three times: a read is not an artifact, and nothing had said
+     ;; what one was.
      :message-form (str "Your answer states figures no artifact supports: "
                         (str/join ", " (map (fn [x] (str "`" x "`"))
                                             (take 8 uncovered-numbers)))
                         ".\nA number in an answer has to come from something"
                         " confirmed or measured — that is the difference between a"
-                        " report and a fabricated one. Either verify these or"
-                        " remove them from the answer.")}
+                        " report and a fabricated one. A figure is covered when it"
+                        " appears in the OUTPUT of a test run or an `eval` this"
+                        " branch ran; reading or grepping a file that contains it"
+                        " covers nothing. Test inputs, coordinates, seeds and line"
+                        " numbers belong in the code, not the report — drop them,"
+                        " and keep only the figures your test output shows.")}
     {:name :engages-problem
      :when (and (not (str/blank? (str problem)))
                 (not (engages-problem? problem answer)))
      :message-form (str "This answer shares no substantive term with the problem"
                         " statement. Whatever it establishes, it is not an answer to"
-                        " the question that was asked.")}]
+                        " the question that was asked.")}
+    ;; karamazov-a6mj.3, thinkingbox's <DONE> rule: a final message may not
+    ;; both close the conversation and ask something of the person reading
+    ;; it. An answer whose last line is a question to the reader, an offer
+    ;; of more work or a request for confirmation is a run that has a
+    ;; question left, not a result. The predicate is last-line-only and
+    ;; phrase-anchored (wordlists :asks-the-reader) so prose that asks and
+    ;; answers itself is left alone.
+    {:name :asks-the-reader
+     :when (asks-the-reader? answer)
+     :message-form (str "This answer ends by asking its reader something — a"
+                        " question, an offer, a request to confirm. `done` closes"
+                        " the run; nobody answers what it asks. If the question"
+                        " matters to the result, ask it now with `ask_human` (a"
+                        " person answers when one is attached, the run's user"
+                        " context otherwise) and finish once you know. If it does"
+                        " not, decide it, say which way you went, and call `done`"
+                        " with the result and no question in it.")}
+    ;; karamazov-g86, dirge completeness_gate.rs: the silent-exhaustion tell.
+    ;; One sentence in the model's own voice planning more work means the run
+    ;; is stopping halfway and saying so. The detection conjunction and its
+    ;; do-not-widen warning live with the wordlists
+    ;; (:completeness-* in wordlists.edn); this rung is just the decision.
+    {:name :completeness
+     :when (unfinished-claim? answer)
+     ;; THE MESSAGE IS THE ONLY INSTRUCTION THE MODEL GETS HERE, and the
+     ;; earlier wording offered "restate the answer as what IS done" as a bare
+     ;; alternative — which is the omission the critic later fails the round
+     ;; for. Its other branch, putting the remainder on the board, is the
+     ;; `task` tool, and no recorded run has ever called it (karamazov-5ot9),
+     ;; so in practice this read as: drop it. Measured on run
+     ;; dbe64eea-successor, where the owner met an impossible requirement and
+     ;; shipped an answer that did not mention it.
+     ;;
+     ;; Three options now, and the middle one is the one that was missing: a
+     ;; requirement you COULD NOT meet is a result, said out loud, and the
+     ;; rung no longer refuses it (wordlists :completeness-blocked).
+     :message-form (str "One sentence of this answer says, in your own voice,"
+                        " that work remains — a first-person plan to do more"
+                        " is not a result. Three honest endings, and only"
+                        " these:\n"
+                        "  - do that work now and finish again;\n"
+                        "  - if something BLOCKED you, say so in the answer:"
+                        " what you could not do and why, with the error or the"
+                        " evidence. That is a result, not a failure, and it"
+                        " ships;\n"
+                        "  - if it is simply left, put it on the board (the"
+                        " task tool) so it is somebody's next task.\n"
+                        "Do not answer by leaving it out. A requirement that"
+                        " goes unmentioned reads as met, and that is the one"
+                        " ending that is not honest.")}]
    :kind :threshold :capability-tunable? false
+  :provenance ["drg-4026 #44"]
    :doc "The lexical ship rungs (drg-4026 #44) — adding a rung is a data
          edit; the evidence computation stays in ship.clj."}
+
+  :give-up-reason-floor
+  {:value 60 :kind :threshold :capability-tunable? false
+   :provenance ["karamazov-ylte.1" "run dbe64eea-successor"]
+   :doc "How many characters an abandonment has to spend accounting for
+         itself. Crude on purpose and tunable because it is crude: the
+         property wanted is 'names what was tried and what blocked it', and
+         no lexical test decides that. A floor plus the engages-problem rung
+         rejects the formulas that carry no account at all — `stuck`,
+         `cannot proceed`, `no reason given` — which is what was actually
+         getting through, since nothing checked at all."}
+
+  :give-up-gates
+  ;; karamazov-ylte.1. `done` faces four lexical rungs, a test-verification
+  ;; rung and a focused verify. `give_up` faced NOTHING — five lines, an
+  ;; optional `reason`, and "no reason given" as its default — so the harness
+  ;; accepted an abandonment with no account of it whatever. Of the four ways
+  ;; a branch can end, this was the only one with no gate on it, which made it
+  ;; the cheapest, and a loop teaches by what it makes cheap.
+  ;;
+  ;; The account asked for is the same one the completeness refusal names as
+  ;; an honest ending: what you could not do, and what blocked you. A branch
+  ;; that genuinely cannot proceed can always say that; a branch that has
+  ;; merely stopped cannot, and that difference is the whole point of the rung.
+  ;;
+  ;; Same shape as :ship-gates — vector order is cond order, the forms see the
+  ;; symbols ship.clj binds (reason, problem, floor), and adding a rung is a
+  ;; data edit.
+  {:value
+   [{:name :reason-exists
+     :when (str/blank? (str reason))
+     ;; Shows the CALL, on base/missing's reasoning that a bare argument name
+     ;; teaches nothing.
+     :message-form (str "`give_up` needs a `reason`, and abandoning is the one"
+                        " ending that has to explain itself — nobody after you"
+                        " can reconstruct what stopped you.\n\n"
+                        "```tool-call\n"
+                        "{\"name\": \"give_up\", \"args\": {\"reason\":"
+                        " \"<what you were trying, what you tried, and what"
+                        " blocked it>\"}}\n"
+                        "```")}
+    {:name :reason-is-an-account
+     :when (< (count (str/trim (str reason))) floor)
+     :message-form (str "That is a verdict, not an account. Say what you were"
+                        " trying to do, what you TRIED, and what blocked it —"
+                        " the error, the command, the thing that would not"
+                        " work. If something genuinely cannot be done here,"
+                        " that is a finding and it is worth recording; if you"
+                        " cannot name what blocked you, you are not blocked"
+                        " yet and there is another approach to try.")}
+    {:name :reason-engages-problem
+     :when (and (not (str/blank? (str problem)))
+                (not (engages-problem? problem reason)))
+     :message-form (str "This reason shares no substantive term with what you"
+                        " were asked to do, so it does not say what was"
+                        " abandoned. Name the actual work and the actual"
+                        " obstacle.")}]
+   :kind :threshold :capability-tunable? false
+   :provenance ["karamazov-ylte.1" "run dbe64eea-successor"]
+   :doc "The lexical give_up rungs. Adding a rung is a data edit; the
+         evidence computation stays in ship.clj, exactly as :ship-gates."}
 
   :tool-vocab
   ;; Tier 1a: the tool vocabularies the gates and their settlers read — data
  ;; here, alongside the thresholds, so a vocabulary changes at runtime
  ;; without a rebuild. agent-test walks every name against the registered
- ;; run-tools (review3 #6): a name the loop cannot dispatch is a gate whose
+ ;; run-tools (provenance R3-6): a name the loop cannot dispatch is a gate whose
  ;; prediction silently narrows to :unmet.
  {:verification #{"eval" "shell"}
-  :shipping #{"write_file" "edit_file" "shell" "reload_cells" "manifest"
-              "done" "give_up" "thesis" "branch_theses"}
-  :file-write #{"write_file" "edit_file"}
+  ;; `patch` writes files exactly as `write_file` and `edit_file` do; it was
+  ;; added to the loop and to none of these, so a branch editing by anchor
+  ;; scored as having shipped NOTHING and drew studying nudges for work it
+  ;; was doing (karamazov-0kk landed the tool, this landed the vocabulary).
+  :shipping #{"write_file" "edit_file" "patch" "shell" "reload_cells"
+              "manifest" "done" "give_up" "thesis" "branch_theses"}
+  :file-write #{"write_file" "edit_file" "patch"}
+  ;; The storm guard's tool classification (karamazov-ekk). :storm-exempt is
+  ;; the read-only surface — repeated identical reads are over-studying's
+  ;; business, not a storm — plus done/give_up, whose repetition belongs to
+  ;; the done-blocked and last-call rungs: storm withholding a done that
+  ;; last-call is simultaneously forcing would be one guard punishing what
+  ;; another demands (dirge hit that conflict three separate times).
+  ;; :storm-mutating tools clear the window's non-mutating entries when they
+  ;; fire, and still count amongst themselves. Everything in neither set is
+  ;; counted normally.
+  :storm-exempt #{"read_file" "read_digest" "grep" "doc" "manual" "introspect" "cells"
+                  "recall" "fetch_artifact" "fetch_turn" "branch_theses"
+                  "lsp" "skill" "policy" "complete" "done" "give_up"}
+  :storm-mutating #{"write_file" "edit_file" "shell" "eval" "reload_cells"
+                    "cell" "prompt" "manifest" "experiment" "remember"
+                    "forget" "retire"}
   :settle-called
-  {:milestone        #{"done"}
+  {:orienting        #{"plan" "write_file" "edit_file" "patch"}
+   :no-edits         #{"write_file" "edit_file" "patch"}
+   ;; A WRITE, not another test run. The steer asked the branch to form a
+   ;; hypothesis about where the defect is; editing the test it doubted and
+   ;; editing the implementation it now believes is wrong are both that
+   ;; hypothesis acted on, and either one ends the window. Running the suite
+   ;; again is the thing it was already doing.
+   :suspect-the-test #{"write_file" "edit_file" "patch"}
+   :milestone        #{"done"}
    :branch-out       #{"branch_theses"}
    :repopulate       #{"branch_theses"}
    :emergency-review #{"done" "thesis"}
    :stuck            #{"thesis"}
+   :storm            #{"done" "give_up"}
+   :mechanics-streak #{"done" "give_up"}
    :safe-state       #{"thesis" "done" "give_up"}
+   ;; SPLIT IT, or SAY WHY IT IS ONE. `task` and `split` are the first; a
+   ;; `thesis` is the second, because "this is one coherent change and here is
+   ;; why" is exactly what a thesis registers. Without this entry the gate
+   ;; could only ever expire unmet, which is the shape :reflection was deleted
+   ;; for — 69 firings and 0 met across two models and five task shapes.
+   :over-budget      #{"task" "split" "thesis"}
    :done-blocked     #{"done" "give_up"}
    :turn-budget      #{"done" "give_up"}
    :wind-down        #{"done"}
    :last-call        #{"done" "give_up"}
-   :reflection       #{"introspect" "reload_cells" "cells"}
+   ;; The planning branch's terminal is its declaration, so its wind-down
+   ;; rungs are met by `plan` — a `done` from it is refused before dispatch.
+   :plan-wind-down   #{"plan"}
+   :plan-last-call   #{"plan"}
+   ;; :reflection's vocabulary went with its gate (karamazov-634): 69 firings
+   ;; and 0 met across two models, five task shapes and two harness
+   ;; generations. A prediction vocabulary for a gate that no longer exists
+   ;; reads as a gate somebody forgot to wire up.
    :studying         #{"write_file" "edit_file" "shell" "reload_cells"
                        "done" "give_up"}}}
 
@@ -413,25 +2774,8 @@
  ;; tuning a threshold stays runtime-editable; only the form structure
  ;; compiles at load. :message-file names a prompts/ file; {{turn-count}}
  ;; and {{max-turns}} interpolate at fire time.
- [{:gate :reflection
-   :priority 13
-   :budget nil
-   :doc "A quiet-turn nudge to reflect on the loop itself. Lowest priority, so
-         it is passed over whenever any real steer holds and surfaces only on a
-         turn where nothing else does. The loop is a mycelium workflow the
-         branch can see (introspect) and reshape (reload_cells); a run that
-         never reconsiders its own machinery keeps whatever friction it started
-         with. Fires on a cadence, not a condition, which is why it sits below
-         every gate that fires because something is wrong."
-   :when (and (state/active? branch)
-              (pos? (state/turn-count branch))
-              (zero? (mod (state/turn-count branch)
-                          (threshold :reflection-cadence))))
-   :message-file "reflection"
-   :prediction "the branch inspects or reshapes its loop"
-   :window 1}
-
-  {:gate :prologue-cap
+ [{:gate :prologue-cap
+   :provenance ["vf-9wx"]
    :priority 9
    :budget nil
    :doc "The branch has produced nothing at all. Every other guard is
@@ -447,7 +2791,8 @@
          harness just asked of it."
    :when (and (= :build (:phase branch))
               (not (:any-progress? branch))
-              (>= (state/turn-count branch) (threshold :prologue-cap)))
+              ;; OWN turns: what THIS branch has produced nothing in (blt.16).
+              (>= (state/own-turn-count branch) (threshold :prologue-cap)))
    :message-file "prologue-cap"
    :message-suffix "\n\nYou are {{turn-count}} turns in with nothing verified."
    :prediction "the branch produces its first artifact"
@@ -465,6 +2810,7 @@
   ;; without renumbering the ladder; priorities need only be distinct
   ;; (gate-config-is-coherent).
   {:gate :last-call
+   :provenance ["karamazov-pab"]
    :priority 2.5
    :budget :max-last-call-steers
    :tool "done"
@@ -476,13 +2822,95 @@
          the reviewer/critic can judge beats a silent exhaustion the supervisor
          has to re-task blind. If the branch truly has nothing, the done-gate
          refuses it and the done-blocked rung takes over toward giving up."
+   ;; NOT ON A PLANNING BRANCH: it has nothing to ship, and forcing a done
+   ;; on it produced a refusal every time (karamazov-ee72). :plan-last-call
+   ;; below is its rung.
    :when (and (state/active? branch)
+              (not (state/planning? branch))
               max-turns
               (>= (state/turn-count branch)
                   (- max-turns (threshold :last-call-window))))
    :message-file "last-call"
    :message-suffix "\n\nYou are at turn {{turn-count}} of {{max-turns}} — your last turns. Ship your best partial now with done."
    :prediction "the branch ships"
+   :window 2}
+
+  ;; Priority 2.4: the planning branch's last-call, one slot above the
+  ;; builder's so the two never compete (they are disjoint by :when anyway;
+  ;; priorities must be distinct). Same budget, same window.
+  {:gate :plan-last-call
+   :provenance ["karamazov-ee72"]
+   :priority 2.4
+   :budget :max-last-call-steers
+   :tool "plan"
+   :doc "A PLANNING branch is in its last turns and has not declared its plan.
+         The design step is a worker loop whose only product is the `plan`
+         call, and until this rung existed its final turns were last-call's:
+         a FORCED `done` that the nothing-changed rung refused, because an RFC
+         is not a diff. Every design step in three live runs spent its whole
+         cap that way and half of them sent the task to construction with no
+         plan at all. This forces the one call that ends the step — `plan` is
+         the planning branch's terminal tool, which is what makes it
+         forceable under :forceable-tools' own rule."
+   :when (and (state/active? branch)
+              (state/planning? branch)
+              max-turns
+              (>= (state/turn-count branch)
+                  (- max-turns (threshold :last-call-window))))
+   :message-file "plan-last-call"
+   :message-suffix "\n\nYou are at turn {{turn-count}} of {{max-turns}} — your last planning turns.{% if goal %} You are planning: {{goal}}.{% endif %}"
+   :prediction "the branch declares its plan"
+   :window 2}
+
+  {:gate :mechanics-streak
+   :provenance ["karamazov-068"]
+   :priority 2.6
+   :budget :max-mechanics-forces
+   :tool "give_up"
+   :doc "The branch has produced no usable tool call for several turns
+         running — malformed fences, prose, or (karamazov-068) copies of the
+         harness's own compaction marker. The no-call path already answers
+         each one specifically; this rung answers the STREAK, which means
+         the specific answers are not landing either. Forces an honest
+         give_up so the work goes back with an account rather than the
+         branch burning to its cap emitting nothing.
+
+         Above :storm because a branch making no calls at all is further
+         gone than one repeating a call, and the storm window cannot even
+         see it: nothing reaches dispatch."
+   :when (and (state/active? branch)
+              (>= (or (:consecutive-mechanics-failures branch) 0)
+                  (threshold :mechanics-streak-threshold)))
+   :message-file "mechanics-streak"
+   ;; Names the failing call and how to pull the whole record. A streak gate
+   ;; that reports only its own count tells the model it is failing without
+   ;; telling it at what.
+   :message-suffix "{% if failed-error %}\n\nThe last one, on turn {{failed-turn}} via `{{failed-tool}}`:\n\n> {{failed-error}}\n\nfetch_turn({\"turn\": {{failed-turn}}}) has the whole record if that is not enough to act on.{% endif %}{% if goal %}\n\nYou are working on: {{goal}}{% endif %}"
+   :prediction "the branch gives up honestly, or produces a well-formed call"
+   :window 2}
+
+  {:gate :storm
+   :provenance ["karamazov-ekk" "karamazov-pab"]
+   :priority 2.7
+   :budget :max-storm-forces
+   :tool "give_up"
+   :doc "The storm guard's escalation rung (karamazov-ekk). The withhold in
+         phases.edn blocks each identical repeat as it is attempted; this
+         rung answers the model that keeps attempting it anyway — several
+         consecutive calls withheld means the branch is spending its turns
+         re-asking for a result it already has, and forcing an honest
+         give_up (a give_up-tool prefill, not prose) hands the task back
+         with an account of what was tried, where a silent grind hands back
+         nothing. Same forced-tool mechanism as last-call, for the same
+         karamazov-pab reason."
+   :when (and (state/active? branch)
+              (>= (or (:storm-strikes branch) 0)
+                  (threshold :storm-strikes-to-force)))
+   :message-file "storm-force"
+   :message-suffix "{% if failed-error %}\n\nMost recent failure, turn {{failed-turn}} via `{{failed-tool}}`:\n\n> {{failed-error}}\n\nfetch_turn({\"turn\": {{failed-turn}}}) has the full record.{% endif %}{% if goal %}\n\nYou are working on: {{goal}}{% endif %}"
+   :prediction "the branch abandons the repeated call honestly — give_up with
+                an account of what was tried, or a genuinely different
+                approach"
    :window 2}
 
   {:gate :wind-down
@@ -495,12 +2923,34 @@
          a branch near its cap is told to ship before it is nagged to do more,
          but it never outranks done-blocked or safe-state: a branch that has
          just been told it cannot ship is not being asked to ship."
+   ;; NOT ON A PLANNING BRANCH — :plan-wind-down below asks it for the one
+   ;; thing it can deliver (karamazov-ee72).
    :when (and (state/active? branch)
+              (not (state/planning? branch))
               (>= (state/turn-count branch)
                   (* (threshold :wind-down-fraction) (max 1 max-turns))))
    :message-file "wind-down"
    :message-suffix "\n\nYou are at turn {{turn-count}} of {{max-turns}}."
    :prediction "the branch ships"
+   :window 3}
+
+  ;; Priority 3.1: the planning branch's wind-down, below :plan-last-call as
+  ;; :wind-down is below :last-call — the soft ask, then the force.
+  {:gate :plan-wind-down
+   :provenance ["karamazov-ee72"]
+   :priority 3.1
+   :budget :max-wind-down-steers
+   :doc "A PLANNING branch has passed the wind-down fraction of its cap with
+         no plan declared. The builder's :wind-down told it to ship, which it
+         cannot; this asks for the plan, which is the step's only product and
+         the call that ends it."
+   :when (and (state/active? branch)
+              (state/planning? branch)
+              (>= (state/turn-count branch)
+                  (* (threshold :wind-down-fraction) (max 1 max-turns))))
+   :message-file "plan-wind-down"
+   :message-suffix "\n\nYou are at turn {{turn-count}} of {{max-turns}}.{% if goal %} You are planning: {{goal}}.{% endif %}"
+   :prediction "the branch declares its plan"
    :window 3}
 
   {:gate :emergency-review
@@ -514,10 +2964,12 @@
    :when (and (>= (:consecutive-failures branch) (threshold :cull-threshold))
               (state/confirmed-in-last branch (threshold :cull-recent-window)))
    :message-file "emergency-review"
+   :message-suffix "{% if goal %}\n\nYou are working on: {{goal}}{% endif %}"
    :prediction "the branch ships or changes technique"
    :window 3}
 
   {:gate :milestone
+   :provenance ["vf-8fl"]
    :priority 5
    :budget :max-milestone-nudges
    :doc "First confirmed artifact on this branch that engages what the branch
@@ -528,6 +2980,7 @@
          (vf-8fl), which is the same failure the zebra run produced."
    :when (state/has-relevant-confirmed? branch)
    :message-file "milestone"
+   :message-suffix "{% if goal %}\n\nYou are working on: {{goal}}{% endif %}"
    :prediction "the branch ships within two turns"
    :window 2}
 
@@ -552,7 +3005,7 @@
            ;; so a mark that survives on the branch does not re-fire every
            ;; boundary while it is busy complying.
            (let [last-fired (->> (:gate-history branch)
-                                 (filter #(= :repopulate (:gate %)))
+                                 (filter (fn [g] (= :repopulate (:gate g))))
                                  (map :turn)
                                  (reduce max -1000))]
              (> due last-fired)))
@@ -580,7 +3033,7 @@
          spending on a branch that confirmed its own tooling. Silent once the
          run is winding down, because a new line that late cannot finish."
    :when (let [last-fired (->> (:gate-history branch)
-                               (filter #(= :branch-out (:gate %)))
+                               (filter (fn [g] (= :branch-out (:gate g))))
                                (map :turn)
                                (reduce max -1000))]
            ;; Not while the branch is still acting on the last ask.
@@ -600,6 +3053,7 @@
   ;; remember to thread it back, and on the first live run it did not — the
   ;; gate re-fired on every turn past 60%.
   {:gate :turn-budget
+   :provenance ["dirge PR 738"]
    :priority 12
    :budget nil
    ;; drg-4026 #4: the effect this gate has on branch state, applied by
@@ -611,10 +3065,18 @@
          budget against it (dirge PR 738)."
    :when (let [used (/ (double (state/turn-count branch)) (max 1 max-turns))
                notified (:notified-fractions branch #{})]
-           (boolean (some #(and (>= used %) (not (contains? notified %)))
+           (boolean (some (fn [frac] (and (>= used frac) (not (contains? notified frac))))
                           (threshold :turn-budget-notices))))
-   :message-suffix "**Turn budget**: you have used {{turn-count}} of {{max-turns}} turns. Land what you can verify rather than opening a new line of attack."
-   :prediction "the branch converges rather than starting something new"
+   ;; Two arms: a builder is told to land, a planning branch to declare —
+   ;; "land what you can verify" told every design branch to build what it
+   ;; was briefed not to (karamazov-ee72).
+   :message-suffix "**Turn budget**: you have used {{turn-count}} of {{max-turns}} turns.{% if planning %} Declare the plan you have with `plan` rather than reading further — the plan is this step's only product, and the call ends the step.{% else %} Land what you can verify rather than opening a new line of attack.{% endif %}{% if goal %} You are working on: {{goal}}{% endif %}"
+   ;; Says what it MEASURES. The rule reads :settle-called :turn-budget,
+   ;; which is #{"done" "give_up"} — terminating, not converging. A branch
+   ;; that edits and writes its way toward finishing was settling `unmet`
+   ;; against a prediction it had no way to satisfy short of stopping, and
+   ;; the met-rate is the only evidence any of this steering works.
+   :prediction "the branch ships or gives up"
    :window 3}
 
   ;; Tier 3b tranche 2: the six message-builder gates. Their :message-form is
@@ -622,14 +3084,28 @@
   ;; prompt/threshold/state — evaluated at fire time.
 
   {:gate :human-directive
+   :provenance ["RFC-012 F5" "dirge PR 717"]
    :priority 0
    :budget nil
-   :doc "A human told the branch to do something. Outranks every machine gate,
-         which is dirge PR 717's finding arriving as a design property rather
-         than a bug fix."
+   :doc "A directive from the queue reached the branch: a human's, the
+         supervisor's, or the reflex's — the one write path into a run, and
+         this gate is where it lands (RFC-012 F5). Outranks every machine
+         gate, which is dirge PR 717's finding arriving as a design property
+         rather than a bug fix. The message names the ISSUER: the gate
+         firing is the one ledger of what was said to a branch and by whom,
+         and it used to say `a human` whatever wrote the directive."
    :when (some? directive)
-   :message-form (str "**A human has intervened in this run.**\n\n"
-                      (:payload directive)
+   ;; :payload-text is attached by the drains — the payload column is a JSON
+   ;; blob ({"text": "..."}), and rendering it raw framed `{"text":"[watch]
+   ;; ..."}` as the human's words (blt.38). An unattributed directive is the
+   ;; operator's: the REPL path predates issued_by.
+   :message-form (str "**"
+                      (case (str (:issued_by directive))
+                        "supervisor" "The supervisor"
+                        "watch"      "The harness's reflex"
+                        "A human")
+                      " has intervened in this run.**\n\n"
+                      (or (:payload-text directive) (:payload directive))
                       "\n\nThis takes precedence over anything the harness has told"
                       " you. Act on it on this turn.")
    :prediction "the branch acts on the directive on the next turn"
@@ -638,11 +3114,19 @@
   {:gate :done-blocked
    :priority 1
    :budget :max-done-blocks
-   :doc "done was called without the evidence it requires. The message says
-         which gate is unmet, because 'not yet' with no reason produces
-         another identical attempt."
+   :doc "A terminal call was refused — `done` without the evidence it
+         requires, or `give_up` without an account of what blocked it. The
+         message says which rung is unmet, because 'not yet' with no reason
+         produces another identical attempt.
+
+         BOTH calls, which is why :settle-called lists both: a refused
+         give_up that drew no steer and spent no budget would let a branch
+         retry the same empty reason until its turns ran out
+         (karamazov-ylte.1)."
    :when (some? done-block)
-   :message-form done-block
+   :message-form (str done-block
+                      (when-let [g (state/stated-goal branch)]
+                        (str "\n\nJudge \"done\" against what you set out to do: " g)))
    :prediction "the branch supplies the missing evidence or gives up"
    :window 3}
 
@@ -657,6 +3141,13 @@
    :when (state/safe-state-due? branch (threshold :cull-threshold)
                                (threshold :safe-state-multiple))
    :message-form (str (prompt "safe-state")
+                      (when-let [f (state/last-failure branch)]
+                        (str "\n\nMost recent failure, turn " (:turn f) " via `"
+                             (:tool f) "`:\n\n> " (:error f)
+                             "\n\nfetch_turn({\"turn\": " (:turn f)
+                             "}) has the full record."))
+                      (when-let [g (state/stated-goal branch)]
+                        (str "\n\nYou are working on: " g))
                       "\n\nYour last green test run was at turn "
                       (:green-snapshot branch) ". "
                       (if (:ok safe-state-coverage)
@@ -671,6 +3162,7 @@
    :window 3}
 
   {:gate :stuck
+   :provenance ["vf-31m" "vf-49o"]
    :priority 8
    :budget :max-stuck-hints
    ;; drg-4026 #4: the effect this gate has on branch state, applied by
@@ -690,7 +3182,13 @@
          and cannot mutate the branch, so that effect lives in the loop
          beside the turn-budget bookkeeping."
    :when (>= (:consecutive-failures branch) (threshold :stuck-threshold))
-   :message-form (str (prompt "stuck")
+   ;; Rendered rather than read raw: the prose names `split` only where the
+   ;; branch may call it, which is a {% if %} over message-context's
+   ;; :can-split (karamazov-ioo.15.2).
+   :message-form (str (sp/render-str (prompt "stuck")
+                                     (message-context branch max-turns))
+                      (when-let [g (state/stated-goal branch)]
+                        (str "\n\nYou are working on: " g))
                       (when-let [c (:last-failed-claim branch)]
                         (str "\n\n**Withheld**, until you put a different approach"
                              " on record:\n\n> " c "\n\nThat claim will not reach an"
@@ -706,8 +3204,30 @@
                       (when-let [earlier (seq (butlast (:abandoned branch)))]
                         (str "\n\nApproaches you have already tried and abandoned"
                              " — do not retry these:\n"
-                             (str/join "\n" (map #(str "- " %) earlier)))))
+                             (str/join "\n" (map (fn [x] (str "- " x)) earlier)))))
    :prediction "the branch retracts, decomposes, or changes technique"
+   :window 3}
+
+  {:gate :file-thrash
+   :provenance ["karamazov-g86"]
+   :priority 9.5
+   :budget :max-file-thrash-nudges
+   :doc "The same-file streak (karamazov-g86, dirge context_depth.rs):
+         consecutive calls all touching the same file(s) is grinding, not
+         iterating — the branch has narrowed to one spot and lost the task.
+         Between prologue-cap and progress-stalled: sharper than the generic
+         stall (it names the files), broader than the build-phase prologue.
+         Settles by rule, not by tool: met when the streak actually broke."
+   :when (>= (get-in branch [:file-touch :streak] 0)
+             (threshold :file-thrash-threshold))
+   :message-form (str (prompt "file-thrash")
+                      (when-let [g (state/stated-goal branch)]
+                        (str "\n\nYou are working on: " g))
+                      (when-let [fs (seq (get-in branch [:file-touch :files]))]
+                        (str "\n\nThe files in the streak: "
+                             (str/join ", " (sort fs)))))
+   :prediction "the branch touches a different file, steps back to a no-file
+                action, or closes the task"
    :window 3}
 
   {:gate :progress-stalled
@@ -719,10 +3239,182 @@
    :when (and (:any-progress? branch)
               (>= (:turns-since-progress branch)
                   (threshold :progress-stall-threshold)))
-   :message-form (str (prompt "progress-stalled")
+   ;; RE-ANCHORED. A steer that says "nothing has advanced" without saying at
+   ;; WHAT asks the model to compare an outcome against an intention it has to
+   ;; remember. Naming the goal it stated is what makes the nudge answerable.
+   :message-form (str (sp/render-str (prompt "progress-stalled")
+                                     (message-context branch max-turns))
                       "\n\nNothing has advanced in " (:turns-since-progress branch)
-                      " turns.")
+                      " turns."
+                      (when-let [g (state/stated-goal branch)]
+                        (str "\n\nYou are working on: " g)))
    :prediction "the branch produces a new confirmed artifact or discharges a sub-claim"
+   :window 3}
+
+  {:gate :orienting
+   :priority 10.4
+   :budget :max-no-edit-nudges
+   :doc "READING WITHOUT ENTERING THE CONTRACT. The branch has declared no
+         plan, written nothing, and spent :orient-turns turns reading.
+
+         This is the last route around the repl session, and three branches
+         across three runs took it — 316 turns, 148, and 87. Every arming
+         condition the session has requires the branch to have entered it
+         first: the entry refusal needs an `eval` attempt, :no-edits needs a
+         declared plan or a write history. A branch that only reads satisfies
+         none of them, so nothing could speak to it at all.
+
+         Fires BEFORE :no-edits (10.4 against 10.5) because it is the earlier
+         and more specific state: not `you declared and did not land`, but
+         `you have not said what you are doing at all`."
+   :when (and (state/active? branch)
+              (state/orienting-too-long? branch
+                                         (tool-vocab :file-write)
+                                         (threshold :orient-turns)))
+   :message-form (str (prompt "orienting")
+                      "\n\nYou have read for " (count (:turns branch))
+                      " turns without saying what you are looking for."
+                      (when-let [g (state/stated-goal branch)]
+                        (str "\n\nYou are working on: " g)))
+   :prediction "the branch declares a plan or writes a file"
+   :window 3}
+
+  {:gate :suspect-the-test
+   :provenance ["run bd56a286" "karamazov-70b"]
+   ;; ABOVE :progress-stalled, :no-edits and :studying — all three of which
+   ;; hold on this branch, and all three of which the branch can answer.
+   ;; Lower number wins, and the ladder's own principle is the one :no-edits
+   ;; states: more specific is the more actionable steer when both are true.
+   ;; This is the narrowest precondition in that whole band — same failure,
+   ;; unchanged implementation, N times — so it takes the boundary's one slot.
+   :priority 9.9
+   :budget :max-suspect-test-nudges
+   :doc "LOOKING IN THE WRONG PLACE. The branch has run the code
+         :same-failure-turns times since it last changed the code and got the
+         same failure every time.
+
+         Every other gate here measures whether the branch is DOING something.
+         This one measures whether it is looking in the right PLACE, and it is
+         the only one that hands over a HYPOTHESIS rather than a demand.
+
+         Run bd56a286 is why it exists: 238 turns cycling read-implementation,
+         run-tests, read-implementation, while the ten failures it was chasing
+         were in its own tests — two assertions inverted against their own
+         descriptions and a bare float equality. Its single edit in that span
+         went to the implementation, the one place the bug was not. :no-edits
+         said write a file (which file? the code is correct) and :studying said
+         commit and test (it tested thirteen times). Both were answerable; this
+         is not (karamazov-70b).
+
+         THE SAME failure, not merely repeated ones: a branch working through
+         different errors is making progress, and telling it to doubt a correct
+         test would be strictly worse than silence."
+   :when (and (state/active? branch)
+              (supervisor/repeating-one-failure? (tool-vocab :file-write)
+                                                 (tool-vocab :verification)
+                                                 (:turns branch)
+                                                 (threshold :same-failure-turns)))
+   ;; The steer QUOTES what the branch is staring at. A gate that describes a
+   ;; failure the branch can already see spends its turn saying less than the
+   ;; branch knows; one that quotes it points at a specific line. Rendered
+   ;; here rather than through :message-file because this template takes
+   ;; variables of its own, and the shared render context is a fixed six keys.
+   :message-form (sp/render-str
+                  (prompt "suspect-the-test")
+                  {:count (threshold :same-failure-turns)
+                   :failure (supervisor/unchanged-failure
+                             (tool-vocab :file-write)
+                             (tool-vocab :verification)
+                             (:turns branch)
+                             (threshold :same-failure-chars))})
+   :prediction "the branch edits a file — the test it doubted, or the implementation it now believes is wrong"
+   :window 4}
+
+  {:gate :no-edits
+   :priority 10.5
+   :budget :max-no-edit-nudges
+   :doc "BUSY BUT NOT COMMITTING. The branch has written a file before and has
+         not written one in :no-edit-turns turns — it is working, usually in
+         the REPL, and none of it is landing anywhere that survives the run.
+
+         Armed only after the first write, like :progress-stalled and
+         :studying: a run reading its way into an unfamiliar codebase must
+         never be nagged for not having written anything yet.
+
+         Sits between :progress-stalled and :studying on purpose. It fires
+         sooner than studying (4 turns against 10) and is more specific, so
+         when both are true this is the more actionable steer. Studying says
+         you have stopped; this says you are going and it is not being kept."
+   ;; TWO WAYS TO ARM, because there are two ways to be not-writing.
+   ;;
+   ;; A STALE PLAN is the sharp one: the branch has DECLARED files and has not
+   ;; written them, so it has said itself what it owes and there is nothing to
+   ;; infer. This reaches a branch that has never written at all, which the
+   ;; history rule below cannot — run bd56a286's T1 read for 316 turns and run
+   ;; 90674c19's T0 explored 32 turns past its own declaration, both invisible
+   ;; to a gate that arms on having written before (karamazov-gez).
+   ;;
+   ;; The HISTORY rule stays for a branch working without a plan: it wrote,
+   ;; then stopped. Armed after the first write so opening exploration is
+   ;; never nagged.
+   :when (and (state/active? branch)
+              (or (state/plan-stale? branch
+                                     (tool-vocab :file-write)
+                                     (threshold :no-edit-turns))
+                  (supervisor/over-studying? (tool-vocab :file-write)
+                                             (:turns branch)
+                                             (threshold :no-edit-turns))))
+   ;; Names the OUTSTANDING FILES when there is a plan. "Write something" is
+   ;; answerable with "which?"; "you said you would change these three and
+   ;; have not" is not.
+   :message-form (str (prompt "no-edits")
+                      "\n\nNothing has been written to a file in "
+                      (threshold :no-edit-turns) " turns."
+                      (when-let [g (state/stated-goal branch)]
+                        (str "\n\nYou are working on: " g))
+                      (when-let [owed (seq (state/unwritten branch))]
+                        (str "\n\nYou declared these and have not written them:\n"
+                             (clojure.string/join "\n" (map (fn [x] (str "  - " x)) owed)))))
+   :prediction "the branch writes or edits a file"
+   :window 3}
+
+  {:gate :over-budget
+   :priority 10.45
+   :budget :max-no-edit-nudges
+   :provenance ["karamazov-5ot9" "run dbe64eea-successor"]
+   :doc "THE TASK IS BIGGER THAN ONE TASK, and now there is evidence rather
+         than a judgement. The branch has written more than
+         :task-line-budget lines against the task it holds, which is the
+         measurable form of the question prompts/task-claimed.md already asks
+         at claim time and cannot answer: is this ONE thing, or several
+         wearing one title.
+
+         MEASURED, not estimated: gitdiff/changed-lines on the turns that
+         actually wrote, added plus deleted, untracked files included. So this
+         does not depend on the model agreeing with its own up-front estimate,
+         which is the half that was missing — four live recordings on four
+         tasks produced zero splits, including on a task whose own statement
+         said 'Three changes to the feel of the flight, and they interact'.
+
+         SITS BELOW :no-edits on purpose. no-edits says you are working and it
+         is not landing; this says it IS landing and there is more of it than
+         one task should hold. When both are true, the branch that has written
+         nothing recently needs the more specific steer first.
+
+         A SUGGESTION, like every gate here. Splitting a task the model
+         genuinely believes is one thing would be worse than not asking — and
+         the ship gate, the critic and the turn budget all remain downstream
+         of it. What it buys is that the question gets asked WHEN THE EVIDENCE
+         EXISTS rather than only at claim time, when nobody can answer it."
+   :when (and (state/active? branch)
+              (number? (:lines-written branch))
+              (> (:lines-written branch) (threshold :task-line-budget)))
+   :message-form (str (prompt "over-budget")
+                      "\n\nThis task has written "
+                      (:lines-written branch)
+                      " lines, against a budget of "
+                      (threshold :task-line-budget) ".")
+   :prediction "the branch splits the task or says why it is one change"
    :window 3}
 
   {:gate :studying
@@ -740,9 +3432,11 @@
               (supervisor/over-studying? (tool-vocab :shipping)
                                          (:turns branch)
                                          (threshold :studying-turns)))
-   :message-form (supervisor/stall-nudge (tool-vocab :shipping)
-                                         (:turns branch)
-                                         (threshold :studying-turns))
+   :message-form (str (supervisor/stall-nudge (tool-vocab :shipping)
+                                              (:turns branch)
+                                              (threshold :studying-turns))
+                      (when-let [g (state/stated-goal branch)]
+                        (str "\n\nYou are working on: " g)))
    :prediction "the branch commits a change, runs a test, or ships"
    :window 3}]
 
@@ -750,8 +3444,23 @@
  ;; Schemas for the tools a gate may FORCE via native tool_choice (tier 3b:
  ;; data). Only the terminal tools — forcing a mid-task tool would be the
  ;; harness deciding rather than steering. Minimal: enough for the provider
- ;; to accept the function.
- {"done" {:name "done"
+ ;; to accept the function. `plan` is here because it is the TERMINAL tool
+ ;; of a planning branch (state/planning?): the design step ends on its
+ ;; declaration, and :plan-last-call forces it exactly as :last-call forces
+ ;; a builder's done (karamazov-ee72).
+ {"plan" {:name "plan"
+          :description "Declare the plan: the files this change touches, the tests that pin it, the goal, and the RFC document when this step asked for one."
+          :parameters {:type "object"
+                       :properties {:files {:type "array" :items {:type "string"}
+                                            :description "Relative paths of the files the change touches."}
+                                    :tests {:type "array" :items {:type "string"}
+                                            :description "Relative paths of the tests that pin it."}
+                                    :goal {:type "string"
+                                           :description "One or two sentences: what the change does and how it meets the whole ask."}
+                                    :rfc {:type "string"
+                                          :description "The RFC document in markdown, when this step asked for one."}}
+                       :required ["files" "goal"]}}
+  "done" {:name "done"
           :description "Finish the task and return the final answer."
           :parameters {:type "object"
                        :properties {:answer {:type "string"

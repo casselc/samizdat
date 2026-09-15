@@ -16,17 +16,29 @@
   hand-rolled str/replace chains used, so the move changed the renderer,
   not the templates."
   (:require [clojure.string :as str]
-            [clojure.test :refer [deftest is]]
+            [clojure.test :refer [deftest is testing]]
+            [jolt.fs :as fs]
             [samizdat.agent.loop :as loop]
             [samizdat.agent.tools :as tools]
-            [samizdat.prompt :as prompt]))
+            [samizdat.prompt :as prompt]
+            [samizdat.userspace :as userspace]))
 
 (deftest every-tool-is-documented
+  ;; Matched as a WORD at the start of a documentation line, not as a
+  ;; substring. `str/includes?` counted a tool named `cell` as documented
+  ;; because the prompt contains the word `cells` — so a whole tool could be
+  ;; added, be invisible to the model, and this test would pass.
   (let [prompt (loop/system-prompt)
-        undocumented (remove #(str/includes? prompt %) (tools/tool-names))]
+        documented? (fn [nm]
+                      (re-find (re-pattern
+                                (str "(?m)^\\s*"
+                                     (java.util.regex.Pattern/quote (str nm))
+                                     "\\b"))
+                               prompt))
+        undocumented (remove documented? (tools/tool-names))]
     (is (empty? undocumented)
-        (str "these tools are dispatched by run-tool but never mentioned in the"
-             " prompt, so the model cannot call them: "
+        (str "these tools are dispatched by run-tool but are not documented on a"
+             " line of their own in the prompt, so the model cannot call them: "
              (str/join ", " undocumented)))))
 
 (deftest every-documented-tool-exists
@@ -88,3 +100,233 @@
   ;; filter in the placeholder would fire, where a replace chain would
   ;; leave it verbatim).
   (is (= "Y" (prompt/render-str "{{v|upper}}" {:v "y"}))))
+
+;; --- the prompt chain (LR-7) -------------------------------------------------
+
+(deftest a-chain-takes-the-first-present-level
+  ;; First-present-wins: a level REPLACES the text, it does not add to it.
+  (is (= "top" (prompt/resolve-chain [{:text "top"} {:text "bottom"}])))
+  (is (= "bottom" (prompt/resolve-chain [{:project "/nonexistent/nope.md"}
+                                         {:text "bottom"}]))
+      "an absent level inherits from the one below"))
+
+(deftest a-blank-level-means-explicitly-none-and-stops-the-walk
+  ;; This is the distinction the whole trichotomy rests on. Collapsing blank
+  ;; into absent would make it impossible to suppress a layer at all.
+  (is (nil? (prompt/resolve-chain [{:text "  "} {:text "bottom"}])))
+  (is (nil? (prompt/resolve-chain [{:text ""} {:file "system"}]))))
+
+(deftest an-exhausted-chain-is-nil-not-an-error
+  (is (nil? (prompt/resolve-chain [])))
+  (is (nil? (prompt/resolve-chain [{:project "/nonexistent/a"}
+                                   {:project "/nonexistent/b"}]))))
+
+(deftest a-file-level-resolves-through-io-resource
+  ;; Not a cwd-relative path: it has to work inside a built binary, where
+  ;; resources/ does not exist on disk.
+  (is (str/includes? (prompt/resolve-chain [{:file "system"}]) "tool call"))
+  (is (nil? (prompt/resolve-chain [{:file "no-such-prompt-anywhere"}]))))
+
+(deftest an-unknown-entry-kind-fails-loud
+  ;; The chain is runtime-editable, so a typo is a live possibility — and a
+  ;; silently dropped layer would look exactly like a suppressed one.
+  (is (thrown-with-msg? Exception #":project, :file or :text"
+                        (prompt/resolve-chain [{:flie "typo"}]))))
+
+(deftest a-project-file-overrides-the-shipped-prompt
+  (let [dir (java.io.File. ".samizdat/prompts")
+        f (java.io.File. dir "chain-test.md")]
+    (try
+      (.mkdirs dir)
+      (spit f "the project's own text")
+      (is (= "the project's own text"
+             (prompt/resolve-chain [{:project (.getPath f)} {:file "system"}])))
+      (testing "and an empty project file suppresses the layer entirely"
+        (spit f "")
+        (is (nil? (prompt/resolve-chain [{:project (.getPath f)} {:file "system"}]))))
+      (finally (.delete f)))))
+
+(deftest the-system-layer-is-declared-and-ends-at-the-shipped-file
+  (let [entries (:system (prompt/chains))]
+    (is (seq entries) "the system prompt goes through the chain")
+    (is (= {:file "system"} (last entries))
+        "the shipped prompt is the floor, so an unconfigured harness is unchanged")
+    (is (str/includes? (prompt/layer :system) "tool call"))))
+
+(deftest an-undeclared-layer-falls-back-to-its-own-prompt-file
+  ;; Adding a layer to prompt-chain.edn is opt-in; a layer with no chain
+  ;; behaves exactly as a plain prompt read.
+  (is (= (str/trim (prompt/prompt "crossover"))
+         (str/trim (prompt/layer :crossover)))))
+
+(deftest shipped-prompts-match-what-ships
+  ;; Enumerated rather than globbed, for the reason cells/shipped-cells is:
+  ;; `jolt build` bakes resources/ into the binary and an embedded resource
+  ;; has no filesystem path for a glob to walk, so a built binary run outside
+  ;; the project root would report that the harness has no prompts. An
+  ;; enumerated list cannot drift on its own — this is what pins it.
+  (let [on-disk (->> (file-seq (java.io.File. "resources/prompts"))
+                     (filter #(.isFile %))
+                     (map #(-> (.getPath %)
+                               (str/replace #"^resources/prompts/" "")
+                               (str/replace #"\.md$" "")))
+                     set)]
+    (is (seq on-disk) "resources/prompts is readable from the test's cwd")
+    (is (= on-disk (set prompt/shipped-prompts))
+        (str "prompt/shipped-prompts and resources/prompts disagree; missing: "
+             (sort (remove (set prompt/shipped-prompts) on-disk))
+             ", listed but absent: "
+             (sort (remove on-disk prompt/shipped-prompts))))))
+
+(deftest every-shipped-prompt-renders
+  ;; A template that cannot be parsed fails where it is USED — for a gate
+  ;; message that is mid-run, and for the system prompt it is the top of every
+  ;; branch. Cheap to check them all here instead.
+  (doseq [n prompt/shipped-prompts]
+    (is (string? (prompt/render-str (prompt/prompt n) {}))
+        (str "prompts/" n ".md does not render"))))
+
+;; --- the prompt is scoped to the PROJECT, not just the role ------------------
+
+(deftest the-self-hosting-sections-only-appear-when-the-target-is-the-harness
+  ;; karamazov-8zk. system.md spends several sections on samizdat's own
+  ;; architecture — cells and manifests, src-is-mechanism vs
+  ;; resources-are-behaviour, "you are building the very harness you run in".
+  ;; All of it is load-bearing when the run's target IS samizdat and all of it
+  ;; is standing instruction about the wrong codebase otherwise, in the
+  ;; most-weighted part of the context. Live, for every run of the fps
+  ;; campaign: a model writing a raylib renderer was being told to prefer
+  ;; adding a reusable cell and to put its decisions in gates.edn.
+  (let [prev (userspace/project-root)]
+    (try
+      (userspace/bind-root! (System/getProperty "user.dir"))
+      (let [own (loop/system-prompt)]
+        (is (str/includes? own "src is mechanism"))
+        (is (str/includes? own "the very harness you run in")))
+      (userspace/bind-root! "/tmp")
+      (let [other (loop/system-prompt)]
+        (is (not (str/includes? other "src is mechanism"))
+            "a run on another project is told where changes go in SAMIZDAT")
+        (is (not (str/includes? other "the very harness you run in")))
+        (is (not (str/includes? other "prefer to add a reusable cell")))
+        (testing "what survives is the project-agnostic half — the turn format,
+                  the REPL-first loop, the honesty rules, one-namespace-one-
+                  responsibility"
+          (is (str/includes? other "One namespace, one responsibility"))
+          (is (str/includes? other "REPL first"))
+          (is (str/includes? other "```tool-call"))
+          (is (str/includes? other "what you build, don't just test it"))))
+      (testing "no unfilled placeholders or stray tags survive either branch"
+        (doseq [p [(do (userspace/bind-root! (System/getProperty "user.dir"))
+                       (loop/system-prompt))
+                   (do (userspace/bind-root! "/tmp") (loop/system-prompt))]]
+          (is (not (str/includes? p "{%")))
+          (is (empty? (->> (re-seq #"\{\{([^}]+)\}\}" p)
+                           (map second)
+                           (remove #(str/starts-with? % "env/")))))))
+      (finally (userspace/bind-root! prev)))))
+
+(deftest an-unbound-root-keeps-the-whole-prompt
+  ;; Unknown reads as TRUE. A test, a bare REPL, a driver that forgot to bind:
+  ;; deleting whole instruction blocks on a missing binding is a silent
+  ;; failure, and the shipped prompt is the harness's own.
+  (let [prev (userspace/project-root)]
+    (try
+      (userspace/bind-root! nil)
+      (is (str/includes? (loop/system-prompt) "the very harness you run in"))
+      (finally (userspace/bind-root! prev)))))
+
+(deftest declared-reference-paths-are-named-in-the-tool-catalogue
+  ;; karamazov-1an, the other half: the read is now allowed, and the model has
+  ;; to be told it is. A capability nothing announces is one only a model that
+  ;; guesses at it will use.
+  (let [prev (userspace/project-root)
+        root (str "/tmp/samizdat-prompt-" (random-uuid))
+        examples (str root "-examples")]
+    (fs/create-dirs (str root "/.samizdat"))
+    (fs/create-dirs examples)
+    (spit (str root "/.samizdat/config.edn")
+          (pr-str {:run {:reference-paths [examples]}}))
+    (try
+      (userspace/bind-root! root)
+      (let [p (loop/system-prompt)]
+        (is (str/includes? p (str (fs/canonicalize examples)))
+            "the declared path is named in read_file's entry")
+        (is (str/includes? p "READ-ONLY reference material")))
+      (userspace/bind-root! "/tmp")
+      (is (not (str/includes? (loop/system-prompt) "READ-ONLY reference material"))
+          "a project that declared none is not told about a capability it has
+           not got")
+      (finally
+        (userspace/bind-root! prev)
+        (fs/delete-tree root)
+        (fs/delete-tree examples)))))
+
+;; --- files resolve against the PROJECT root, not the cwd --------------------
+
+(deftest a-project-chain-level-resolves-against-the-bound-root
+  ;; {:project ".samizdat/prompts/system.md"} used to be read relative to the
+  ;; process working directory, so a served harness with HARNESS_ROOT set
+  ;; elsewhere never saw the project's own file.
+  (let [root (str (java.nio.file.Files/createTempDirectory
+                   "samizdat-chain-root"
+                   (make-array java.nio.file.attribute.FileAttribute 0)))
+        f (java.io.File. root ".samizdat/prompts/system.md")
+        prev (userspace/project-root)]
+    (.mkdirs (.getParentFile f))
+    (spit f "THE PROJECT'S OWN SYSTEM PROMPT")
+    (try
+      (userspace/bind-root! root)
+      (is (= "THE PROJECT'S OWN SYSTEM PROMPT"
+             (prompt/resolve-chain [{:project ".samizdat/prompts/system.md"}
+                                    {:file "system"}])))
+      (userspace/bind-root! "/tmp")
+      (is (str/includes? (prompt/resolve-chain [{:project ".samizdat/prompts/system.md"}
+                                                {:file "system"}])
+                         "tool call")
+          "with the root elsewhere the level is absent and the shipped file answers")
+      (finally
+        (userspace/bind-root! prev)
+        (.delete f)
+        (.delete (.getParentFile f))
+        (.delete (.getParentFile (.getParentFile f)))
+        (.delete (java.io.File. root))))))
+
+;; --- the split decision is its own prompt, injected --------------------------
+
+(deftest the-split-decision-is-a-named-section-a-model-file-can-replace
+  ;; system.md is ~500 lines and the measured per-model finding is an 8-line
+  ;; block. A per-model system.md would be a fork that drifts; the overridable
+  ;; unit has to be smaller than the file. So the block is its own prompt,
+  ;; injected where it sat, and a provider/model file replaces THAT.
+  (let [root (str (java.nio.file.Files/createTempDirectory
+                   "samizdat-split-section"
+                   (make-array java.nio.file.attribute.FileAttribute 0)))
+        f (java.io.File. root ".samizdat/prompts/local/qwen3/split-decision.md")
+        prev-root (userspace/project-root)
+        prev-model (userspace/model-context)]
+    (.mkdirs (.getParentFile f))
+    (spit f "QWEN DECISION BLOCK")
+    (try
+      (testing "shipped: the block is in the system prompt through the seam"
+        (userspace/bind-root! "/tmp")
+        (userspace/bind-model! nil)
+        (is (str/includes? (prompt/prompt "split-decision") "ONE thing or SEVERAL"))
+        (is (str/includes? (loop/system-prompt) "ONE thing or SEVERAL")))
+      (testing "a provider/model file replaces the block and nothing else"
+        (userspace/bind-root! root)
+        (userspace/bind-model! {:provider :local :model "Qwen3.8-27B-Q8_0"})
+        (let [p (loop/system-prompt)]
+          (is (str/includes? p "QWEN DECISION BLOCK"))
+          (is (not (str/includes? p "ONE thing or SEVERAL")))
+          (is (str/includes? p "```tool-call") "the rest of the prompt is intact")
+          (is (str/includes? p "split({reason, parts})"))))
+      (testing "another model on the same project keeps the shipped block"
+        (userspace/bind-model! {:provider :deepseek :model "deepseek-v4-flash"})
+        (is (str/includes? (loop/system-prompt) "ONE thing or SEVERAL")))
+      (finally
+        (userspace/bind-root! prev-root)
+        (userspace/bind-model! prev-model)
+        (.delete f)
+        (doseq [d (take 4 (iterate #(.getParentFile ^java.io.File %) (.getParentFile f)))]
+          (.delete ^java.io.File d))))))

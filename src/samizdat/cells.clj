@@ -42,7 +42,8 @@
             ;; Preload the namespaces the shipped cells load-string reach for, so
             ;; they compile the normal way first and the AOT cache stays sound
             ;; (samizdat.cell-prelude explains the -dirty-build failure it fixes).
-            [samizdat.cell-prelude]))
+            [samizdat.cell-prelude]
+            [samizdat.userspace :as userspace]))
 
 (defn resource-dir
   "Resolve the shipped cells dir from the classpath, so a caller that is not
@@ -56,7 +57,7 @@
   project's own overrides. A later dir's cell of the same id wins (it loads
   last), so a project can replace a shipped cell without touching it.
 
-  The shipped entry resolves through the classpath (review3 #11): a built
+  The shipped entry resolves through the classpath (provenance R3-11): a built
   binary started outside the project root must still find the cells it
   ships — a cwd-relative `resources/cells` there resolves to nothing and
   the kernel silently registers zero cells. The override dir stays
@@ -72,6 +73,30 @@
 (defonce ^:private loaded-content (atom {}))
 
 (defn loaded [] @loaded-cells)
+
+;; What the last SUCCESSFUL load put in the registry, for the skip in
+;; load-cells!: the sources as [[id content] …] in load order, and the spec
+;; object each loaded cell id resolved to once every source was in.
+(defonce ^:private last-load (atom nil))
+
+(defn- unchanged-since-last-load?
+  "True when `sources` are the last successful load's sources — same ids, same
+  content, same order — AND the registry still resolves every cell that load
+  registered to the very spec object it registered.
+
+  The first half is the files. The second is the registry, which is global
+  mutable state: a test or another workflow may have registered its own cell
+  under one of our ids, or removed one, and unchanged files are no proof the
+  LOOP's cells are present. That was compile-loop's reason for loading before
+  every compile; it is kept here as the guard, so the load happens exactly
+  when it would change something. A defcell registers its spec through
+  `constantly`, so the object the registry answers with is the one we
+  recorded until somebody re-registers the id (karamazov-3n4n)."
+  [sources]
+  (when-let [{last-sources :sources specs :specs} @last-load]
+    (and (= last-sources (mapv (juxt :id :content) sources))
+         (let [live (:specs (cell/registry-snapshot))]
+           (every? (fn [[id spec]] (identical? spec (get live id))) specs)))))
 
 (defn loaded-file-content
   "The content of every cell file as it was at the last successful load — the
@@ -103,8 +128,12 @@
   Lowest precedence: a project's .samizdat/cells override still loads after
   these and wins, and in a source checkout the dir scan reads the very same
   files, so a shipped cell edited in place is picked up from disk."
-  ["cells/critic.clj" "cells/decompose.clj" "cells/feature.clj"
-   "cells/loop.clj" "cells/team.clj"])
+  ["cells/beam.clj" "cells/board.clj" "cells/compaction.clj" "cells/critic.clj"
+   "cells/decompose.clj"
+   "cells/feature.clj" "cells/loop.clj" "cells/probe.clj" "cells/repair.clj"
+   "cells/oversight.clj"
+   "cells/repl.clj"
+   "cells/team.clj"])
 
 (defn- shipped-sources
   "The shipped cells as {:id :content} — read from the classpath (embedded or
@@ -116,7 +145,7 @@
         :when (and url (not (contains? covered (last (str/split r #"/")))))]
     {:id r :content (slurp url) :file? false}))
 
-(defn- defcell-ids
+(defn defcell-ids
   "The cell ids a cell file defines, by reading its `defcell` forms — so a
   reload attributes a cell to its file even though re-registration is not a
   'new' method, and so we never have to clear the shared registry to tell
@@ -147,47 +176,133 @@
     (load-string content))
   (defcell-ids content))
 
+(def ^:private cell-names
+  "The names the shipped cell templates are known by in the userspace store —
+  the resource basename without its extension. `shipped-cells` stays the
+  resource list; this is the same set as store keys."
+  (mapv #(str/replace (last (str/split % #"/")) #"\.clj$" "") shipped-cells))
+
+(defn- project-sources
+  "The project's cells as {:id :content}, seeded from the shipped templates on
+  first use and read back from the project's own store.
+
+  This is what makes the cell layer USERSPACE rather than harness state. Before
+  it, `reload_cells` edited the file in resources/ — the file every other
+  project loads — so a supervisor 'changing its cells' was changing the
+  harness. Now the template seeds a copy into the project and every later edit
+  is a version of that copy.
+
+  `dirs` are still read, and still win, but as an additional SEED source: a
+  `.samizdat/cells` file is how a project starts with a cell the harness never
+  shipped, and once seeded the store is authoritative for it too."
+  [dirs]
+  (let [files (mapcat cell-files dirs)
+        ;; A dir file's name is its basename, so it seeds over a shipped
+        ;; template of the same name — the documented override, now expressed
+        ;; as "this project starts from a different template".
+        from-dirs (into {} (for [p files]
+                             [(str/replace (last (str/split (str p) #"/"))
+                                           #"\.clj$" "")
+                              (slurp p)]))]
+    (doseq [[nm body] from-dirs]
+      (when-not (userspace/body :cell nm)
+        (userspace/save! :cell nm body)))
+    (let [bodies (merge (userspace/seed-all! :cell cell-names)
+                        ;; Unbound (a test, a bare REPL) there is no store to
+                        ;; seed into, so the dir content IS the source.
+                        (when-not (userspace/bound?) from-dirs))
+          ;; Shipped templates load FIRST, in their shipped order; everything
+          ;; the project added after them, sorted for determinism. Later
+          ;; load-string wins in the registry, so this is what makes "a
+          ;; project cell overrides a shipped cell-id" true by construction —
+          ;; a plain (sort-by key) made precedence depend on how a project
+          ;; name happened to sort against the template basenames
+          ;; (karamazov-blt.8).
+          shipped-order (into {} (map-indexed (fn [i n] [n i]) cell-names))]
+      (for [[nm body] (sort-by (fn [[nm _]] [(get shipped-order nm 999999) nm])
+                               bodies)]
+        {:id nm :content body :file? false :store? true}))))
+
+(defn- dir-sources
+  "The legacy source set: shipped resources plus a scan of `dirs`, with no
+  project store involved. What `(load-cells! dirs)` still does, and what a
+  test loading a temp directory needs."
+  [dirs]
+  (let [files (mapcat cell-files dirs)]
+    (concat (shipped-sources
+             (set (map #(last (str/split (str %) #"/")) files)))
+            (for [p files] {:id p :content (slurp p) :file? true}))))
+
+(declare load-sources!)
+
 (defn load-cells!
-  "Load every cell file under the given dirs (default `default-dirs`) into the
-  live image, registering their cells. Transactional: on any file error the
-  registry is restored to its prior state and the error rethrown, so a bad cell
-  never half-loads. Returns the loaded map {cell-id {:source path}}."
-  ([] (load-cells! default-dirs))
+  "Load the project's cells into the live image, registering them.
+
+  Two modes, and the difference is where the bodies come from:
+
+  `(load-cells!)` — THE PROJECT's cells: seeded from the shipped templates
+  into the project's userspace store on first use, then read from that store,
+  so an edit the supervisor makes is a version of this project's copy and no
+  other project sees it. `.samizdat/cells` files seed alongside the templates.
+  With no project bound (a test, a bare REPL) this reads the templates
+  directly, which is what the harness did before the store existed.
+
+  `(load-cells! dirs)` — a literal source scan of `dirs` plus the shipped
+  resources, with no store. The seam a test loading a temp directory needs,
+  and deliberately not the production path.
+
+  Transactional either way: on any error the registry is restored to its prior
+  state and the error rethrown, so a bad cell never half-loads. Returns the
+  loaded map {cell-id {:source name}}.
+
+  Free when nothing changed: the same sources as the last successful load,
+  with the registry still holding what that load registered, return that
+  load's map without evaluating a file (unchanged-since-last-load?).
+  compile-loop calls this before every compile, and re-evaluating twelve
+  files cost about a second each time — most of the test suite's minutes."
+  ([] (load-cells! nil))
   ([dirs]
-   (let [snapshot (cell/registry-snapshot)
-         files (mapcat cell-files dirs)
-         ;; Shipped resources FIRST and only where the dir scan did not
-         ;; already produce that file, so a source checkout loads each cell
-         ;; once from disk and a built binary with no resources/ dir still
-         ;; gets the loop's cells (deps.edn :jolt/build :embed).
-         sources (concat (shipped-sources
-                          (set (map #(last (str/split (str %) #"/")) files)))
-                         (for [p files] {:id p :content (slurp p) :file? true}))]
+   ;; nil means "the project"; an explicit dir list means the legacy scan.
+   ;; Distinguishing on the ARGUMENT rather than on a flag keeps every
+   ;; existing caller and test meaning exactly what it meant.
+   (let [sources (if (nil? dirs)
+                   (project-sources default-dirs)
+                   (dir-sources dirs))]
+     (if (unchanged-since-last-load? sources)
+       @loaded-cells
+       (load-sources! dirs sources)))))
+
+(defn- load-sources!
+  "The full load: every source evaluated in order, transactionally."
+  [dirs sources]
+   (let [snapshot (cell/registry-snapshot)]
      (try
        (let [loaded (reduce (fn [acc src]
                               (into acc (for [id (load-source! src)]
-                                          [id {:source (:id src)}])))
+                                          [id {:source (:id src)
+                                               :store? (boolean (:store? src))}])))
                             {}
                             sources)]
          ;; Drop any cell we loaded before that is gone from the new set (a
-         ;; deleted cell file / removed defcell), WITHOUT clearing the shared
+         ;; deleted cell / removed defcell), WITHOUT clearing the shared
          ;; registry — other code and tests hold cells here that are not ours.
          (doseq [id (remove (set (keys loaded)) (keys @loaded-cells))]
            (cell/remove-cell! id))
          (reset! loaded-cells loaded)
-         ;; Remember the good on-disk content, so the mutation protocol can
-         ;; roll a later bad edit back to exactly this. Only reached on
-         ;; success, so it never records a half-loaded state.
-         ;; Only the sources backed by a real file: the mutation protocol
-         ;; restores by spitting content back to the path, and an embedded
-         ;; resource has no path to spit to (nor any way for the agent to
-         ;; have edited it).
+         ;; The known-good content of every source, for the mutation
+         ;; protocol's rollback. Keyed by whatever identifies the source:
+         ;; a path for the legacy scan, a store name for the project path.
+         ;; Only reached on success, so it never records a half-loaded state.
          (reset! loaded-content
-                 (into {} (for [src sources :when (:file? src)]
+                 (into {} (for [src sources :when (or (:file? src) (:store? src))]
                             [(:id src) (:content src)])))
+         (reset! last-load
+                 {:sources (mapv (juxt :id :content) sources)
+                  :specs (select-keys (:specs (cell/registry-snapshot))
+                                      (keys loaded))})
          loaded)
-          (catch Throwable e
-            (cell/registry-restore! snapshot)
-            (throw (ex-info (str "cell load failed; registry rolled back: "
-                                 (ex-message e))
-                          {:dirs dirs} e)))))))
+       (catch Throwable e
+         (cell/registry-restore! snapshot)
+         (throw (ex-info (str "cell load failed; registry rolled back: "
+                              (ex-message e))
+                         {:dirs dirs} e))))))

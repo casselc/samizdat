@@ -6,22 +6,51 @@
   critique -> supervise -> route) delegating each stage to a role. These tests
   drive the state machine with a role-dispatching mock and stub the judge's
   content heuristics (tested in judge-test), so they exercise the WIRING —
-  ship, the reviewer's revise bounce, and the supervisor's escalation."
+  ship, the reviewer's revise bounce, and the supervisor's directives landing
+  at the stage that applies them (RFC-012)."
   (:require [clojure.string :as str]
             [clojure.test :refer [deftest testing is use-fixtures]]
+            [samizdat.agent.files :as files]
             [samizdat.agent.gitdiff :as gitdiff]
             [samizdat.agent.judge :as judge]
+            [samizdat.agent.state :as ag-state]
+            [samizdat.agent.tools :as ag-tools]
+            [samizdat.agent.verify :as verify]
             [samizdat.engine.proc :as proc]
             [samizdat.llm.client :as llm]
+            [mycelium.cell :as cell]
+            [samizdat.cells :as cells]
             [samizdat.store.db :as db]
+            [samizdat.store.interventions :as interventions]
+            [samizdat.store.journal :as journal]
+            [samizdat.store.runs :as runs]
             [samizdat.workflow :as workflow]))
+
+(defn- owner-ran?
+  "Whether owner `n` ran, by prefix. Branch ids carry the task they worked now
+  (`T0-get-the-suite-green`), so pinning the bare `T0` froze an id format that
+  deliberately changed — the owner is the thing these tests mean."
+  [ids n]
+  (boolean (some #(str/starts-with? (str %) (str "T" n)) ids)))
+
+(defn- round-ran?
+  "Whether owner `n` ran a REVISE round `r`. The round suffix is still `v<r>`;
+  what moved is the task slug between the owner and the suffix."
+  [ids n r]
+  (boolean (some #(and (str/starts-with? (str %) (str "T" n))
+                       (str/ends-with? (str %) (str "v" r)))
+                 ids)))
 
 ;; Ground truth (step 3): a done with no diff is not a completed feature. By
 ;; default these tests simulate a run that DID change files, so the wiring tests
 ;; below exercise the ship/revise paths; the hollow-path tests redef this to [].
 (use-fixtures :each
   (fn [t]
-    (with-redefs [gitdiff/changed-files (constantly ["src/example.clj"])]
+    ;; A test file is in the change set: the ship gate's TDD rung refuses a
+    ;; change with no test in it, so a mock world without one is a world where
+    ;; no owner can ever land — which is a different test than these run.
+    (with-redefs [gitdiff/changed-files (constantly ["src/example.clj"
+                                                    "test/example_test.clj"])]
       (t))))
 
 (defn- done-call [answer]
@@ -41,22 +70,17 @@
 (defn- roles
   "One redef playing every role by the prompt it sees: the reviewer ships
   PASS/REVISE, an implementor builds its part (or, when :exhaust, never calls a
-  tool so it hits the turn cap), the critic's judge reply is ignored (stubbed)."
-  [{:keys [review exhaust stop]}]
+  tool so it hits the turn cap), the critic's judge reply is ignored (stubbed).
+
+  No supervisor branch: the feature loop no longer runs one. The supervisor
+  is the stream beside the run, and its say arrives as directives — see
+  `submitting`."
+  [{:keys [review exhaust]}]
   (fn [_ _ messages & _]
     (let [c (str/join " " (map :content messages))]
       (cond
         (str/includes? c "Your role: reviewer")
         (done-call (review-answer review))        ; PASS/REVISE on the first line
-
-        (str/includes? c "Your role: supervisor")
-        ;; the supervisor READS the telemetry and DECIDES — it revises when the
-        ;; digest flags that nothing shipped, else it lets the loop proceed.
-        (cond
-          stop (done-call "STOP: further revise rounds are not converging; ship what the implementors produced and end.")
-          (str/includes? c "NO IMPLEMENTOR SHIPPED")
-          (done-call "REVISE: no implementor shipped; re-run the implement round with tighter guidance.")
-          :else (done-call "CONTINUE: the implementors shipped and the reviewer passed; the loop is converging, no adjustment needed."))
 
         (str/includes? c "Your role: implementor")
         (if exhaust
@@ -75,6 +99,21 @@
                          :problem "the feature" :max-turns 4}
                         extra)))
 
+(defn- submitting
+  "Run `f` with `directives` queued the moment the run row exists, as the
+  supervisor's. The single-branch driver these tests use has no supervisor
+  stream, so this stands in for the stream's hands: what it would have said
+  through `intervene`, already on the queue when the loop reaches the stage
+  that applies it."
+  [directives f]
+  (let [orig runs/start-run!]
+    (with-redefs [runs/start-run! (fn [c & args]
+                                    (let [id (apply orig c args)]
+                                      (doseq [d directives]
+                                        (interventions/submit! c id (assoc d :issued-by "supervisor")))
+                                      id))]
+      (f))))
+
 (deftest feature-flows-plan-implement-review-critique-ship
   (with-redefs [judge/deterministic-block (constantly nil)
                 judge/parse-verdict (constantly :complete)
@@ -86,90 +125,153 @@
       (testing "the join carries both implementors' parts"
         (is (str/includes? (:answer r) "alpha"))
         (is (str/includes? (:answer r) "beta")))
-      (testing "each role ran on its own branch: implementors W0/W1 + reviewer R0"
+      (testing "each task got its own owner branch (T0/T1), and no round reviewer ran"
+        ;; The default implement strategy is the BOARD: the two subtasks are two
+        ;; owned tasks worked one at a time, not two workers in the tree at
+        ;; once — and each was critic-reviewed on its own diff before closing,
+        ;; so the round-level reviewer role is skipped (RFC-011).
         (let [b (branch-ids conn)]
-          (is (contains? b "W0"))
-          (is (contains? b "W1"))
-          (is (contains? b "R0")))))))
+          (is (owner-ran? b 0))
+          (is (owner-ran? b 1))
+          (is (not (contains? b "R0"))))))))
 
-(deftest feature-reviewer-revise-loops-back-to-implement-bounded
+(deftest feature-critique-revise-loops-back-to-implement-bounded
+  ;; On a board round the per-task critic replaced the round reviewer, so the
+  ;; round-level bounce comes from CRITIQUE (the judge): an :incomplete verdict
+  ;; sends the round back, bounded by the runaway guard.
   (with-redefs [judge/deterministic-block (constantly nil)
-                judge/parse-verdict (constantly :complete)
+                judge/parse-verdict (constantly :incomplete) ; the judge always bounces
                 judge/blocking-findings (constantly nil)
-                llm/chat (roles {:review :revise})]     ; reviewer always bounces
+                llm/chat (roles {:review :pass})]
     (let [conn (db/open! ":memory:")
           ;; soft-cap above the hard cap so the strategy-escalation ladder does
-          ;; not fire here — this test is about the fan-out revise mechanics.
+          ;; not fire here — this test is about the revise mechanics.
           r (run-feature conn {:config {:run {:loop "feature" :subtasks ["alpha"]
                                               :max-revisions 9 :max-revisions-hard 2}}})]
       (testing "an unsatisfiable reviewer keeps the loop solving, then the runaway guard abandons honestly (it never claims a solution it didn't reach)"
         (is (= :abandoned (:status r))))
       (testing "each revise round re-implemented on a versioned branch"
         (let [b (branch-ids conn)]
-          (is (contains? b "W0"))     ; round 0
-          (is (contains? b "W0v1"))   ; revise round 1
-          (is (contains? b "W0v2"))   ; revise round 2, then the runaway guard trips
-          (is (not (contains? b "W0v3"))))))))
+          (is (owner-ran? b 0))     ; round 0
+          (is (round-ran? b 0 1))   ; revise round 1
+          (is (round-ran? b 0 2))   ; revise round 2, then the runaway guard trips
+          (is (not (contains? b "T0v3"))))))))
 
-(deftest supervisor-reasons-over-telemetry-and-forces-a-round
-  ;; Reviewer PASSes, so without the supervisor the run would ship round 0. The
-  ;; implementors exhaust (ship nothing); the supervisor reads that in the
-  ;; run-health digest ("NO IMPLEMENTOR SHIPPED") and DECIDES to REVISE — the
-  ;; loop introspecting and steering itself, not a hard-coded rule.
-  (with-redefs [judge/deterministic-block (constantly nil)
+(deftest a-crashing-stage-does-not-kill-the-run-and-is-on-the-record
+  ;; critique used to throw an unbound-var and take the whole run down. Now a
+  ;; stage that crashes is recorded, fails soft, and the run goes on. The
+  ;; record is what the SUPERVISOR reads — the stream's gather picks up
+  ;; :stage-error notes (oversight-test) — so the crash reaches the one
+  ;; supervisor there is without this loop running a second one to show it to.
+  (with-redefs [judge/deterministic-block (fn [& _] (throw (ex-info "boom in the judge" {})))
                 judge/parse-verdict (constantly :complete)
                 judge/blocking-findings (constantly nil)
-                llm/chat (roles {:review :pass :exhaust true})]
+                llm/chat (roles {:review :pass})]
     (let [conn (db/open! ":memory:")
-          r (run-feature conn {:config {:run {:loop "feature" :subtasks ["alpha"]
-                                              :max-revisions 9 :max-revisions-hard 1}}
-                               :max-turns 3})]
-      (testing "a revise round happened despite the reviewer passing"
-        (is (contains? (branch-ids conn) "W0v1")))
-      (testing "and since the implementors never shipped, it ends unsolved, not falsely completed"
-        (is (= :abandoned (:status r)))))))
+          r (run-feature conn {:config {:run {:loop "feature" :subtasks ["alpha"]}}})
+          crashes (journal/notes conn (:run-id r) :stage-error)]
+      (is (= :completed (:status r)) "the run survived the crashing critique")
+      (is (seq crashes) "the crash is on the record for the supervisor stream")
+      (is (str/includes? (str (:error (first crashes))) "boom in the judge")))))
 
-(deftest a-crashing-stage-does-not-kill-the-run-and-surfaces-to-the-supervisor
-  ;; critique used to throw an unbound-var and take the whole run down before the
-  ;; supervisor stage ran. Now a stage that crashes is recorded, fails soft, and
-  ;; the run reaches the supervisor with the crash in its telemetry to plan on.
-  (let [seen-digest (atom nil)
-        base (roles {:review :pass})]
-    (with-redefs [judge/deterministic-block (fn [& _] (throw (ex-info "boom in the judge" {})))
-                  judge/parse-verdict (constantly :complete)
-                  judge/blocking-findings (constantly nil)
-                  llm/chat (fn [a b messages & r]
-                             (when (str/includes? (str/join " " (map :content messages))
-                                                  "Your role: supervisor")
-                               (reset! seen-digest (str/join " " (map :content messages))))
-                             (apply base a b messages r))]
-      (let [conn (db/open! ":memory:")
-            r (run-feature conn {:config {:run {:loop "feature" :subtasks ["alpha"]}}})]
-        (is (= :completed (:status r)) "the run survived the crashing critique")
-        (is (some? @seen-digest) "it reached the supervisor despite the crash")
-        (is (str/includes? @seen-digest "STAGE CRASHED")
-            "the supervisor was shown the crash to plan around")))))
-
-(deftest supervisor-stop-means-give-up-and-abandons-unsolved
-  ;; STOP is the supervisor's last resort — it concluded the loop can't solve the
-  ;; task. The run ends UNSOLVED (abandoned), it does NOT ship the work as done,
-  ;; and it stops iterating at once (no further revise round).
+(deftest a-stop-directive-means-give-up-and-abandons-unsolved
+  ;; STOP is the supervisor's last resort — it concluded the loop can't solve
+  ;; the task. It arrives as a `stop` directive through the queue, the stage
+  ;; applies it, and the run ends UNSOLVED (abandoned): it does NOT ship the
+  ;; work as done, and it stops iterating at once (no further revise round).
   (with-redefs [judge/deterministic-block (constantly nil)
-                judge/parse-verdict (constantly :complete)
+                judge/parse-verdict (constantly :incomplete) ; the judge keeps bouncing
                 judge/blocking-findings (constantly nil)
-                llm/chat (roles {:review :revise :stop true})]
+                llm/chat (roles {:review :pass})]
     (let [conn (db/open! ":memory:")
-          r (run-feature conn {:config {:run {:loop "feature" :subtasks ["alpha"]
-                                              :max-revisions 3}}})]
+          r (submitting [{:kind "stop" :payload {:text "not converging after three approaches"}}]
+                        ;; The hard cap is a guard for THIS TEST: a loop that
+                        ;; ignored the stop would revise forever, and a hang
+                        ;; is not a failure anyone can read.
+                        #(run-feature conn {:config {:run {:loop "feature" :subtasks ["alpha"]
+                                                           :max-revisions 3
+                                                           :max-revisions-hard 4}}}))]
       (is (= :abandoned (:status r)) "STOP ends unsolved, not shipped")
       (is (nil? (:answer r)) "no answer is presented for an unsolved task")
       (testing "it gave up at once — no versioned revise branch"
-        (is (not (contains? (branch-ids conn) "W0v1")))))))
+        (is (not (contains? (branch-ids conn) "T0v1"))))
+      (testing "the reason travels: the record says who stopped it and why"
+        (is (str/includes? (str (get-in r [:branch :inactive-reason])) "not converging"))
+        (let [note (journal/last-note conn (:run-id r) :supervise)]
+          (is (true? (:stop note)))
+          (is (= "supervisor" (:issued-by (first (:applied note))))))))))
+
+(deftest a-budget-directive-extends-the-owner-turn-budget
+  ;; Self-healing is ADJUSTING the loop, not just voting on it. The binding
+  ;; constraint observed across every dogfood round was the per-owner turn
+  ;; budget: owners spend their opening turns orienting and exhaust mid-fix,
+  ;; and the supervisor could see that and do nothing about it. A `budget`
+  ;; directive is the lever: the next round's owners run under it.
+  (let [owner-turns (atom {})]
+    (with-redefs [judge/deterministic-block (constantly nil)
+                  judge/parse-verdict (constantly :complete)
+                  judge/blocking-findings (constantly nil)
+                  llm/chat (fn [_ _ messages & _]
+                             (let [c (str/join " " (map :content messages))]
+                               (cond
+                                 (str/includes? c "Your role: implementor")
+                                 ;; Calls a real but non-terminal tool every
+                                 ;; turn, so the owner runs to ITS turn cap,
+                                 ;; which is what the test measures. It used
+                                 ;; to emit no call at all, which was a
+                                 ;; convenient way to reach the cap until the
+                                 ;; no-call ladder started ending a branch
+                                 ;; that cannot act (karamazov-068) — and
+                                 ;; ending it is right, so the stub is what
+                                 ;; changes. A read is exempt and neutral, so
+                                 ;; it resets no streak and trips no gate.
+                                 {:content (str "```tool-call\n"
+                                                "{\"name\":\"read_file\","
+                                                "\"args\":{\"path\":\"deps.edn\"}}\n```")
+                                  :finish-reason "stop"}
+
+                                 :else {:content "COMPLETE" :finish-reason "stop"})))]
+      (let [conn (db/open! ":memory:")]
+        (submitting [{:kind "budget" :payload {:text "9"}}]
+                    #(run-feature conn {:config {:run {:loop "feature" :subtasks ["alpha"]
+                                                       :max-revisions 9 :max-revisions-hard 1}}
+                                        :max-turns 3}))
+        (let [turns (into {} (map (juxt :branch_id :t)
+                                  (db/fetch conn ["SELECT branch_id, MAX(turn) t FROM turns
+                                                   WHERE branch_id LIKE 'T0%' GROUP BY branch_id"])))]
+          (is (= 3 (val (first (filter #(str/starts-with? (key %) "T0") turns))))
+              "round 0 ran under the run's own budget")
+          (is (= 9 (some (fn [[k v]] (when (and (str/starts-with? k "T0")
+                                                   (str/ends-with? k "v1")) v))
+                             turns))
+              "after budget 9, the revise round's owner ran under the extended budget"))))))
+
+(deftest an-advisory-branch-ships-its-verdict-without-the-evidence-rungs
+  ;; karamazov-t86, the supervisor half. A reviewer or supervisor's done IS its
+  ;; deliverable — a verdict about the run, quoting the run's own figures
+  ;; ("19 tests, 0 failures") and, on a red tree, describing the redness. The
+  ;; figure rung demanded artifacts for those numbers and the verify rung
+  ;; demanded green tests, so the advisory roles ground out their budgets
+  ;; unable to say what they had concluded (S0 in runs 3b8d2af5, e1491f04,
+  ;; 7857c6e7 — every one). Advisory branches skip the evidence rungs.
+  (let [ctx {:branch (assoc (ag-state/new-branch
+                             {:id "S9" :problem "supervise the run"})
+                            :advisory? true)
+             :config {:run {:verify-cmd "false" :verify-focused? true}}
+             :root "/nonexistent"
+             :tool-name "done"
+             :args {:answer "REVISE — 19 tests ran, 7 failed; the owners keep exhausting at turn 40."}}
+        r (ag-tools/run-tool ctx)]
+    (is (= :success (:category r)) (str (:result r)))
+    (is (= :done (get-in r [:branch :status]))
+        "the verdict lands — figures, red tree and all")))
 
 (deftest per-role-models-reach-each-role
-  ;; karamazov-reo: implementor on one model, supervisor on another, reviewer on
-  ;; the run default. The captured :provider per role proves each role's sub-loop
-  ;; ran on its assigned model.
+  ;; karamazov-reo: implementor on one model, critic on another. The captured
+  ;; :provider per role proves each role's sub-loop ran on its assigned model.
+  ;; (The supervisor is not a role this loop runs any more — it is the stream
+  ;; beside the run — and a board round skips the reviewer, so the critic is
+  ;; the second role a board run can show.)
   (let [seen (atom {})
         base (roles {:review :pass})]
     (with-redefs [judge/deterministic-block (constantly nil)
@@ -178,8 +280,6 @@
                   llm/chat (fn [adapter cfg messages & r]
                              (let [c (str/join " " (map :content messages))
                                    role (cond
-                                          (str/includes? c "Your role: reviewer") :reviewer
-                                          (str/includes? c "Your role: supervisor") :supervisor
                                           (str/includes? c "Your role: implementor") :implementor
                                           :else :critic)]
                                (swap! seen update role (fnil conj #{}) (:provider cfg)))
@@ -188,13 +288,13 @@
         (workflow/run! {:conn conn
                         :config {:run {:loop "feature" :subtasks ["alpha"]
                                        :role-models {:implementor {:provider "deepseek"}
-                                                     :supervisor {:provider "glm"}}}}
+                                                     :critic {:provider "glm"}}}}
                         :llm-adapter :a
                         :llm-config {:provider :openai :model "gpt-4o" :max-tokens 16384}
                         :problem "the feature" :max-turns 4})
         (is (contains? (:implementor @seen) :deepseek) "implementor ran on its assigned model")
-        (is (contains? (:supervisor @seen) :glm) "supervisor ran on its assigned model")
-        (is (contains? (:reviewer @seen) :openai) "the unconfigured reviewer kept the run default")))))
+        (is (contains? (:critic @seen) :glm) "critic ran on its assigned model")
+        (is (not (contains? (:implementor @seen) :openai)) "and not on the run default")))))
 
 (deftest hollow-work-is-never-shipped-completed-it-keeps-solving
   ;; step 3: the DeepSeek dogfood shipped an empty diff as "completed" (reviewer
@@ -209,13 +309,46 @@
                 llm/chat (roles {:review :pass})]           ; reviewer would pass, but ground truth overrides
     (let [conn (db/open! ":memory:")
           ;; soft-cap above the hard cap so escalation doesn't fire — this test
-          ;; is about hollow work never shipping, via the fan-out.
+          ;; is about hollow work never shipping, via the board.
           r (run-feature conn {:config {:run {:loop "feature" :subtasks ["alpha"]
                                               :max-revisions 9 :max-revisions-hard 2}}})]
       (is (not= :completed (:status r)) "an empty diff is never reported completed")
       (testing "it kept solving before giving up (revised, did not abandon on the first empty round)"
-        (is (contains? (branch-ids conn) "W0v1")))
+        (is (round-ran? (branch-ids conn) 0 1)))
       (is (= :abandoned (:status r)) "only the runaway guard ends it, honestly unsolved"))))
+
+(deftest a-ship-carries-an-answer-even-when-the-last-round-landed-nothing
+  ;; Runs 3b8d2af5 and e1491f04 both ended with route decision SHIP on green
+  ;; gates while the FINAL round's board had landed nothing (the work landed
+  ;; in earlier rounds) — so the branch carried no :final-answer. Under the
+  ;; beam driver the turn slice cuts the :finish node out of a whole-run
+  ;; manifest, and the beam's own ending reads :final-answer: nil there turned
+  ;; a shipped feature into finish-run! :failed, which then taught
+  ;; record-workflow-outcome! that the loop never ships. Ship WRITES the
+  ;; answer on the branch.
+  (with-redefs [judge/deterministic-block (constantly nil)
+                judge/parse-verdict (constantly :complete)
+                judge/blocking-findings (constantly nil)
+                proc/run (constantly {:exit 0 :out "ok"})
+                llm/chat (fn [_ _ messages & _]
+                           (let [c (str/join " " (map :content messages))]
+                             (cond
+                               (str/includes? c "Your role: supervisor")
+                               (done-call "CONTINUE: the gates are green; nothing to adjust.")
+
+                               ;; owners never call a tool -> the round lands nothing
+                               (str/includes? c "Your role: implementor")
+                               {:content "still thinking" :finish-reason "stop"}
+
+                               :else {:content "COMPLETE" :finish-reason "stop"})))]
+    (let [conn (db/open! ":memory:")
+          r (run-feature conn {:config {:run {:loop "feature" :subtasks ["alpha"]
+                                              :verify-cmd "run-tests"}}
+                               :max-turns 3})]
+      (is (= :completed (:status r))
+          "green review + green tests ship, whatever the last round landed")
+      (is (not (str/blank? (str (:answer r))))
+          "and the shipped run carries an answer for the record"))))
 
 (deftest a-real-diff-still-ships-as-completed
   (with-redefs [judge/deterministic-block (constantly nil)
@@ -227,33 +360,30 @@
           r (run-feature conn {:config {:run {:loop "feature" :subtasks ["alpha"]}}})]
       (is (= :completed (:status r)) "real changes + a pass ships completed"))))
 
-(deftest soft-cap-notifies-the-supervisor-not-auto-abandon
-  ;; The cap is a SOFT stop: at it the supervisor is notified via telemetry and
-  ;; decides for itself — the loop does not abandon just for reaching it.
-  (let [caps (atom [])
-        base (roles {:review :revise})]     ; keeps bouncing, so the loop revises
-    (with-redefs [judge/deterministic-block (constantly nil)
-                  judge/parse-verdict (constantly :complete)
-                  judge/blocking-findings (constantly nil)
-                  llm/chat (fn [a b messages & r]
-                             (when (str/includes? (str/join " " (map :content messages))
-                                                  "Your role: supervisor")
-                               (swap! caps conj (str/join " " (map :content messages))))
-                             (apply base a b messages r))]
-      (let [conn (db/open! ":memory:")]
-        (run-feature conn {:config {:run {:loop "feature" :subtasks ["alpha"]
-                                          :max-revisions 1 :max-revisions-hard 4}}})
-        (is (some #(str/includes? % "REVISION CAP REACHED") @caps)
-            "at the soft cap the supervisor is told, and asked to decide")
-        (is (contains? (branch-ids conn) "DT")
-            "and the loop continued PAST the soft cap (escalating to decompose) rather than abandoning at it")))))
+(deftest the-soft-cap-is-on-the-record-and-does-not-abandon
+  ;; The cap is a SOFT stop: at it the loop keeps solving — auto-advancing the
+  ;; strategy ladder — and the record says so, which is what the supervisor
+  ;; stream reads to decide whether to switch, re-budget or stop
+  ;; (oversight-test covers that it does look).
+  (with-redefs [judge/deterministic-block (constantly nil)
+                judge/parse-verdict (constantly :incomplete) ; keeps bouncing, so the loop revises
+                judge/blocking-findings (constantly nil)
+                llm/chat (roles {:review :pass})]
+    (let [conn (db/open! ":memory:")
+          r (run-feature conn {:config {:run {:loop "feature" :subtasks ["alpha"]
+                                              :max-revisions 1 :max-revisions-hard 4}}})
+          routes (journal/notes conn (:run-id r) :route)]
+      (is (some #(and (= 1 (:soft-cap %)) (>= (:revision %) 1)) routes)
+          "a round at the soft cap is on the record with the cap beside it")
+      (is (contains? (branch-ids conn) "DT")
+          "and the loop continued PAST the soft cap (escalating to decompose) rather than abandoning at it"))))
 
 (deftest tests-gate-must-pass-to-complete
   (testing "failing tests block completion — gate 2 is real"
     (with-redefs [judge/deterministic-block (constantly nil)
                   judge/parse-verdict (constantly :complete)
                   judge/blocking-findings (constantly nil)
-                  gitdiff/changed-files (constantly ["src/x.clj"])
+                  gitdiff/changed-files (constantly ["src/x.clj" "test/x_test.clj"])
                   proc/run (constantly {:exit 1 :out "1 test FAILED"})
                   llm/chat (roles {:review :pass})]
       (let [conn (db/open! ":memory:")
@@ -265,7 +395,7 @@
     (with-redefs [judge/deterministic-block (constantly nil)
                   judge/parse-verdict (constantly :complete)
                   judge/blocking-findings (constantly nil)
-                  gitdiff/changed-files (constantly ["src/x.clj"])
+                  gitdiff/changed-files (constantly ["src/x.clj" "test/x_test.clj"])
                   proc/run (constantly {:exit 0 :out "ok"})
                   llm/chat (roles {:review :pass})]
       (let [conn (db/open! ":memory:")
@@ -273,10 +403,59 @@
                                                :verify-cmd "run-tests"}}})]
         (is (= :completed (:status r)) "real diff + review pass + tests pass = completed")))))
 
-(deftest supervisor-can-switch-the-implement-approach-mid-run
-  ;; self-healing: the supervisor decides the fan-out isn't working and switches
-  ;; this run's implement stage to the decompose loop with a SWITCH: line. The
-  ;; next round routes through :decompose/run instead of the fan-out.
+(defn- roles-answering-acceptance
+  "`roles`, plus a fixed YES/NO to every acceptance question — the narrow
+  judge the :judge criteria put to the critic role at verify."
+  [opts yesno]
+  (let [base (roles opts)]
+    (fn [a b messages & more]
+      (if (some #(str/includes? (str (:content %)) "Reply with YES or NO") messages)
+        {:content (str yesno " — because the evidence says so.") :finish-reason "stop"}
+        (apply base a b messages more)))))
+
+(deftest acceptance-criteria-are-gate-2-beside-the-tests
+  ;; karamazov-a6mj.2. The operator's criteria, checked at :feature/verify
+  ;; with both kinds — :check by the shell and :judge by the critic role. A
+  ;; :judge criterion is the one the ship gate cannot run (model-free), so it
+  ;; is the one that shows Gate 2 doing work of its own here.
+  (let [spec [{:name "suite green" :check "run-tests"}
+              {:name "says what it saw"
+               :judge "Does the answer say what the screenshot showed?"}]
+        run (fn [yesno]
+              (with-redefs [judge/deterministic-block (constantly nil)
+                            judge/parse-verdict (constantly :complete)
+                            judge/blocking-findings (constantly nil)
+                            gitdiff/changed-files (constantly ["src/x.clj" "test/x_test.clj"])
+                            proc/run (constantly {:exit 0 :out "ok"})
+                            verify/run-verify (fn [_ _ _] {:green? true :output "63 tests, 0 failures"})
+                            llm/chat (roles-answering-acceptance {:review :pass} yesno)]
+                (let [conn (db/open! ":memory:")
+                      r (run-feature conn {:config {:run {:loop "feature" :subtasks ["alpha"]
+                                                         :verify-cmd "run-tests"
+                                                         :acceptance spec
+                                                         :max-revisions 1 :max-revisions-hard 1}}})]
+                  {:result r
+                   :notes (journal/notes conn (:run-id r) :acceptance)
+                   :route (journal/notes conn (:run-id r) :route)
+                   :verify (journal/notes conn (:run-id r) :verify)})))]
+    (testing "a judge criterion the critic answers NO keeps the feature from completing"
+      (let [{:keys [result notes route verify]} (run "NO")]
+        (is (not= :completed (:status result)) "the suite was green; the criterion was not")
+        (let [at-verify (filter #(= "verify" (:at %)) notes)]
+          (is (seq at-verify) "the verdicts are on the journal from the verify stage")
+          (is (= [true false] (mapv :passed? (:results (first at-verify))))
+              "the check passed and the judge failed, each on its own line"))
+        (is (some #(false? (:tests-passed %)) route) "route saw gate 2 red")
+        (is (some #(str/includes? (str (:note %)) "says what it saw") verify)
+            "and the verify note names the criterion, in the failure's own words")))
+    (testing "the same run with a YES completes"
+      (let [{:keys [result]} (run "YES")]
+        (is (= :completed (:status result)))))))
+
+(deftest a-switch-directive-changes-the-implement-approach-mid-run
+  ;; self-healing: the supervisor decides the board isn't working and switches
+  ;; this run's implement stage to the decompose loop with a `switch`
+  ;; directive. The next round routes through :decompose/run instead.
   (let [architect-json (str "{\"decision\":\"decompose\",\"subtasks\":"
                             "[{\"name\":\"a\",\"description\":\"do a\"}]}")
         mock (fn [_ _ messages & _]
@@ -284,11 +463,6 @@
                  (cond
                    (str/includes? c "Your role: reviewer")
                    (done-call "PASS: the implementors covered the feature; nothing to send back")
-
-                   (str/includes? c "Your role: supervisor")
-                   (if (str/includes? c "revision 0")
-                     (done-call "SWITCH: decompose\nthe fan-out is stuck; try decompose")
-                     (done-call "CONTINUE: the decompose approach is converging, nothing to change"))
 
                    (str/includes? c "architect diagnosing")
                    {:content architect-json :finish-reason "stop"}
@@ -301,16 +475,22 @@
                   judge/parse-verdict (constantly :complete)
                   judge/blocking-findings (constantly nil)
                   gitdiff/baseline (constantly "HEAD")
-                  gitdiff/changed-files (constantly ["src/x.clj"])
+                  gitdiff/changed-files (constantly ["src/x.clj" "test/x_test.clj"])
                   llm/chat mock]
       (let [conn (db/open! ":memory:")
-            r (run-feature conn {:config {:run {:loop "feature" :subtasks ["alpha"]
-                                               :max-revisions-hard 3}}})
+            r (submitting [{:kind "switch" :payload {:text "decompose"}}]
+                          #(run-feature conn {:config {:run {:loop "feature" :subtasks ["alpha"]
+                                                             :max-revisions-hard 3}}}))
             branches (branch-ids conn)]
-        (testing "round 0 ran the fan-out"
-          (is (contains? branches "W0")))
-        (testing "after SWITCH: decompose, the next round ran the decompose loop"
-          (is (contains? branches "DT") "the decompose root attempt ran"))))))
+        (testing "round 0 ran the board (the default strategy)"
+          (is (owner-ran? branches 0)))
+        (testing "after the switch, the next round ran the decompose loop"
+          (is (contains? branches "DT") "the decompose root attempt ran"))
+        (testing "the directive was resolved at the stage, applied, with the record naming it"
+          (let [[d] (interventions/history conn (:run-id r))]
+            (is (= "applied" (:status d)))
+            (is (some #(= "decompose" (:switch %)) (journal/notes conn (:run-id r) :supervise))
+                "the round that applied it says so")))))))
 
 (deftest a-failing-strategy-auto-escalates-even-without-a-supervisor-switch
   ;; iteration must not hinge on the LLM supervisor deciding to switch (it may
@@ -321,12 +501,258 @@
                 judge/blocking-findings (constantly nil)
                 gitdiff/baseline (constantly "HEAD")
                 gitdiff/changed-files (constantly [])          ; everything hollow -> keeps failing
-                llm/chat (roles {:review :pass})]              ; supervisor CONTINUEs, never switches
+                llm/chat (roles {:review :pass})]              ; no directive ever arrives
     (let [conn (db/open! ":memory:")]
       (run-feature conn {:config {:run {:loop "feature" :subtasks ["alpha"]
                                         :max-revisions 1 :max-revisions-hard 3}}})
       (let [branches (branch-ids conn)]
-        (testing "round 0 ran the fan-out"
-          (is (contains? branches "W0")))
-        (testing "the loop auto-advanced to decompose on its own"
-          (is (contains? branches "DT")))))))
+        (testing "round 0 ran the board (the default strategy)"
+          (is (owner-ran? branches 0)))
+        (testing "the loop auto-advanced along the ladder on its own"
+          ;; board -> team -> decompose: a strategy that keeps failing its
+          ;; soft-cap rounds hands over without waiting for the supervisor.
+          (is (contains? branches "W0v1") "the fan-out, the next rung (at revision 1)")
+          (is (contains? branches "DT") "and then decompose"))))))
+
+;; --- one run, two supervisors (karamazov-poe) --------------------------------
+
+(deftest the-feature-loop-runs-no-supervisor-of-its-own
+  ;; RFC-012 F1/F4. The stage used to run the supervisor ROLE on a branch of
+  ;; its own — S<revision> — once per round: a second supervisor, with a
+  ;; second identity and a second context, that could only act when the graph
+  ;; reached it. There is one supervisor now, the stream on `SUP`, and the
+  ;; stage is where its directives about the outer loop LAND. So a feature
+  ;; run makes no supervisor model call and opens no S-branch.
+  (let [prompts (atom [])
+        base (roles {:review :pass})]
+    (with-redefs [judge/deterministic-block (constantly nil)
+                  judge/parse-verdict (constantly :complete)
+                  judge/blocking-findings (constantly nil)
+                  llm/chat (fn [a b messages & more]
+                             (swap! prompts conj (str/join " " (map :content messages)))
+                             (apply base a b messages more))]
+      (let [conn (db/open! ":memory:")
+            r (run-feature conn {:config {:run {:loop "feature" :subtasks ["alpha"]
+                                                :max-revisions 9 :max-revisions-hard 1}}
+                                 :max-turns 3})]
+        (is (= :completed (:status r)))
+        (is (not-any? #(str/includes? % "Your role: supervisor") @prompts)
+            "no supervisor turn was spent inside the loop")
+        (is (not-any? #(re-matches #"S\d+" (str %)) (branch-ids conn))
+            "and no S<revision> branch was opened")))))
+
+(deftest a-malformed-outer-loop-directive-is-refused-with-a-reason-and-the-round-goes-on
+  ;; A directive is never silently dropped and never wedges the loop: a switch
+  ;; to a strategy that does not exist, or a budget with no number in it, is
+  ;; resolved :rejected with a reason a person can read, and the round routes
+  ;; as if nothing had been said.
+  (with-redefs [judge/deterministic-block (constantly nil)
+                judge/parse-verdict (constantly :complete)
+                judge/blocking-findings (constantly nil)
+                llm/chat (roles {:review :pass})]
+    (let [conn (db/open! ":memory:")
+          r (submitting [{:kind "switch" :payload {:text "banana"}}
+                         {:kind "budget" :payload {:text "lots"}}]
+                        #(run-feature conn {:config {:run {:loop "feature" :subtasks ["alpha"]}}}))
+          by-kind (into {} (map (juxt :kind identity)) (interventions/history conn (:run-id r)))]
+      (is (= :completed (:status r)) "the round shipped on its own gates")
+      (is (= "rejected" (:status (by-kind "switch"))))
+      (is (every? #(str/includes? (str (:disposition (by-kind "switch"))) %)
+                  ["board" "team" "decompose"])
+          "the refusal names what IS available")
+      (is (= "rejected" (:status (by-kind "budget"))))
+      (is (str/includes? (str (:disposition (by-kind "budget"))) "turn count")))))
+
+(deftest the-journal-hands-back-the-last-note-of-a-kind
+  ;; The stream hands its output to nobody, so the journal is the only place a
+  ;; pipeline stage can meet it.
+  (let [conn (db/open! ":memory:")
+        rid (runs/start-run! conn {:problem "p"})]
+    (is (nil? (journal/last-note conn rid :oversight))
+        "no note yet is nil, not a throw")
+    (journal/note! conn rid :oversight {:data {:notes "first" :verdict "done"}})
+    (journal/note! conn rid :oversight {:data {:notes "second" :verdict "done"}})
+    (journal/note! conn rid :supervise {:data {:directive "revise"}})
+    (is (= "second" (:notes (journal/last-note conn rid :oversight)))
+        "the LAST note of that kind, not the last note")
+    (is (= "revise" (:directive (journal/last-note conn rid :supervise))))
+    (is (= ["first" "second"] (mapv :notes (journal/notes conn rid :oversight)))
+        "and every note of a kind, oldest first")))
+
+(deftest the-board-round-reports-its-outcome-where-the-supervisor-reads-it
+  ;; karamazov-u5uy. :results in the data map is not a channel to the
+  ;; supervisor — the one supervisor is the stream beside the run, and it
+  ;; reads the journal. The board writes the round's per-owner outcomes as an
+  ;; :implement-round note so the stream's digest can count them.
+  (with-redefs [judge/deterministic-block (constantly nil)
+                judge/parse-verdict (constantly :complete)
+                judge/blocking-findings (constantly nil)
+                llm/chat (roles {:review :pass})]
+    (let [conn (db/open! ":memory:")
+          r (run-feature conn {:config {:run {:loop "feature" :subtasks ["alpha" "beta"]}}})
+          note (journal/last-note conn (:run-id r) :implement-round)
+          results (:results note)]
+      (is (= "board" (:strategy note)))
+      (is (= 2 (count results)))
+      (testing "one entry per owner, identified — the board names its owners by
+                TASK ID, which is what its finish node carries, where the
+                fan-out names them by subtask text. The digest counts statuses
+                and renders neither, so the two coexist; the status vocabulary
+                is the part that must agree."
+        (is (every? #(seq (str (:subtask %))) results)))
+      (is (every? #(= "done" (:status %)) results)
+          "both parts landed, so the round did not read as nobody-shipped"))))
+
+(deftest the-critique-note-keeps-the-reason-it-bounced-the-round
+  ;; karamazov-3htz: the critique note said {:decision :deterministic} and not
+  ;; which deterministic check fired or what the judge found.
+  (with-redefs [judge/deterministic-block (constantly "the answer claims a test ran and none did")
+                llm/chat (roles {:review :pass})]
+    (let [conn (db/open! ":memory:")]
+      (run-feature conn {:config {:run {:loop "feature" :subtasks ["alpha"]
+                                        :max-revisions 9 :max-revisions-hard 1}}})
+      (let [rid (:id (first (db/fetch conn ["SELECT id FROM runs"])))
+            notes (journal/notes conn rid :critique)]
+        (is (seq notes))
+        (is (every? #(= "revise" (str (:decision %))) notes))
+        (is (str/includes? (str (:reason (first notes))) "claims a test ran")
+            "the deterministic reason is on the note")))))
+
+(deftest the-critique-judge-is-told-what-the-feature-asked-for
+  ;; Same defect as the board review's (run e1b765e7, karamazov-iev2): the
+  ;; critique passed the pre-requirement keys, so the judge's requirement
+  ;; section rendered empty and it inferred the ask from the answer alone.
+  (let [judged (atom [])
+        base (roles {:review :pass})]
+    (with-redefs [judge/deterministic-block (constantly nil)
+                  llm/chat (fn [a c messages & rest]
+                             (let [txt (str/join " " (map :content messages))]
+                               (if (str/includes? txt "## The answer it wants to ship")
+                                 (do (swap! judged conj txt)
+                                     {:content "VERDICT: COMPLETE" :finish-reason "stop"})
+                                 (apply base a c messages rest))))]
+      (let [conn (db/open! ":memory:")]
+        (run-feature conn {:problem "Add a ghost replay to the game"
+                           :config {:run {:loop "feature" :subtasks ["alpha"]}}})
+        (is (seq @judged) "a judge was called")
+        (is (some #(str/includes? % "Add a ghost replay to the game") @judged)
+            "and one of them read the feature itself as the requirement")))))
+
+;; --- a revise must not report a test result there was none ------------------
+;; karamazov-q0u3. :feature/verify short-circuits on EITHER the reviewer or
+;; the critic sending work back, but the guidance guard checked only the
+;; reviewer — so a critic revise handed the next round a task reading "The
+;; tests did not pass: not run — review already sent it back". Run 2ec1df03
+;; spent 33 turns proving a green suite was green because of it.
+
+(defn- guidance-for
+  "The guidance :feature/route writes for the next round, from one data map."
+  [data]
+  (cells/load-cells!)
+  (let [conn (db/open! ":memory:")
+        rid (runs/start-run! conn {:problem "p"})]
+    (try
+      (:revise/guidance
+       ((:handler (cell/get-cell! :feature/route))
+        {:conn conn :run-id rid :config {}}
+        (merge {:feature/revisions 0 :implement-strategy "board"
+                :results [{:status :done :subtask "t" :answer "a"}]
+                :board/landed 1}
+               data)))
+      (finally (db/close conn)))))
+
+(deftest a-critic-revise-does-not-claim-the-tests-failed
+  (let [g (str (guidance-for {:review/decision :pass
+                              :critic/decision :revise
+                              :critique/findings "- [low] the determinism test is missing"
+                              :verify/passed? false
+                              :verify/note "not run — review already sent it back"}))]
+    (is (str/includes? g "determinism test is missing")
+        "the finding that actually sent it back is what the next round gets")
+    (is (not (str/includes? g "The tests did not pass"))
+        "and nothing claims a test result, because no test was run")))
+
+(deftest a-reviewer-revise-does-not-either
+  ;; The case that was already handled; kept so the two stay symmetric.
+  (let [g (str (guidance-for {:review/decision :revise
+                              :review/findings "- [high] the handler ignores errors"
+                              :verify/passed? false
+                              :verify/note "not run — review already sent it back"}))]
+    (is (not (str/includes? g "The tests did not pass")))))
+
+(deftest a-real-test-failure-is-still-reported
+  (let [g (str (guidance-for {:review/decision :pass
+                              :critic/decision :pass
+                              :verify/passed? false
+                              :verify/note "2 failures in flight.wind-test"}))]
+    (is (str/includes? g "The tests did not pass"))
+    (is (str/includes? g "flight.wind-test")
+        "which is the most actionable guidance there is")))
+
+(deftest what-was-tried-records-who-bounced-it
+  ;; :feature/tried is what the supervisor reads to pick a different strategy,
+  ;; so "tests failed" against a critic bounce sends it after the wrong thing.
+  (cells/load-cells!)
+  (let [conn (db/open! ":memory:")
+        rid (runs/start-run! conn {:problem "p"})
+        outcome (fn [data]
+                  (-> ((:handler (cell/get-cell! :feature/route))
+                       {:conn conn :run-id rid :config {}}
+                       (merge {:feature/revisions 0 :implement-strategy "board"
+                               :results [{:status :done :subtask "t" :answer "a"}]
+                               :board/landed 1}
+                              data))
+                      :feature/tried last :outcome))]
+    (try
+      (is (= "critic bounced it"
+             (outcome {:review/decision :pass :critic/decision :revise
+                       :critique/findings "- [low] a missing test"
+                       :verify/passed? false
+                       :verify/note "not run — review already sent it back"})))
+      (is (= "tests failed"
+             (outcome {:review/decision :pass :critic/decision :pass
+                       :verify/passed? false :verify/note "2 failures"})))
+      (finally (db/close conn)))))
+
+(deftest a-failing-acceptance-criterion-is-what-the-next-round-is-told
+  (let [g (str (guidance-for {:review/decision :pass
+                              :critic/decision :ship
+                              :verify/passed? false
+                              :verify/note "tests passed\nacceptance criteria not met:\nFAIL  says what it saw\n  NO — the answer never mentions a screenshot"}))]
+    (is (str/includes? g "says what it saw"))
+    (is (str/includes? g "never mentions a screenshot"))))
+
+(deftest the-acceptance-judge-is-shown-the-sources-and-a-rubric-sized-diff
+  ;; karamazov-0way's other half. Run 5f8de58c's verify-stage judges failed two
+  ;; operator criteria in their own words for evidence not shown: the diff was
+  ;; cut at the branch budget before the test files, and "the wind is one
+  ;; field" cannot be seen in a diff at all when the sampling predates the
+  ;; run. Each question now sees the diff focused on it under the rubric's
+  ;; budget, and the current sources of the files the run changed.
+  (let [asked (atom [])
+        spec [{:name "one field" :judge "Does every reader call `wind-at`?"}]
+        big-diff (str "diff --git a/PLAN.md b/PLAN.md\n+plan\n"
+                      "diff --git a/src/x.clj b/src/x.clj\n+(defn wind-at [] 1)\n")]
+    (with-redefs [judge/deterministic-block (constantly nil)
+                  judge/parse-verdict (constantly :complete)
+                  judge/blocking-findings (constantly nil)
+                  gitdiff/changed-files (constantly ["src/x.clj" "test/x_test.clj"])
+                  gitdiff/diff (fn [_ _ & _] big-diff)
+                  files/read-sources (constantly {"src/x.clj" "(ns x)\n(defn wind-at [] 1)\n(defn hud [] (wind-at))"})
+                  proc/run (constantly {:exit 0 :out "ok"})
+                  verify/run-verify (fn [_ _ _] {:green? true :output "63 tests, 0 failures"})
+                  llm/chat (let [base (roles-answering-acceptance {:review :pass} "YES")]
+                             (fn [a b messages & more]
+                               (when (some #(str/includes? (str (:content %)) "Reply with YES or NO") messages)
+                                 (swap! asked conj (str/join "\n" (map :content messages))))
+                               (apply base a b messages more)))]
+      (let [conn (db/open! ":memory:")]
+        (run-feature conn {:config {:run {:loop "feature" :subtasks ["alpha"]
+                                          :verify-cmd "run-tests" :acceptance spec
+                                          :max-revisions 1 :max-revisions-hard 1}}})
+        (let [q (first (filter #(str/includes? % "Does every reader call") @asked))]
+          (is (some? q) "the judge criterion was asked")
+          (is (str/includes? q "## Current sources") "the judge sees the tree, not only the diff")
+          (is (str/includes? q "(defn hud [] (wind-at))"))
+          (is (< (str/index-of q "diff --git a/src/x.clj") (str/index-of q "diff --git a/PLAN.md"))
+              "the diff is ordered with the file the question is about first"))))))

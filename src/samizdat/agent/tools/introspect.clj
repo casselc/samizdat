@@ -19,32 +19,69 @@
 (ns samizdat.agent.tools.introspect
   "Self-reflection, read-only: see the loop you are running in.
 
-  Two renderings, both bounded:
+  Four renderings, all bounded:
+
+    IMAGE   which image `eval` lands in for this role, and what the sandbox
+            around it allows — so a supervisor reading a failed eval can tell
+            a policy refusal from a broken form.
 
     WIRING  the loop graph from the manifest — every node, its cell, the
             cell's effects, and its outgoing edge or dispatch table. The
             same data reload_cells validates an edit against.
 
     HEALTH  this run so far, from the turns table — the last few turns
-            (turn, tool, category) and simple tallies.
+            (turn, tool, category) and simple tallies, plus what the run has
+            spent and how much of it the prompt cache served.
+
+    CONTEXT what the block appended to the last turn was made of and what
+            each part of it cost, so a cap in gates.edn can be retuned
+            against a measurement rather than a guess.
 
   A separate namespace requiring only base + the read seams, so the tool
   surface grows by a plug-in file rather than by editing the aggregator.
   Render fns are exposed (not private) so a test can call them directly."
   (:require [clojure.edn :as edn]
-            [clojure.java.io :as io]
             [clojure.string :as str]
             [mycelium.cell :as cell]
             [samizdat.agent.tools.base :as base]
             [samizdat.cells :as cells]
-            [samizdat.store.journal :as journal]))
+            [samizdat.config :as config]
+            [samizdat.lexicon :as lexicon]
+            [samizdat.agent.state :as state]
+            [samizdat.repl.route :as route]
+            [samizdat.security.sandbox :as sandbox]
+            [samizdat.manual :as manual]
+            [samizdat.prompt :as prompt]
+            [samizdat.manifests :as manifests]
+            [samizdat.store.journal :as journal]
+            [samizdat.store.runs :as runs]
+            [samizdat.store.userspace :as store-us]))
+
+(defn active-manifest
+  "The manifest that is ACTUALLY driving this run, as {:name :version
+  :definition}. The beam puts compile-turn-loop's result in ctx
+  :turn-workflow — the version-true wiring — and a caller without one (a
+  test, a bare render) falls back to the configured name through the
+  userspace seam. Reading the factory loop.edn here meant the
+  self-observation tool showed a project that evolved its loop the FACTORY
+  wiring, and always called it 'loop' whatever was running
+  (karamazov-blt.4)."
+  [ctx]
+  (if-let [tw (:turn-workflow ctx)]
+    (if (:definition tw)
+      (select-keys tw [:name :version :definition])
+      (let [nm (or (get-in ctx [:config :run :loop]) "loop")]
+        {:name nm
+         :definition (edn/read-string (manifests/manifest-body! nm))}))
+    (let [nm (or (get-in ctx [:config :run :loop]) "loop")]
+      {:name nm
+       :definition (edn/read-string (manifests/manifest-body! nm))})))
 
 (defn loop-def
-  "The loop's workflow definition — :cells (node -> cell-id), :edges
-  (node -> next node or dispatch map), :dispatches. Read from the manifest
-  resource for the same reason reload_cells does: no loop-driver cycle."
-  []
-  (edn/read-string (slurp (io/resource "manifests/loop.edn"))))
+  "The active loop's workflow definition — :cells (node -> cell-id), :edges
+  (node -> next node or dispatch map), :dispatches."
+  ([] (loop-def nil))
+  ([ctx] (:definition (active-manifest ctx))))
 
 (defn cell-effects
   "A cell's effects, as the cells tool renders them: 'pure', the sorted
@@ -75,7 +112,10 @@
   ([def]
    (str/join "\n"
              (for [[node cell-id] (sort-by key (:cells def))]
-               (str (name node) " = " (name cell-id)
+               ;; The FULL cell id, namespace included — :llm/* vs :tool/* is
+               ;; load-bearing (interceptors glob on it), and (name :llm/parse)
+               ;; and (name :fence/parse) rendered identically.
+               (str (name node) " = " (subs (str cell-id) 1)
                     "  [" (cell-effects cell-id) "]"
                     "  -> " (edge-str (get (:edges def) node)))))))
 
@@ -91,29 +131,153 @@
                  (str (:turn r) "  " (:tool_name r "?")
                       "  " (some-> (:category r) name)))))))
 
+(defn- render-spend
+  "What the run cost, as one line, or nil without a usage map.
+
+  TWO NUMBERS THE OLD BLOCK DID NOT CARRY. The token total is the WHOLE bill
+  — turns and side calls together (karamazov-2rqb.1) — because a loop whose
+  reader and critic outspend its branches is a loop whose cost lives entirely
+  off this screen. The hit rate is the cache's, and `n/a` rather than 0% when
+  no provider on the run reported a lane (karamazov-2rqb.2): a zero there
+  would claim every token missed, which is a measurement nobody made."
+  [{:keys [side-calls total-tokens cache-hit-rate] :as usage}]
+  (when usage
+    (str "tokens: " (or total-tokens 0)
+         " | side calls: " (or side-calls 0)
+         " | cache hit: " (if cache-hit-rate
+                            (str (Math/round (* 100.0 cache-hit-rate)) "%")
+                            "n/a"))))
+
 (defn render-health
-  "A compact snapshot of a run: tallies over every turn row, then the
-  recent tail. rows are turn maps with :turn :tool_name :category
+  "A compact snapshot of a run: tallies over every turn row, what it has spent,
+  then the recent tail. rows are turn maps with :turn :tool_name :category
   :parse_error; max-turns may be absent, in which case only the count is
-  shown."
-  ([rows] (render-health rows nil))
-  ([rows max-turns]
+  shown; `usage` is journal/run-usage, or absent in a context with no run
+  database."
+  ([rows] (render-health rows nil nil))
+  ([rows max-turns] (render-health rows max-turns nil))
+  ([rows max-turns usage]
    (let [n (count rows)
          parse-errors (count (filter :parse_error rows))
          failures (count (filter #(= "failure" (some-> (:category %) name)) rows))
          head (str "turns: " n (when max-turns (str " of " max-turns))
                    " | failed calls: " failures
                    " | parse errors: " parse-errors)]
-     (str head "\n\nrecent:\n" (render-recent rows)))))
+     (str head
+          (when-let [spend (render-spend usage)] (str "\n" spend))
+          "\n\nrecent:\n" (render-recent rows)))))
 
-(defmethod base/run-tool "introspect" [{:keys [branch conn run-id max-turns]}]
-  (base/ok branch
-           (str "=== LOOP WIRING (manifests/loop.edn) ===\n\n"
-                (render-wiring)
-                "\n\n=== RUN HEALTH ===\n\n"
-                (if conn
-                  (render-health
-                   (map #(select-keys % [:turn :tool_name :category :parse_error])
-                        (journal/turns conn run-id))
-                   max-turns)
-                  "(no run database in this context — wiring only)"))))
+(defn render-context
+  "What the block appended to the branch's last turn was made of, and what each
+  part of it cost.
+
+  THE MEASUREMENT NOBODY COULD TAKE (karamazov-2rqb.3). The block is seven
+  renderers stacked, each with its own cap in gates.edn, and from outside it
+  was one opaque string: a supervisor deciding which cap to retune had no way
+  to know which part was spending the turn. Autolith measures its own
+  contributions the same way and found one worth 12,000 tokens.
+
+  `sizes` is the branch's :context-sizes — [[part chars] …] in reading order,
+  parts that rendered nothing already dropped. Those are named separately
+  rather than shown as zero: an empty ledger and a ledger eating the turn are
+  different problems, and a 0 reads as a measurement of the second."
+  [sizes]
+  (if (empty? sizes)
+    (prompt/prompt "context-empty")
+    (let [shown (map first sizes)
+          silent (remove (set shown) state/context-part-names)]
+      (str "total: " (reduce + (map second sizes)) " chars\n\n"
+           (str/join "\n" (for [[part n] sizes]
+                            (str (clojure.core/name part) ": " n)))
+           (when (seq silent)
+             (str "\n\nrendered nothing: "
+                  (str/join ", " (map clojure.core/name silent))))))))
+
+(defn- render-eval-image
+  "Which image this run's `eval` lands in, and how confined it is.
+
+  WITHOUT THIS A SUPERVISOR CANNOT TELL A DENIAL FROM A DEFECT. It reads a
+  worker's failed eval with no way to know whether the sandbox refused the
+  call or the code is broken, and the standing rule is that everything the
+  supervisor might act on has to be enumerable at runtime with a description.
+  The wording is prompts/eval-image.md, like every other sentence the model
+  reads."
+  [ctx]
+  (let [image (route/image-of ctx)
+        root (:root ctx)]
+    (prompt/render "eval-image"
+                   {:image (clojure.core/name image)
+                    :root root
+                    :role (or (:role ctx) "(unset)")
+                    :harness (= :harness image)
+                    :project (= :project image)
+                    :off (= :off image)
+                    :backend (clojure.core/name
+                              (sandbox/backend-for (config/eval-sandbox root)
+                                                   (System/getProperty "os.name")))})))
+
+(defmethod base/run-tool "introspect" [{:keys [branch conn run-id max-turns] :as ctx}]
+  (let [{:keys [name version definition]} (active-manifest ctx)]
+    (base/ok branch
+             (str "=== LOOP WIRING (" name
+                  (when version (str " v" version)) ") ===\n\n"
+                  (render-wiring definition)
+                  "\n\n=== EVAL IMAGE ===\n\n"
+                  (render-eval-image ctx)
+                  "\n\n=== RUN HEALTH ===\n\n"
+                  (if conn
+                    (render-health
+                     (map #(select-keys % [:turn :tool_name :category :parse_error])
+                          (journal/turns conn run-id))
+                     max-turns
+                     (journal/run-usage conn run-id))
+                    "(no run database in this context — wiring only)")
+                  "\n\n=== CONTEXT BLOCK (last turn) ===\n\n"
+                  (render-context (:context-sizes branch))
+                  ;; What the tuning has been touching. The self-healing rule:
+                  ;; everything the supervisor might act on is enumerable at
+                  ;; runtime with a description, and the edit history is a
+                  ;; thing it acts on (karamazov-00qw).
+                  "\n\n=== USERSPACE DRIFT ===\n\n"
+                  (if conn
+                    (let [{:keys [window-runs top-names]} (lexicon/policy :drift)]
+                      (prompt/render "drift"
+                                     {:window window-runs
+                                      :surfaces (store-us/drift
+                                                 conn {:since (runs/nth-recent-start conn window-runs)
+                                                       :top-names top-names})}))
+                    (prompt/render "drift" {:no-db true}))))))
+
+(defmethod base/run-tool "manual" [{:keys [branch] :as ctx}]
+  ;; The harness's own command surface, for a branch developing at the REPL
+  ;; inside it. Curated in resources/manual.edn (LR-6), so what the agent is
+  ;; told it can do is editable at runtime — including by the agent.
+  ;;
+  ;; With a `name` argument, the full docstring for that one entry; without,
+  ;; the whole surface as summaries. A name that is not in the manual says so
+  ;; and lists the groups, rather than returning nothing.
+  (let [wanted (some-> (base/arg ctx :name) str str/trim not-empty)]
+    (try
+      (if wanted
+        (if-let [e (manual/find-entry wanted)]
+          (base/ok branch (str (:name e) " " (pr-str (:arglists e)) "\n\n"
+                               (:summary e) "\n\n"
+                               (or (:doc e) "(no docstring)")))
+          (base/malformed
+           branch
+           (str "`" wanted "` is not in the manual. Groups: "
+                (str/join ", " (map :group (manual/groups)))
+                ". Call `manual` with no arguments for the whole surface, or"
+                " `doc` for any var whether it is curated or not.")))
+        (base/ok branch
+                 (str "=== THE HARNESS'S OWN COMMAND SURFACE ===\n"
+                      "Call these from `eval`. `manual` with a `name` gives one"
+                      " entry's full docstring.\n\n"
+                      (manual/render))))
+      (catch Throwable e
+        ;; A broken manual.edn is a real failure and must say so: a manual that
+        ;; renders nothing reads as "there is nothing here".
+        (base/malformed branch
+                        (str "the manual could not be compiled — resources/manual.edn"
+                             " names something that does not resolve: "
+                             (ex-message e)))))))
