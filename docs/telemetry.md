@@ -170,6 +170,10 @@ configure the ordinary server and model runtime.
 
 Application ingress and resources stop before the embedded owner drains its
 SDK, closes the Oscope source, checkpoints Durable, and closes the connection.
+The production chDB adapter owns one native storage lifetime per process. A
+recovery check therefore starts a fresh Jolt process only after the writer
+process reports `:closed`, opens the same Durable root there, verifies the
+persisted span, and closes that second owner before it exits.
 An application-stop exception does not skip that embedded retirement: when the
 embedded owner closes, the original application exception remains primary; if
 both fail, the bounded Durable-close failure is primary and records only that
@@ -196,16 +200,23 @@ Only the alias adds dependencies; the stock `:deps` are unchanged.
 
 | lib | revision | why |
 |---|---|---|
-| casselc/otel | `88503a695d9f0786475de7ce7faa1a773db51696` | current SDK main, including independent lifecycle and value-shape fixes |
+| Oscope embedded profile | `7ee3ec4f6aaa4d085d88384f85934280d421fa1a` | reviewed in-process owner and UI handler sources, without the standalone server profile |
+| casselc/otel | `4d61f8e921d1310bc7ba39d7208cc38ac14a3215` | reviewed SDK revision shared by Samizdat and Oscope |
+| jolt-chdb | `95d7b2b31c95e007d5065e3950deb1869e2d0f8a` | current reviewed Durable/native lifecycle revision |
+| jolt-otel-clickhouse | `14a2998a27f64a9bff329811461be9157a00c849` | embedded chDB exporter selected by Oscope |
+| casselc/jolt-http | `35d1d7f9ebdc796ee9bd4c80745298b2c8b7fdf8` | viewer-only Ring server dependency; no listener is started by this profile |
+| jolt-otel-viewer | `5723a7c28c3bb3ae7cb27f9856b90463e77df523` | trace workbench rendering used by Oscope's handlers |
 | jolt-lang/http-client → casselc/http-client | `eab6b78d5957f88690faf6768360572a3f185341` | the exact revision selected by otel; the otel edge uses a second lib id for the same `jolt.http.*` namespaces, so the alias excludes that edge and selects this source once under Samizdat's stock coordinate |
-| jolt-lang/jolt-crypto | `44da69bad08a2fd7631bd4061e3fb53938dafff6` | the exact crypto provider revision selected by otel/http-client |
+| jolt-lang/db → casselc/db | `96324713500c96ae97c0deaf84691f31df158f25` | one database namespace provider shared by Samizdat and Durable |
+| org.clojure/data.json → casselc/data.json | `3174868a7baa06e118fb8d1201edd98c5769b335` | one JSON implementation across the embedded graph |
+| jolt-lang/jolt-crypto | `5effcc89a3258499a79a2a3d69edad9e7800d1bf` | one canonical crypto provider across chDB, viewer, OTel, and HTTP |
 
-`jolt -Stree -A:telemetry` and `jolt -Spath -A:telemetry` show exactly one
-checkout of each. `jolt-otel-clickhouse` is deliberately **not** a
-dependency: its jolt-chdb pin resolves `casselc/db` over this project's
-`jolt-lang/db`. Typed-column fragments (`contract/typed-column-fragments`,
-joc v3 shape) are therefore compiled outside this repository from the
-rendered JSON.
+`jolt -Stree -A:telemetry:embedded-telemetry` and
+`jolt -Spath -A:telemetry:embedded-telemetry` show one provider for the
+database, HTTP client, HTTP server, OTel SDK, exporter, and viewer namespaces.
+The alias only makes the low-level UI handlers available. It does not load
+`oscope.server`, `oscope.otlp`, or `oscope.embedded.viewer`, and it neither
+mounts a handler nor starts a listener; that composition is a later slice.
 
 ## The manifest
 

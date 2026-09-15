@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Qualify the embedded profile's current Oscope, OTel, chDB, ClickHouse
+  exporter, and viewer-only HTTP graph without loading a listener or receiver.
 - Add an opt-in `:embedded-telemetry` dependency profile that layers Oscope's
   embedded chDB profile over `:telemetry`, converges its database, data.json,
   Malli, and crypto providers, and raises Samizdat's Jolt floor to 0.8.6 so
