@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Close synchronous OpenAI agent runs durably on exceptional task exit,
+  preserving cancellation and concurrent terminal winners without masking the
+  original exception or leaving active ownership behind.
+
 - Await the canonical completion of every owned Ebb run task before database
   and telemetry shutdown, including already-terminal exhausted runs, so the
   outer `run` and `run.rounds` spans finish and export before the SDK closes.

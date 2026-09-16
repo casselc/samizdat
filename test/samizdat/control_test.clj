@@ -943,6 +943,79 @@
                              "positive integer"))
           (is (false? @called?)))))))
 
+(deftest openai-task-exception-closes-its-row-without-masking-the-failure
+  (with-db [c]
+    (let [failure (ex-info "OpenAI task failed" {})
+          rid* (atom nil)
+          done* (atom nil)]
+      (with-redefs [beam/run! (fn [{:keys [on-start]}]
+                                (let [rid (runs/start-run! c {:problem "p"})]
+                                  (reset! rid* rid)
+                                  (on-start rid)
+                                  (reset! done* (get-in @api-control/active [rid :done]))
+                                  (throw failure)))]
+        (let [caught (try (openai/chat-completion {:conn c :config {:llm {:provider :local :model "m"}}} {:messages [{:role "user" :content "q"}]})
+                         (catch Throwable error error))]
+          (is (identical? failure caught))
+          (is (= "failed" (:status (runs/get-run c @rid*))))
+          (is (= 1 (count (filter #(= "run-error" (:kind %))
+                                  (journal/events-since c @rid* 0 100)))))
+          (is (not (contains? @api-control/active @rid*)))
+          (is (= :err (first @@done*)))
+          (is (identical? failure (second @@done*))))))))
+
+(deftest openai-task-exception-preserves-every-terminal-winner
+  (with-db [c]
+    (doseq [status [:completed :exhausted :aborted]]
+      (let [failure (ex-info "late OpenAI teardown failed" {})
+            rid* (atom nil)]
+        (with-redefs [beam/run! (fn [{:keys [on-start]}]
+                                  (let [rid (runs/start-run! c {:problem "p"})]
+                                    (reset! rid* rid)
+                                    (on-start rid)
+                                    (runs/finish-run! c rid status nil)
+                                    (throw failure)))]
+          (let [caught (try (openai/chat-completion {:conn c :config {:llm {:provider :local :model "m"}}} {:messages [{:role "user" :content "q"}]})
+                           (catch Throwable error error))]
+            (is (identical? failure caught))
+            (is (= (name status) (:status (runs/get-run c @rid*))))
+            (is (not-any? #(= "run-error" (:kind %))
+                          (journal/events-since c @rid* 0 100)))))))))
+
+(deftest openai-cancellation-is-aborted-not-failed
+  (with-db [c]
+    (let [failure (InterruptedException. "cancelled")
+          rid* (atom nil)]
+      (with-redefs [beam/run! (fn [{:keys [on-start]}]
+                                (let [rid (runs/start-run! c {:problem "p"})]
+                                  (reset! rid* rid)
+                                  (on-start rid)
+                                  (throw failure)))]
+        (let [caught (try (openai/chat-completion {:conn c :config {:llm {:provider :local :model "m"}}} {:messages [{:role "user" :content "q"}]})
+                         (catch Throwable error error))]
+          (is (identical? failure caught))
+          (is (= "aborted" (:status (runs/get-run c @rid*))))
+          (is (not-any? #(= "run-error" (:kind %))
+                        (journal/events-since c @rid* 0 100))))))))
+
+(deftest openai-durable-cleanup-failure-cannot-mask-the-task-exception
+  (with-db [c]
+    (let [failure (ex-info "original task failure" {})
+          rid* (atom nil)
+          done* (atom nil)]
+      (with-redefs [beam/run! (fn [{:keys [on-start]}]
+                                (let [rid (runs/start-run! c {:problem "p"})]
+                                  (reset! rid* rid)
+                                  (on-start rid)
+                                  (reset! done* (get-in @api-control/active [rid :done]))
+                                  (throw failure)))
+                    runs/get-run (fn [& _] (throw (ex-info "durable lookup failed" {})))]
+        (let [caught (try (openai/chat-completion {:conn c :config {:llm {:provider :local :model "m"}}} {:messages [{:role "user" :content "q"}]})
+                         (catch Throwable error error))]
+          (is (identical? failure caught))
+          (is (not (contains? @api-control/active @rid*)))
+          (is (identical? failure (second @@done*))))))))
+
 ;; --- the supervisor's hands -------------------------------------------------
 ;; store/interventions/submit! has always taken :issued-by, and until now no
 ;; tool could call it. The supervisor had the full tool surface and could
