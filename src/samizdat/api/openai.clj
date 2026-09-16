@@ -102,6 +102,8 @@
       ;; hours-long) life (karamazov-blt.13). The request thread still blocks:
       ;; that IS the OpenAI-compat contract this endpoint exists for.
       (let [abort (atom false)
+            done (promise)
+            outcome (atom [:ok nil])
             run-id* (atom nil)
             r (try
                 (beam/run! {:conn conn :config config
@@ -110,7 +112,8 @@
                             :abort abort
                             :on-start (fn [rid]
                                         (reset! run-id* rid)
-                                        (swap! api-control/active assoc rid {:abort abort}))
+                                        (swap! api-control/active assoc rid
+                                               {:abort abort :done done}))
                             :max-turns (or (:max_turns body) (:max-turns body)
                                            (get-in config [:run :max-turns]))
                             :beam-width (or (:beam_width body) (:beam-width body)
@@ -118,9 +121,13 @@
                             :max-total-branches (:value cap-result)
                             :token-budget (or (:token_budget body) (:token-budget body)
                                               (get-in config [:run :token-budget]))})
+                (catch Throwable failure
+                  (reset! outcome [:err failure])
+                  (throw failure))
                 (finally
                   (when-let [rid @run-id*]
-                    (swap! api-control/active dissoc rid))))
+                    (swap! api-control/active dissoc rid))
+                  (deliver done @outcome)))
             artifacts (journal/artifacts conn (:run-id r))
             answered (= :completed (:status r))]
         {:status 200

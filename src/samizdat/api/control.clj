@@ -39,8 +39,8 @@
             [samizdat.store.journal :as journal]
             [samizdat.store.runs :as runs]))
 
-;; run-id -> {:future f :abort (atom false)}. A run outlives the request that
-;; started it, so something has to hold it.
+;; run-id -> {:done promise :abort (atom false) :cancel fn}. A run outlives
+;; the request that started it, so something has to own its complete lifetime.
 (defonce active (atom {}))
 
 (defn- close-exceptional-task! [conn run-id e]
@@ -155,6 +155,7 @@
         adapter (registry/adapter-for (:provider llm-config))
         abort (atom false)
         promised (promise)
+        done (promise)
         cancel* (atom nil)
         ;; The run is a TASK (RFC-013): abort cancels it, and the cancel is
         ;; observed at the round's next step or a turn's next check. The abort
@@ -176,6 +177,7 @@
                                           :on-start (fn [rid]
                                                       (swap! active assoc rid
                                                              {:abort abort
+                                                              :done done
                                                               :cancel (fn [] (some-> @cancel* (apply [])))})
                                                       (deliver promised rid))})]
                         (swap! active dissoc (:run-id r))
@@ -193,7 +195,8 @@
                           (close-exceptional-task! conn rid e)
                           (swap! active dissoc rid)
                           (approval/abandon! rid))
-                        {:status :error :error (ex-message e)})))))
+                        {:status :error :error (ex-message e)}))))
+                 done)
         _ (reset! cancel* (:cancel started))
         ;; How long the request waits for the run row before answering 503.
         ;; gates.edn :run-start-deadline-ms: the selection model call runs
@@ -268,12 +271,14 @@
           abort (atom false)
           max-turns (or (:max_turns body) (:max-turns body))]
       (let [cancel* (atom nil)
+            done (promise)
             started (cancel/start!
                      (cancel/spawn
                       (fn []
                         (try
                           (swap! active assoc run-id
                                  {:abort abort
+                                  :done done
                                   :cancel (fn [] (some-> @cancel* (apply [])))})
                           (let [r (resume/resume! {:conn conn :config config
                                                    :llm-adapter adapter
@@ -288,7 +293,8 @@
                               (log/error "resume failed:" (ex-message e)))
                             (close-exceptional-task! conn run-id e)
                             (swap! active dissoc run-id)
-                            {:status :error :error (ex-message e)})))))]
+                            {:status :error :error (ex-message e)}))))
+                     done)]
         (reset! cancel* (:cancel started)))
       ;; The budget this resume is running under, from what the caller asked
       ;; for, falling back to the row as it stood BEFORE the future started.
