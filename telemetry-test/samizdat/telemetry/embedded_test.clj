@@ -389,6 +389,7 @@
             (is (= :ok (:status child-result)) (pr-str child-result))
             (is (= {:status :closed :phase :closed}
                    (get-in child-result [:payload :stop])))
+            (is (true? (get-in child-result [:payload :ui-readback])))
             (is (= "lifecycle.embedded-test"
                    (get-in child-result [:payload :recovered-span]))))))
       (finally

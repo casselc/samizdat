@@ -170,10 +170,29 @@ configure the ordinary server and model runtime.
 
 Application ingress and resources stop before the embedded owner drains its
 SDK, closes the Oscope source, checkpoints Durable, and closes the connection.
+The same listener now serves the borrowed read-only Oscope UI at `/oscope`:
+charts and distributions at `/oscope`, the trace/correlated-log workbench at
+`/oscope/telemetry`, and logs/metrics at `/oscope/events`. Only the exact mount
+and slash-delimited children belong to Oscope; a path such as `/oscopes` still
+belongs to Samizdat. Requests must carry the exact `127.0.0.1:<HARNESS_PORT>`
+Host authority or receive Oscope's `421 misdirected request` response.
+
+This mount starts no second listener and exposes no OTLP receiver. Viewer
+queries run with instrumentation suppressed so reading telemetry cannot create
+recursive telemetry. Admission is bounded; overload and closing return 503.
+Shutdown records interrupted work, stops Samizdat ingress/resources, rejects
+new viewer requests and drains admitted requests, and only then retires the
+Oscope source and Durable owner. Failure to confirm the bounded viewer drain
+leaves the source open and fails shutdown rather than closing storage beneath
+an active query. The first borrowed surface intentionally omits the plot editor
+and strips Oscope's binary-export command until Samizdat has explicit adapter
+semantics for them.
+
 The production chDB adapter owns one native storage lifetime per process. A
 recovery check therefore starts a fresh Jolt process only after the writer
 process reports `:closed`, opens the same Durable root there, verifies the
-persisted span, and closes that second owner before it exits.
+persisted span through both the source command and `/oscope/telemetry`, drains
+the viewer, and closes that second owner before it exits.
 An application-stop exception does not skip that embedded retirement: when the
 embedded owner closes, the original application exception remains primary; if
 both fail, the bounded Durable-close failure is primary and records only that
@@ -204,7 +223,7 @@ Only the alias adds dependencies; the stock `:deps` are unchanged.
 | casselc/otel | `4d61f8e921d1310bc7ba39d7208cc38ac14a3215` | reviewed SDK revision shared by Samizdat and Oscope |
 | jolt-chdb | `95d7b2b31c95e007d5065e3950deb1869e2d0f8a` | current reviewed Durable/native lifecycle revision |
 | jolt-otel-clickhouse | `14a2998a27f64a9bff329811461be9157a00c849` | embedded chDB exporter selected by Oscope |
-| casselc/jolt-http | `35d1d7f9ebdc796ee9bd4c80745298b2c8b7fdf8` | viewer-only Ring server dependency; no listener is started by this profile |
+| casselc/jolt-http | `35d1d7f9ebdc796ee9bd4c80745298b2c8b7fdf8` | viewer-only Ring dependency; the handlers use Samizdat's existing listener |
 | jolt-otel-viewer | `5723a7c28c3bb3ae7cb27f9856b90463e77df523` | trace workbench rendering used by Oscope's handlers |
 | jolt-lang/http-client → casselc/http-client | `eab6b78d5957f88690faf6768360572a3f185341` | the exact revision selected by otel; the otel edge uses a second lib id for the same `jolt.http.*` namespaces, so the alias excludes that edge and selects this source once under Samizdat's stock coordinate |
 | jolt-lang/db → casselc/db | `96324713500c96ae97c0deaf84691f31df158f25` | one database namespace provider shared by Samizdat and Durable |
@@ -214,9 +233,9 @@ Only the alias adds dependencies; the stock `:deps` are unchanged.
 `jolt -Stree -A:telemetry:embedded-telemetry` and
 `jolt -Spath -A:telemetry:embedded-telemetry` show one provider for the
 database, HTTP client, HTTP server, OTel SDK, exporter, and viewer namespaces.
-The alias only makes the low-level UI handlers available. It does not load
-`oscope.server`, `oscope.otlp`, or `oscope.embedded.viewer`, and it neither
-mounts a handler nor starts a listener; that composition is a later slice.
+The embedded launcher composes only the low-level UI handlers. It does not load
+`oscope.server`, `oscope.otlp`, `oscope.embedded.viewer`, or the visualization
+editor, and it does not start another listener.
 
 ## The manifest
 

@@ -7,6 +7,7 @@
             [samizdat.core :as core]
             [samizdat.system :as system]
             [samizdat.telemetry.embedded :as embedded]
+            [samizdat.telemetry.embedded-http :as embedded-http]
             [samizdat.telemetry.embedded-serve :as serve]))
 
 (deftest durable-root-is-explicit-and-file-safe
@@ -30,6 +31,24 @@
         (is (= :samizdat.telemetry.embedded-serve/invalid-configuration
                (:type (ex-data failure))))))))
 
+(deftest delegated-core-run-leaves-shutdown-to-its-owner
+  (let [calls (atom [])]
+    (with-redefs [system/start! (fn [handler]
+                                 (swap! calls conj [:start handler]))
+                  system/config (constantly {:http {:port 8080}
+                                             :nrepl {:port 7888}
+                                             :llm {:provider :local
+                                                   :model "test"}})
+                  core/warm-tls! (fn [_] (swap! calls conj :warm) :ok)
+                  core/start-nrepl! (fn [port]
+                                      (swap! calls conj [:nrepl port]))
+                  jolt.host/add-shutdown-hook (fn [_]
+                                                (swap! calls conj :hook))
+                  jolt.host/park-until-interrupt #(swap! calls conj :park)
+                  system/stop! #(swap! calls conj :system-stop)]
+      (core/run! ::handler {:own-shutdown? false})
+      (is (= [[:start ::handler] :warm [:nrepl 7888] :park] @calls)))))
+
 (deftest launch-defaults-content-off-and-cleans-up-in-owner-order
   (let [calls (atom [])
         published-stop (atom nil)
@@ -40,9 +59,19 @@
                   embedded/stop! (fn [actual]
                                    (swap! calls conj [:embedded-stop actual])
                                    {:status :closed :phase :closed})
+                  embedded-http/start! (fn [actual _]
+                                         (swap! calls conj [:viewer-start actual])
+                                         ::viewer)
+                  embedded-http/compose-handler (fn [_ actual]
+                                                  (is (= ::viewer actual))
+                                                  ::handler)
+                  embedded-http/stop! (fn [actual]
+                                        (swap! calls conj [:viewer-stop actual])
+                                        {:status :closed :phase :closed})
+                  core/record-exit! (fn [] (swap! calls conj [:record-exit]))
                   system/stop! (fn [] (swap! calls conj [:system-stop]) :stopped)
-                  core/-main (fn [& args]
-                               (swap! calls conj [:core-main args])
+                  core/run! (fn [handler options]
+                               (swap! calls conj [:core-run handler options])
                                :returned)]
       (is (= :returned
              (serve/run! ["--durable-root" "/durable"]
@@ -51,8 +80,11 @@
                            true))))
       (is (= [[:embedded-start {:durable-root "/durable"
                                 :content {:enabled? false}}]
-              [:core-main nil]
+              [:viewer-start runtime]
+              [:core-run ::handler {:own-shutdown? false}]
+              [:record-exit]
               [:system-stop]
+              [:viewer-stop ::viewer]
               [:embedded-stop runtime]]
              @calls))
       (is (fn? @published-stop))
@@ -77,6 +109,24 @@
              (serve/stop-until-closed! ::runtime)))
       (is (= 2 @pauses)))))
 
+(deftest a-viewer-drain-failure-never-retires-its-query-source
+  (let [embedded-stops (atom 0)]
+    (with-redefs [core/record-exit! (constantly nil)
+                  system/stop! (constantly :stopped)
+                  embedded-http/stop! (constantly
+                                       {:status :closing :phase :draining})
+                  embedded/stop! (fn [_] (swap! embedded-stops inc))
+                  serve/max-stop-attempts 1
+                  serve/pause-before-retry! (constantly nil)]
+      (let [failure (try (serve/stop-owned! ::runtime ::viewer)
+                         (catch Throwable error error))]
+        (is (= :samizdat.telemetry.embedded-serve/stop-not-closed
+               (:type (ex-data failure))))
+        (is (= {:status :closing :phase :draining}
+               (:last-result (ex-data failure))))
+        (is (zero? @embedded-stops)
+            "the source remains open rather than closing under a reader")))))
+
 (deftest core-failure-still-stops-system-before-the-owner
   (let [calls (atom [])
         core-failure (ex-info "core failed" {:stage :core})]
@@ -85,14 +135,42 @@
                                    (swap! calls conj :embedded-stop)
                                    {:status :closed :phase :closed})
                   system/stop! (fn [] (swap! calls conj :system-stop))
-                  core/-main (fn [& _]
-                               (swap! calls conj :core-main)
+                  embedded-http/start! (fn [& _] ::viewer)
+                  embedded-http/compose-handler (fn [& _] ::handler)
+                  embedded-http/stop! (constantly {:status :closed :phase :closed})
+                  core/record-exit! (constantly nil)
+                  core/run! (fn [& _]
+                               (swap! calls conj :core-run)
                                (throw core-failure))]
       (let [failure (try (serve/run! ["--durable-root" "/durable"]
                                      (constantly true))
                          (catch Throwable error error))]
         (is (identical? core-failure failure))
-        (is (= [:core-main :system-stop :embedded-stop] @calls))))))
+        (is (= [:core-run :system-stop :embedded-stop] @calls))))))
+
+(deftest viewer-construction-failure-retires-owner-before-ingress
+  (let [calls (atom [])
+        published (atom nil)
+        startup-failure (ex-info "viewer failed" {:private "/path"})]
+    (with-redefs [embedded/start! (constantly ::runtime)
+                  embedded-http/start! (fn [& _] (throw startup-failure))
+                  core/record-exit! (fn [] (swap! calls conj :record-exit))
+                  core/run! (fn [& _] (swap! calls conj :ingress))
+                  system/stop! (fn [] (swap! calls conj :system-stop))
+                  embedded/stop! (fn [_]
+                                   (swap! calls conj :embedded-stop)
+                                   {:status :closed :phase :closed})]
+      (let [failure (try
+                      (serve/run! ["--durable-root" "/durable"]
+                                  (fn [stop!]
+                                    (reset! published stop!)
+                                    true))
+                      (catch Throwable error error))]
+        (is (identical? startup-failure failure))
+        (is (= [:record-exit :system-stop :embedded-stop] @calls))
+        (is (fn? @published))
+        (@published)
+        (is (= [:record-exit :system-stop :embedded-stop] @calls))))))
 
 (deftest application-stop-failure-still-retires-the-embedded-owner
   (let [calls (atom [])

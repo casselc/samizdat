@@ -8,6 +8,7 @@
             [samizdat.core :as core]
             [samizdat.system :as system]
             [samizdat.telemetry.embedded :as embedded]
+            [samizdat.telemetry.embedded-http :as embedded-http]
             [samizdat.telemetry.embedded-serve :as serve]
             [samizdat.telemetry.embedded-bootstrap :as bootstrap]))
 
@@ -143,16 +144,24 @@
                   embedded/stop! (fn [_]
                                    (swap! calls conj :embedded-stop)
                                    {:status :closed :phase :closed})
+                  embedded-http/start! (fn [& _]
+                                         (swap! calls conj :viewer-start)
+                                         ::viewer)
+                  embedded-http/compose-handler (fn [& _] ::handler)
+                  embedded-http/stop! (fn [_]
+                                        (swap! calls conj :viewer-stop)
+                                        {:status :closed :phase :closed})
+                  core/record-exit! #(swap! calls conj :record-exit)
                   system/stop! (fn [] (swap! calls conj :system-stop))
-                  core/-main (fn [& _]
-                               (swap! calls conj :core-main)
+                  core/run! (fn [& _]
+                               (swap! calls conj :core-run)
                                (throw core-failure))]
       (let [failure (try
                       (bootstrap/run! ["--durable-root" "/durable"])
                       (catch Throwable error error))]
         (is (identical? core-failure failure))
-        (is (= [:armed :embedded-start :core-main
-                :system-stop :embedded-stop]
+        (is (= [:armed :embedded-start :viewer-start :core-run :record-exit
+                :system-stop :viewer-stop :embedded-stop]
                @calls))))))
 
 (deftest wired-bootstrap-shares-one-concurrent-terminal-cleanup-failure
@@ -165,6 +174,9 @@
     (with-redefs [jolt.host/add-shutdown-hook #(reset! hook %)
                   bootstrap/resolve-launcher! (constantly serve/run!)
                   embedded/start! (constantly ::runtime)
+                  embedded-http/start! (fn [& _] ::viewer)
+                  embedded-http/compose-handler (fn [& _] ::handler)
+                  embedded-http/stop! (constantly {:status :closed :phase :closed})
                   embedded/stop! (fn [_]
                                    (swap! stop-attempts inc)
                                    (deliver stop-entered true)
@@ -175,7 +187,8 @@
                   serve/max-stop-attempts 1
                   serve/pause-before-retry! (constantly nil)
                   system/stop! #(swap! system-stops inc)
-                  core/-main (constantly :returned)
+                  core/record-exit! (constantly nil)
+                  core/run! (constantly :returned)
                   clojure.tools.logging/log* (fn [& args]
                                                (swap! logs conj args))]
       (let [running (future (try (bootstrap/run! ["--durable-root" "/durable"])
@@ -209,13 +222,17 @@
     (with-redefs [jolt.host/add-shutdown-hook #(reset! hook %)
                   bootstrap/resolve-launcher! (constantly serve/run!)
                   embedded/start! (constantly ::runtime)
+                  embedded-http/start! (fn [& _] ::viewer)
+                  embedded-http/compose-handler (fn [& _] ::handler)
+                  embedded-http/stop! (constantly {:status :closed :phase :closed})
                   embedded/stop! (fn [_]
                                    (swap! stop-attempts inc)
                                    (deliver stop-entered true)
                                    @release-stop
-                                   terminal)
+                  terminal)
                   system/stop! #(swap! system-stops inc)
-                  core/-main (constantly :returned)]
+                  core/record-exit! (constantly nil)
+                  core/run! (constantly :returned)]
       (let [running (future (bootstrap/run! ["--durable-root" "/durable"]))]
         (is (= true (deref stop-entered 5000 ::timeout)))
         (let [signaling (future (@hook))]
