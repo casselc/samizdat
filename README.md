@@ -40,3 +40,10 @@ jolt smoke      # platform probes (sqlite, https, server)
 State lives in `.samizdat/samizdat.sqlite3` (moving to [dolt](https://github.com/dolthub/dolt)
 via [doltera](https://github.com/jolt-lang/doltera)); a run survives restart
 and resumes from its journal.
+
+`beam_width` is the population Samizdat tries to maintain, not a ceiling:
+successful branches may fork beyond it. Set `max_total_branches` on
+`POST /v1/runs`, `:run :max-total-branches` in `.samizdat/config.edn`, or
+`HARNESS_MAX_TOTAL_BRANCHES` to place a stricter per-run ceiling on every
+branch creation path. The value must be a positive integer; omitting it keeps
+the process-wide safety ceiling from `resources/gates.edn`.

@@ -221,6 +221,20 @@
       (let [id (str parent-id "." ix)]
         (recur (inc ix) (cond-> acc (not (taken id)) (conj id)))))))
 
+(defn effective-max-total-branches
+  "The validated branch ceiling for one run.
+
+  A request/config value may tighten, never loosen, the process safety policy
+  in gates.edn. nil preserves the prior behavior."
+  [config requested]
+  (let [configured (or requested (get-in config [:run :max-total-branches]))
+        hard-cap (gates/threshold :max-total-branches)]
+    (when (and (some? configured)
+               (not (and (integer? configured) (pos? configured))))
+      (throw (ex-info "max_total_branches must be a positive integer"
+                      {:type :invalid-run-limit :value configured})))
+    (min hard-cap (or configured hard-cap))))
+
 (defn spawn-children!
   "Turn a branch's pending theses into sibling branches, under the total cap.
 
@@ -229,7 +243,8 @@
   when it binds the parent is told rather than the request silently shrinking."
   [ctx parent existing-count turn]
   (let [pending (:pending-branch-theses parent)
-        cap (gates/threshold :max-total-branches)
+        cap (or (:max-total-branches ctx)
+                (gates/threshold :max-total-branches))
         room (max 0 (- cap existing-count))
         take-n (min room (count pending))
         spawning (vec (take take-n pending))
@@ -993,10 +1008,12 @@
   land a `done` wins and the rest are abandoned, since paying for four more
   provider calls after the answer exists is pure waste."
   [{:keys [conn config llm-adapter llm-config problem max-turns beam-width
+           max-total-branches
            token-budget abort on-start seed-run quarantine complete] :as opts}]
   (hook/observe! :run {:provider (:provider llm-config) :model (:model llm-config)
                        :problem problem :max-turns max-turns :beam-width beam-width} (fn []
   (let [max-turns (or max-turns (get-in config [:run :max-turns]) 40)
+        max-total-branches (effective-max-total-branches config max-total-branches)
         ;; Tokens the whole run may spend; nil is unbounded. Enforced by
         ;; :beam/round-open against the journal, sized against below.
         token-budget (or token-budget (get-in config [:run :token-budget]))
@@ -1042,11 +1059,12 @@
         ;; or the token budget could pay for at the cap (gates.edn
         ;; :beam-contention; Tier 2 of karamazov-41a).
         contention (lexicon/policy :beam-contention)
-        {width :width bound :bound}
+        {provider-width :width bound :bound}
         (contended-width forced-width contention
                          {:deadline-ms (turn-deadline-ms)
                           :max-turns max-turns
                           :token-budget token-budget})
+        width (min provider-width max-total-branches)
         ;; Seeding forces sharing on for this run regardless of the config
         ;; flag: seeds enter through the shared log's context blocks, and
         ;; seeds nobody reads would be dead rows.
@@ -1057,6 +1075,7 @@
                                       :model (:model llm-config)
                                       :max-turns max-turns
                                       :beam-width width
+                                      :max-total-branches max-total-branches
                                       :token-budget token-budget
                                       :prompt-digest (branch-loop/prompt-digest
                                                       prompt-suffix)})
@@ -1094,6 +1113,7 @@
              ;; call-model falls back to infer/complete-fn exactly as before.
              :complete complete
              :max-turns max-turns :beam? (> width 1) :beam-width width
+             :max-total-branches max-total-branches
              :token-budget token-budget
              :root root
              ;; What the manifest says this run is FOR — see seed-branch.
@@ -1145,8 +1165,8 @@
     (when (not= forced-width requested-width)
       (log/info "loop" loop-nm "is a whole-run workflow; beam width forced to 1"
                 "(asked for" (str requested-width ")")))
-    (when (< width forced-width)
-      (log/info "beam width narrowed from" forced-width "to" width
+    (when (< provider-width forced-width)
+      (log/info "beam width narrowed from" forced-width "to" provider-width
                 "by" (str/join " and " (map name (sort bound)))
                 "- the provider serves" (:provider-concurrency contention)
                 "call(s) at a time, a turn takes ~" (:expected-turn-ms contention)
@@ -1154,6 +1174,9 @@
                 (turn-deadline-ms) "ms turn deadline and a token budget of"
                 token-budget "over" max-turns "turns"
                 "(gates.edn :beam-contention, config :run :token-budget)"))
+    (when (< width provider-width)
+      (log/info "beam width narrowed from" provider-width "to" width
+                "by the run's max_total_branches ceiling"))
     (let [initial (mapv #(open-branch! ctx (str "B" (inc %)) nil nil 0) (range width))
           result (try (run-rounds ctx initial 1)
                       (catch Throwable e

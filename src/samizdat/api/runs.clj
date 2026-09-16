@@ -102,7 +102,7 @@
                      ;; ceiling that actually bounds it.
                      :active_branches (count (filter #(= "active" (:status %))
                                                      branches))
-                     :max_branches (gates/threshold :max-total-branches)
+                     :max_branches (:max_total_branches r)
                      ;; Seeding forces sharing on regardless of config
                      ;; (beam.clj), and nothing recorded that, so /health
                      ;; reported the config value while a seeded run shared

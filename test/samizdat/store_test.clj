@@ -173,6 +173,22 @@
                (get-in d [:run :max_branches]))
             "and the ceiling that actually bounds it")))))
 
+(deftest a-run-owned-branch-ceiling-is-a-store-invariant
+  ;; Scheduler checks make hitting the cap graceful, but they are not the
+  ;; invariant: team/board/decompose cells also open branches. The row owns
+  ;; the bound and the single INSERT statement enforces it for every writer.
+  (with-db [c]
+    (let [rid (runs/start-run! c {:problem "p" :beam-width 1
+                                  :max-total-branches 1})]
+      (is (= "B1" (runs/open-branch! c rid {:branch-id "B1"})))
+      (is (= "B1" (runs/open-branch! c rid {:branch-id "B1"}))
+          "an idempotent resume rejoin is still allowed at the cap")
+      (let [e (try (runs/open-branch! c rid {:branch-id "B2"}) nil
+                   (catch Throwable e e))]
+        (is (= :branch-cap (:type (ex-data e))))
+        (is (= 1 (:max-total-branches (ex-data e)))))
+      (is (= ["B1"] (mapv :id (runs/branches c rid)))))))
+
 (deftest a-quarantined-claim-does-not-cross-into-the-next-run
   ;; vf-4tw. A Lean reply with no goal list was read as a closed proof, so
   ;; three artifacts were confirmed on the tactic `classical`, which closes

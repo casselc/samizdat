@@ -7,6 +7,9 @@
   instrumentation suppression, bounded admission, and drain-before-Durable
   shutdown. The initial surface deliberately excludes OTLP, plot editing, and
   binary export.
+- Add a validated, durable `max_total_branches` run control that strictly caps
+  initial, forked, repopulated, and workflow-opened branches; `beam_width`
+  remains a population target rather than an implicit ceiling.
 - Qualify the embedded profile's current Oscope, OTel, chDB, ClickHouse
   exporter, and viewer-only HTTP graph without loading a listener or receiver.
 - Add an opt-in `:embedded-telemetry` dependency profile that layers Oscope's

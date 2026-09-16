@@ -46,7 +46,7 @@
 (defn start-run!
   "Open a run and return its id."
   [conn {:keys [problem provider model max-turns beam-width prompt-digest
-                token-budget]}]
+                token-budget max-total-branches]}]
   (let [id (str (random-uuid))]
     ;; The retention sweep (provenance R2-11), on run START rather than at
     ;; finish: a client tailing a just-finished run still reads its
@@ -68,19 +68,27 @@
           (when (pos? n)
             (log/info "retention: dropped the record of" n "run(s) older than"
                       run-record-days "days")))))
-    (db/with-writer
-      (db/execute! conn
-                     ["INSERT INTO runs (id, problem, status, provider, model, max_turns,
-                                         beam_width, prompt_digest, started_at,
-                                         token_budget)
-                       VALUES (?, ?, 'running', ?, ?, ?, ?, ?, ?, ?)"
-                      ;; The columns are NOT NULL DEFAULT '', and a DEFAULT does
-                      ;; not apply to an explicitly-inserted NULL, so these
-                      ;; coerce rather than relying on the schema. token_budget
-                      ;; is the exception: NULL there means unbounded.
-                      id problem (if provider (name provider) "") (or model "")
-                      (or max-turns 0) (or beam-width 1) (or prompt-digest "")
-                      (db/now) token-budget]))
+    (let [values [id problem (if provider (name provider) "") (or model "")
+                  (or max-turns 0) (or beam-width 1) (or prompt-digest "")
+                  (db/now) token-budget]]
+      (db/with-writer
+        ;; Beam callers pass the gates.edn-derived effective ceiling. Direct
+        ;; store callers (tests and migration-era tooling) omit it and let the
+        ;; v30 schema default preserve their prior behavior; no second policy
+        ;; literal lives in source.
+        (if max-total-branches
+          (db/execute! conn
+                       (into ["INSERT INTO runs (id, problem, status, provider, model, max_turns,
+                                                 beam_width, prompt_digest, started_at,
+                                                 token_budget, max_total_branches)
+                               VALUES (?, ?, 'running', ?, ?, ?, ?, ?, ?, ?, ?)"]
+                             (conj values max-total-branches)))
+          (db/execute! conn
+                       (into ["INSERT INTO runs (id, problem, status, provider, model, max_turns,
+                                                 beam_width, prompt_digest, started_at,
+                                                 token_budget)
+                               VALUES (?, ?, 'running', ?, ?, ?, ?, ?, ?, ?)"]
+                             values)))))
     (journal/note! conn id :run-started {:data {:problem problem :model model}})
     id))
 
@@ -277,9 +285,22 @@
   (let [n (db/with-writer
             (db/execute! conn
                          ["INSERT OR IGNORE INTO branches (id, run_id, parent_id, status, created_at_turn, problem, role, prompt_suffix)
-                           VALUES (?, ?, ?, 'active', ?, ?, ?, ?)"
+                           SELECT ?, ?, ?, 'active', ?, ?, ?, ?
+                            WHERE (SELECT COUNT(*) FROM branches WHERE run_id = ?)
+                                < (SELECT max_total_branches FROM runs WHERE id = ?)"
                           branch-id run-id parent-id (or created-at-turn 0) problem
-                          (some-> role name) (str prompt-suffix)]))]
+                          (some-> role name) (str prompt-suffix) run-id run-id]))
+        existing? (or (pos? n)
+                      (some? (db/fetch-one conn
+                                           ["SELECT id FROM branches WHERE run_id = ? AND id = ?"
+                                            run-id branch-id])))]
+    (when-not existing?
+      (let [limit (:max_total_branches
+                   (db/fetch-one conn ["SELECT max_total_branches FROM runs WHERE id = ?"
+                                       run-id]))]
+        (throw (ex-info (str "run " run-id " reached its maximum total branch count")
+                        {:run-id run-id :branch-id branch-id :type :branch-cap
+                         :max-total-branches limit}))))
     (journal/note! conn run-id (if (pos? n) :branch-opened :branch-rejoined)
                    {:branch-id branch-id :data {:parent parent-id}}))
   branch-id)))

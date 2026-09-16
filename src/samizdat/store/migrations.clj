@@ -767,7 +767,16 @@
   ["ALTER TABLE knowledge ADD COLUMN error_count INTEGER NOT NULL DEFAULT 0"
    "ALTER TABLE userspace ADD COLUMN error_count INTEGER NOT NULL DEFAULT 0"])
 
+(def v30
+  "A RUN-OWNED BRANCH CEILING.
+
+  beam_width is a repopulation target, not a ceiling: branch-out can grow a
+  run beyond it. Persist the effective per-run ceiling so resume and every
+  branch writer enforce the same bound. Eight is the v30 gates.edn ceiling,
+  preserving existing stores' behavior when they migrate."
+  ["ALTER TABLE runs ADD COLUMN max_total_branches INTEGER NOT NULL DEFAULT 8"])
+
 (def migrations
   "Ordered. Index 0 is migration 1; PRAGMA user_version holds the count applied."
   [v1 v2 v3 v4 v5 v6 v7 v8 v9 v10 v11 v12 v13 v14 v15 v16 v17 v18 v19 v20 v21 v22 v23 v24
-   v25 v26 v27 v28 v29])
+   v25 v26 v27 v28 v29 v30])

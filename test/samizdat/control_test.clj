@@ -131,21 +131,38 @@
   ;; happen inside the run's own thread (on-start), so it can never land
   ;; after the completion dissoc.
   (with-db [c]
-    (with-redefs [beam/run! (fn [{:keys [on-start]}]
+    (let [seen (atom nil)]
+    (with-redefs [beam/run! (fn [{:keys [on-start] :as opts}]
+                              (reset! seen opts)
                               (let [rid (str (random-uuid))]
                                 (on-start rid)
                                 {:run-id rid :status :completed}))]
       (let [r (api-control/start-run! {:conn c :config {:llm {:provider :local}}}
-                                      {:problem "p"})
+                                      {:problem "p" :beam_width 1
+                                       :max_total_branches 1})
             rid (:run_id (:body r))]
         (is (= "running" (:status (:body r))))
+        (is (= 1 (:max-total-branches @seen))
+            "the underscored request key reaches the run")
+        (is (= 1 (get-in r [:body :max_total_branches])))
         (let [gone? (loop [n 0]
                       (cond (nil? (get @api-control/active rid)) true
                             (< n 100) (do (Thread/sleep 10) (recur (inc n)))
                             :else false))]
           (is gone? "no stranded active entry after an instant run"))
         (is (= 409 (:status (api-control/abort! c rid)))
-            "abort on a finished run refuses rather than rewriting status")))))
+            "abort on a finished run refuses rather than rewriting status"))))))
+
+(deftest an-invalid-per-run-branch-ceiling-is-refused-before-start
+  (with-db [c]
+    (let [called? (atom false)]
+      (with-redefs [beam/run! (fn [_] (reset! called? true))]
+        (let [r (api-control/start-run! {:conn c :config {:llm {:provider :local}}}
+                                        {:problem "p" :max_total_branches 0})]
+          (is (= 400 (:status r)))
+          (is (str/includes? (get-in r [:body :error :message])
+                             "positive integer"))
+          (is (false? @called?)))))))
 
 (deftest abort-refuses-when-the-run-won-the-finish-race
   ;; provenance R2-4: the transient window provenance A-3 could not close — the run's own
@@ -546,14 +563,19 @@
   ;; claim a SECOND task, with the old row in_progress and attributed to it
   ;; forever: RFC-008's named worst state for a shared board.
   (with-db [c]
-    (let [rid (runs/start-run! c {:problem "p" :max-turns 10 :beam-width 1})]
+    (let [rid (runs/start-run! c {:problem "p" :max-turns 10 :beam-width 1
+                                  :max-total-branches 1})]
       (runs/open-branch! c rid {:branch-id "B1"})
       (let [t-id (tasks/create! c {:title "the part" :body "do it" :run-id rid})]
         (is (some? (tasks/claim! c t-id rid "B1")))
-        (with-redefs [beam/run-rounds (fn [_ branches _] {:branches branches})]
+        (with-redefs [beam/run-rounds (fn [ctx branches _]
+                                        {:branches branches
+                                         :max-total-branches (:max-total-branches ctx)})]
           (let [r (resume/resume! {:conn c :config {} :llm-adapter :a
                                    :llm-config {} :run-id rid})
                 b (first (:branches r))]
+            (is (= 1 (:max-total-branches r))
+                "resume carries the original run-owned ceiling")
             (is (= t-id (get-in b [:task :id]))
                 "the branch knows what it holds again")
             (is (some :pinned? (:messages b))
@@ -737,16 +759,33 @@
   (with-db [c]
     (let [seen (atom nil)]
       (with-redefs [beam/run!
-                    (fn [{:keys [abort on-start]}]
+                    (fn [{:keys [abort on-start max-total-branches]}]
                       (is (some? abort) "an abort atom reaches the run")
+                      (is (= 1 max-total-branches)
+                          "the validated custom ceiling reaches the OpenAI run")
                       (on-start "r-oai")
                       (reset! seen (contains? @api-control/active "r-oai"))
                       {:status :completed :run-id "r-oai" :answer "a"})]
         (openai/chat-completion {:conn c :config {:llm {:provider :local :model "m"}}}
-                                {:messages [{:role "user" :content "q"}]})
+                                {:messages [{:role "user" :content "q"}]
+                                 :max_total_branches 1})
         (is (true? @seen) "the run was visible to the abort endpoint while live")
         (is (not (contains? @api-control/active "r-oai"))
             "and deregistered when it finished")))))
+
+(deftest chat-completion-refuses-an-invalid-branch-ceiling-before-start
+  (with-db [c]
+    (let [called? (atom false)]
+      (with-redefs [beam/run! (fn [_] (reset! called? true))]
+        (let [r (openai/chat-completion
+                 {:conn c :config {:llm {:provider :local :model "m"}}}
+                 {:messages [{:role "user" :content "q"}]
+                  :max_total_branches 0})]
+          (is (= 400 (:status r)))
+          (is (= "invalid_request_error" (get-in r [:body :error :type])))
+          (is (str/includes? (get-in r [:body :error :message])
+                             "positive integer"))
+          (is (false? @called?)))))))
 
 ;; --- the supervisor's hands -------------------------------------------------
 ;; store/interventions/submit! has always taken :issued-by, and until now no
