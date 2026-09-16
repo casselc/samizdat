@@ -314,6 +314,7 @@
         (runs/reopen-branch! conn run-id (:id b))))
     (let [max-turns (max (or max-turns 0) (:max_turns run))
           width (:beam_width run)
+          max-total-branches (:max_total_branches run)
           turn-rows (journal/turns conn run-id)
           turns (group-by :branch_id turn-rows)
           artifacts (group-by :branch_id (journal/artifacts conn run-id))
@@ -335,6 +336,7 @@
           ctx {:conn conn :run-id run-id :config config :problem (:problem run)
                :llm-adapter llm-adapter :llm-config llm-config
                :max-turns max-turns :beam? (> width 1) :beam-width width
+               :max-total-branches max-total-branches
                ;; The budget the run STARTED under, like max-turns: a resume
                ;; continues the same bound, it does not re-grant it.
                :token-budget (:token_budget run)

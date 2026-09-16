@@ -297,8 +297,8 @@
   The precondition needs facts only the scheduler has (how many are alive, the
   target width, which survivor is strongest), which is why the split is mark
   here, ask there."
-  [{:keys [conn run-id beam-width]} branches total-count turn]
-  (let [cap (gates/threshold :max-total-branches)
+  [{:keys [conn run-id beam-width max-total-branches]} branches total-count turn]
+  (let [cap (or max-total-branches (gates/threshold :max-total-branches))
         cooldown (gates/threshold :fork-invite-cooldown)
         floor (gates/threshold :fork-invite-floor)
         earning? (fn [b]

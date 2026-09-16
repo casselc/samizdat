@@ -1175,6 +1175,30 @@
     (testing "the budget allows a productive branch several forks over a run"
       (is (>= (gates/threshold :max-branch-outs) 5)))))
 
+(deftest branch-out-reads-the-run-owned-ceiling
+  (let [fit (branch-with
+             :artifacts [{:claim "proved" :claim-status :confirmed :turn 1}]
+             :turns (vec (repeat 12 {})))]
+    (is (some #{:branch-out}
+              (map :gate (arbiter/eligible {:branch fit :max-turns 40
+                                            :branch-count 1})))
+        "beam_width=1 is not implicitly a ceiling")
+    (is (not-any? #{:branch-out}
+                  (map :gate (arbiter/eligible {:branch fit :max-turns 40
+                                                :branch-count 1
+                                                :max-total-branches 1})))
+        "the explicit per-run ceiling prevents branch-out")))
+
+(deftest a-per-run-ceiling-can-tighten-but-not-loosen-process-policy
+  (let [hard-cap (gates/threshold :max-total-branches)]
+    (is (= hard-cap (beam/effective-max-total-branches {} nil)))
+    (is (= 1 (beam/effective-max-total-branches {} 1)))
+    (is (= 2 (beam/effective-max-total-branches
+              {:run {:max-total-branches 2}} nil)))
+    (is (= hard-cap (beam/effective-max-total-branches {} (inc hard-cap))))
+    (is (thrown? Exception (beam/effective-max-total-branches {} 0)))
+    (is (thrown? Exception (beam/effective-max-total-branches {} 1.5)))))
+
 (deftest domination-ignores-accumulated-progress
   ;; Survival is about where a line is going, not what it has banked. The
   ;; artifacts a branch already confirmed are in the log and cannot be lost
@@ -1411,6 +1435,10 @@
         (is (nil? (:fork-invited
                    (first (repopulate ctx [strong dead]
                                              (gates/threshold :max-total-branches) 20))))))
+      (testing "a per-run ceiling of one overrides the wider beam target"
+        (is (nil? (:fork-invited
+                   (first (repopulate (assoc ctx :max-total-branches 1)
+                                      [strong dead] 1 20))))))
       (testing "a recent ask is not repeated"
         (is (= 18 (:fork-invited
                    (first (repopulate ctx [(assoc strong :fork-invited 18) dead]

@@ -74,6 +74,18 @@
       (assoc :reasoning-effort
              (pick :reasoning_effort :reasoning-effort "reasoning_effort")))))
 
+(defn branch-cap-result
+  "The validated effective branch ceiling named by one request body.
+
+  Shared by both run-producing HTTP surfaces so invalid input has the same
+  pre-start 400 behavior rather than escaping one of them as a server error."
+  [config body]
+  (let [requested (or (:max_total_branches body)
+                      (:max-total-branches body))]
+    (try
+      {:value (beam/effective-max-total-branches config requested)}
+      (catch Throwable e {:error (ex-message e)}))))
+
 (defn start-run!
   "Kick off a run in the background and return its id immediately.
 
@@ -88,15 +100,25 @@
         beam-width (or (:beam_width body) (:beam-width body))
         token-budget (or (:token_budget body) (:token-budget body))
         seed-run (or (:seed_run body) (:seed-run body))
-        quarantine (or (:quarantine body) (get body "quarantine"))]
+        quarantine (or (:quarantine body) (get body "quarantine"))
+        cap-result (branch-cap-result config body)]
   ;; A {} body used to start a REAL run on a nil problem — a selection model
   ;; call plus a full beam of provider spend answering nothing, while
   ;; /v1/chat/completions 400s the same input (blt.38).
-  (if (str/blank? (str problem))
+  (cond
+    (str/blank? (str problem))
     {:status 400
      :body {:error {:message "a run needs a non-blank `problem`"
                     :type "invalid_request_error"}}}
-  (let [llm-config (run-llm-config (:llm config) body)
+
+    (:error cap-result)
+    {:status 400
+     :body {:error {:message (:error cap-result)
+                    :type "invalid_request_error"}}}
+
+    :else
+  (let [max-total-branches (:value cap-result)
+        llm-config (run-llm-config (:llm config) body)
         adapter (registry/adapter-for (:provider llm-config))
         abort (atom false)
         promised (promise)
@@ -113,6 +135,7 @@
                                           :problem problem
                                           :max-turns max-turns
                                           :beam-width beam-width
+                                          :max-total-branches max-total-branches
                                           :token-budget token-budget
                                           :seed-run seed-run
                                           :quarantine quarantine
@@ -150,6 +173,7 @@
       ;; success and the refusal and neither has to be special-cased.
       {:body {:run_id run-id :status "running"
               :beam_width (or beam-width (get-in config [:run :beam-width]))
+              :max_total_branches max-total-branches
               :max_turns (or max-turns (get-in config [:run :max-turns]))
               :token_budget (or token-budget (get-in config [:run :token-budget]))}}
       ;; 503, not 200: the request was well formed and the server could not

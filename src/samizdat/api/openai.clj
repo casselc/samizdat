@@ -92,6 +92,10 @@
                                     {:usage (:usage r) :harness {:mode "raw"}})})
 
       :else
+      (let [cap-result (api-control/branch-cap-result config body)]
+        (if-let [message (:error cap-result)]
+          {:status 400
+           :body {:error {:message message :type "invalid_request_error"}}}
       ;; Registered in api.control/active like a run started by POST /v1/runs,
       ;; so POST /v1/runs/:id/abort works on it — without the abort atom and
       ;; the registration this run was unabortable for its whole (potentially
@@ -111,6 +115,7 @@
                                            (get-in config [:run :max-turns]))
                             :beam-width (or (:beam_width body) (:beam-width body)
                                             (get-in config [:run :beam-width]))
+                            :max-total-branches (:value cap-result)
                             :token-budget (or (:token_budget body) (:token-budget body)
                                               (get-in config [:run :token-budget]))})
                 (finally
@@ -138,4 +143,4 @@
                                              {:id (:id b) :status (name (:status b))
                                               :confirmed (count (filter #(= :confirmed (:claim-status %))
                                                                         (:artifacts b)))})
-                                           (:branches r))}})}))))
+                                           (:branches r))}})}))))))

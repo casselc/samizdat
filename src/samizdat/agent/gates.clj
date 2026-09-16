@@ -274,6 +274,7 @@
                  ~'branch               (get ~'ctx :branch)
                  ~'max-turns            (get ~'ctx :max-turns)
                  ~'branch-count         (get ~'ctx :branch-count)
+                 ~'max-total-branches   (get ~'ctx :max-total-branches)
                  ~'safe-state-coverage  (get ~'ctx :safe-state-coverage)]
              ~form)))))
 

@@ -407,6 +407,10 @@
                   :root       root
                   :max-turns  (or (env-long "HARNESS_MAX_TURNS") 1000)
                   :beam-width (or (env-long "HARNESS_BEAM_WIDTH") 5)
+                  ;; A per-run ceiling on every branch row, including the
+                  ;; initial beam and children opened by workflow cells. nil
+                  ;; preserves the shipped gates.edn safety ceiling.
+                  :max-total-branches (env-long "HARNESS_MAX_TOTAL_BRANCHES")
                   ;; Tokens the whole run may spend, summed over every turn's
                   ;; total_tokens; nil is unbounded. The beam ends the run
                   ;; :exhausted when it is crossed (karamazov-aqsr.3).

@@ -3058,7 +3058,8 @@
                                (reduce max -1000))]
            ;; Not while the branch is still acting on the last ask.
            (and (state/has-relevant-confirmed? branch)
-                (< (or branch-count 0) (threshold :max-total-branches))
+                (< (or branch-count 0)
+                   (or max-total-branches (threshold :max-total-branches)))
                 (>= (- (state/turn-count branch) last-fired)
                     (threshold :branch-out-cooldown))
                 (< (state/turn-count branch)
