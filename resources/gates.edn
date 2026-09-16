@@ -267,10 +267,11 @@
  {:value 20000 :kind :threshold :capability-tunable? true
   :provenance ["karamazov-zrq"]
   :doc "How long to wait for the sandboxed project image's nREPL port to
-        answer before giving up on it. A cold jolt start is a second or two;
-        this is generous for a loaded machine and short enough that a broken
-        profile fails a run rather than hanging it. Tunable because a large
-        project on a slow box legitimately needs longer.
+        answer before giving up on it. A sandboxed release runtime compiles
+        cold into private scratch rather than a shared host cache; twenty
+        seconds is generous for the qualified runtime and short enough that a
+        broken profile fails a run rather than hanging it. Tunable because a
+        large project or slow box can legitimately need longer.
 
         Shrinking this cannot buy an escape: an image that fails to start
         fails the eval, and NEVER falls back to the harness image

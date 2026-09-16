@@ -62,16 +62,17 @@
   "Whether an OS sandbox is actually in force here.
 
   THE RESOLVED BACKEND, not the config setting. `:sandbox :auto` is what the
-  operator asked for; `backend-for` is what the platform can deliver, and off
-  macOS it is `:none` (karamazov-zrq.8). Guarding on the setting was the bug
-  that made these pass locally and fail on CI's Linux: :auto is not :none, but
-  it resolves to it.
+  operator asked for; `selected-backend` is the same current-host resolver the
+  eval route uses before project-image startup. Guarding on the setting was
+  the first bug;
+  calling a capability-free backend arity was the second — it reported none
+  while the route found and launched bwrap on Linux.
 
   The filesystem assertions below are TWO-SIDED rather than skipped. A test
   that quietly passes on the platform where the protection does not exist
   would hide exactly the gap zrq.8 is open about."
   []
-  (not= :none (sandbox/backend-for :auto (System/getProperty "os.name"))))
+  (not= :none (sandbox/selected-backend :auto)))
 
 ;; --- the door to the unconfined image ---------------------------------------
 
@@ -195,3 +196,18 @@
               "the refusal did not name the tool to reach for instead"))
       (is (:ok r)
           "WITHOUT a sandbox the shell is reachable from the REPL — zrq.8"))))
+
+(deftest fork-refusal-is-rendered-as-policy-only-when-sandboxed
+  ;; Current Jolt reports seccomp's fork refusal in this form rather than the
+  ;; older posix_spawn/EPERM vocabulary. It is policy only when a backend is
+  ;; actually selected; the same words from an unsandboxed process remain an
+  ;; ordinary error.
+  (let [error "process: cannot fork subprocess"
+        rendered (route/denial error "/work/project" true)]
+    (is (str/includes? rendered "not the problem"))
+    (is (str/includes? rendered "tried to start a process"))
+    (is (nil? (route/denial error "/work/project" false)))
+    (is (nil? (route/denial "Syntax error compiling at (REPL:1:7)"
+                            "/work/project" true)))
+    (is (nil? (route/denial "ClassCastException: wrong value shape"
+                            "/work/project" true)))))

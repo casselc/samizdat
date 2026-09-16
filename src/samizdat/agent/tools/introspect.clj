@@ -213,8 +213,9 @@
                     :project (= :project image)
                     :off (= :off image)
                     :backend (clojure.core/name
-                              (sandbox/backend-for (config/eval-sandbox root)
-                                                   (System/getProperty "os.name")))})))
+                              (or (route/image-backend ctx)
+                                  (sandbox/selected-backend
+                                   (config/eval-sandbox root))))})))
 
 (defmethod base/run-tool "introspect" [{:keys [branch conn run-id max-turns] :as ctx}]
   (let [{:keys [name version definition]} (active-manifest ctx)]

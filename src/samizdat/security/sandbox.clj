@@ -54,7 +54,8 @@
      profile written for this leaked /etc/passwd exactly that way. Everything
      here goes through `resolved`."
   (:require [clojure.java.io :as io]
-            [clojure.string :as str]))
+            [clojure.string :as str]
+            [jolt.fs :as fs]))
 
 (defn resolved
   "`path` with symlinks resolved, so a rule about it actually matches.
@@ -245,8 +246,8 @@
 
 (defn deny-read-kinds
   "`paths` split into the directories and the files that exist, which bwrap
-  hides differently, dropping what does not exist. The one impure step; the
-  argv builder takes its answer."
+  hides differently, dropping what does not exist. The impure classification
+  step for deny paths; the argv builder takes its answer."
   [paths]
   (let [fs (map io/file (clean paths))]
     {:deny-dirs (mapv str (filter #(.isDirectory %) fs))
@@ -291,15 +292,28 @@
   dev/linux-sandbox/verify.sh measures what an emulating host can). Ubuntu
   24.04 and later restrict unprivileged user namespaces by default
   (kernel.apparmor_restrict_unprivileged_userns); there bwrap fails to start
-  and the image fails closed the same way."
-  ([setting os-name] (backend-for setting os-name false))
-  ([setting os-name bwrap?]
-   (cond
-     (= :bwrap setting) :bwrap
-     (not= :auto setting) :none
-     (str/starts-with? (str os-name) "Mac OS X") :seatbelt
-     (and (str/starts-with? (str os-name) "Linux") bwrap?) :bwrap
-     :else :none)))
+  and the image fails closed the same way. Pure: callers must state the
+  capability input explicitly; `selected-backend` is the sole current-host
+  resolver."
+  [setting os-name bwrap?]
+  (cond
+    (= :bwrap setting) :bwrap
+    (not= :auto setting) :none
+    (str/starts-with? (str os-name) "Mac OS X") :seatbelt
+    (and (str/starts-with? (str os-name) "Linux") bwrap?) :bwrap
+    :else :none))
+
+(defn selected-backend
+  "Resolve `setting` against the current host's actual capabilities.
+
+  This is the one impure selection seam shared by project-image startup,
+  introspection, and two-sided confinement tests. The `os-name` arity exists
+  only so platform-selection tests can hold the OS input fixed while stubbing
+  executable discovery; bubblewrap availability is never defaulted."
+  ([setting]
+   (selected-backend setting (System/getProperty "os.name")))
+  ([setting os-name]
+   (backend-for setting os-name (some? (fs/which "bwrap")))))
 
 (defn write-profile!
   "Write what `backend` reads at spawn to `path`: the SBPL profile for

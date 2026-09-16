@@ -174,15 +174,14 @@
 
 (deftest auto-resolves-to-the-platform-backend
   (testing "macOS gets seatbelt"
-    (is (= :seatbelt (sandbox/backend-for :auto "Mac OS X"))))
-  (testing "an unverified platform gets nothing rather than a guess"
-    ;; Shipping an untested bubblewrap profile would be a sandbox that reads
-    ;; as protection and is not one. karamazov-zrq.8 carries the Linux
-    ;; backend, to be verified on a real host before :auto selects it.
-    (is (= :none (sandbox/backend-for :auto "Linux")))
-    (is (= :none (sandbox/backend-for :auto "Windows 11"))))
+    (is (= :seatbelt (sandbox/backend-for :auto "Mac OS X" false))))
+  (testing "a platform without an available backend gets nothing"
+    ;; Linux bwrap is qualified, but it is optional host capability. Windows
+    ;; has no supported process sandbox in this implementation.
+    (is (= :none (sandbox/backend-for :auto "Linux" false)))
+    (is (= :none (sandbox/backend-for :auto "Windows 11" false))))
   (testing ":none is honoured everywhere — the container case"
-    (is (= :none (sandbox/backend-for :none "Mac OS X")))))
+    (is (= :none (sandbox/backend-for :none "Mac OS X" true)))))
 
 (deftest wrapping-a-command-is-a-no-op-without-a-backend
   ;; :sandbox :none still gets the subprocess split, which is most of the fix.
@@ -203,11 +202,33 @@
   ;; asks for it by name and fails closed at spawn when it is missing.
   (is (= :bwrap (sandbox/backend-for :auto "Linux" true)))
   (is (= :none (sandbox/backend-for :auto "Linux" false)))
-  (is (= :none (sandbox/backend-for :auto "Linux")))
   (is (= :bwrap (sandbox/backend-for :bwrap "Linux" false)))
   (is (= :seatbelt (sandbox/backend-for :auto "Mac OS X" true)))
   (is (= :none (sandbox/backend-for :none "Linux" true)))
   (is (= :none (sandbox/backend-for :auto "Windows 11" true))))
+
+(deftest selected-backend-is-the-only-current-host-capability-resolver
+  (testing "Linux selects bwrap exactly when executable discovery finds it"
+    (with-redefs [fs/which (fn [program]
+                            (when (= "bwrap" program) "/usr/bin/bwrap"))]
+      (is (= :bwrap (sandbox/selected-backend :auto "Linux"))))
+    (with-redefs [fs/which (constantly nil)]
+      (is (= :none (sandbox/selected-backend :auto "Linux"))
+          "hosts without bwrap preserve the honest no-sandbox behavior")
+      (is (= :bwrap (sandbox/selected-backend :bwrap "Linux"))
+          "explicit bwrap remains fail-closed at spawn when it is absent"))
+    (with-redefs [fs/which (constantly "/usr/bin/bwrap")]
+      (is (= :none (sandbox/selected-backend :none "Linux"))
+          "explicit none is not upgraded by host capability")))
+  (testing "the default arity supplies real current-host inputs"
+    (let [seen (atom nil)]
+      (with-redefs [fs/which (constantly "/qualified/bwrap")
+                    sandbox/backend-for
+                    (fn [setting os-name bwrap?]
+                      (reset! seen [setting os-name bwrap?])
+                      :sentinel)]
+        (is (= :sentinel (sandbox/selected-backend :auto)))
+        (is (= [:auto (System/getProperty "os.name") true] @seen))))))
 
 (defn- run-of
   "Does `argv` contain `run` as consecutive elements?"
