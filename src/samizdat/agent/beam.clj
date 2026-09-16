@@ -584,6 +584,40 @@
     (throw (ex-info "the beam was handed no :turn-workflow — a turn is defined by a manifest, and the scheduler cannot advance a branch without one"
                     {:branch (:id b) :turn turn}))))))
 
+(defn- cancel-started-turns! [pending]
+  (doseq [[b task] pending :when (map? task)]
+    (try
+      ((:cancel task))
+      (catch Throwable e
+        (log/warn "cancelling acquired turn task for branch" (:id b) "failed:"
+                  (ex-message e)))))
+  nil)
+
+(defn- start-turns!
+  "Acquire every turn task or cancel every handle acquired so far.
+
+  Starting an ebb process is a synchronous first-park handshake and can throw.
+  The caller cannot own a partially built vector: without this scope, child 0
+  survives when child 1 fails to start and keeps using the branch's sessions
+  after the round that owned it has already unwound."
+  [ctx branches turn cancelling]
+  (loop [remaining (seq branches), pending []]
+    (if-let [b (first remaining)]
+      (let [entry
+            (try
+              (let [prev (when cancelling (get @cancelling (:id b)))]
+                (if (and prev (not (realized? prev)))
+                  [b ::still-cancelling]
+                  (do
+                    (when prev (swap! cancelling dissoc (:id b)))
+                    [b (cancel/start!
+                        (cancel/spawn #(advance-branch ctx b turn)))])))
+              (catch Throwable e
+                (cancel-started-turns! pending)
+                (throw e)))]
+        (recur (next remaining) (conj pending entry)))
+      pending)))
+
 (defn advance-all
   "One turn for every active branch, concurrently, each under a hard deadline.
 
@@ -622,7 +656,7 @@
                        (str "[harness] " (prompt/render "turn-deadline"
                                            {:seconds (quot (or deadline 0) 1000)})))
                       (update :timeouts (fnil inc 0))))
-        ;; Both passes are `reduce`, not `mapv`: starting a task parks the
+        ;; Both passes avoid lazy sequence bodies: starting a task parks the
         ;; driver at the spawn handshake and awaiting one parks it on the
         ;; signal, and in jolt `mapv` runs its function under a counted lock
         ;; (measured 2026-09-07; ratchet no-park-inside-a-lazy-body). Under
@@ -630,19 +664,11 @@
         ;; "a fiber cannot leave the CPU while its carrier holds a counted
         ;; lock" — and only live, because the tests drove advance-all from a
         ;; plain thread, where a park is a block and nothing is asserted.
-        pending (reduce (fn [acc b]
-                          (let [prev (when cancelling (get @cancelling (:id b)))]
-                            (conj acc
-                                  (if (and prev (not (realized? prev)))
-                                    [b ::still-cancelling]
-                                    (do (when prev (swap! cancelling dissoc (:id b)))
-                                        ;; Each turn is a task the beam holds the
-                                        ;; canceller of. Started with a yield, so all
-                                        ;; five start now rather than each after the
-                                        ;; previous one's prefix.
-                                        [b (cancel/start! (cancel/spawn #(advance-branch ctx b turn)))])))))
-                        []
-                        branches)]
+        ;; Each turn is a task the beam holds the canceller of. Started with a
+        ;; yield, so all five start now rather than each waiting for the
+        ;; previous one's body. Acquisition is scoped: if child N fails to
+        ;; start, start-turns! cancels 0..N-1 before rethrowing.
+        pending (start-turns! ctx branches turn cancelling)]
     (try
       (reduce (fn [acc [b t]]
                 (conj acc
@@ -672,10 +698,10 @@
               []
               pending)
       (catch Throwable e
-        ;; The round itself was cancelled (an abort) with turns in flight:
-        ;; every turn goes down with it before the signal travels on.
-        (when (cancel/control-signal? e)
-          (doseq [[_ t] pending :when (map? t)] ((:cancel t))))
+        ;; Any exceptional exit loses ownership of the pending vector, not
+        ;; only an abort. Every acquired child goes down before the signal
+        ;; travels on; ordinary branch failures arrive as :err values above.
+        (cancel-started-turns! pending)
         (throw e)))))
 
 (defn dispose-branch-engines!
@@ -1082,6 +1108,12 @@
         ;; The tracer's steps can now say which run they belong to; the bus is
         ;; process-wide and the watcher filters on it.
         _ (reset! run-id* run-id)
+        ;; Publish ownership as soon as the durable row exists. Everything
+        ;; below this point can throw (seed copy, project-root setup, Git
+        ;; baseline, session creation); api.control needs the id before any of
+        ;; those operations so its task-level catch can close the row rather
+        ;; than leave an unreachable run claiming `running` forever.
+        _ (when on-start (on-start run-id))
         ;; Seeded before any branch opens, so the first context block a
         ;; branch ever sees can already carry inherited lemmas.
         ;; `quarantine` drops named claims from the inheritance: a row still
@@ -1146,7 +1178,6 @@
     ;; fetches run-detail immediately sees zero branches for a moment; the
     ;; journal poller handles that, and it is the honest picture — the branches
     ;; genuinely do not exist yet.
-    (when on-start (on-start run-id))
     ;; Which loop drove this run, durably: an agent reading a surprising run
     ;; back needs to know which version of itself produced it.
     (journal/note! conn run-id :loop-workflow

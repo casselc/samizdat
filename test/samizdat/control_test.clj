@@ -164,6 +164,95 @@
                              "positive integer"))
           (is (false? @called?)))))))
 
+(deftest an-exceptional-run-task-exit-fails-the-durable-run
+  ;; A failure outside run-rounds' own crash recorder used to be logged only
+  ;; in memory.  The active entry disappeared while the durable row continued
+  ;; to claim `running` forever.
+  (with-db [c]
+    (with-redefs [beam/run! (fn [{:keys [on-start]}]
+                              (let [rid (runs/start-run! c {:problem "p"})]
+                                (on-start rid)
+                                (throw (ex-info "task-level boom" {:phase :test}))))]
+      (let [response (api-control/start-run!
+                      {:conn c :config {:llm {:provider :local}}}
+                      {:problem "p" :beam_width 1 :max_total_branches 1})
+            rid (get-in response [:body :run_id])
+            settled? (loop [n 0]
+                       (cond (nil? (get @api-control/active rid)) true
+                             (< n 100) (do (Thread/sleep 10) (recur (inc n)))
+                             :else false))]
+        (is settled? "the failed task left the active registry")
+        (is (= "failed" (:status (runs/get-run c rid)))
+            "the durable row cannot outlive its failed task as running")
+        (is (some #(= "run-error" (:kind %))
+                  (journal/events-since c rid 0 100))
+            "the durable journal names the task-level failure")))))
+
+(deftest a-task-error-after-a-terminal-winner-is-a-no-op
+  ;; close-exceptional-task! observes the row after the run has already won
+  ;; completion. It must neither rewrite that winner nor append a misleading
+  ;; run-error about a task teardown failure that happened afterward.
+  (with-db [c]
+    (with-redefs [beam/run! (fn [{:keys [on-start]}]
+                              (let [rid (runs/start-run! c {:problem "p"})]
+                                (on-start rid)
+                                (runs/finish-run! c rid :completed "done")
+                                (throw (ex-info "late teardown boom" {}))))]
+      (let [response (api-control/start-run!
+                      {:conn c :config {:llm {:provider :local}}}
+                      {:problem "p" :beam_width 1 :max_total_branches 1})
+            rid (get-in response [:body :run_id])
+            settled? (loop [n 0]
+                       (cond (nil? (get @api-control/active rid)) true
+                             (< n 100) (do (Thread/sleep 10) (recur (inc n)))
+                             :else false))
+            events (journal/events-since c rid 0 100)]
+        (is settled? "the late-failing task left the active registry")
+        (is (= "completed" (:status (runs/get-run c rid)))
+            "the completed winner cannot be overwritten")
+        (is (not-any? #(= "run-error" (:kind %)) events)
+            "a failure after the terminal winner is not journaled as run failure")))))
+
+(deftest a-terminal-winner-between-status-read-and-close-gets-no-run-error
+  ;; Force the actual stale-read interleaving: task failure observes running,
+  ;; completion wins before its guarded failed transition, then the task
+  ;; resumes. The loser must not leave a run-error in the winner's history.
+  (with-db [c]
+    (let [real-get-run runs/get-run
+          observed-running (promise)
+          release-read (promise)
+          intercept? (atom true)]
+      (with-redefs [runs/get-run
+                    (fn [conn rid]
+                      (let [row (real-get-run conn rid)]
+                        (when (and (compare-and-set! intercept? true false)
+                                   (= "running" (:status row)))
+                          (deliver observed-running true)
+                          (deref release-read 2000 nil))
+                        row))
+                    beam/run! (fn [{:keys [on-start]}]
+                                (let [rid (runs/start-run! c {:problem "p"})]
+                                  (on-start rid)
+                                  (throw (ex-info "racing teardown boom" {}))))]
+        (let [response (api-control/start-run!
+                        {:conn c :config {:llm {:provider :local}}}
+                        {:problem "p" :beam_width 1 :max_total_branches 1})
+              rid (get-in response [:body :run_id])]
+          (is (= true (deref observed-running 2000 ::timeout))
+              "task failure reached the stale running read")
+          (is (= 1 (runs/finish-run! c rid :completed "done"))
+              "completion won while the failed closer was paused")
+          (deliver release-read true)
+          (let [settled? (loop [n 0]
+                           (cond (nil? (get @api-control/active rid)) true
+                                 (< n 100) (do (Thread/sleep 10) (recur (inc n)))
+                                 :else false))
+                events (journal/events-since c rid 0 100)]
+            (is settled? "the losing failed task left the active registry")
+            (is (= "completed" (:status (real-get-run c rid))))
+            (is (not-any? #(= "run-error" (:kind %)) events)
+                "the stale failure did not journal over the completion winner")))))))
+
 (deftest abort-refuses-when-the-run-won-the-finish-race
   ;; provenance R2-4: the transient window provenance A-3 could not close — the run's own
   ;; :completed lands between abort!'s registry read and its finish-run!.

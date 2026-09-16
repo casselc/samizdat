@@ -14,9 +14,11 @@
             [mycelium.cell :as cell]
             [samizdat.agent.beam :as beam]
             [samizdat.agent.state :as state]
+            [samizdat.api.control :as api-control]
             [samizdat.cells :as cells]
             [samizdat.llm.client :as llm]
             [samizdat.store.db :as db]
+            [samizdat.store.artifacts :as artifacts]
             [clojure.string :as str]
             [samizdat.store.interventions :as interventions]
             [samizdat.store.journal :as journal]
@@ -217,6 +219,38 @@
         (is (= 1 (:error_count row))))
       (is (some #{:run} @observed) "the instrumented run seam was exercised")
       (finally (hook/uninstall!) (us/unbind!) (db/close c)))))
+
+(deftest a-post-row-setup-failure-is-announced-and-closed
+  ;; Once start-run! has inserted the durable row, every later setup step can
+  ;; fail. The API must own the id before the first such step or its task catch
+  ;; cannot close the otherwise unreachable `running` row.
+  (let [c (db/open! ":memory:")
+        rid* (atom nil)]
+    (try
+      (with-redefs [artifacts/seed-from-run!
+                    (fn [& _] (throw (ex-info "seed setup failed" {})))
+                    llm/chat (fn [& _] {:content "" :finish-reason "stop"})]
+        (let [response (api-control/start-run!
+                        {:conn c
+                         :config {:llm {:provider :local}
+                                  :run {:loop "loop" :root "."}}}
+                        {:problem "p" :seed_run "prior"
+                         :beam_width 1 :max_total_branches 1})
+              rid (get-in response [:body :run_id])
+              _ (reset! rid* rid)
+              settled? (loop [n 0]
+                         (cond (nil? (get @api-control/active rid)) true
+                               (< n 100) (do (Thread/sleep 10) (recur (inc n)))
+                               :else false))]
+          (is (string? rid) "the API learned the id before seed setup failed")
+          (is settled? "the failed task left the active registry")
+          (is (= "failed" (:status (runs/get-run c rid)))
+              "the announced durable row was closed instead of staying running")
+          (is (some #(= "run-error" (:kind %))
+                    (journal/events-since c rid 0 100)))))
+      (finally
+        (when @rid* (swap! api-control/active dissoc @rid*))
+        (db/close c)))))
 
 (deftest teardown-sees-the-branches-as-they-stood-when-the-round-died
   ;; A thrown manifest hands nothing back, so the driver keeps its own window.

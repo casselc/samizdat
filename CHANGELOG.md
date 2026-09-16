@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Close failed run tasks durably instead of leaving false `running` rows,
+  publish run ownership before throwable post-row setup, and cancel every turn
+  task acquired before a partial-start failure.
+
 - Mount Oscope's read-only trace, event, and chart handlers at `/oscope` on
   the existing embedded Samizdat listener, with exact Host validation,
   instrumentation suppression, bounded admission, and drain-before-Durable

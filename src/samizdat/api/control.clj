@@ -36,11 +36,44 @@
             [samizdat.prompt :as prompt]
             [samizdat.store.grants :as grants]
             [samizdat.store.interventions :as interventions]
+            [samizdat.store.journal :as journal]
             [samizdat.store.runs :as runs]))
 
 ;; run-id -> {:future f :abort (atom false)}. A run outlives the request that
 ;; started it, so something has to hold it.
 (defonce active (atom {}))
+
+(defn- close-exceptional-task! [conn run-id e]
+  ;; The beam records failures inside run-rounds, but task setup and teardown
+  ;; sit outside that recorder. If one of those throws after on-start delivered
+  ;; the id, the task is gone and a `running` row is a false liveness claim.
+  ;; Best effort independently: a failed diagnostic write must not prevent the
+  ;; terminal transition, and finish-run!'s row guard preserves an abort or
+  ;; completion that won the race.
+  (when (= "running" (:status (runs/get-run conn run-id)))
+    (if (cancel/control-signal? e)
+      (try (runs/finish-run! conn run-id :aborted nil)
+           (catch Throwable close-error
+             (log/warn "closing cancelled run" run-id "failed:"
+                       (ex-message close-error))))
+      (let [closed? (try
+                      (pos? (runs/finish-run! conn run-id :failed nil))
+                      (catch Throwable close-error
+                        (log/warn "closing failed run" run-id "failed:"
+                                  (ex-message close-error))
+                        false))]
+        ;; Journal only when this task won the terminal transition. A stale
+        ;; `running` read followed by a concurrent completion or abort must
+        ;; not append a misleading run-error to the winner's history.
+        (when closed?
+          (try
+            (journal/note! conn run-id :run-error
+                           {:data {:error (ex-message e)
+                                   :type (some-> (:via (Throwable->map e)) first :type str)
+                                   :phase :task-exit}})
+            (catch Throwable note-error
+              (log/warn "recording task-level failure for run" run-id "failed:"
+                        (ex-message note-error)))))))))
 
 (defn run-llm-config
   "The llm config this run should use, after the request's own overrides.
@@ -157,6 +190,7 @@
                           (log/info "run aborted:" (ex-message e))
                           (log/error "run failed:" (ex-message e)))
                         (when-let [rid (deref promised 0 nil)]
+                          (close-exceptional-task! conn rid e)
                           (swap! active dissoc rid)
                           (approval/abandon! rid))
                         {:status :error :error (ex-message e)})))))
@@ -252,6 +286,7 @@
                             (if (cancel/control-signal? e)
                               (log/info "resume aborted:" (ex-message e))
                               (log/error "resume failed:" (ex-message e)))
+                            (close-exceptional-task! conn run-id e)
                             (swap! active dissoc run-id)
                             {:status :error :error (ex-message e)})))))]
         (reset! cancel* (:cancel started)))
