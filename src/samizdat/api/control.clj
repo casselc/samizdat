@@ -43,7 +43,12 @@
 ;; the request that started it, so something has to own its complete lifetime.
 (defonce active (atom {}))
 
-(defn- close-exceptional-task! [conn run-id e]
+(defn close-exceptional-task!
+  "Best-effort durable closure shared by background and synchronous run
+  owners. Only a still-running row may transition; a terminal winner gets no
+  misleading task-exit event. The initial durable lookup may itself throw;
+  owners that must preserve the task exception must guard this call separately."
+  [conn run-id e]
   ;; The beam records failures inside run-rounds, but task setup and teardown
   ;; sit outside that recorder. If one of those throws after on-start delivered
   ;; the id, the task is gone and a `running` row is a false liveness claim.

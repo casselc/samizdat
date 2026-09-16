@@ -123,6 +123,12 @@
                                               (get-in config [:run :token-budget]))})
                 (catch Throwable failure
                   (reset! outcome [:err failure])
+                  ;; Preserve the synchronous exception contract even if the
+                  ;; durable store or its diagnostics also fail. The guarded
+                  ;; closer preserves any terminal row that already won.
+                  (when-let [rid @run-id*]
+                    (try (api-control/close-exceptional-task! conn rid failure)
+                         (catch Throwable _ nil)))
                   (throw failure))
                 (finally
                   (when-let [rid @run-id*]
