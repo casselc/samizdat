@@ -110,6 +110,26 @@
           (Thread/sleep 100)
           (recur))))))
 
+(declare reap-timeout-ms reaped?)
+
+(defn- delete-image-paths!
+  "Delete image-owned filesystem state after its process is gone."
+  [& paths]
+  (doseq [path paths]
+    (try (when path (fs/delete-tree (io/file path)))
+         (catch Exception _ nil))))
+
+(defn child-env
+  "Scrub `parent-env` for an image and select its Jolt AOT cache policy.
+
+  A sandboxed image gets private writable cache scratch because its home is
+  read-only. An unsandboxed image retains the operator's configured or normal
+  warm cache. Pure so both security-relevant branches are testable on every
+  host."
+  [backend scratch parent-env]
+  (cond-> (secrets/scrub-env parent-env)
+    (not= :none backend) (assoc "JOLT_CACHE_DIR" scratch)))
+
 (defn start!
   "Start a project image at `root` and return it, or nil when it could not be
   started.
@@ -130,7 +150,6 @@
         spec (merge sandbox-spec
                     {:project-root root :scratch-paths [scratch]}
                     (sandbox/deny-read-kinds (:deny-read sandbox-spec)))]
-    (sandbox/write-profile! backend profile spec)
     (let [argv (spawn-argv backend {:profile profile :spec spec} port)
           ;; THE CHILD SEES ONLY A SCRUBBED ENVIRONMENT, the same one the shell
           ;; tool's subprocess gets. boundary-test's security map records the
@@ -141,23 +160,44 @@
           ;; the supervisor it now spawns, and inheriting the harness's
           ;; environment would have handed the model every provider key inside
           ;; a process that can also write files into the project.
-          proc (process/process argv {:dir (str root)
-                                      :env (secrets/scrub-env
-                                            (into {} (System/getenv)))})]
-      (if (await-port! port (connect-timeout-ms))
-        (do (log/info "project image up on" port "rooted at" root
-                      (if (= :none backend) "(unsandboxed)" (str "under " (name backend))))
-            {:proc proc :port port :root (str root) :backend backend
-             :profile profile :scratch scratch
-             ;; Namespaces already created in this image. See eval-in.
-             ;; No shared transport: eval-in connects per call, because a
-             ;; shared one crossed concurrent branches' replies and let a
-             ;; timed-out eval poison every later one.
-             :sessions (atom #{})})
-        (do (log/error "project image did not come up on" port
-                       "— profile at" profile)
-            (try (process/destroy-tree proc) (catch Exception _ nil))
-            nil)))))
+          ;; A release Jolt compiles newly encountered namespaces into its AOT
+          ;; namespace cache (`JOLT_CACHE_DIR` does not relocate gitlibs or
+          ;; other dependency state). The sandbox intentionally makes ~/.jolt
+          ;; read-only: sharing a writable compiler cache with model-controlled
+          ;; code would let one project poison later images or the harness.
+          ;; Give this image its own already-writable, teardown-owned scratch
+          ;; instead. This also makes a cold cache behave like a warm one.
+          env (child-env backend scratch (into {} (System/getenv)))
+          proc (try
+                 ;; Keep this catch strictly around profile preparation and
+                 ;; spawn. Once a process exists, interruption during the
+                 ;; port wait must not delete live profile/cache state.
+                 (sandbox/write-profile! backend profile spec)
+                 (process/process argv {:dir (str root) :env env})
+                 (catch Exception e
+                   (log/error e "project image failed before its port could start" port)
+                   (delete-image-paths! profile scratch profile-dir)
+                   nil))]
+      (when proc
+        (if (await-port! port (connect-timeout-ms))
+          (do (log/info "project image up on" port "rooted at" root
+                        (if (= :none backend) "(unsandboxed)" (str "under " (name backend))))
+              {:proc proc :port port :root (str root) :backend backend
+               :profile profile :profile-dir profile-dir :scratch scratch
+               ;; Namespaces already created in this image. See eval-in.
+               ;; No shared transport: eval-in connects per call, because a
+               ;; shared one crossed concurrent branches' replies and let a
+               ;; timed-out eval poison every later one.
+               :sessions (atom #{})})
+          (do (log/error "project image did not come up on" port)
+              (try (process/destroy-tree proc) (catch Exception _ nil))
+              (if (reaped? proc)
+                (do (delete-image-paths! profile scratch profile-dir)
+                    (log/error "failed project image reaped; removed its profile and scratch"))
+                (log/warn "failed project image did not die within"
+                          (reap-timeout-ms) "ms — retaining profile" profile
+                          "and scratch" scratch))
+              nil))))))
 
 (defn- reap-timeout-ms
   "How long to wait for a killed image to actually be gone. gates.edn
@@ -184,24 +224,25 @@
 
 (defn stop!
   "Tear an image down: close the connection, kill the process TREE, wait for it
-  to actually die, drop the profile. Idempotent and never throws — teardown
-  runs on paths that are already failing, and a teardown that throws loses the
-  original error."
-  [{:keys [proc profile scratch] :as image}]
+  to actually die, then drop its profile, profile directory, and scratch/cache.
+  Idempotent and never throws — teardown runs on paths that are already failing,
+  and a teardown that throws loses the original error."
+  [{:keys [proc profile profile-dir scratch] :as image}]
   (when image
     ;; The process first. Connections are per-eval and owned by their caller;
     ;; killing the image EOFs any that are still open, including one an
     ;; abandoned timeout future is blocked on.
     (try (some-> proc process/destroy-tree) (catch Exception _ nil))
-    (when (and proc (not (reaped? proc)))
-      ;; Say so rather than leaking quietly. A survivor holds a port and a
-      ;; sandbox, and the next run's free-port will simply route around it.
-      (log/warn "project image did not die within" (reap-timeout-ms)
-                "ms — it may be holding port" (:port image)))
-    ;; The profile is the last thing to go: it is evidence while anything is
-    ;; still running, and litter afterwards.
-    (doseq [d [profile scratch]]
-      (try (when d (fs/delete-tree (io/file d))) (catch Exception _ nil))))
+    (let [dead? (or (nil? proc) (reaped? proc))]
+      (if dead?
+        ;; Confinement evidence and writable cache remain intact until the
+        ;; process is gone; afterwards they are only litter.
+        (delete-image-paths! profile scratch profile-dir)
+        ;; Say so rather than leaking quietly. A survivor holds a port and a
+        ;; sandbox, and the next run's free-port will simply route around it.
+        (log/warn "project image did not die within" (reap-timeout-ms)
+                  "ms — it may be holding port" (:port image)
+                  "and its profile and scratch were retained"))))
   nil)
 
 (defn- collect

@@ -29,7 +29,8 @@
             [jolt.fs :as fs]
             [samizdat.repl.image :as image]
             [samizdat.repl.route :as route]
-            [samizdat.security.sandbox :as sandbox]))
+            [samizdat.security.sandbox :as sandbox]
+            [samizdat.security.secrets :as secrets]))
 
 ;; --- pure -------------------------------------------------------------------
 
@@ -51,11 +52,43 @@
                                        (+ 2 (.indexOf argv "--seccomp")))))
       (is (= (into ["--"] image-cmd) (subvec argv (- (count argv) 6)))))))
 
+(deftest child-environment-isolates-only-sandboxed-aot-caches
+  (let [parent {"JOLT_CACHE_DIR" "/host/warm-cache"
+                "OPENAI_API_KEY" "must-not-reach-child"
+                "PATH" "/usr/bin"}]
+    (is (= "/host/warm-cache"
+           (get (image/child-env :none "/private/scratch" parent)
+                "JOLT_CACHE_DIR"))
+        "an unsandboxed container retains its configured warm cache")
+    (doseq [backend [:bwrap :seatbelt]]
+      (let [env (image/child-env backend "/private/scratch" parent)]
+        (is (= "/private/scratch" (get env "JOLT_CACHE_DIR")))
+        (is (not (contains? env "OPENAI_API_KEY")))))
+    (is (= "/usr/bin"
+           (get (image/child-env :bwrap "/private/scratch" parent) "PATH")))))
+
 (deftest free-port-is-actually-free
   (let [p (image/free-port)]
     (is (pos? p))
     (is (with-open [s (java.net.ServerSocket. p)] (= p (.getLocalPort s)))
         "free-port handed back a port something was already holding")))
+
+(deftest failed-spawn-preparation-removes-both-temp-trees
+  (let [scratch (fs/create-temp-dir)
+        profile-dir (fs/create-temp-dir)
+        dirs (atom [scratch profile-dir])]
+    (with-redefs [fs/create-temp-dir
+                  (fn [] (let [d (first @dirs)]
+                           (swap! dirs rest)
+                           d))
+                  sandbox/write-profile!
+                  (fn [& _] (throw (ex-info "profile probe" {})))]
+      (is (nil? (image/start! {:root (str (fs/cwd))
+                               :backend :none
+                               :sandbox-spec {:deny-read []
+                                              :exec-roots []}}))))
+    (is (not (.exists (java.io.File. (str scratch)))))
+    (is (not (.exists (java.io.File. (str profile-dir)))))))
 
 ;; --- the running image ------------------------------------------------------
 
@@ -75,10 +108,8 @@
         home (System/getenv "HOME")
         escape (str home "/SAMIZDAT-IMAGE-TEST-ESCAPE.txt")
         im (image/start! {:root root
-                          ;; Whatever :auto resolves to on this host, which is
-                          ;; what a run would get.
-                          :backend (sandbox/backend-for :auto (System/getProperty "os.name")
-                                                        (some? (fs/which "bwrap")))
+                          ;; The same current-host resolver production uses.
+                          :backend (sandbox/selected-backend :auto)
                           :sandbox-spec {:deny-read [(str home "/.ssh") "/etc"
                                                     (str (fs/cwd))]
                                          ;; The runtime's own directory. /usr/bin
@@ -90,6 +121,18 @@
       (when im
         (testing "it evaluates"
           (is (= "3" (:value (image/eval-in im "(+ 1 2)")))))
+
+        (testing "its compiler cache matches the selected confinement"
+          (let [actual (:value (image/eval-in im
+                                              "(System/getenv \"JOLT_CACHE_DIR\")"))]
+            (if (= :none (:backend im))
+              (is (= (pr-str (get (secrets/scrub-env
+                                    (into {} (System/getenv)))
+                                   "JOLT_CACHE_DIR"))
+                     actual)
+                  "an unsandboxed image must inherit the operator's warm-cache setting")
+              (is (= (pr-str (:scratch im)) actual)
+                  "a sandboxed image must use private writable cache scratch"))))
 
         (testing "relative paths resolve in the PROJECT, not the harness"
           ;; The bug warn-if-not-cwd! exists to shout about. A harness-rooted
@@ -132,10 +175,8 @@
 (deftest stopping-an-image-kills-it-and-is-idempotent
   (let [root (project!)
         im (image/start! {:root root
-                          ;; Whatever :auto resolves to on this host, which is
-                          ;; what a run would get.
-                          :backend (sandbox/backend-for :auto (System/getProperty "os.name")
-                                                        (some? (fs/which "bwrap")))
+                          ;; The same current-host resolver production uses.
+                          :backend (sandbox/selected-backend :auto)
                           :sandbox-spec {:deny-read []
                                          :exec-roots (route/runtime-exec-roots)}})]
     (is (some? im))
@@ -144,7 +185,8 @@
       (image/stop! im)
       (is (not (image/alive? im)) "the image survived its own teardown")
       (testing "the profile does not outlive the image it confined"
-        (is (not (.exists (java.io.File. ^String (:profile im))))))
+        (is (not (.exists (java.io.File. ^String (:profile im)))))
+        (is (not (.exists (java.io.File. ^String (:profile-dir im))))))
       (testing "stopping twice is not an error"
         (is (nil? (image/stop! im)))))))
 
@@ -164,10 +206,8 @@
   ;; isolation exists to prevent.
   (let [root (project!)
         im (image/start! {:root root
-                          ;; Whatever :auto resolves to on this host, which is
-                          ;; what a run would get.
-                          :backend (sandbox/backend-for :auto (System/getProperty "os.name")
-                                                        (some? (fs/which "bwrap")))
+                          ;; The same current-host resolver production uses.
+                          :backend (sandbox/selected-backend :auto)
                           :sandbox-spec {:deny-read []
                                          :exec-roots (route/runtime-exec-roots)}})]
     (try
@@ -190,6 +230,9 @@
         ctx {:root root :role :implementor}]
     (try
       (is (= "3" (:value (route/eval-for ctx "(+ 1 2)" nil 25000))))
+      (is (= (sandbox/selected-backend :auto)
+             (route/image-backend ctx))
+          "the route must report the backend of the image actually serving")
       (let [t (route/eval-for ctx "(loop [] (recur))" nil 3000)]
         (is (:timeout? t))
         (is (= "timeout" (:error-type t))))

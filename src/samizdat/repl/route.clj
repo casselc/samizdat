@@ -139,6 +139,11 @@
   [{:keys [root]}]
   (some-> (get @images root) :port))
 
+(defn image-backend
+  "The backend of the live image for `ctx`'s root, or nil before one starts."
+  [{:keys [root]}]
+  (some-> (get @images root) :backend))
+
 (defn release-all!
   "Stop every image. For shutdown, and for tests that must not leak a process."
   []
@@ -148,8 +153,9 @@
 ;; --- making a refusal legible ------------------------------------------------
 
 (def ^:private exec-refusal
-  "What the kernel says when the sandbox refused to start a process."
-  #"posix_spawn|Operation not permitted|Permission denied|EPERM")
+  "Kernel refusal strings, including Jolt's whole-phrase rendering of the
+  seccomp EPERM returned while forking a subprocess."
+  #"posix_spawn|cannot fork subprocess|Operation not permitted|Permission denied|EPERM")
 
 (defn- exec-attempt? [s]
   (boolean (re-find #"posix_spawn|process|sh\b|exec" (str s))))
@@ -163,8 +169,10 @@
   otherwise be dressed up as policy and the model told its code is fine, which
   is the same wrong-answer-that-looks-right this whole seam exists to remove.
   Under `:sandbox :none` nothing here can be a kernel refusal at all. The
-  residual case — a genuine in-project permission error while the sandbox IS
-  on — still mislabels, and narrowing that needs the path out of the message."
+  residual cases — a genuine in-project permission error, or Jolt rendering a
+  non-policy fork failure such as resource exhaustion with the same phrase,
+  while the sandbox IS on — still mislabel. Narrowing those needs the path or
+  errno out of the runtime message."
   [error root sandboxed?]
   (when (and error sandboxed? (re-find exec-refusal (str error)))
     (prompt/render "image-denied"
@@ -222,9 +230,7 @@
                        "confining to nothing")
             {:ok false :error-type "image-down"
              :error (prompt/render "image-down" {})})
-        (let [backend (sandbox/backend-for (config/eval-sandbox root)
-                                           (System/getProperty "os.name")
-                                           (some? (fs/which "bwrap")))]
+        (let [backend (sandbox/selected-backend (config/eval-sandbox root))]
           (if-let [im (image-for! root backend)]
           ;; Bounded by the image itself (RFC-013): at the deadline the image
           ;; is asked to interrupt the eval, which stops even a tight loop at
@@ -245,7 +251,7 @@
                             "ms and did not answer the interrupt — image restarted")
                   {:ok false :error-type "timeout" :timeout? true
                    :error (prompt/render "image-timeout" {:ms timeout})})
-              :else (legible r root (not= :none backend))))
+              :else (legible r root (not= :none (:backend im)))))
             {:ok false :error-type "image-down"
              :error (prompt/render "image-down" {})}))))))
 

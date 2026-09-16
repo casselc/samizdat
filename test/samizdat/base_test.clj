@@ -375,10 +375,11 @@
                   rename its way past it."}}
 
    "src/samizdat/repl/route.clj"
-   {:vocabulary {"posix_spawn|Operation not permitted|Permission denied|EPERM"
-                 "What the KERNEL says when the sandbox refuses. Protocol
-                  strings from the OS, like the LSP header below — not a
-                  vocabulary anyone tunes, and widening it would only make
+   {:vocabulary {"posix_spawn|cannot fork subprocess|Operation not permitted|Permission denied|EPERM"
+                 "Exact kernel-refusal strings plus Jolt's whole-phrase
+                  rendering of seccomp EPERM while forking. These are runtime
+                  protocol text, not vocabulary a project tunes; keep every
+                  alternative narrow because broader matching would make
                   ordinary failures read as policy refusals."
                  "posix_spawn|process|sh\\b|exec"
                  "Which half of the refusal message to show — the exec advice

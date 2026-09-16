@@ -6,6 +6,14 @@
   and telemetry shutdown, including already-terminal exhausted runs, so the
   outer `run` and `run.rounds` spans finish and export before the SDK closes.
 
+- Make project-image startup, introspection, and confinement tests share one
+  capability-aware sandbox backend resolver, including installed bwrap on
+  Linux while preserving explicit no-backend behavior where it is absent.
+  Render Jolt's exact seccomp fork-refusal message as a sandbox policy refusal
+  instead of an opaque runtime error, and give each sandboxed image a private
+  scratch-backed Jolt compiler cache so cold release-runtime startup succeeds
+  without exposing the host's shared cache to project code.
+
 - Close failed run tasks durably instead of leaving false `running` rows,
   publish run ownership before throwable post-row setup, and cancel every turn
   task acquired before a partial-start failure.
