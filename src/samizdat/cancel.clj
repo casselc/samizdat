@@ -102,14 +102,19 @@
   asks it to stop at its next check. Two settlements because they answer two
   questions: `realized?` on the promise says whether a cancelled task has
   terminated yet (the beam's :cancelling registry), and parking on the
-  variable is how a fiber waits for it without blocking its carrier."
-  [task]
-  (let [done (promise)
-        signal (ebb/dfv)
-        settle (fn [r] (deliver done r) (signal r))
-        cancel (task (fn [v] (settle [:ok v]))
-                     (fn [e] (settle [:err e])))]
-    {:done done :signal signal :cancel cancel}))
+  variable is how a fiber waits for it without blocking its carrier.
+
+  The two-argument form accepts the promise the owner will publish before the
+  task can finish. That keeps one canonical completion capability across the
+  scheduler and an external ownership registry; attaching it after start!
+  would leave a shutdown race with a half-published owner."
+  ([task] (start! task (promise)))
+  ([task done]
+   (let [signal (ebb/dfv)
+         settle (fn [r] (deliver done r) (signal r))
+         cancel (task (fn [v] (settle [:ok v]))
+                      (fn [e] (settle [:err e])))]
+     {:done done :signal signal :cancel cancel})))
 
 (defn await-or-cancel
   "Park on a started task's signal for up to `ms` (nil: no bound). Returns

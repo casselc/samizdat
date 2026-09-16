@@ -238,6 +238,15 @@
         Two minutes covers a slow selection call under load without letting a
         client hang forever on a provider that never answers."}
 
+ :active-run-stop-timeout-ms
+ {:value 15000 :kind :threshold :capability-tunable? false
+  :provenance ["casselc/samizdat#35"]
+  :doc "One process-wide bound for every active run task to finish teardown
+        before its database and telemetry dependencies close. This is not a
+        per-run allowance: all owners share one deadline, so shutdown remains
+        bounded when several runs are active. It is not capability-tunable
+        because a run must not extend the lifetime of process-owned resources."}
+
  :git-snapshot-ttl-ms
  {:value 3000 :kind :threshold :capability-tunable? true
   :provenance ["karamazov-uk77" "dirge-vuzz"]

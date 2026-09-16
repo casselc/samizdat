@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Await the canonical completion of every owned Ebb run task before database
+  and telemetry shutdown, including already-terminal exhausted runs, so the
+  outer `run` and `run.rounds` spans finish and export before the SDK closes.
+
 - Close failed run tasks durably instead of leaving false `running` rows,
   publish run ownership before throwable post-row setup, and cancel every turn
   task acquired before a partial-start failure.

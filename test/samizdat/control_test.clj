@@ -153,6 +153,73 @@
         (is (= 409 (:status (api-control/abort! c rid)))
             "abort on a finished run refuses rather than rewriting status"))))))
 
+(deftest shutdown-owns-the-canonical-task-completion-through-terminal-teardown
+  ;; Regression for #35: the Durable row may be terminal before beam/run!
+  ;; unwinds its outer run and run.rounds scopes. Shutdown must not interpret
+  ;; terminal as "the task is gone", and must not cancel normal teardown.
+  (with-db [c]
+    (let [terminal (promise)
+          release (promise)
+          abort-seen (atom nil)]
+      (with-redefs [beam/run! (fn [{:keys [on-start abort]}]
+                                (let [rid (runs/start-run! c {:problem "p"})]
+                                  (on-start rid)
+                                  (runs/finish-run! c rid :exhausted nil)
+                                  (deliver terminal rid)
+                                  (deref release 2000 nil)
+                                  (reset! abort-seen @abort)
+                                  {:run-id rid :status :exhausted}))]
+        (let [response (api-control/start-run!
+                        {:conn c :config {:llm {:provider :local}}}
+                        {:problem "p" :beam_width 1 :max_total_branches 1})
+              rid (get-in response [:body :run_id])
+              done (get-in @api-control/active [rid :done])
+              terminal-rid (deref terminal 2000 ::timeout)
+              stopping (future (system/stop-active-runs! c 2000))]
+          (is (= rid terminal-rid))
+          (is (some? done) "the owner publishes :done with the run id")
+          (is (not (realized? done)) "terminal storage does not imply task teardown")
+          (Thread/sleep 20)
+          (is (not (realized? stopping)) "shutdown waits for terminal task teardown")
+          (deliver release true)
+          (is (= :stopped (deref stopping 2000 ::timeout)))
+          (is (false? @abort-seen) "an exhausted task finishes without cancellation")
+          (is (realized? done))
+          (is (not (contains? @api-control/active rid))
+              "the completing task removes its active ownership"))))))
+
+(deftest shutdown-orders-live-abort-before-cancel-and-await
+  (with-db [c]
+    (let [rid (runs/start-run! c {:problem "p"})
+          abort (atom false)
+          done (promise)
+          calls (atom [])]
+      (swap! api-control/active assoc rid
+             {:abort abort
+              :done done
+              :cancel (fn []
+                        (swap! calls conj (if @abort :cancel-after-abort :cancel-before-abort))
+                        (deliver done [:ok :cancelled]))})
+      (try
+        (is (= :stopped (system/stop-active-runs! c 2000)))
+        (is (= [:cancel-after-abort] @calls))
+        (finally (swap! api-control/active dissoc rid))))))
+
+(deftest shutdown-surfaces-a-bounded-missing-or-hung-owner
+  (with-db [c]
+    (let [rid (runs/start-run! c {:problem "p"})]
+      (swap! api-control/active assoc rid {:abort (atom false) :done (promise)})
+      (try
+        (let [failure (try (system/stop-active-runs! c 1)
+                           (catch Throwable error error))]
+          (is (= :samizdat.system/active-runs-did-not-stop
+                 (:type (ex-data failure))))
+          (is (= 1 (:count (ex-data failure))))
+          (is (= 1 (:timeout-ms (ex-data failure))))
+          (is (not (contains? (ex-data failure) :run-ids))
+              "diagnostics stay bounded and identity-free"))
+        (finally (swap! api-control/active dissoc rid))))))
+
 (deftest an-invalid-per-run-branch-ceiling-is-refused-before-start
   (with-db [c]
     (let [called? (atom false)]

@@ -170,6 +170,14 @@ configure the ordinary server and model runtime.
 
 Application ingress and resources stop before the embedded owner drains its
 SDK, closes the Oscope source, checkpoints Durable, and closes the connection.
+Run ownership covers task teardown, not only the Durable status transition:
+shutdown cancels rows that are still running, then boundedly awaits every
+snapshotted task's canonical completion. Already-terminal rows such as
+`exhausted` are not cancelled while their outer `run` and `run.rounds` scopes
+unwind. This ordering ensures those root spans are ended and handed to the SDK
+before application stop lets the embedded owner flush and close it. A missing
+or non-terminating owner produces one bounded, identity-free shutdown failure;
+resource cleanup remains best effort after that bound.
 The same listener now serves the borrowed read-only Oscope UI at `/oscope`:
 charts and distributions at `/oscope`, the trace/correlated-log workbench at
 `/oscope/telemetry`, and logs/metrics at `/oscope/events`. Only the exact mount

@@ -70,6 +70,45 @@
   []
   (registry/adapter-for (get-in @system [:config :llm :provider])))
 
+(defn stop-active-runs!
+  "Request cancellation only from runs whose durable row is still live, then
+  await every snapshotted task's canonical :done promise within one shared
+  bound. Terminal rows (including exhausted) are allowed to finish normal
+  teardown so their outer telemetry spans can close. Throws bounded metadata
+  when an owner is missing or does not terminate; callers may continue their
+  best-effort resource cleanup after surfacing that failure."
+  ([conn] (stop-active-runs! conn (lexicon/policy :active-run-stop-timeout-ms)))
+  ([conn timeout-ms]
+   (let [owned @api-control/active
+         deadline (+ (System/currentTimeMillis) timeout-ms)]
+     (doseq [[rid {:keys [abort cancel]}] owned]
+       (let [terminal? (try
+                         (runs/terminal? (runs/get-run conn rid))
+                         (catch Throwable _ false))]
+         (when-not terminal?
+           (when abort (reset! abort true))
+           ;; The abort flag is the durable request; cancellation is the
+           ;; prompt scheduler wake-up. A broken canceller must not prevent
+           ;; the remaining owners from receiving their request or being
+           ;; awaited against the shared deadline.
+           (when cancel
+             (try (cancel) (catch Throwable _ nil))))))
+     (let [incomplete
+           (reduce
+            (fn [ids [rid {:keys [done]}]]
+              (let [remaining (max 0 (- deadline (System/currentTimeMillis)))]
+                (if (and done (not= ::hung (deref done remaining ::hung)))
+                  ids
+                  (conj ids rid))))
+            [] owned)]
+       (when (seq incomplete)
+         (throw
+          (ex-info "active run tasks did not stop within the shutdown bound"
+                   {:type ::active-runs-did-not-stop
+                    :count (count incomplete)
+                    :timeout-ms timeout-ms})))
+       :stopped))))
+
 (defn bind-project!
   "Point userspace at this project's store, THEN reload every policy table.
 
@@ -225,28 +264,23 @@
 (defn stop!
   "Tear the system down. Best effort per resource: one failing close must not
   strand the others, which is the whole reason the RAX manager could always
-  stop the Lisp task regardless of what the agent believed."
+  stop the Lisp task regardless of what the agent believed. An active task
+  that exceeds its shared bound is still surfaced after those best-effort
+  closes, rather than being reduced to a log line."
   []
   (when-let [s @system]
-    (doseq [[label f] [;; Active runs FIRST, before anything they depend on
-                       ;; closes under them: set every abort flag and give the
-                       ;; run threads a bounded window to reach a boundary and
-                       ;; journal their ending. Tearing the db down while run
-                       ;; futures kept executing meant their writes — including
-                       ;; the crash record — landed on a closed handle, and a
-                       ;; restart!'s reconcile-orphans! marked still-executing
-                       ;; runs interrupted while their threads kept going
-                       ;; (karamazov-blt.14).
-                       ["active runs"
-                        #(let [runs @api-control/active]
-                           (doseq [[_ {:keys [abort]}] runs]
-                             (when abort (reset! abort true)))
-                           (doseq [[rid {:keys [future]}] runs]
-                             (when future
-                               (when (= ::hung (deref future 15000 ::hung))
-                                 (log/warn "run" rid "did not stop within 15s;"
-                                           "closing the system under it")))))]
-                       ["http server" #(adapter/stop-server (:server s))]
+    ;; Active runs FIRST, before anything they depend on closes under them:
+    ;; cancel live work and give every owned task a bounded window to finish
+    ;; teardown and journal its ending. Tearing the db down while run tasks
+    ;; kept executing meant their writes — including the crash record — landed
+    ;; on a closed handle (karamazov-blt.14). Preserve this failure while still
+    ;; retiring every independent resource below.
+    (let [active-failure (try (stop-active-runs! (:conn s)) nil
+                              (catch Throwable error
+                                (log/warn "stopping active runs failed:"
+                                          (ex-message error))
+                                error))]
+      (doseq [[label f] [["http server" #(adapter/stop-server (:server s))]
                        ;; After the server, so a request in flight can still
                        ;; read the trace it was serving; the rings go with it.
                        ["step pump" #(do (steps/stop-pump!) (steps/reset!))]
@@ -261,9 +295,11 @@
                        ["userspace" #(do (userspace/unbind!)
                                          (userspace/bind-root! nil))]
                        ["database" #(db/close (:conn s))]]]
-      (try (f) (catch Throwable e (log/warn "stopping" label "failed:" (ex-message e)))))
-    (reset! system nil)
-    :stopped))
+        (try (f) (catch Throwable e (log/warn "stopping" label "failed:" (ex-message e)))))
+      (reset! system nil)
+      (if active-failure
+        (throw active-failure)
+        :stopped))))
 
 (defn restart!
   ([handler] (restart! handler nil))

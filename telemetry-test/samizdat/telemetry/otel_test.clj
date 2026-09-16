@@ -28,6 +28,10 @@
             [otel.trace :as trace]
             [samizdat.agent.tools :as tools]
             [samizdat.agent.tools.base :as tool-base]
+            [samizdat.api.control :as api-control]
+            [samizdat.store.db :as db]
+            [samizdat.store.runs :as runs]
+            [samizdat.system :as system]
             [samizdat.telemetry.contract :as contract]
             [samizdat.telemetry.hook :as hook]
             [samizdat.telemetry.otel :as tel]))
@@ -52,6 +56,52 @@
   (memory/spans *mem*))
 
 (defn- by-name [n] (first (filter #(= n (:name %)) (exported))))
+
+(deftest shutdown-awaits-exhausted-root-spans-before-the-sdk-closes
+  ;; The real-model reproduction stored seven inner families but omitted the
+  ;; two outer scopes because shutdown looked for stale :future ownership.
+  ;; Model the exact boundary: Durable is exhausted while both root scopes are
+  ;; still open, then prove shutdown waits before the SDK is closed/exported.
+  (let [conn (db/open! ":memory:")
+        rid (runs/start-run! conn {:problem "p"})
+        terminal (promise)
+        release (promise)
+        done (promise)
+        worker (future
+                 (try
+                   (hook/observe! :run {:provider :local :model "m" :problem "p"
+                                        :max-turns 1 :beam-width 1}
+                     (fn []
+                       (hook/observe! :control-loop {:run-id rid :start-turn 1 :branches 1}
+                         (fn []
+                           (swap! api-control/active assoc rid
+                                  {:abort (atom false) :done done})
+                           (runs/finish-run! conn rid :exhausted nil)
+                           (deliver terminal true)
+                           (deref release 2000 nil)
+                           {:status :exhausted}))
+                       {:status :exhausted :run-id rid}))
+                   (finally
+                     (swap! api-control/active dissoc rid)
+                     (deliver done [:ok :finished]))))]
+    (try
+      (is (= true (deref terminal 2000 ::timeout)))
+      (let [stopping (future (system/stop-active-runs! conn 2000))]
+        (Thread/sleep 20)
+        (is (not (realized? stopping)))
+        (is (empty? (memory/spans *mem*))
+            "neither open root scope exported early")
+        (deliver release true)
+        (is (= :stopped (deref stopping 2000 ::timeout)))
+        (is (not= ::timeout (deref worker 2000 ::timeout)))
+        (tel/shutdown!)
+        (is (= #{"run" "run.rounds"}
+               (set (map :name (memory/spans *mem*))))
+            "both exhausted root scopes export before SDK shutdown"))
+      (finally
+        (deliver release true)
+        (swap! api-control/active dissoc rid)
+        (db/close conn)))))
 
 (deftest execution-span-carries-typed-facts
   (tel/with-execution [sp "execution" {"samizdat.run.id" "r1"
