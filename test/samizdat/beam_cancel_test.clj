@@ -98,6 +98,23 @@
         (is (= :abandoned (:status r)))
         (is (re-find #"kaboom" (str (:inactive-reason r))))))))
 
+(deftest partial-turn-task-acquisition-cancels-every-child-already-started
+  ;; If starting child N throws, children 0..N-1 are already live and owned by
+  ;; this scope.  The acquisition itself used to sit outside advance-all's try,
+  ;; so none of those handles were cancelled on the exceptional path.
+  (let [starts (atom 0)
+        cancels (atom 0)
+        branches [(state/new-branch {:id "B1" :problem "p"})
+                  (state/new-branch {:id "B2" :problem "p"})]]
+    (with-redefs [cancel/start! (fn [_]
+                                  (if (= 1 (swap! starts inc))
+                                    {:cancel #(swap! cancels inc)
+                                     :done (promise) :signal (ebb/dfv)}
+                                    (throw (ex-info "start failed" {}))))]
+      (is (thrown? Throwable (beam/advance-all (ctx 2000) branches 1)))
+      (is (= 1 @cancels)
+          "the successfully acquired child is cancelled before the error escapes"))))
+
 (deftest abort-cancels-the-run-task
   ;; The abort flag becomes a cancel of the run task. A run parked in a
   ;; provider call (here, a sleep) comes back cancelled at once, not at the
@@ -144,11 +161,59 @@
 (deftest advancing-a-branch-whose-turn-parks-works-on-a-fiber
   (let [b (state/new-branch {:id "B1" :problem "p"})]
     (with-redefs [beam/advance-branch (fn [_ b _]
-                                        (ebb/? (ebb/sleep 20))
+                                        ;; A provider call leaves the fiber for a
+                                        ;; blocking host thread; an ebb sleep alone
+                                        ;; does not exercise that hand-back state.
+                                        (ebb/? (ebb/via ebb/blk
+                                                        (do (Thread/sleep 20) :reply)))
                                         (assoc b :advanced true))]
       (let [[r] (ebb/? (ebb/sp (beam/advance-all (ctx 2000) [b] 1)))]
         (is (true? (:advanced r)) "the turn ran and its result came back")
         (is (nil? (:timeouts r)))))))
+
+(deftest a-request-thread-can-start-a-run-with-a-parking-first-turn
+  ;; The real HTTP adapter invokes the synchronous route on a Jolt future,
+  ;; which aa0e implements with fork-thread rather than a fiber. That route
+  ;; starts the run fiber, and advance-all starts a child turn fiber. This
+  ;; request-thread -> run-task -> turn-task hierarchy is the shape that
+  ;; failed before the first durable turn in the real-model demo.
+  (let [c (db/open! ":memory:")
+        rid* (atom nil)
+        b (state/new-branch {:id "B1" :problem "p"})
+        stage (atom :request)]
+    (try
+      (with-redefs [beam/advance-branch (fn [_ b _]
+                                          (ebb/? (ebb/via ebb/blk
+                                                          (do (Thread/sleep 20) :reply)))
+                                          (assoc b :advanced true))
+                    beam/run! (fn [{:keys [on-start]}]
+                                (reset! stage :run-task)
+                                (let [rid (runs/start-run! c {:problem "p"})]
+                                  (reset! rid* rid)
+                                  (on-start rid)
+                                  (reset! stage :before-turn)
+                                  (let [[r] (beam/advance-all (ctx 2000) [b] 1)]
+                                    (reset! stage :after-turn)
+                                    (runs/finish-run! c rid :completed nil)
+                                    (reset! stage :completed)
+                                    {:run-id rid :status :completed :branches [r]})))]
+        (let [request (future
+                        (api-control/start-run!
+                         {:conn c :config {:llm {:provider :local :model "fake"}}}
+                         {:problem "p" :beam_width 1 :max_total_branches 1}))
+              response (deref request 3000 ::timeout)]
+          (is (not= ::timeout response) "the request returned the durable run id")
+          (is (= @rid* (get-in response [:body :run_id])))
+          (let [terminal? (loop [n 0]
+                            (cond (= "completed" (:status (runs/get-run c @rid*))) true
+                                  (< n 300) (do (Thread/sleep 10) (recur (inc n)))
+                                  :else false))]
+            (when-not terminal? (api-control/abort! c @rid*))
+            (is terminal? (str "the first parking turn settled and the run closed; stage=" @stage
+                               " active=" (contains? @api-control/active @rid*))))))
+      (finally
+        (when @rid* (swap! api-control/active dissoc @rid*))
+        (db/close c)))))
 
 (deftest scoring-a-branch-whose-critic-parks-works-on-a-fiber
   (let [b (state/new-branch {:id "B1" :problem "p"})]
