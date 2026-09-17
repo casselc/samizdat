@@ -2363,6 +2363,13 @@
           :tree-lines          8
           :keep-pairs          10
           :compaction-chars    50000
+          ;; How many exchanges the compaction frontier moves by at once
+          ;; (karamazov-pdes). Measured on run 5e78b96a: advancing one
+          ;; exchange per turn re-prefilled the whole verbatim window on
+          ;; every call, a quarter of every request. At 4, three turns in
+          ;; four send a byte-identical history and the window floats
+          ;; between 10 and 13 exchanges. 1 is the old behaviour.
+          :compaction-batch    4
           :diff-chars          12000
           :shell-output-chars  8000
           :shared-code-chars   700

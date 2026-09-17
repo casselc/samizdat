@@ -158,6 +158,15 @@ cache-safe force.** Measured live 2026-09-06:
   clusters at terminal gates, so the cost is ~one full-prompt miss per branch on
   GLM — accepted, since GLM cannot prefill and the alternative (a constant tools
   block) does not help.
+- **What that costs, measured** (karamazov-o4wm.7, endless-flight run
+  5f8de58c, GLM-5.3, 1023 turns): only gates naming a forceable tool force at
+  all, and those are the terminal ones (`last-call`, `plan-last-call`); a bare
+  steer's prefill is dropped on GLM and busts nothing. The 15 forced
+  `last-call` turns missed 202k of the run's 17.1M prompt tokens (1.2%), and
+  13 of the 15 landed the `done` they forced. The miss that matters is the
+  per-turn tail — the ledger and the context block that move every turn —
+  which re-prefills ~7% of every request and is most of the run's 25% miss
+  share. So forcing stays where it is, and the tail is the thing to shrink.
 
 deepseek-harness — the official DeepSeek reference — never prefills and never
 forces: it uses native tool calling, whose structured output cannot be prose, so

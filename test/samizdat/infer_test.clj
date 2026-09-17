@@ -282,7 +282,16 @@
             s (infer/prefix-stats prev cur)]
         (is (= :rewritten (:change s)))
         (is (= 2 (:stable-msgs s)))
-        (is (= 10 (:stable-chars s)))))))
+        (is (= 10 (:stable-chars s)))
+        ;; WHICH message, and what it turned into (karamazov-pdes): a
+        ;; rewrite with no compaction note beside it was unattributable on
+        ;; the first live run of these columns, and the role and the sizes
+        ;; are what tell a digest from a re-rendered pinned block.
+        (is (= "user" (:changed-role s)))
+        (is (= (count "big result") (:was-chars s)))
+        (is (= (count "[unloaded] t3") (:now-chars s)))))
+    (testing "a first render names no changed message"
+      (is (nil? (:changed-role (infer/prefix-stats nil (fp "a"))))))))
 
 (deftest complete-fn-fingerprints-the-wire-it-sent
   ;; The fingerprint rides the RESPONSE, beside :prefilled, because that is

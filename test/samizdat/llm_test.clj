@@ -378,6 +378,60 @@
                                            [{:turn 1 :tool "t" :category :success}]
                                            {:keep-pairs 4 :threshold-chars 1000000})))))))
 
+(deftest the-compaction-frontier-advances-in-batches-not-every-turn
+  ;; karamazov-pdes, measured live on run 5e78b96a (endless-flight, GLM-5.3):
+  ;; from the turn a branch had more than :keep-pairs exchanges, EVERY turn
+  ;; was a rewrite behind the tail — the frontier moved one exchange per turn,
+  ;; so the whole verbatim window behind it was re-prefilled on every call:
+  ;; 4k of 16k prompt tokens a turn, a quarter of every request, against
+  ;; ~1k for a turn where only the tail moved. In place and once each was
+  ;; true and did not help, because "the prefix before the NEWEST rewrite"
+  ;; is a prefix that shrinks by one exchange a turn.
+  ;;
+  ;; So the frontier moves in steps of :compaction-batch exchanges: the
+  ;; number of compacted exchanges is always a multiple of the batch, and the
+  ;; verbatim window floats between keep-pairs and keep-pairs+batch-1. The
+  ;; cost is a slightly larger window for a few turns; the gain is that
+  ;; batch-1 turns out of every batch send a byte-identical history.
+  (let [pair (fn [i] [{:role "assistant" :turn i
+                       :content (str "long reasoning " i (apply str (repeat 400 "x")))}
+                      {:role "user" :turn i
+                       :content (str "result " i (apply str (repeat 400 "y")))}])
+        tape (fn [n] (into [{:role "system" :content "SYS"}
+                            {:role "user" :content "## Problem\n\nsolve it"}]
+                           (mapcat pair (range 1 (inc n)))))
+        turns (mapv (fn [i] {:turn i :tool (str "tool" i) :category :success})
+                    (range 1 21))
+        opts {:keep-pairs 4 :threshold-chars 1000 :batch 4}
+        compacted (fn [out] (set (keep-indexed (fn [i m] (when (:compacted? m) i)) out)))]
+    ;; Counts below are relative: tape/window-index keeps the user turn that
+    ;; prompted the oldest verbatim reply, so a window of k exchanges holds
+    ;; one message more than 2k and the first batch compacts one fewer.
+    (testing "nothing moves until a whole batch has aged out"
+      (is (empty? (compacted (message/compact (tape 5) turns opts)))
+          "one exchange past the window is left verbatim")
+      (is (empty? (compacted (message/compact (tape 7) turns opts))))
+      (is (seq (compacted (message/compact (tape 8) turns opts)))
+          "four exchanges aged out: the batch fires"))
+    (testing "then the frontier holds for batch-1 turns"
+      (let [at8 (message/compact (tape 8) turns opts)
+            c8 (count (compacted at8))
+            settled (count at8)]
+        (doseq [n [9 10 11]]
+          (let [out (message/compact (tape n) turns opts)]
+            (is (= (compacted at8) (compacted out))
+                (str "turn " n ": the same messages are compacted"))
+            (is (= (take settled at8) (take settled out))
+                (str "turn " n ": everything through the frontier is byte-identical"))))
+        (is (= (+ c8 8) (count (compacted (message/compact (tape 12) turns opts))))
+            "and moves by a whole batch — four exchanges, eight messages — at once")))
+    (testing "a batch of one is the old behaviour: the frontier moves every turn"
+      (let [c8 (count (compacted (message/compact (tape 8) turns (assoc opts :batch 1))))]
+        (is (= (+ c8 2) (count (compacted (message/compact (tape 9) turns (assoc opts :batch 1))))))
+        (is (= (+ c8 4) (count (compacted (message/compact (tape 10) turns (assoc opts :batch 1))))))))
+    (testing "the shipped batch comes from gates.edn, not a constant here"
+      (is (pos? (message/default-compaction-batch))))))
+
 (deftest only-the-newest-settled-state-block-goes-over-the-wire
   ;; The settled-state ledger is regenerated every turn and appended to that
   ;; turn's user message, so without this every copy accumulates: gen-18's

@@ -147,6 +147,14 @@
                     (:stable-chars prefix) (:chars prefix)
                     (some-> (:change prefix) name)
                     (some-> forced-tool str not-empty)]))
+  ;; WHERE history changed, beside the row that says it did
+  ;; (karamazov-pdes): the message index, its role, its size before and
+  ;; after. Only for a rewrite — the tail moving is the normal turn.
+  (when (= :rewritten (:change prefix))
+    (emit! conn run-id :prefix-rewrite
+           {:branch-id branch-id :turn turn
+            :data {:at (:stable-msgs prefix) :role (:changed-role prefix)
+                   :was (:was-chars prefix) :now (:now-chars prefix)}}))
   (emit! conn run-id :turn {:branch-id branch-id :turn turn
                             :data {:tool tool-name :category category}}))
 
@@ -376,15 +384,51 @@
   reasoning_text drops the bulk, which on one real run was 5.5MB against
   62KB of results. The branch panel used to fetch all of it, spend over two
   minutes doing so, and exceed the client's socket timeout — so the branch
-  never rendered at all."
+  never rendered at all. The token columns and the prefix identity ride
+  along (karamazov-pdes): four integers and two short strings a row are not
+  the bulk, and they are how a reader sees the cache serve, or stop
+  serving, at the turn it happened."
   [conn run-id branch-id]
   (db/fetch conn
             ["SELECT id, run_id, branch_id, turn, tool_name, args, result,
-                     category, parse_error, auto_repaired, created_at
+                     category, parse_error, auto_repaired, created_at,
+                     prompt_tokens, cache_hit_tokens, prefix_change, forced_tool
                 FROM turns
                WHERE run_id = ? AND branch_id = ?
                ORDER BY turn, id"
              run-id branch-id]))
+
+(defn branch-context
+  "Each branch's newest MEASURED request (karamazov-pdes): `{branch-id
+  {:turn :prompt-tokens :cache-hit-tokens :hit :prefix-change :forced-tool}}`.
+
+  `run-usage` sums what the run spent; this is how full each branch's
+  context is NOW, which is what a fill gauge measures — the prompt tokens of
+  its last request, not the total of all of them. The newest turn that
+  carried usage: a turn a provider error left without a count must not hide
+  the last one that had it. `:hit` is the share of that request the cache
+  served, nil when the provider reported no cache lane — unknown, not zero,
+  run-usage's rule. Empty when nothing on the run was measured."
+  [conn run-id]
+  (into {}
+        (map (fn [{:keys [branch_id turn prompt_tokens cache_hit_tokens
+                          prefix_change forced_tool]}]
+               [branch_id
+                {:turn turn
+                 :prompt-tokens prompt_tokens
+                 :cache-hit-tokens cache_hit_tokens
+                 :hit (when (and cache_hit_tokens (pos? prompt_tokens))
+                        (double (/ cache_hit_tokens prompt_tokens)))
+                 :prefix-change (some-> prefix_change not-empty keyword)
+                 :forced-tool (not-empty forced_tool)}]))
+        (db/fetch conn ["SELECT t.branch_id, t.turn, t.prompt_tokens, t.cache_hit_tokens,
+                                t.prefix_change, t.forced_tool
+                           FROM turns t
+                           JOIN (SELECT branch_id, max(id) AS id
+                                   FROM turns
+                                  WHERE run_id = ? AND prompt_tokens IS NOT NULL
+                                  GROUP BY branch_id) newest ON newest.id = t.id"
+                        run-id])))
 
 ;; --- artifacts --------------------------------------------------------------
 

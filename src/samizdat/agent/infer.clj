@@ -143,7 +143,7 @@
   (karamazov-o4wm.1)."
   [messages]
   (mapv (fn [{:keys [role content]}]
-          [(hash [(str role) (str content)]) (count (str content))])
+          [(hash [(str role) (str content)]) (count (str content)) (str role)])
         messages))
 
 (defn prefix-stats
@@ -161,6 +161,12 @@
                 a withheld digest. Compaction's doing, and the one shape a
                 policy retune can move.
 
+  When something changed, `:changed-role`, `:was-chars` and `:now-chars`
+  say which message did and what it turned into (karamazov-pdes): a digest
+  is a small message where a big one was, a re-rendered pinned block is the
+  same size; without them a rewrite with no compaction note beside it —
+  twelve on the first live run of these columns — was a guess.
+
   A forced native tool_choice is NOT visible here — the prefix is
   byte-stable and the provider misses anyway — which is why the loop records
   the forced tool beside this rather than folding it in. Pure."
@@ -170,11 +176,14 @@
     (if (nil? prev)
       {:change :first :stable-msgs 0 :stable-chars 0 :chars total}
       (let [prev (vec prev)
-            d (count (take-while true? (map (fn [[a _] [b _]] (= a b)) prev cur)))]
-        {:change (if (>= d (dec (count prev))) :tail :rewritten)
-         :stable-msgs d
-         :stable-chars (reduce + 0 (map second (subvec cur 0 d)))
-         :chars total}))))
+            d (count (take-while true? (map (fn [[a _] [b _]] (= a b)) prev cur)))
+            [_ was] (get prev d)
+            [_ now role] (get cur d)]
+        (cond-> {:change (if (>= d (dec (count prev))) :tail :rewritten)
+                 :stable-msgs d
+                 :stable-chars (reduce + 0 (map second (subvec cur 0 d)))
+                 :chars total}
+          (< d (count cur)) (assoc :changed-role role :was-chars was :now-chars now))))))
 
 ;; --- the effect seam --------------------------------------------------------
 

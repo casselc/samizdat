@@ -112,9 +112,29 @@
                      ;; What the run has spent, beside the budget the row
                      ;; carries, so an operator watching a metered provider
                      ;; can see the one against the other (karamazov-aqsr.3).
-                     :usage (journal/run-usage conn run-id)))
-       ;; Reuses the rows already read for the active count above.
-       :branches (mapv #(update % :thesis parse-json) branches)
+                     ;; And why the cache hit rate is what it is: the
+                     ;; low-hit turns by cause, the grouping introspect
+                     ;; shows the agent, so the operator sees the same
+                     ;; number (karamazov-pdes).
+                     :usage (assoc (journal/run-usage conn run-id)
+                                   :cache-misses
+                                   (journal/cache-misses conn run-id
+                                                         (gates/threshold :cache-miss))
+                                   ;; And what the harness's own per-turn block
+                                   ;; costs on average — how much of each
+                                   ;; request is context the run added rather
+                                   ;; than the conversation. nil until a turn
+                                   ;; has measured it.
+                                   :context-block
+                                   (journal/context-block-stats conn run-id))))
+       ;; Reuses the rows already read for the active count above. Each row
+       ;; carries its newest measured request as :context — how full THAT
+       ;; branch is, which the run's summed usage cannot say — and a branch
+       ;; nothing has measured carries none rather than zeros.
+       :branches (let [ctx (journal/branch-context conn run-id)]
+                   (mapv #(cond-> (update % :thesis parse-json)
+                            (ctx (:id %)) (assoc :context (ctx (:id %))))
+                         branches))
        :artifacts (mapv #(update % :witness parse-json)
                         (journal/artifacts conn run-id))
        :gates (journal/gate-tally conn run-id)

@@ -78,6 +78,21 @@
   []
   (lexicon/budget :compaction-chars))
 
+(defn default-compaction-batch
+  "How many exchanges the compaction frontier moves by at once.
+
+  Measured live (karamazov-pdes, run 5e78b96a): once a branch had more than
+  `keep-pairs` exchanges, EVERY turn rewrote history behind the tail, because
+  the frontier advanced one exchange per turn and the whole verbatim window
+  behind it — a quarter of every request — was re-prefilled on every call.
+  In steps, the window floats between keep-pairs and keep-pairs+batch-1 and
+  batch-1 turns in every batch send a byte-identical history.
+
+  `:context-budget :compaction-batch`, for the reason `default-keep-pairs`
+  gives."
+  []
+  (lexicon/budget :compaction-batch))
+
 (def ^:private frame-size
   "Messages at the head of a tape that are never compaction candidates: the
   system prompt and the problem statement.
@@ -195,10 +210,23 @@
   the branch's own history is untouched and a resume replays what was really
   sent at the time."
   ([messages turns] (compact messages turns nil))
-  ([messages turns {:keys [keep-pairs threshold-chars floor]}]
+  ([messages turns {:keys [keep-pairs threshold-chars floor batch]}]
    (let [messages (vec messages)
          keep-pairs (or keep-pairs (default-keep-pairs))
          threshold (or threshold-chars (default-compaction-threshold))
+         batch (or batch (default-compaction-batch))
+         ;; THE FRONTIER MOVES IN STEPS (karamazov-pdes). Applied on every
+         ;; render from the untouched tape, "once per message" still moved
+         ;; the boundary one exchange per turn, and the verbatim window
+         ;; behind it was re-prefilled on every call. So the number of
+         ;; exchanges compacted is always a multiple of `batch`: the window
+         ;; is widened by the remainder, and the boundary holds still for
+         ;; batch-1 turns out of every batch. A batch of one, or none, is
+         ;; the old behaviour.
+         aged (- (count (filter #(= "assistant" (:role %)) messages)) keep-pairs)
+         keep (if (and (number? batch) (> batch 1) (pos? aged))
+                (+ keep-pairs (mod aged (long batch)))
+                keep-pairs)
          total (reduce + 0 (map (comp count str :content) messages))]
      ;; Nothing to do below the threshold, and nothing to do when the tape is
      ;; the frame plus at most nothing: there is no message past it.
@@ -222,7 +250,7 @@
              ;; which leading messages are load-bearing, so the frame is
              ;; protected here, by the caller that owns it.
              due (remove #(< % frame-size)
-                         (tape/due-indices messages keep-pairs compactable-roles))]
+                         (tape/due-indices messages keep compactable-roles))]
          (reduce (fn [ms i]
                    (tape/compact-at ms i
                                     (replacement-for (nth ms i) turns-by-number)
