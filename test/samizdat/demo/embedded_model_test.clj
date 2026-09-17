@@ -9,6 +9,81 @@
             [clojure.java.io :as io]
             [samizdat.demo.embedded-model :as demo]))
 
+(deftest demo-signals-are-explicit-server-a-only-command-data
+  (let [options {:wrapper "/wrapper" :jolt "/jolt" :durable-root "/durable"}
+        reader (demo/embedded-command options)
+        writer (demo/embedded-command (assoc options :demo-signals? true))]
+    (is (= "--demo-signals" (last writer)))
+    (is (= reader (vec (butlast writer))))
+    (is (not (some #{"--demo-signals"} reader)))))
+
+(deftest signal-readback-requires-current-trace-exact-counts-and-finite-duration
+  (let [trace-id "12345678901234567890123456789012"
+        snapshot {:counter [["run" "success" 1.0] ["turn" "success" 4.0]]
+                  :histogram [["run" "success" 1 0.03] ["turn" "success" 4 0.02]]
+                  :logs [["samizdat.run.finished" "Samizdat run finished" trace-id]
+                         ["samizdat.run.started" "Samizdat run started" trace-id]]}]
+    (is (= snapshot (demo/assert-signal-snapshot! snapshot 4 trace-id)))
+    (doseq [bad [(assoc snapshot :counter [])
+                 (assoc-in snapshot [:counter 1 2] 3.0)
+                 (assoc-in snapshot [:counter 1 2] 4.1)
+                 (update snapshot :counter conj ["run" "success" 1.0])
+                 (assoc-in snapshot [:histogram 1 2] 3)
+                 (assoc-in snapshot [:histogram 1 3] -1.0)
+                 (assoc-in snapshot [:histogram 1 3] ##Inf)
+                 (assoc-in snapshot [:histogram 1 3] ##NaN)
+                 (assoc-in snapshot [:logs 1 2] "99999999999999999999999999999999")
+                 (assoc snapshot :logs [])
+                 (update snapshot :logs conj (first (:logs snapshot)))
+                 (assoc-in snapshot [:logs 0 1] "untrusted payload")]]
+      (is (thrown? clojure.lang.ExceptionInfo
+                   (demo/assert-signal-snapshot! bad 4 trace-id))))
+    (is (thrown? clojure.lang.ExceptionInfo
+                 (demo/assert-signal-snapshot! snapshot 4 "99999999999999999999999999999999")))))
+
+(deftest signal-readiness-and-fresh-store-preconditions-fail-closed
+  (is (nil? (demo/assert-signals-flush! "samizdat demo signals flush confirmed\n")))
+  (doseq [logs ["" "samizdat demo signals flush failed"
+                "quoted samizdat demo signals flush confirmed"]]
+    (is (thrown? clojure.lang.ExceptionInfo (demo/assert-signals-flush! logs))))
+  (is (thrown? clojure.lang.ExceptionInfo (demo/assert-fresh-demo-output! ".")))
+  (is (nil? (demo/assert-fresh-demo-output!
+             (str (System/getProperty "java.io.tmpdir") "/samizdat-uncreated-" (random-uuid))))))
+
+(deftest signal-reader-child-uses-one-public-reader-and-settles-before-return
+  (doseq [failure [nil :query :close]]
+    (let [events (atom []) original (ex-info "inert reader fault" {})]
+      (with-redefs [clojure.core/requiring-resolve
+                    (fn [symbol]
+                      (case symbol
+                        jdbc.chdb.durable.local-posix/local-backend
+                        (fn [root] (swap! events conj [:backend root]) ::backend)
+                        jdbc.chdb.durable/open-reader!
+                        (fn [opts] (swap! events conj [:open opts]) ::reader)
+                        jdbc.chdb.durable.reader/query!
+                        (fn [reader sql params]
+                          (swap! events conj [:query reader sql params])
+                          (when (= :query failure) (throw original))
+                          {:labels ["fixture"] :rows [[1]] :count 0})
+                        jdbc.chdb.durable.reader/close!
+                        (fn [reader]
+                          (swap! events conj [:close reader])
+                          (when (= :close failure) (throw original)))))]
+        (if failure
+          (is (identical? original
+                          (try (demo/read-signal-snapshot! "/owned-fixture")
+                               (catch Throwable error error))))
+          (is (= {:counter [[1]] :histogram [[1]] :logs [[1]]}
+                 (demo/read-signal-snapshot! "/owned-fixture"))))
+        (is (= [:open {:store ::backend}] (second @events)))
+        (is (= [:close ::reader] (last @events)))
+        (is (= 1 (count (filter #(= :open (first %)) @events))))
+        (let [queries (filter #(= :query (first %)) @events)]
+          (is (= (if (= :query failure) 1 3) (count queries)))
+          (is (every? #(and (= ::reader (second %)) (= [] (last %))) queries))
+          (when-not (= :query failure)
+            (is (= (set (vals demo/signal-queries)) (set (map #(nth % 2) queries))))))))))
+
 (deftest child-environment-is-an-allowlist-with-explicit-local-settings
   (let [options {:base-url "http://model/v1" :model "model"
                  :project-root "/project" :db-path "/db"
@@ -109,17 +184,26 @@
   (let [root (java.nio.file.Files/createTempDirectory
               "samizdat-demo-policy-" (make-array java.nio.file.attribute.FileAttribute 0))
         calls (atom [])
-        trace {:trace-id "t" :families demo/expected-span-families
+        mode (atom :success) reader-calls (atom 0)
+        trace-id "12345678901234567890123456789012"
+        signal-snapshot {:counter [["run" "success" 1.0] ["turn" "success" 12.0]]
+                         :histogram [["run" "success" 1 0.03] ["turn" "success" 12 0.02]]
+                         :logs [["samizdat.run.finished" "Samizdat run finished" trace-id]
+                                ["samizdat.run.started" "Samizdat run started" trace-id]]}
+        trace {:trace-id trace-id :families demo/expected-span-families
                :content-enabled false}
         options {:output (str root) :timeout-ms 60000
                  :wrapper "/wrapper" :jolt "/jolt"
                  :expected-jolt-rev "aea91781"}]
     (try
-      (let [result
-            (with-redefs-fn
+      (let [invoke
+            (fn [] (with-redefs-fn
               {#'demo/model-preflight! (constantly {:mode :none :metadata-ready? false})
-               #'demo/prepare-project! (fn [_] "baseline")
-               #'clojure.core/slurp (constantly "fixture instruction")
+               #'demo/prepare-project! (fn [opts]
+                                        (.mkdirs (io/file (:project-root opts)))
+                                        (spit (io/file (:project-root opts) "problem.md") "inert fixture instruction")
+                                        (spit (io/file (:project-root opts) "steer.md") "inert fixture steer")
+                                        "baseline")
                #'demo/bounded-process! (fn [command _]
                                         (cond
                                           (= "--version" (last command))
@@ -127,12 +211,22 @@
                                           (= demo/trusted-verifier-expression (last command))
                                           (do (swap! calls conj :semantics)
                                               {:exit 0 :out "[0 9 16 0 27 -8]\n"})
+                                          (some #{"--read-signals"} command)
+                                          (let [n (swap! reader-calls inc)
+                                                snapshot (cond-> signal-snapshot
+                                                           (and (= :changed-reader @mode) (= 2 n))
+                                                           (assoc-in [:histogram 0 3] 0.04))]
+                                            (swap! calls conj [:signals (last command)])
+                                            {:exit 0 :out (str (json/write-str snapshot) "\n")})
                                           :else
                                           (do (swap! calls conj :fixture)
                                               {:exit 0 :out "Ran 6 tests. 6 assertions passed, 0 failures, 0 errors."})))
                #'demo/start-server! (fn [options label]
                                      (swap! calls conj [label (:durable-root options)])
-                                     {:label label :terminal (atom false)})
+                                     (let [raw-err (str (:output options) "/" label ".fixture.stderr")]
+                                       (spit raw-err (if (= :missing-flush @mode) ""
+                                                        "samizdat demo signals flush confirmed\n"))
+                                       {:label label :terminal (atom false) :raw-err raw-err}))
                #'demo/await-ready! (fn [& _] nil)
                #'demo/drive-run! (fn [& _] {:run-id "run" :status "exhausted" :turns 12 :steering-count 1})
                #'demo/oscope-evidence! (fn [_ run-id _]
@@ -143,8 +237,9 @@
                                     {:closed? true :graceful? true :terminal? true})
                #'demo/publish-sanitized-logs! (fn [& _] nil)
                #'demo/write-evidence! (fn [& _] nil)}
-              #(demo/run-demo! options))
-            starts (filter vector? @calls)]
+              #(demo/run-demo! options)))
+            result (invoke)
+            starts (filter #(and (vector? %) (#{"server-a" "server-b"} (first %))) @calls)]
         (is (= "exhausted" (get-in result [:run :status])))
         (is (= 6 (get-in result [:verification :tests])))
         (is (true? (get-in result [:verification :trusted-semantic-check])))
@@ -152,10 +247,19 @@
         (is (= demo/expected-span-families (get-in result [:process-a :trace :families])))
         (is (= trace (get-in result [:process-b :trace])))
         (is (false? (:external-export result)))
-        (is (= ["server-a" :fixture :semantics :trace :stop "server-b" :trace :stop]
+        (is (= ["server-a" :fixture :semantics :trace :signals :stop "server-b" :trace :signals :stop]
                (mapv #(if (vector? %) (first %) %) @calls)))
-        (is (= (second (first starts)) (second (nth starts 3)))
-            "fresh process uses the same Durable root"))
+        (is (= (second (first starts)) (second (second starts)))
+            "fresh process uses the same Durable root")
+        (is (true? (get-in result [:signals :same-values])))
+        (doseq [failure [:missing-flush :changed-reader]]
+          (reset! mode failure) (reset! calls []) (reset! reader-calls 0)
+          (let [error (try (invoke) (catch Throwable error error))]
+            (is (= :signal-readback (:phase (ex-data error))))
+            (when (= :missing-flush failure)
+              (is (not (some #(and (vector? %) (= "server-b" (first %))) @calls)))
+              (is (zero? @reader-calls)))
+            (when (= :changed-reader failure) (is (= 2 @reader-calls))))))
       (finally
         (doseq [file (reverse (file-seq (io/file (str root))))]
           (java.nio.file.Files/deleteIfExists (.toPath file)))))))

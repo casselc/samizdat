@@ -55,6 +55,9 @@
             [otel.exporter.otlp :as otlp]
             [otel.propagation :as propagation]
             [otel.resource :as res]
+            [otel.sdk :as process-sdk]
+            [otel.metrics :as metrics]
+            [otel.logs :as logs]
             [otel.sdk.export :as export]
             [otel.sdk.tracer :as sdk]
             [otel.trace :as trace]
@@ -438,6 +441,60 @@
             "samizdat.steer.passed_over" (some-> (:passed-over v) count)}
     nil))
 
+(defonce demo-signals (atom nil))
+
+(defn enable-demo-signals!
+  "Borrow the already-installed embedded owner's meter/logger, never a new
+  SDK. Explicit demo only; ordinary diagnostics are not bridged."
+  []
+  (let [meter (process-sdk/meter "samizdat.demo")
+        logger (process-sdk/logger "samizdat.demo")
+        completed (metrics/counter meter "samizdat.operation.completed"
+                                   {:unit "{operation}"})
+        duration (metrics/histogram meter "samizdat.operation.duration"
+                                   {:unit "s"})]
+    (reset! demo-signals
+            {:now-ns #(System/nanoTime)
+             :started! (fn [kind]
+                         (when (= :run kind)
+                           (logs/emit! logger {:severity :info
+                                               :body "Samizdat run started"
+                                               :event-name "samizdat.run.started"})))
+             :finished! (fn [kind outcome seconds]
+                          (let [attrs {"samizdat.operation.kind" (name kind)
+                                       "samizdat.operation.outcome" (name outcome)}]
+                            (metrics/add! completed 1 attrs)
+                            (metrics/record! duration seconds attrs)
+                            (when (= :run kind)
+                              (logs/emit! logger
+                                          {:severity :info
+                                           :body "Samizdat run finished"
+                                           :event-name "samizdat.run.finished"
+                                           :attributes attrs})
+                              ;; Publication is observed through the existing
+                              ;; SDK owner, not inferred from a periodic tick.
+                              (when-let [flush! (:flush-callback @runtime)]
+                                (when (true? (flush!))
+                                  (binding [*out* *err*]
+                                    (println "samizdat demo signals flush confirmed")))))))})))
+
+(defn- observe-demo-operation [kind thunk]
+  (if-let [{:keys [now-ns started! finished!]} (when (#{:run :turn} kind)
+                                               @demo-signals)]
+    (let [start (try (now-ns) (catch Throwable _ nil))
+          finish! (fn [outcome]
+                    (try
+                      (when start
+                        (finished! kind outcome
+                                   (max 0.0 (/ (- (now-ns) start) 1.0e9))))
+                      (catch Throwable _ nil)))]
+      (try (started! kind) (catch Throwable _ nil))
+      (let [result (try {:value (thunk)}
+                        (catch Throwable error {:error error}))]
+        (finish! (if (:error result) :error :success))
+        (if-let [error (:error result)] (throw error) (:value result))))
+    (thunk)))
+
 (defn run-observer
   "One span per harness seam: the root `run` (agent) and its rounds, turns,
   branch open/close, model calls (generation, with usage), tool selection,
@@ -446,7 +503,7 @@
   [kind attrs thunk]
   (let [{k :kind nm :name} (run-kinds kind)]
     (with-observation [sp k nm (run-start-attrs kind attrs)]
-      (let [v (thunk)]
+      (let [v (observe-demo-operation kind thunk)]
         (when-let [facts (run-end-attrs kind attrs v)]
           (set-facts! sp facts))
         ;; The one line that lets an operator find the run in a viewer:
@@ -677,6 +734,7 @@
                     ;; Re-entrant/concurrent shutdown therefore sees nil, and
                     ;; hook installation cannot race after retirement.
                     (reset! runtime nil)
+                    (reset! demo-signals nil)
                     (uninstall!)
                     (reset! content-policy
                             {:enabled? false :max-chars default-content-max-chars})
