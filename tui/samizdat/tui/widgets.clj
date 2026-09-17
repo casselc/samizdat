@@ -191,6 +191,21 @@
 (defn- failed? [turn]
   (contains? #{"failure" "mechanics"} (str (:category turn))))
 
+(defn- request-cost
+  "`  ctx 43k · hit 93%`, and what busted the cache when something did: the
+  tool a native tool_choice forced, or a history rewritten behind the tail.
+  The conversation is where a reader follows a run turn by turn, so it is
+  where a cache that stopped serving should show at the turn it happened
+  (karamazov-pdes). nil for a turn that carried no usage — a replay, a
+  provider error — rather than a row of zeros."
+  [{:keys [prompt_tokens cache_hit_tokens prefix_change forced_tool]}]
+  (when (number? prompt_tokens)
+    (str "  ctx " (fmt-tokens prompt_tokens)
+         (when (and (number? cache_hit_tokens) (pos? prompt_tokens))
+           (str " · hit " (quot (* 100 cache_hit_tokens) prompt_tokens) "%"))
+         (when (not-empty (str forced_tool)) (str " · forced " forced_tool))
+         (when (= "rewritten" (str prefix_change)) " · rewritten"))))
+
 (defn- turn-entry
   [state {:keys [turn tool_name args result] :as t}]
   (let [writing? (contains? #{"write_file" "edit_file" "patch"} (str tool_name))
@@ -213,11 +228,12 @@
              #(vector :paragraph {:dim true} (str reasoning_text))))
 
      (when tool_name
-       [:hbox
-        [:text {:color (if (failed? t) :red :green)}
-         (if (failed? t) " ✗ " " → ")]
-        [:text {:bold true} (str tool_name)]
-        [:text {:dim true} (str "  turn " turn)]])
+       (cond-> [:hbox
+                [:text {:color (if (failed? t) :red :green)}
+                 (if (failed? t) " ✗ " " → ")]
+                [:text {:bold true} (str tool_name)]
+                [:text {:dim true} (str "  turn " turn)]]
+         (request-cost t) (conj [:text {:dim true} (request-cost t)])))
 
      (when (not-empty (str args))
        (fold state (fold-id turn :args) "arguments" #(body-block args false)))
@@ -302,6 +318,59 @@
     (double (min 1.0 (/ used total)))
     0.0))
 
+(def ^:private fold-warn-fraction
+  "Where the footer starts flagging a fold, as a fraction of the window.
+
+  dirge's numbers and its reasoning: the denominator is the WINDOW, so the
+  gauge reads 0-100 rather than running past 100 once usage passes the
+  fold-trigger budget — a fold is flagged by a marker instead (dirge-l4rp,
+  dirge-cx7t). samizdat's own ladder rungs are gates.edn :compaction; these
+  two are the front end's warning line, not the policy, which is why they are
+  not read from there."
+  0.75)
+
+(def ^:private fold-urgent-fraction 0.90)
+
+(defn- fill-segment
+  "`used / window (pct%)` with a fold marker as the window fills, or nil when
+  there is no window to measure against."
+  [used window]
+  (when (and window (pos? window))
+    (let [pct (quot (* 100 (or used 0)) window)
+          frac (/ (double (or used 0)) window)]
+      (str (fmt-tokens used) " / " (fmt-tokens window) " (" pct "%"
+           (cond (>= frac fold-urgent-fraction) " fold!"
+                 (>= frac fold-warn-fraction) " fold"
+                 :else "")
+           ")"))))
+
+(defn- selected-branch
+  "The branch row the conversation is showing, or nil when none is chosen or
+  the detail has not landed."
+  [state]
+  (when-let [id (:branch-id state)]
+    (some #(when (= (str (:id %)) (str id)) %)
+          (get-in state [:detail :branches]))))
+
+(defn- branch-fill
+  "The prompt tokens of the selected branch's newest measured request — how
+  full its context is now — or nil. NOT the run's total: on a beam of five
+  that is every branch's every turn summed, and a gauge fed that read
+  \"fold!\" a handful of turns into any run and never stopped
+  (karamazov-pdes)."
+  [state]
+  (get-in (selected-branch state) [:context :prompt-tokens]))
+
+(defn- cache-miss-clause
+  "` · 33 low: forced 19, rewritten 3` — how many turns the cache failed
+  and why, biggest cause first — or nothing when no turn missed."
+  [{:keys [low by-cause]}]
+  (when (and (number? low) (pos? low))
+    (str " · " low " low"
+         (when (seq by-cause)
+           (str ": " (str/join ", " (map (fn [[k n]] (str (name k) " " n))
+                                          (sort-by (comp - val) by-cause))))))))
+
 (defn context
   "What the run is spending: tokens against its budget, turns against its
   ceiling. Gauges rather than numbers alone — a ratio is not a number to
@@ -315,16 +384,45 @@
         used (get-in run [:usage :total-tokens])
         budget (:token_budget run)
         turns (get-in run [:usage :turns])
-        max-turns (:max_turns run)]
+        max-turns (:max_turns run)
+        ;; The window and the cache (karamazov-pdes): the selected branch's
+        ;; last request against the model's context window, and the run's
+        ;; hit rate with the turns that missed, by cause. Each line draws
+        ;; only when its number was measured — nil is unknown, not zero.
+        window (get-in state [:project :context_window])
+        fill (branch-fill state)
+        rate (get-in run [:usage :cache-hit-rate])
+        misses (get-in run [:usage :cache-misses])
+        block (get-in run [:usage :context-block :avg-total])
+        fill? (and (number? fill) (number? window) (pos? window))]
     (panel props
-           [:vbox
-            [:text {:dim true} (str "  tokens " (or used 0)
-                                    (when budget (str " / " budget)))]
-            [:gauge {:value (ratio used budget)
-                     :color (if (> (ratio used budget) 0.85) :red :cyan)}]
-            [:text {:dim true} (str "  turns  " (or turns 0)
-                                    (when max-turns (str " / " max-turns)))]
-            [:gauge {:value (ratio turns max-turns)}]])))
+           (into [:vbox
+                  [:text {:dim true} (str "  tokens " (or used 0)
+                                          (when budget (str " / " budget)))]
+                  [:gauge {:value (ratio used budget)
+                           :color (if (> (ratio used budget) 0.85) :red :cyan)}]
+                  [:text {:dim true} (str "  turns  " (or turns 0)
+                                          (when max-turns (str " / " max-turns)))]
+                  [:gauge {:value (ratio turns max-turns)}]]
+                 (remove nil?
+                         [(when fill?
+                            [:text {:dim true} (str "  ctx    " (fill-segment fill window))])
+                          (when fill?
+                            [:gauge {:value (ratio fill window)
+                                     :color (if (>= (ratio fill window) fold-warn-fraction)
+                                              :red :cyan)}])
+                          (when (number? rate)
+                            [:text {:dim true}
+                             (str "  cache  " (Math/round (* 100.0 rate)) "% hit"
+                                  (cache-miss-clause misses))])
+                          ;; What the harness adds to each request itself —
+                          ;; the ledger, the memories, the task — averaged
+                          ;; over the run, so a block that has grown to a
+                          ;; third of every request is a number and not a
+                          ;; feeling.
+                          (when (number? block)
+                            [:text {:dim true}
+                             (str "  block  " block " chars/turn added by the harness")])])))))
 
 (defn gates
   "Which gates have fired, and how many of their predictions are still open —
@@ -554,32 +652,6 @@
                        :on-click (fn [] (when-let [f (get-in state [:on :resume])] (f)))}]]]
     (if (:title props) (panel props row) row)))
 
-(def ^:private fold-warn-fraction
-  "Where the footer starts flagging a fold, as a fraction of the window.
-
-  dirge's numbers and its reasoning: the denominator is the WINDOW, so the
-  gauge reads 0-100 rather than running past 100 once usage passes the
-  fold-trigger budget — a fold is flagged by a marker instead (dirge-l4rp,
-  dirge-cx7t). samizdat's own ladder rungs are gates.edn :compaction; these
-  two are the front end's warning line, not the policy, which is why they are
-  not read from there."
-  0.75)
-
-(def ^:private fold-urgent-fraction 0.90)
-
-(defn- fill-segment
-  "`used / window (pct%)` with a fold marker as the window fills, or nil when
-  there is no window to measure against."
-  [used window]
-  (when (and window (pos? window))
-    (let [pct (quot (* 100 (or used 0)) window)
-          frac (/ (double (or used 0)) window)]
-      (str (fmt-tokens used) " / " (fmt-tokens window) " (" pct "%"
-           (cond (>= frac fold-urgent-fraction) " fold!"
-                 (>= frac fold-warn-fraction) " fold"
-                 :else "")
-           ")"))))
-
 (defn status
   "The footer: where the harness is pointed, what is answering, what the run
   has spent, and what it is doing.
@@ -600,9 +672,11 @@
   (let [run (get-in state [:detail :run])
         p (:project state)
         model (or (:model run) (:model p))
-        used (get-in run [:usage :total-tokens])
         turns (get-in run [:usage :turns])
-        fill (fill-segment used (:context_window p))
+        ;; The branch's last request, not the run's total (karamazov-pdes,
+        ;; see branch-fill); no measured request, no segment.
+        fill (when-let [used (branch-fill state)]
+               (fill-segment used (:context_window p)))
         sep [:text {:dim true} " \u2502 "]]
     (into [:hbox {:bg :gray-dark}]
           (remove nil?

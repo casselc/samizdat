@@ -239,7 +239,24 @@
         (try
           (doseq [sql statements]
             (try
-              (jdbc/execute! conn sql)
+              (let [{:keys [table column shape]}
+                    (get-in migrations/existing-column-guards [version sql])
+                    present (when table
+                              (first (filter #(= column (:name %))
+                                             (jdbc/fetch conn
+                                                         (str "PRAGMA table_info(" table ")")))))]
+                ;; The check and ALTER share BEGIN IMMEDIATE: another
+                ;; connection cannot race this reconciliation's publication.
+                ;; SQL failures are never interpreted as "already applied".
+                (if present
+                  (let [actual (update (select-keys present [:type :notnull :dflt_value])
+                                       :type #(str/upper-case (str/trim (str %))))]
+                    (when-not (= shape actual)
+                      (throw (ex-info "Incompatible existing reconciliation column"
+                                      {:type ::incompatible-reconciliation-column
+                                       :table table :column column
+                                       :expected shape :actual actual}))))
+                  (jdbc/execute! conn sql)))
               (catch Throwable e
                 (throw (ex-info (str "Migration v" version " failed: " (ex-message e))
                                 {:version version

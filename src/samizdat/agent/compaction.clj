@@ -53,7 +53,8 @@
   gates.edn entry and every sentence the model reads is a prompt, because a
   compaction policy compiled into `src/` is one the supervisor cannot tune —
   and the supervisor is the role that watches runs run out of context."
-  (:require [clojure.string :as str]))
+  (:require [clojure.string :as str]
+            [samizdat.llm.message :as message]))
 
 ;; --- measuring ---------------------------------------------------------------
 
@@ -183,7 +184,10 @@
   size. The generic arm keeps a bounded preview. `templates` is the prose,
   from a prompt — these sentences are read by the model on every folded turn."
   [tool content templates]
-  (let [text (str content)
+  (let [;; The body, not the frame: a framed result's first line is the
+        ;; frame's opening tag, and the shell template's `first-line` is
+        ;; the command (karamazov-o4wm.3).
+        text (message/unframe (str content))
         lines (count (str/split-lines text))
         chars (count text)
         first-line (str/trim (or (first (str/split-lines text)) ""))

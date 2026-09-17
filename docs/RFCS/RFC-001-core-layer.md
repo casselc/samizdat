@@ -104,10 +104,15 @@ run config after the endpoint probe has said what a local server loaded);
 resolution per role — a role on a different model than the run — is a known
 gap, tracked on karamazov-2lbi.
 
-The overridable unit is deliberately smaller than `system.md`: sections a
-model is measured to need worded differently are their own prompts, injected
-(`{{split-decision}}` is the first), so a per-model file says one thing rather
-than forking five hundred lines.
+The overridable unit is deliberately smaller than `system.md`. Every
+top-level section is its own prompt — `system-structure`, `system-turn`,
+`system-tools`, `system-honesty` (`loop/system-segments`) — rendered against
+the same context and inserted where the frame names it, so a userspace version
+or a per-model file replaces one section rather than forking five hundred
+lines; `{{split-decision}}` was the first such extract and is still one. A
+run's `:prompt-manifest` note records, per segment, where the text came from
+and a hash of it beside the whole-prompt digest, so a pass-rate change
+localises to a section (karamazov-o4wm.4).
 
 ## API
 

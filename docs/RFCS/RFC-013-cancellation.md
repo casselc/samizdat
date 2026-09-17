@@ -404,7 +404,7 @@ turn tasks under it. Teardown is `run-rounds`'s existing `finally`.
 | Advanced | data with `:branch` | records the turn, branch stays active | none, the turn is complete |
 | Parked | data with `:mycelium/halt` and `:mycelium/resume` | hands the brief to the supervisor | none |
 | Abandoned | a thrown exception, not `Cancelled` | branch abandoned with the message | none |
-| Forfeited | `Cancelled`, passed through every catch | timeouts plus one, the deadline message, retention counters untouched | none, because `:pre` runs before every writing cell |
+| Forfeited | `Cancelled`, passed through every catch | timeouts plus one, the handoff — the call the turn had in flight and its side-effect state, from the dispatch note the loop wrote before running the tool, or the plain deadline message when nothing was (karamazov-o4wm.2) — and a `:forfeit` note; retention counters untouched | none, because `:pre` runs before every writing cell |
 
 ## Invariants
 

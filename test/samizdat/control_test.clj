@@ -1069,3 +1069,60 @@
   (try
     (is (seq (cells/loaded)) "the cell registry is populated before the first run")
     (finally (system/stop!))))
+
+(deftest a-resumed-branch-is-told-what-was-in-flight-when-the-harness-died
+  ;; karamazov-o4wm.2. The journal replay stops at the last turn ROW, and a
+  ;; crash inside a tool wrote none — so the branch came back with its last
+  ;; call missing from its own tape and no idea whether the write landed.
+  ;; The dispatch note the loop wrote before running the tool is what the
+  ;; resume hands back, with the side-effect state.
+  (with-db [c]
+    (let [rid (runs/start-run! c {:problem "p" :max-turns 10 :beam-width 1})]
+      (runs/open-branch! c rid {:branch-id "B1"})
+      (journal/record-turn! c rid {:branch-id "B1" :turn 1 :tool-name "read_file"
+                                   :assistant-text "reading" :result "contents"
+                                   :category :neutral})
+      (journal/record-dispatch! c rid {:branch-id "B1" :turn 2 :tool "write_file"
+                                       :args {:path "a.clj"} :said "writing a.clj"})
+      (with-redefs [beam/run-rounds (fn [_ branches _] {:branches branches})]
+        (let [b (first (:branches (resume/resume! {:conn c :config {} :llm-adapter :a
+                                                   :llm-config {} :run-id rid})))
+              tail (take-last 2 (:messages b))]
+          (is (= ["assistant" "user"] (mapv :role tail)))
+          (is (= "writing a.clj" (:content (first tail))))
+          (is (str/includes? (:content (second tail)) "`write_file`"))
+          (is (str/includes? (:content (second tail)) "restarted"))
+          (is (str/includes? (:content (second tail)) "not known whether"))))
+      (testing "a dispatch its row settled is not handed back"
+        (journal/record-turn! c rid {:branch-id "B1" :turn 2 :tool-name "write_file"
+                                     :assistant-text "writing a.clj" :result "wrote it"
+                                     :category :success})
+        (with-redefs [beam/run-rounds (fn [_ branches _] {:branches branches})]
+          (let [b (first (:branches (resume/resume! {:conn c :config {} :llm-adapter :a
+                                                     :llm-config {} :run-id rid})))]
+            (is (= "<tool_result tool=\"write_file\">\nwrote it\n</tool_result>"
+                   (:content (last (:messages b))))
+                "the replayed row is the last word")))))))
+
+(deftest a-resumed-tape-frames-tool-rows-and-not-harness-rows
+  ;; karamazov-o4wm.3: the live turn frames tool output; a replay has to
+  ;; rebuild the same shape, and must not frame the harness's own messages
+  ;; (a no-call complaint is journalled as a turn row too).
+  (with-db [c]
+    (let [rid (runs/start-run! c {:problem "p" :max-turns 10 :beam-width 1})]
+      (runs/open-branch! c rid {:branch-id "B1"})
+      (journal/record-turn! c rid {:branch-id "B1" :turn 1 :tool-name "read_file"
+                                   :assistant-text "reading" :result "contents"
+                                   :category :neutral})
+      (journal/record-turn! c rid {:branch-id "B1" :turn 2 :tool-name "__no_call__"
+                                   :assistant-text "prose"
+                                   :result "[harness] No tool-call block"
+                                   :category :mechanics})
+      (with-redefs [beam/run-rounds (fn [_ branches _] {:branches branches})]
+        (let [users (->> (resume/resume! {:conn c :config {} :llm-adapter :a
+                                          :llm-config {} :run-id rid})
+                         :branches first :messages
+                         (filter #(= "user" (:role %)))
+                         (map :content))]
+          (is (some #(= "<tool_result tool=\"read_file\">\ncontents\n</tool_result>" %) users))
+          (is (some #(= "[harness] No tool-call block" %) users)))))))

@@ -144,7 +144,8 @@
                       (or s {})
                       (select-keys signals
                                    [:no-fence :truncated :parse-error
-                                    :auto-repaired :multiple-fences]))))))
+                                    :auto-repaired :multiple-fences
+                                    :periodic]))))))
 
 (defn observe-turn!
   "One completed turn: the tool it called and how that went, plus whatever the

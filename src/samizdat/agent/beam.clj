@@ -65,6 +65,7 @@
             [mycelium.core :as myc]
             [samizdat.agent.critic :as critic]
             [samizdat.agent.gates :as gates]
+            [samizdat.agent.handoff :as handoff]
             [samizdat.agent.gitdiff :as gitdiff]
             [samizdat.agent.loop :as branch-loop]
             [samizdat.agent.select :as select]
@@ -649,12 +650,16 @@
         ;; schedule — including that a cancel WITHOUT this registry is not
         ;; enough.
         cancelling (:cancelling ctx)
+        ;; What the branch is told is the handoff's to say (karamazov-o4wm.2):
+        ;; the call the cancelled turn had in flight and its side-effect
+        ;; state, read back from the dispatch note the turn wrote before
+        ;; running the tool, or the plain deadline message when nothing was.
+        ;; The forfeit goes on record there too, so the count is measurable.
         forfeit (fn [b]
                   (-> b
-                      (state/add-message
-                       "user"
-                       (str "[harness] " (prompt/render "turn-deadline"
-                                           {:seconds (quot (or deadline 0) 1000)})))
+                      (update :messages into
+                              (handoff/forfeit! (:conn ctx) (:run-id ctx) b turn
+                                                (quot (or deadline 0) 1000)))
                       (update :timeouts (fnil inc 0))))
         ;; Both passes avoid lazy sequence bodies: starting a task parks the
         ;; driver at the spawn handshake and awaiting one parks it on the
@@ -1114,6 +1119,11 @@
         ;; those operations so its task-level catch can close the row rather
         ;; than leave an unreachable run claiming `running` forever.
         _ (when on-start (on-start run-id))
+        ;; Prompt provenance is observational and may itself block or fail;
+        ;; publish row ownership before this new post-row operation too.
+        _ (try (journal/note! conn run-id :prompt-manifest
+                              {:data (branch-loop/prompt-manifest prompt-suffix)})
+               (catch Throwable _ nil))
         ;; Seeded before any branch opens, so the first context block a
         ;; branch ever sees can already carry inherited lemmas.
         ;; `quarantine` drops named claims from the inheritance: a row still

@@ -1287,3 +1287,204 @@
               "every part the block builds is a part introspect knows about")
           (is (= produced (filter (set produced) declared))
               "and in the order the branch reads them in"))))))
+
+;; --- prefix identity on the turn row (karamazov-o4wm.1) ---------------------
+
+(deftest a-turn-records-its-prefix-identity
+  ;; The journal held the cache's answer (hit tokens) and nothing about the
+  ;; question — whether the bytes before the tail were the same as last
+  ;; call's. Without that a miss after a fold and a miss after a forced
+  ;; tool_choice read identically.
+  (with-db [c]
+    (let [rid (runs/start-run! c {:problem "p"})]
+      (journal/record-turn! c rid
+                            {:branch-id "B1" :turn 2 :tool-name "verify"
+                             :result "ok" :category :success
+                             :usage {:prompt-tokens 100 :cache-hit-tokens 10}
+                             :prefix {:stable-chars 900 :chars 1000 :change :rewritten}
+                             :forced-tool "done"})
+      (let [t (first (journal/turns c rid))]
+        (is (= 900 (:prefix_stable_chars t)))
+        (is (= 1000 (:prefix_chars t)))
+        (is (= "rewritten" (:prefix_change t)))
+        (is (= "done" (:forced_tool t)))))
+    (testing "a turn with no fingerprint stores nulls, not zeros"
+      (let [rid (runs/start-run! c {:problem "p2"})]
+        (journal/record-turn! c rid {:branch-id "B1" :turn 1 :tool-name "verify"
+                                     :result "ok" :category :success})
+        (let [t (first (journal/turns c rid))]
+          (is (nil? (:prefix_stable_chars t)))
+          (is (nil? (:prefix_change t)))
+          (is (nil? (:forced_tool t))))))))
+
+(deftest a-rewritten-turn-journals-where-history-changed
+  ;; karamazov-pdes: the four columns say THAT history was rewritten; the
+  ;; note says WHERE — which message, its role, its size before and after —
+  ;; so a rewrite with no compaction note beside it (the first live run of
+  ;; the columns had twelve) can be attributed rather than guessed at.
+  (with-db [c]
+    (let [rid (runs/start-run! c {:problem "p"})]
+      (journal/record-turn! c rid {:branch-id "B1" :turn 12 :tool-name "shell"
+                                   :result "ok" :category :success
+                                   :usage {:prompt-tokens 22210 :cache-hit-tokens 12160}
+                                   :prefix {:change :rewritten :stable-msgs 5
+                                            :stable-chars 49446 :chars 83125
+                                            :changed-role "assistant"
+                                            :was-chars 822 :now-chars 28}})
+      (journal/record-turn! c rid {:branch-id "B1" :turn 13 :tool-name "shell"
+                                   :result "ok" :category :success
+                                   :usage {:prompt-tokens 100 :cache-hit-tokens 90}
+                                   :prefix {:change :tail :stable-msgs 7
+                                            :stable-chars 50000 :chars 51000
+                                            :changed-role "user"
+                                            :was-chars 300 :now-chars 200}})
+      (let [notes (journal/notes c rid :prefix-rewrite)]
+        (is (= 1 (count notes)) "a tail turn is the normal turn and notes nothing")
+        (is (= {:at 5 :role "assistant" :was 822 :now 28} (first notes)))
+        (is (= ["B1" 12] (map (first (db/fetch c ["SELECT branch_id, turn FROM events WHERE kind = 'prefix-rewrite'"]))
+                              [:branch_id :turn]))
+            "on the branch and turn, so it joins to the turn row")))))
+
+(deftest low-hit-turns-are-grouped-by-cause
+  (with-db [c]
+    (let [rid (runs/start-run! c {:problem "p"})
+          row (fn [turn hit prefix forced]
+                (journal/record-turn! c rid
+                                      (cond-> {:branch-id "B1" :turn turn :tool-name "t"
+                                               :result "ok" :category :success
+                                               :usage {:prompt-tokens 10000
+                                                       :cache-hit-tokens hit}
+                                               :prefix prefix}
+                                        forced (assoc :forced-tool forced))))]
+      (row 1 0 {:change :first :stable-chars 0 :chars 40000} nil)
+      (row 2 9800 {:change :tail :stable-chars 39000 :chars 40000} nil)
+      (row 3 100 {:change :tail :stable-chars 39000 :chars 40000} "done")
+      (row 4 200 {:change :rewritten :stable-chars 8000 :chars 40000} nil)
+      (row 5 300 {:change :tail :stable-chars 39000 :chars 40000} nil)
+      ;; No fingerprint at all: a replay, a stub, a pre-migration row.
+      (journal/record-turn! c rid {:branch-id "B1" :turn 6 :tool-name "t"
+                                   :result "ok" :category :success
+                                   :usage {:prompt-tokens 10000 :cache-hit-tokens 0}})
+      ;; Too small to tell anything from.
+      (journal/record-turn! c rid {:branch-id "B1" :turn 7 :tool-name "t"
+                                   :result "ok" :category :success
+                                   :usage {:prompt-tokens 500 :cache-hit-tokens 0}
+                                   :prefix {:change :tail :stable-chars 1 :chars 2}})
+      (let [m (journal/cache-misses c rid {:min-prompt-tokens 2000 :hit-below 0.5})]
+        (is (= 5 (:low m)) "turn 2 hit well and turn 7 is under the size floor")
+        (is (= {:first 1 :forced 1 :rewritten 1 :tail 1 :unknown 1} (:by-cause m))
+            "a forced tool outranks the prefix shape: the prefix was stable and
+             the provider missed anyway, which is the forced call's doing")))))
+
+(deftest context-block-notes-average-per-part
+  ;; karamazov-o4wm.6: the block's cost was on the branch map for introspect's
+  ;; last-turn view and nowhere durable. One note per turn per branch, and a
+  ;; reader that averages it, is the measurement the budget decision waits on.
+  (with-db [c]
+    (let [rid (runs/start-run! c {:problem "p"})]
+      (journal/note! c rid :context-block
+                     {:branch-id "B1" :turn 1
+                      :data {:sizes [["task" 40] ["ledger" 1000]] :total 1040}})
+      (journal/note! c rid :context-block
+                     {:branch-id "B1" :turn 2
+                      :data {:sizes [["task" 40] ["ledger" 1400] ["memories" 300]]
+                             :total 1740}})
+      (let [s (journal/context-block-stats c rid)]
+        (is (= 2 (:turns s)))
+        (is (= 1390 (:avg-total s)))
+        (is (= 40 (get-in s [:parts "task"])))
+        (is (= 1200 (get-in s [:parts "ledger"])))
+        (is (= 300 (get-in s [:parts "memories"]))
+            "averaged over the turns it appeared in, not over every turn")))
+    (testing "a run with no notes reports none rather than zeros"
+      (let [rid (runs/start-run! c {:problem "p2"})]
+        (is (nil? (journal/context-block-stats c rid)))))))
+
+(deftest branch-context-is-each-branch-s-newest-measured-request
+  ;; karamazov-pdes: the journal knew what every request cost and the run
+  ;; detail summed it, so an operator could read the run's total and nothing
+  ;; about how full any branch's context is NOW — which is the number a fill
+  ;; gauge is for. The newest turn that carried usage, per branch; a turn a
+  ;; provider error left without usage must not hide the last measured one.
+  (with-db [c]
+    (let [rid (runs/start-run! c {:problem "p"})
+          row (fn [b turn m]
+                (journal/record-turn! c rid
+                                      (merge {:branch-id b :turn turn :tool-name "t"
+                                              :result "ok" :category :success}
+                                             m)))]
+      (row "B1" 1 {:usage {:prompt-tokens 5000 :cache-hit-tokens 0}
+                   :prefix {:change :first :stable-chars 0 :chars 20000}})
+      (row "B1" 2 {:usage {:prompt-tokens 8000 :cache-hit-tokens 6000}
+                   :prefix {:change :tail :stable-chars 19000 :chars 32000}
+                   :forced-tool "done"})
+      (row "B1" 3 {:tool-name "__error__" :category :mechanics})
+      (row "B2" 1 {:usage {:prompt-tokens 3000}})
+      (let [m (journal/branch-context c rid)]
+        (is (= 2 (get-in m ["B1" :turn])) "the newest turn that was measured, not the newest turn")
+        (is (= 8000 (get-in m ["B1" :prompt-tokens])))
+        (is (= 6000 (get-in m ["B1" :cache-hit-tokens])))
+        (is (= 0.75 (get-in m ["B1" :hit])))
+        (is (= :tail (get-in m ["B1" :prefix-change])))
+        (is (= "done" (get-in m ["B1" :forced-tool])))
+        (is (= 3000 (get-in m ["B2" :prompt-tokens])))
+        (is (nil? (get-in m ["B2" :hit])) "no cache lane reported: unknown, not zero")
+        (is (nil? (get-in m ["B2" :prefix-change])))))
+    (testing "a run with no measured turn has no entries"
+      (let [rid (runs/start-run! c {:problem "p2"})]
+        (journal/record-turn! c rid {:branch-id "B1" :turn 1 :tool-name "t"
+                                     :result "ok" :category :success})
+        (is (= {} (journal/branch-context c rid)))))))
+
+(deftest branch-turns-carry-what-each-request-cost
+  ;; The light rows the branch panel reads dropped every token column with
+  ;; the prose, so a reader could not see the cache serve — or fail — turn by
+  ;; turn. Four integers and two short strings per row are not the bulk.
+  (with-db [c]
+    (let [rid (runs/start-run! c {:problem "p"})]
+      (journal/record-turn! c rid {:branch-id "B1" :turn 1 :tool-name "t"
+                                   :result "ok" :category :success
+                                   :usage {:prompt-tokens 5000 :cache-hit-tokens 4000}
+                                   :prefix {:change :rewritten :stable-chars 100 :chars 20000}
+                                   :forced-tool "done"})
+      (let [t (first (journal/branch-turns c rid "B1"))]
+        (is (= 5000 (:prompt_tokens t)))
+        (is (= 4000 (:cache_hit_tokens t)))
+        (is (= "rewritten" (:prefix_change t)))
+        (is (= "done" (:forced_tool t)))
+        (is (not (contains? t :assistant_text)) "the prose still stays out")))))
+
+;; --- what was in flight when a turn did not finish (karamazov-o4wm.2) --------
+
+(deftest a-dispatch-is-recorded-before-its-tool-runs-and-found-when-no-row-follows
+  ;; A turn row is written AFTER the tool runs, so a turn cancelled or
+  ;; crashed mid-tool left nothing behind: the branch came back not knowing
+  ;; what it had called. The dispatch note is written before, and the
+  ;; reader finds the one no row ever settled.
+  (with-db [c]
+    (let [rid (runs/start-run! c {:problem "p"})]
+      (journal/record-turn! c rid {:branch-id "B1" :turn 1 :tool-name "read_file"
+                                   :result "x" :category :neutral})
+      (journal/record-dispatch! c rid {:branch-id "B1" :turn 2 :tool "shell"
+                                       :args {:cmd "git push"} :said "pushing"})
+      (is (= {:turn 2 :tool "shell" :args {:cmd "git push"} :said "pushing"
+              :forfeited? false}
+             (journal/in-flight-dispatch c rid "B1")))
+      (testing "the turn's row, when it exists, is readable by turn"
+        (is (nil? (journal/turn-row c rid "B1" 2)))
+        (journal/record-turn! c rid {:branch-id "B1" :turn 2 :tool-name "shell"
+                                     :result "ok" :category :success})
+        (is (= "shell" (:tool_name (journal/turn-row c rid "B1" 2)))))
+      (testing "a turn row at or after the dispatch settles it"
+        (is (nil? (journal/in-flight-dispatch c rid "B1"))))
+      (testing "a forfeited dispatch says so, so a resume can tell a deadline
+                cancel from the crash it is recovering from"
+        (journal/record-dispatch! c rid {:branch-id "B1" :turn 3 :tool "eval"
+                                         :args {} :said "s"})
+        (journal/record-forfeit! c rid {:branch-id "B1" :turn 3
+                                        :data {:tool "eval" :side-effect "unknown"}})
+        (is (true? (:forfeited? (journal/in-flight-dispatch c rid "B1"))))
+        (is (= {:tool "eval" :side-effect "unknown"}
+               (journal/last-note c rid :forfeit))))
+      (testing "another branch's dispatch is not this branch's"
+        (is (nil? (journal/in-flight-dispatch c rid "B2")))))))

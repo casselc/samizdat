@@ -140,6 +140,8 @@
             [samizdat.sandbox-test]
             [samizdat.websearch-test]
             [samizdat.toolerr-test]
+            [samizdat.handoff-test]
+            [samizdat.repetition-test]
             [samizdat.tape-test]
             [samizdat.image-test]
             [samizdat.infer-test]
@@ -179,6 +181,7 @@
             [samizdat.tui-state-test]
             [samizdat.tui-widgets-test]
             [samizdat.store-test]
+            [samizdat.migration-lineage-test]
             [samizdat.gui-api-test]
             [samizdat.gui-ops-test]
             [samizdat.gui-graph-test]
@@ -250,6 +253,7 @@
     samizdat.tui-state-test
     samizdat.tui-widgets-test
     samizdat.store-test
+    samizdat.migration-lineage-test
     samizdat.llm-test
     samizdat.agent-test
     samizdat.approval-test
@@ -327,6 +331,8 @@
     samizdat.sandbox-test
     samizdat.websearch-test
     samizdat.toolerr-test
+    samizdat.handoff-test
+    samizdat.repetition-test
     samizdat.tape-test
     samizdat.image-test
     samizdat.infer-test

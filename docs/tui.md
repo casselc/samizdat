@@ -90,7 +90,7 @@ right gutter, a wide short row, and the bottom strip.
 | `:widget/branches` | the beam — every branch on the run and what became of it. A run is several branches and the one being read is a choice |
 | `:widget/tasks` | the board: open, in progress, blocked, done |
 | `:widget/files` | files this run has written, newest first |
-| `:widget/context` | context-window fill, and what the run has spent |
+| `:widget/context` | the selected branch's context fill against the model's window, what the run has spent against its budget, and the cache: the run's hit rate and how many turns missed, by cause |
 | `:widget/gates` | gates that fired, and predictions still unsettled |
 | `:widget/artifacts` | claims made, and how each was judged |
 | `:widget/approvals` | the one question a person is being asked, if any. Draws nothing when there is none |
@@ -118,9 +118,10 @@ Ported from dirge's status line, which reads
 ```
 
 Left to right: the connection, the project and its git branch, the model
-actually answering, tokens against the model's context window, turns against
-the run's ceiling, what the run is doing, the run id, and which harness this
-is pointed at. Every segment is optional — the first frame has none of them.
+actually answering, the selected branch's last request against the model's
+context window, turns against the run's ceiling, what the run is doing, the
+run id, and which harness this is pointed at. Every segment is optional — the
+first frame has none of them.
 
 The connection dot is samizdat's own addition rather than dirge's. dirge's UI
 *is* the process doing the work; this one is a client that can be pointed
@@ -134,6 +135,24 @@ Two details carried over deliberately:
   90% instead.
 - **`project:branch` collapses to just the project** on a detached HEAD or
   outside a git tree — never a dangling separator.
+
+And one that is samizdat's own: **the numerator is the branch's last
+request**, the prompt tokens of the newest turn the provider measured, which
+each branch row of `GET /v1/runs/:id` carries as `context`. It used to be the
+run's cumulative total, which on a beam of five is every branch's every turn
+summed, so the strip said `fold!` a handful of turns into any run and never
+stopped. A branch nothing has measured yet draws no fill segment at all.
+
+The CONTEXT panel draws the same fill as a gauge under the run's spend, and
+below it the cache: the run's hit rate from `usage.cache-hit-rate`, and from
+`usage.cache-misses` how many turns the cache failed and why — `forced` (a
+native tool_choice), `rewritten` (a fold or a prune behind the tail), `tail`
+(the provider dropped a byte-stable prefix), `first`; and from
+`usage.context-block` what the harness's own per-turn block (the ledger, the
+memories, the task) adds to each request on average. Each conversation turn
+says what its request cost beside its tool name, `ctx 43k · hit 93%`, and
+names the forced tool or the rewrite when one busted the cache — so a hit
+rate that drops is readable at the turn it dropped.
 
 ### Where the project data comes from
 

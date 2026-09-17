@@ -104,3 +104,57 @@
       (write-turn! c rid "B1" 1 "write_file" nil)
       (write-turn! c rid "B1" 2 "bash" nil)
       (is (empty? (:modified (api-runs/get-run c rid)))))))
+
+(deftest the-run-detail-says-how-full-each-branch-is-and-why-the-cache-missed
+  ;; karamazov-pdes: the detail carried the run's hit rate and nothing an
+  ;; operator could act on — not which branch is near the window, not why
+  ;; the rate is what it is. Each branch row carries its newest measured
+  ;; request, and :usage carries the low-hit turns by cause beside the rate.
+  (with-db [c]
+    (let [rid (runs/start-run! c {:problem "p"})]
+      (doseq [b ["B1" "B2"]] (runs/open-branch! c rid {:branch-id b}))
+      (journal/record-turn! c rid {:branch-id "B1" :turn 1 :tool-name "t"
+                                   :result "ok" :category :success
+                                   :usage {:prompt-tokens 20000 :cache-hit-tokens 0}
+                                   :prefix {:change :first :stable-chars 0 :chars 80000}})
+      (journal/record-turn! c rid {:branch-id "B1" :turn 2 :tool-name "t"
+                                   :result "ok" :category :success
+                                   :usage {:prompt-tokens 43000 :cache-hit-tokens 40000}
+                                   :prefix {:change :tail :stable-chars 170000 :chars 172000}})
+      (journal/record-turn! c rid {:branch-id "B2" :turn 1 :tool-name "t"
+                                   :result "ok" :category :success
+                                   :usage {:prompt-tokens 21000 :cache-hit-tokens 200}
+                                   :prefix {:change :tail :stable-chars 80000 :chars 84000}
+                                   :forced-tool "done"})
+      (journal/note! c rid :context-block
+                     {:branch-id "B1" :turn 2
+                      :data {:sizes [["task" 40] ["ledger" 1200]] :total 1240}})
+      (let [d (api-runs/get-run c rid)
+            by-id (into {} (map (juxt :id identity)) (:branches d))]
+        (is (= 1240 (get-in d [:run :usage :context-block :avg-total]))
+            "what the harness's own block costs per turn, beside the spend")
+        (is (= 43000 (get-in by-id ["B1" :context :prompt-tokens])))
+        (is (= 2 (get-in by-id ["B1" :context :turn])))
+        (is (= 21000 (get-in by-id ["B2" :context :prompt-tokens])))
+        (is (= "done" (get-in by-id ["B2" :context :forced-tool])))
+        (is (= 2 (get-in d [:run :usage :cache-misses :low])))
+        (is (= {:first 1 :forced 1} (get-in d [:run :usage :cache-misses :by-cause])))
+        (is (number? (get-in d [:run :usage :cache-hit-rate])))))
+    (testing "a branch with no measured turn carries no context, not zeros"
+      (let [rid (runs/start-run! c {:problem "p2"})]
+        (runs/open-branch! c rid {:branch-id "B1"})
+        (let [d (api-runs/get-run c rid)]
+          (is (nil? (:context (first (:branches d)))))
+          (is (nil? (get-in d [:run :usage :context-block])) "unmeasured is nil, not zeros")
+          (is (= 0 (get-in d [:run :usage :cache-misses :low]))))))))
+
+(deftest the-branch-detail-s-turns-say-what-each-request-cost
+  (with-db [c]
+    (let [rid (runs/start-run! c {:problem "p"})]
+      (runs/open-branch! c rid {:branch-id "B1"})
+      (journal/record-turn! c rid {:branch-id "B1" :turn 1 :tool-name "t"
+                                   :result "ok" :category :success
+                                   :usage {:prompt-tokens 43000 :cache-hit-tokens 40000}})
+      (let [t (first (:turns (api-runs/branch-detail c rid "B1")))]
+        (is (= 43000 (:prompt_tokens t)))
+        (is (= 40000 (:cache_hit_tokens t)))))))

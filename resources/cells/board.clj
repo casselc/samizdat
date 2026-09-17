@@ -199,6 +199,27 @@
                          (and (seq kids) (not-any? open? kids)))))
        vec))
 
+(defn- close-row!
+  "Close a worker branch's row with the loop's outcome (karamazov-pdes).
+  Every owner's row was opened at the claim and never closed, so every row
+  of every finished run said 'active' — the beam panel, the run detail's
+  active count and a resume all read a finished owner as a working one. A
+  branch the loop returned still `:active` ended on its cap, which is what
+  the beam calls exhausted; a loop that threw returns no branch, which is
+  abandoned. close-branch! only moves a row off 'active', so a row a
+  rejoin found already closed keeps how it ended."
+  [conn run-id bid out]
+  (let [b (:branch out)
+        s (:status b)
+        error? (or (nil? b) (= :error (:verdict out)))
+        status (cond error? :abandoned
+                     (contains? #{:done :abandoned :culled :exhausted} s) s
+                     :else :exhausted)]
+    (runs/close-branch! conn run-id bid status
+                        (or (:inactive-reason b)
+                            (when error? (or (not-empty (str (:final-answer b)))
+                                             "the loop failed"))))))
+
 (cell/defcell :board/plan
   {:doc "Make sure the board has work. An existing board is left alone — a
         revise round picks up what is still open rather than duplicating it.
@@ -609,8 +630,19 @@
                            ;; :planning-declares-a-plan) and the wind-down
                            ;; rungs ask for the plan (karamazov-ee72).
                            :planning? true))
+              ;; A ROW OF ITS OWN (karamazov-pdes). The design branch took its
+              ;; turns under an id no branches row carried — 14 of the 24
+              ;; branch ids on run 5f8de58c — so the beam panel could not show
+              ;; or select it, a resume could not rebuild it, and nothing
+              ;; per-branch (the fill, the handoff) could attach to it. Opened
+              ;; the way the claim opens the owner's, under the owner as its
+              ;; parent, on the brief it runs under.
+              _ (runs/open-branch! conn run-id {:branch-id did :parent-id branch-id
+                                                :problem prob :role :implementor
+                                                :prompt-suffix suffix})
               out (try (myc/run-compiled (wf/worker-compiled) ictx {:branch b :turn 1})
                        (catch Throwable _ nil))
+              _ (close-row! conn run-id did out)
               ;; The worker loop returns {:branch <finished branch>}, the same
               ;; shape board/work reads its answer from — not the beam's
               ;; {:done-branch}/{:branches}. state/plan reads what the owner
@@ -1029,6 +1061,7 @@
                 (catch Throwable e
                   {:verdict :error
                    :branch {:id bid :final-answer (str "owner failed: " (ex-message e))}}))
+          _ (close-row! conn run-id bid out)
           ;; What the branch ACTUALLY held at the end. The claim prompt tells a
           ;; composite task's owner to split and SWITCH to the first child, and
           ;; reviewing the task the board handed out then judges the untouched
