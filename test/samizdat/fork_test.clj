@@ -80,7 +80,7 @@
       (is (= [] (:abandoned c)))
       (is (= [] (:artifacts c)))
       (is (= {:calls 0 :parse-errors 0 :auto-repairs 0
-              :unknown-tools 0 :truncations 0 :multi-fences 0}
+              :unknown-tools 0 :truncations 0 :multi-fences 0 :periodic 0}
              (:mechanics c))))
     (testing "and it gets a full phase budget rather than its parent's spent one"
       (is (= 4 (:phase-entered-turn c)))

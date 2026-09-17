@@ -237,7 +237,8 @@
         ;; storing a doubled fence on every steered GLM turn.
         use-prefill? (boolean (and (:prefill request)
                                    (adapter/prefill-support? adapter config)))
-        payload (json/write-str (adapter/chat-body adapter config request))
+        body (adapter/chat-body adapter config request)
+        payload (json/write-str body)
         started (System/currentTimeMillis)
         resp (http/post url {:headers (merge (adapter/auth-headers adapter config)
                                              {"Content-Type" "application/json"})
@@ -294,6 +295,14 @@
                           ;; ignored the prefill (GLM) is not credited a fence
                           ;; it never emitted (karamazov-0r8s).
                           :prefilled (when use-prefill? (:prefill request))
+                          ;; The tool a native tool_choice named, or nil —
+                          ;; read off the body actually sent, the same way
+                          ;; :prefilled is, so a forced call the adapter
+                          ;; turned into a prefill is not recorded as a
+                          ;; force. GLM busts its prefix cache on this with
+                          ;; the bytes unchanged (karamazov-8jz), which is
+                          ;; why the turn row keeps it (karamazov-o4wm.1).
+                          :forced (get-in body [:tool_choice :function :name])
                           :elapsed-ms elapsed}}))
           {:outcome :fatal
            :error (str (adapter/display-name adapter)

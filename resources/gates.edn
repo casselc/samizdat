@@ -2060,6 +2060,47 @@
         budget assembled ~33k-token prompts and the branch re-sent them on
         backoff, burning wall-clock against a wall."}
 
+ :cache-miss
+ {:value {:min-prompt-tokens 2000
+          :hit-below 0.5}
+  :kind :threshold :capability-tunable? false
+  :provenance ["karamazov-o4wm.1"]
+  :doc "WHICH TURNS COUNT AS CACHE MISSES when the journal groups them by
+        cause (journal/cache-misses, shown on introspect's usage line).
+
+        A turn is a miss when the provider served under :hit-below of its
+        prompt tokens from the cache, and only when the prompt was at least
+        :min-prompt-tokens — a tiny request that missed says nothing about
+        the prefix discipline, and a hit rate over two hundred tokens is
+        noise either way. Both numbers are what the 2026-09-13 endless-flight
+        reading used (33 of 1352 turns), so a later reading compares.
+
+        The CAUSES are not policy: first call, tail-only, history rewritten,
+        forced native tool_choice come off the turn row (migration v30)."}
+
+ :repetition
+ {:value {:window 80 :step 1 :min-repeats 3 :min-period 20 :max-gap-variance 0.5}
+  :kind :threshold :capability-tunable? true
+  :provenance ["karamazov-o4wm.5"]
+  :doc "WHEN A REPLY COUNTS AS REPEATING ITSELF (samizdat.llm.repetition).
+
+        A :window-character slice that recurs :min-repeats times at gaps
+        within :max-gap-variance of their mean is a loop, not a reply that
+        needed more room: complete-fn does not retry it at a doubled budget,
+        and the no-call step words the complaint as a loop. Slices are
+        taken every :step characters — 1, because a coarser step sees only
+        the periods it divides — and a period under :min-period is a run
+        (a line of dashes, a column of zeros), not a model repeating
+        itself. The shape is floatboat's LoopDetector
+        (350-char windows, three near-matches, period variance under half)
+        over exact text rather than SimHash, since samizdat reads the
+        finished reply and a degenerate repeat is verbatim.
+
+        Evidence for the retry cost is thin — zero doubled retries on the
+        recent GLM runs, 560 on the older deepseek runs — which is why this
+        lands as a signal (mechanics :periodic, a :periodic-reply note) and
+        a guard on one retry, not as a steer of its own."}
+
  :context-pressure
  {:value {:operating-ceiling 24000
           :advisory 0.75
@@ -2148,6 +2189,23 @@
         WHICH tools may be retried is wordlists.edn :retry-safe-tools, and it
         is a positive allowlist. The error class says retrying could work; the
         tool says retrying is allowed to be tried; both must hold."}
+
+ :handoff
+ {:value {:args-chars 400 :said-chars 2000}
+  :kind :cost-ceiling :capability-tunable? false
+  :provenance ["karamazov-o4wm.2"]
+  :doc "HOW MUCH OF A DISPATCH IS KEPT ON RECORD before the tool runs.
+
+        The loop journals every dispatch before running it — the tool, its
+        args, what the branch said — so a turn cancelled or crashed inside
+        the tool can be handed back as the call it made and its side-effect
+        state, rather than as `abandoned`. The note is written every turn,
+        so it is clipped: args string values to :args-chars each, the
+        assistant text to :said-chars. A write_file's content is not what
+        the handoff needs; the path and the fact of the call are.
+
+        The turn row, written after the tool, keeps the full text as it
+        always has."}
 
  :compaction
  {:value
@@ -2305,6 +2363,13 @@
           :tree-lines          8
           :keep-pairs          10
           :compaction-chars    50000
+          ;; How many exchanges the compaction frontier moves by at once
+          ;; (karamazov-pdes). Measured on run 5e78b96a: advancing one
+          ;; exchange per turn re-prefilled the whole verbatim window on
+          ;; every call, a quarter of every request. At 4, three turns in
+          ;; four send a byte-identical history and the window floats
+          ;; between 10 and 13 exchanges. 1 is the old behaviour.
+          :compaction-batch    4
           :diff-chars          12000
           :shell-output-chars  8000
           :shared-code-chars   700

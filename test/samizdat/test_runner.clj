@@ -140,6 +140,8 @@
             [samizdat.sandbox-test]
             [samizdat.websearch-test]
             [samizdat.toolerr-test]
+            [samizdat.handoff-test]
+            [samizdat.repetition-test]
             [samizdat.tape-test]
             [samizdat.image-test]
             [samizdat.infer-test]
@@ -324,6 +326,8 @@
     samizdat.sandbox-test
     samizdat.websearch-test
     samizdat.toolerr-test
+    samizdat.handoff-test
+    samizdat.repetition-test
     samizdat.tape-test
     samizdat.image-test
     samizdat.infer-test

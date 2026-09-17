@@ -29,7 +29,11 @@
             [samizdat.agent.planner]
             [samizdat.agent.reflect]
             [samizdat.agent.telemetry]
-            [samizdat.engine.proc]))
+            [samizdat.engine.proc]
+            ;; cells/board.clj and cells/feature.clj read the run's metrics;
+            ;; nothing in src required the namespace, so a built binary would
+            ;; have lacked it (cells-test caught it, 2026-09-16).
+            [samizdat.metrics]))
 
 ;; decompose was the one shipped-cell dependency nothing in src reached, so it
 ;; was never compiled into a `jolt build` image and cells/decompose.clj's

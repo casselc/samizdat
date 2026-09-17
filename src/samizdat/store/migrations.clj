@@ -767,7 +767,35 @@
   ["ALTER TABLE knowledge ADD COLUMN error_count INTEGER NOT NULL DEFAULT 0"
    "ALTER TABLE userspace ADD COLUMN error_count INTEGER NOT NULL DEFAULT 0"])
 
+(def v30
+  "WHAT THE CACHE WAS ASKED, beside what it answered (karamazov-o4wm.1).
+
+  A turn row held the provider's cache split and nothing about the request
+  that earned it, so a miss after a compaction fold, a miss after a forced
+  native tool_choice and a branch's first call all read the same. On
+  endless-flight (GLM-5.3, 2026-09-13) 33 of 1352 turns hit under half their
+  prompt, 19 of them the turn after a gate fired, and none could be joined
+  to the 249 caps and 11 folds the run also recorded.
+
+  `prefix_stable_chars` is how many of this call's wire characters were
+  identical to the previous call's, counted from the front in whole
+  messages; `prefix_chars` is the whole request. `prefix_change` is one of
+  first | tail | rewritten: a branch's first call, the normal turn where
+  only the tail moved, or a message behind the tail rewritten — which is
+  compaction's doing and nobody else's. `forced_tool` is the tool a native
+  tool_choice named, recorded because that busts GLM's cache with the
+  prefix byte-stable, so a forced miss and a rewritten miss are different
+  findings.
+
+  Nullable: a replayed or stubbed call has no fingerprint, and a pre-v30
+  row was never measured. Nothing here changes a byte of what goes over the
+  wire; it records what did."
+  ["ALTER TABLE turns ADD COLUMN prefix_stable_chars INTEGER"
+   "ALTER TABLE turns ADD COLUMN prefix_chars INTEGER"
+   "ALTER TABLE turns ADD COLUMN prefix_change TEXT"
+   "ALTER TABLE turns ADD COLUMN forced_tool TEXT"])
+
 (def migrations
   "Ordered. Index 0 is migration 1; PRAGMA user_version holds the count applied."
   [v1 v2 v3 v4 v5 v6 v7 v8 v9 v10 v11 v12 v13 v14 v15 v16 v17 v18 v19 v20 v21 v22 v23 v24
-   v25 v26 v27 v28 v29])
+   v25 v26 v27 v28 v29 v30])

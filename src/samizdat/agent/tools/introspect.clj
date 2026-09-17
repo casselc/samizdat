@@ -51,6 +51,7 @@
             [samizdat.repl.route :as route]
             [samizdat.security.sandbox :as sandbox]
             [samizdat.manual :as manual]
+            [samizdat.agent.gates :as gates]
             [samizdat.prompt :as prompt]
             [samizdat.manifests :as manifests]
             [samizdat.store.journal :as journal]
@@ -131,7 +132,7 @@
                  (str (:turn r) "  " (:tool_name r "?")
                       "  " (some-> (:category r) name)))))))
 
-(defn- render-spend
+(defn render-spend
   "What the run cost, as one line, or nil without a usage map.
 
   TWO NUMBERS THE OLD BLOCK DID NOT CARRY. The token total is the WHOLE bill
@@ -140,13 +141,23 @@
   off this screen. The hit rate is the cache's, and `n/a` rather than 0% when
   no provider on the run reported a lane (karamazov-2rqb.2): a zero there
   would claim every token missed, which is a measurement nobody made."
-  [{:keys [side-calls total-tokens cache-hit-rate] :as usage}]
+  [{:keys [side-calls total-tokens cache-hit-rate cache-misses] :as usage}]
   (when usage
     (str "tokens: " (or total-tokens 0)
          " | side calls: " (or side-calls 0)
          " | cache hit: " (if cache-hit-rate
                             (str (Math/round (* 100.0 cache-hit-rate)) "%")
-                            "n/a"))))
+                            "n/a")
+         ;; WHY it is what it is (karamazov-o4wm.1): the low-hit turns by
+         ;; cause, largest first. Absent when nothing was low — a clause
+         ;; reading "0 (none)" is a line the reader has to parse to learn
+         ;; nothing.
+         (when-let [{:keys [low by-cause]} cache-misses]
+           (when (pos? (or low 0))
+             (str " | low-hit turns: " low " ("
+                  (str/join ", " (for [[k n] (sort-by (comp - second) by-cause)]
+                                   (str (clojure.core/name k) " " n)))
+                  ")"))))))
 
 (defn render-health
   "A compact snapshot of a run: tallies over every turn row, what it has spent,
@@ -181,17 +192,29 @@
   parts that rendered nothing already dropped. Those are named separately
   rather than shown as zero: an empty ledger and a ledger eating the turn are
   different problems, and a 0 reads as a measurement of the second."
-  [sizes]
-  (if (empty? sizes)
-    (prompt/prompt "context-empty")
-    (let [shown (map first sizes)
-          silent (remove (set shown) state/context-part-names)]
-      (str "total: " (reduce + (map second sizes)) " chars\n\n"
-           (str/join "\n" (for [[part n] sizes]
-                            (str (clojure.core/name part) ": " n)))
-           (when (seq silent)
-             (str "\n\nrendered nothing: "
-                  (str/join ", " (map clojure.core/name silent))))))))
+  ([sizes] (render-context sizes nil))
+  ([sizes stats]
+   (str
+    (if (empty? sizes)
+      (prompt/prompt "context-empty")
+      (let [shown (map first sizes)
+            silent (remove (set shown) state/context-part-names)]
+        (str "total: " (reduce + (map second sizes)) " chars\n\n"
+             (str/join "\n" (for [[part n] sizes]
+                              (str (clojure.core/name part) ": " n)))
+             (when (seq silent)
+               (str "\n\nrendered nothing: "
+                    (str/join ", " (map clojure.core/name silent)))))))
+    ;; THE RUN, not just the last turn (karamazov-o4wm.6): a part that is
+    ;; 1,200 chars on one turn and 12,000 on average is a different
+    ;; problem, and only the average says which. From the :context-block
+    ;; notes; absent when the run has none.
+    (when-let [{:keys [turns avg-total parts]} stats]
+      (str "\n\nover " turns " turns: avg total " avg-total " chars"
+           (when (seq parts)
+             (str " — "
+                  (str/join ", " (for [[part n] (sort-by (comp - second) parts)]
+                                   (str part ": " n))))))))))
 
 (defn- render-eval-image
   "Which image this run's `eval` lands in, and how confined it is.
@@ -230,10 +253,13 @@
                      (map #(select-keys % [:turn :tool_name :category :parse_error])
                           (journal/turns conn run-id))
                      max-turns
-                     (journal/run-usage conn run-id))
+                     (assoc (journal/run-usage conn run-id)
+                            :cache-misses (journal/cache-misses
+                                           conn run-id (gates/threshold :cache-miss))))
                     "(no run database in this context — wiring only)")
                   "\n\n=== CONTEXT BLOCK (last turn) ===\n\n"
-                  (render-context (:context-sizes branch))
+                  (render-context (:context-sizes branch)
+                                  (when conn (journal/context-block-stats conn run-id)))
                   ;; What the tuning has been touching. The self-healing rule:
                   ;; everything the supervisor might act on is enumerable at
                   ;; runtime with a description, and the edit history is a

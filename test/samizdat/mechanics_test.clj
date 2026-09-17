@@ -50,8 +50,10 @@
               {:role "user" :content (apply str (repeat 400 "b")) :turn 1}
               {:role "assistant" :content "recent" :turn 9}
               {:role "user" :content "newest" :turn 9}]
+        ;; :batch 1: this pins the marker, not the frontier's stride, and a
+        ;; single aged-out exchange is under the shipped batch.
         out (message/compact msgs [{:turn 1 :tool "grep" :category :neutral}]
-                             {:keep-pairs 1 :threshold-chars 10})
+                             {:keep-pairs 1 :threshold-chars 10 :batch 1})
         compacted (filter message/unloaded? (map :content out))]
     (is (seq compacted) "something was unloaded at this threshold")
     (doseq [c compacted]

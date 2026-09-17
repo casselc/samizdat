@@ -49,7 +49,9 @@
  ;;                         :dispatch :journal :settle :arbiter :route).
  ;;   :widget/tasks         the board: what is open, in progress, done.
  ;;   :widget/files         files this run has written, newest first.
- ;;   :widget/context       context-window fill, and what the run has spent.
+ ;;   :widget/context       the branch's context fill against the window, what
+;;                         the run has spent, and the cache: hit rate and the
+;;                         turns that missed, by cause.
  ;;   :widget/gates         gates that fired and predictions still unsettled.
  ;;   :widget/artifacts     claims made, and how each was judged.
  ;;   :widget/runs          the run picker.
@@ -84,7 +86,7 @@
    ;; which run all of it is about.
    [:vbox {:width 30}
     [:widget/activity {:title "ACTIVITY LOG" :flex :grow}]
-    [:widget/context {:title "CONTEXT" :height 7}]
+    [:widget/context {:title "CONTEXT" :height 11}]
     [:widget/runs {:title "RUNS" :height 6}]]
 
    ;; The middle band is the conversation, and it takes the room. `:turns` is

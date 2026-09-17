@@ -55,10 +55,18 @@
    :default (:prune-line-default p)})
 
 (defn- note!
-  "Record what the pass did. Best effort — a journal that refuses must not
-  stop a compaction the context pressure requires."
-  [conn run-id data]
-  (try (journal/note! conn run-id :compaction {:data data}) (catch Throwable _ nil)))
+  "Record what the pass did, and WHERE. Best effort — a journal that refuses
+  must not stop a compaction the context pressure requires.
+
+  `data` is the cell's data map; its :branch and :turn go on the note so a
+  rung's firing can be joined to the turn whose cache it cost. Every rung
+  used to note {:data …} alone, and on endless-flight (GLM-5.3, 2026-09-13)
+  249 caps and 11 folds could not be joined to any of the run's 33 low-hit
+  turns (karamazov-o4wm.1)."
+  [conn run-id {:keys [branch turn]} payload]
+  (try (journal/note! conn run-id :compaction
+                      {:branch-id (:id branch) :turn turn :data payload})
+       (catch Throwable _ nil)))
 
 ;; --- measure -----------------------------------------------------------------
 
@@ -118,8 +126,11 @@
    ;; manifest that edges straight to :cap without :measure is a cap sizing its
    ;; clip from nil, which is exactly the rewiring the file header invites and
    ;; the one shape of it that does not work.
+   ;; :turn is declared, not required: a manifest that reaches this rung
+   ;; without one still compacts, and its note just names no turn.
    :input  [:map [:branch :map] [:compaction/tier :any]
-            [:compaction/ratio :any] [:compaction/before :any]]
+            [:compaction/ratio :any] [:compaction/before :any]
+            [:turn {:optional true} :int]]
    :output [:map [:branch :map] [:compaction/freed :any]
             [:compaction/route :keyword]]}
   (fn [{:keys [conn run-id llm-config]} {:keys [branch] :as data}]
@@ -144,7 +155,7 @@
         ;; the tier was right, because the pressure that chose it is missing.
         ;; Fold recorded :before all along; this is cap catching up
         ;; (karamazov-be8).
-        (note! conn run-id {:tier (some-> t name) :action "cap" :freed freed
+        (note! conn run-id data {:tier (some-> t name) :action "cap" :freed freed
                             :before (:compaction/before data)
                             :ratio (:compaction/ratio data)}))
       (assoc data
@@ -264,7 +275,7 @@
    ;; against it: a fold that cannot tell whether it shrank anything is the
    ;; every-turn-forever loop the docstring ends on.
    :input  [:map [:branch :map] [:compaction/before :any]
-            [:compaction/tier :any]]
+            [:compaction/tier :any] [:turn {:optional true} :int]]
    ;; Every failure path returns `data` unchanged, so :branch is all this may
    ;; promise — and it promises it because the success path replaces the
    ;; messages in place.
@@ -286,7 +297,7 @@
                    (:aggressive-tail p) (:protect-tail p))
             [s e] (cmp/compress-window msgs (:protect-head p) tail)]
         (if (>= s e)
-          (do (note! conn run-id {:tier (some-> (:compaction/tier data) name)
+          (do (note! conn run-id data {:tier (some-> (:compaction/tier data) name)
                                   :action "prune-only" :why "no window to fold"})
               data)
           (let [folded (subvec msgs s e)
@@ -301,7 +312,7 @@
                            :min-sections (:min-summary-sections p)
                            :empties (:empty-bodies p)}))]
             (if-not ok?
-              (do (note! conn run-id
+              (do (note! conn run-id data
                          {:tier (some-> (:compaction/tier data) name)
                           :action "prune-only"
                           :why (if summary "summary rejected" "summarizer produced nothing")})
@@ -311,10 +322,10 @@
                                            (prompt/prompt "compaction-marker") summary)
                     after (cmp/estimate-tokens out (:chars-per-token p))]
                 (if (>= after (:compaction/before data))
-                  (do (note! conn run-id {:action "no-progress"
+                  (do (note! conn run-id data {:action "no-progress"
                                           :before (:compaction/before data) :after after})
                       data)
-                  (do (note! conn run-id
+                  (do (note! conn run-id data
                              {:tier (some-> (:compaction/tier data) name)
                               :action "fold" :folded (- e s)
                               :before (:compaction/before data) :after after
