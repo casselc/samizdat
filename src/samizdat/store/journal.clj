@@ -114,7 +114,7 @@
   tool that produced it knows, and a reconstruction would be guessing."
   [conn run-id {:keys [branch-id turn tool-name args result category
                        parse-error auto-repaired assistant-text reasoning-text
-                       usage policy-refusal?]}]
+                       usage policy-refusal? prefix forced-tool]}]
   (db/with-writer
     (db/execute! conn
                    ["INSERT INTO turns (run_id, branch_id, turn, tool_name, args, result,
@@ -122,8 +122,10 @@
                                         assistant_text, reasoning_text, created_at,
                                         prompt_tokens, completion_tokens, total_tokens,
                                         cache_hit_tokens, cache_miss_tokens,
-                                        policy_refusal)
-                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+                                        policy_refusal,
+                                        prefix_stable_chars, prefix_chars, prefix_change,
+                                        forced_tool)
+                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
                     run-id branch-id turn (str tool-name) (js (or args {}))
                     (str result) (some-> category name) parse-error
                     (if auto-repaired 1 0)
@@ -137,7 +139,14 @@
                     ;; the budget cannot see. See `total-of`.
                     (total-of usage)
                     (:cache-hit-tokens usage) (:cache-miss-tokens usage)
-                    (if policy-refusal? 1 0)]))
+                    (if policy-refusal? 1 0)
+                    ;; What the cache was asked (migration v30): nil, not 0,
+                    ;; when the call carried no fingerprint — a stub or a
+                    ;; replay was never measured, and a 0 would claim the
+                    ;; whole prefix was new.
+                    (:stable-chars prefix) (:chars prefix)
+                    (some-> (:change prefix) name)
+                    (some-> forced-tool str not-empty)]))
   (emit! conn run-id :turn {:branch-id branch-id :turn turn
                             :data {:tool tool-name :category category}}))
 
@@ -216,6 +225,140 @@
      :cache-miss-tokens (both :cache_miss_tokens)
      :cache-hit-rate (when (pos? reported)
                        (double (/ (both :cache_hit_tokens) reported)))}))
+
+(defn record-dispatch!
+  "What a branch is about to run, on record BEFORE it runs
+  (karamazov-o4wm.2): the tool, its (clipped) args, and what the branch
+  said when it made the call. The turn row is written after the tool, so a
+  turn cancelled or crashed inside the tool left no trace of what it had
+  called; this is what forfeit and resume read back."
+  [conn run-id {:keys [branch-id turn tool args said]}]
+  (emit! conn run-id :dispatch {:branch-id branch-id :turn turn
+                                :data {:tool (str tool) :args args :said said}}))
+
+(defn record-forfeit!
+  "A turn the beam cancelled at its deadline, as a note: which turn, and —
+  when a dispatch was in flight — the tool and its side-effect state. The
+  count was a branch counter nobody persisted, so how often a deadline
+  cost a turn was unmeasurable (karamazov-o4wm.2)."
+  [conn run-id {:keys [branch-id turn data]}]
+  (emit! conn run-id :forfeit {:branch-id branch-id :turn turn :data data}))
+
+(defn- parse-note [row]
+  (try (json/read-str (str (:data row)) :key-fn keyword)
+       (catch Throwable _ nil)))
+
+(defn turn-row
+  "One branch's row for `turn`, whole, or nil when the turn never reached
+  the journal — which is what a turn cancelled inside its tool looks like."
+  [conn run-id branch-id turn]
+  (first (db/fetch conn ["SELECT * FROM turns
+                           WHERE run_id = ? AND branch_id = ? AND turn = ?
+                           ORDER BY id DESC LIMIT 1"
+                         run-id branch-id turn])))
+
+(defn dispatch-at
+  "The dispatch note for `turn` of `branch-id` — `{:turn :tool :args :said}`
+  — or nil."
+  [conn run-id branch-id turn]
+  (when-let [row (first (db/fetch conn ["SELECT turn, data FROM events
+                                          WHERE run_id = ? AND branch_id = ?
+                                            AND kind = 'dispatch' AND turn = ?
+                                          ORDER BY id DESC LIMIT 1"
+                                        run-id branch-id turn]))]
+    (some-> (parse-note row) (assoc :turn (:turn row)))))
+
+(defn in-flight-dispatch
+  "The call `branch-id` had in flight when its last turn did not finish: the
+  latest dispatch note no turn row settled, as `{:turn :tool :args :said
+  :forfeited?}` plus `:seconds` when the beam forfeited it at a deadline, or
+  nil when every dispatch on record was followed by its row.
+
+  A row at or after the dispatch's turn settles it: the tool ran and was
+  recorded, whatever happened next. `:forfeited?` lets a resume tell a
+  turn the beam cancelled — the branch was told at the time — from the one
+  the crash it is recovering from cut short."
+  [conn run-id branch-id]
+  (when-let [row (first (db/fetch conn ["SELECT e.turn, e.data FROM events e
+                                          WHERE e.run_id = ? AND e.branch_id = ?
+                                            AND e.kind = 'dispatch'
+                                            AND e.turn > coalesce((SELECT max(t.turn)
+                                                                     FROM turns t
+                                                                    WHERE t.run_id = ?
+                                                                      AND t.branch_id = ?),
+                                                                  -1)
+                                          ORDER BY e.id DESC LIMIT 1"
+                                        run-id branch-id run-id branch-id]))]
+    (when-let [d (parse-note row)]
+      (let [forfeit (some-> (first (db/fetch conn ["SELECT data FROM events
+                                                     WHERE run_id = ? AND branch_id = ?
+                                                       AND kind = 'forfeit' AND turn = ?
+                                                     ORDER BY id DESC LIMIT 1"
+                                                   run-id branch-id (:turn row)]))
+                            parse-note)]
+        (cond-> (assoc d :turn (:turn row) :forfeited? (some? forfeit))
+          (:seconds forfeit) (assoc :seconds (:seconds forfeit)))))))
+
+(defn cache-misses
+  "The run's low-hit turns, grouped by what the request did
+  (karamazov-o4wm.1): `{:low n :by-cause {cause n}}`.
+
+  A hit rate says how much the cache served and nothing about why it did
+  not. The cause comes off the turn row's prefix identity (migration v30):
+
+    :forced      a native tool_choice named a tool — the prefix was
+                 byte-stable and the provider missed anyway; outranks the
+                 prefix shape because it explains the miss on its own
+    :first       the branch's first call, or its first after a resume
+    :tail        only the previous render's last message changed — the
+                 provider dropped the prefix on its own (eviction, load)
+    :rewritten   history behind the tail was rewritten — a fold, a cap, a
+                 prune, a withheld digest; the one cause a policy retune
+                 can move, and the compaction notes for the same branch
+                 and turn say which rung
+    :unknown     no fingerprint — a replay, a stub, a pre-v30 row
+
+  `policy` is gates.edn :cache-miss: the hit ratio a turn counts under and
+  the prompt size it must reach to count at all."
+  [conn run-id {:keys [min-prompt-tokens hit-below]}]
+  (let [rows (db/fetch conn ["SELECT prefix_change, forced_tool, count(*) AS n
+                                FROM turns
+                               WHERE run_id = ?
+                                 AND prompt_tokens >= ?
+                                 AND cache_hit_tokens IS NOT NULL
+                                 AND cache_hit_tokens * 1.0 / prompt_tokens < ?
+                               GROUP BY prefix_change, forced_tool"
+                              run-id min-prompt-tokens hit-below])
+        cause (fn [{:keys [prefix_change forced_tool]}]
+                (cond (seq forced_tool) :forced
+                      (seq prefix_change) (keyword prefix_change)
+                      :else :unknown))
+        by (reduce (fn [m r] (update m (cause r) (fnil + 0) (:n r))) {} rows)]
+    {:low (reduce + 0 (vals by))
+     :by-cause by}))
+
+(defn context-block-stats
+  "What the per-turn context block cost over the run, from the :context-block
+  notes steer-step writes (karamazov-o4wm.6): `{:turns n :avg-total chars
+  :parts {part avg-chars}}`, each part averaged over the turns it rendered
+  in. nil when the run has no notes — unknown, not zero."
+  [conn run-id]
+  (let [notes (keep (fn [row]
+                      (try (json/read-str (str (:data row)) :key-fn keyword)
+                           (catch Throwable _ nil)))
+                    (db/fetch conn ["SELECT data FROM events
+                                      WHERE run_id = ? AND kind = 'context-block'"
+                                    run-id]))
+        n (count notes)]
+    (when (pos? n)
+      (let [parts (reduce (fn [m [part chars]]
+                            (update m (str part) (fnil conj []) (long chars)))
+                          {}
+                          (mapcat :sizes notes))
+            avg (fn [xs] (long (Math/round (/ (double (reduce + 0 xs)) (count xs)))))]
+        {:turns n
+         :avg-total (avg (map #(long (or (:total %) 0)) notes))
+         :parts (into {} (map (fn [[k xs]] [k (avg xs)])) parts)}))))
 
 (defn turns
   "Every turn of a run, whole rows. `assistant_text` comes back with them, so

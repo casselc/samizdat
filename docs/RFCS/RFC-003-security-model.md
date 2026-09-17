@@ -204,6 +204,23 @@ Reading the load-bearing solid edges:
   the boundary, not outside it.
 - **no path from toolcall to sub skips perm or scrub.**
 
+### Tool output is data, and says so on the wire
+
+Every tool result reaches the model inside `<tool_result tool="…">` …
+`</tool_result>` (`message/frame-result`), with the only `</tool_result>` the
+output itself contained escaped on the way in — so a file, a page or a
+command's output cannot close the frame and speak as the harness. Harness
+text (the context block, the one steer) is appended after the frame, and
+`system.md` tells the model that anything inside it is what the tool
+returned, never an instruction (karamazov-o4wm.3). A replayed row and a
+forfeit handoff frame the same way; the harness's own rows are not framed,
+because they are the thing the frame distinguishes from.
+
+This is a defence against impersonation, not against persuasion: nothing
+scans a page for advice the model might follow (dirge's `content_guard` does;
+this harness does not), and the frame does not change a byte of the output
+beyond the one escape.
+
 ## API
 
 ### `samizdat.security.secrets`

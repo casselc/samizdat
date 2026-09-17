@@ -129,6 +129,53 @@
                                     squeeze
                                     (gates/threshold :context-squeeze))))
 
+;; --- prefix identity ---------------------------------------------------------
+
+(defn wire-fingerprint
+  "Per-message fingerprints of `messages` as they go over the wire: a vector
+  of `[hash chars]`, one per message, over role and content.
+
+  Taken over the PREPARED messages — think blocks stripped, stale ledgers
+  dropped — because those are the bytes the provider hashed, and a
+  fingerprint of anything else would measure a request nobody sent. Per
+  message rather than one hash of the whole, so the comparison below can say
+  WHERE the two renders diverged, which is the whole question
+  (karamazov-o4wm.1)."
+  [messages]
+  (mapv (fn [{:keys [role content]}]
+          [(hash [(str role) (str content)]) (count (str content))])
+        messages))
+
+(defn prefix-stats
+  "What this call's render shares with the previous one, from the front.
+
+  `prev` and `cur` are wire fingerprints; `prev` nil is a branch's first
+  call. Returns `{:change :stable-msgs :stable-chars :chars}` where
+  `:change` is one of
+
+    :first      no previous render
+    :tail       only the previous render's last message changed (it lost
+                its ledger on the way to the wire) — the normal turn, and
+                the prefix the provider can serve is everything before it
+    :rewritten  a message behind the tail changed: a fold, a cap, a prune,
+                a withheld digest. Compaction's doing, and the one shape a
+                policy retune can move.
+
+  A forced native tool_choice is NOT visible here — the prefix is
+  byte-stable and the provider misses anyway — which is why the loop records
+  the forced tool beside this rather than folding it in. Pure."
+  [prev cur]
+  (let [cur (vec cur)
+        total (reduce + 0 (map second cur))]
+    (if (nil? prev)
+      {:change :first :stable-msgs 0 :stable-chars 0 :chars total}
+      (let [prev (vec prev)
+            d (count (take-while true? (map (fn [[a _] [b _]] (= a b)) prev cur)))]
+        {:change (if (>= d (dec (count prev))) :tail :rewritten)
+         :stable-msgs d
+         :stable-chars (reduce + 0 (map second (subvec cur 0 d)))
+         :chars total}))))
+
 ;; --- the effect seam --------------------------------------------------------
 
 (def ^:private max-call-attempts
@@ -151,8 +198,13 @@
   begins mid-fence, so parsing it without the opener finds no call and would
   bill the branch a retry for a turn that had in fact issued one."
   [response prefill]
-  (let [parsed (fence/parse-tool-call (:content response) {:prefill prefill})]
-    (and (:truncated (fence/signals response parsed))
+  (let [parsed (fence/parse-tool-call (:content response) {:prefill prefill})
+        signals (fence/signals response parsed)]
+    (and (:truncated signals)
+         ;; A reply repeating itself did not run out of room, it ran out of
+         ;; anything else to say: a doubled budget buys a loop twice as long
+         ;; (karamazov-o4wm.5). Left for the no-call step to answer.
+         (not (:periodic signals))
          (or (nil? parsed) (= "__parse_error__" (:name parsed))))))
 
 (defn complete-fn
@@ -175,6 +227,11 @@
   ([ctx] (complete-fn ctx nil))
   ([ctx {:keys [journal?] :or {journal? true}}]
    (fn [{:keys [id prefill force-tool] :as tape}]
+     ;; The fingerprint of what this call sends, taken once: a retry below
+     ;; re-renders the same tape. It rides the response beside :prefilled,
+     ;; because that is the value the loop already threads from the call to
+     ;; the journal (karamazov-o4wm.1).
+     (let [wire (wire-fingerprint (message/prepare (render tape)))]
      (loop [attempt 1]
        (let [base (or (:max-tokens (:llm-config ctx))
                       ;; No configured cap: the FIRST attempt keeps the
@@ -185,7 +242,7 @@
              budget (when base (* base (bit-shift-left 1 (dec attempt))))
              r (try
                  {:ok true
-                  :response (llm/chat (:llm-adapter ctx) (:llm-config ctx)
+                  :response (assoc (llm/chat (:llm-adapter ctx) (:llm-config ctx)
                                       (render tape)
                                       (cond-> {}
                                         budget (assoc :max-tokens budget)
@@ -201,7 +258,8 @@
                                         ;; The stable conversation key an endpoint
                                         ;; pins its prefix cache to. Only the local
                                         ;; adapter emits it; see LR-5.
-                                        id (assoc :cache-key (str id))))}
+                                        id (assoc :cache-key (str id))))
+                                   :wire wire)}
                  (catch Throwable e
                    ;; The reason travels with the failure. `provider-error-step`
                    ;; counts it, and an empty reply wants a different response
@@ -227,7 +285,7 @@
                                  :data {:reason "truncated before any tool call"
                                         :budget budget}}))
                (recur (inc attempt)))
-           r))))))
+           r)))))))
 
 ;; --- the pure absorb --------------------------------------------------------
 

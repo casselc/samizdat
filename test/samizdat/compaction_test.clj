@@ -351,3 +351,44 @@
       (is (and w (pos? w)) (str "provider " p " must declare a context window"))))
   (testing "and it reaches the :llm config the loop hands to compaction"
     (is (pos? (:context-window (:llm (config/load-config {:llm {:provider :glm}})))))))
+
+(deftest a-compaction-note-names-the-branch-and-the-turn
+  ;; Every rung noted WHAT it did and none noted WHERE: {:data …} with no
+  ;; :branch-id and no :turn, so a fold could not be joined to the cache miss
+  ;; it caused. On endless-flight (GLM-5.3, 2026-09-13) 249 caps and 11
+  ;; folds were unjoinable to any of the 33 low-hit turns (karamazov-o4wm.1).
+  (cells/load-cells!)
+  (let [notes (atom [])
+        big (apply str (repeat 40000 "x"))
+        data {:compaction/tier :aggressive-cap
+              :compaction/ratio 0.83
+              :compaction/before 61000
+              :turn 4
+              :branch {:id "B7"
+                       :messages (into [{:role "user" :content "go"}]
+                                       (repeat 8 {:role "user" :content big}))}}]
+    (with-redefs [samizdat.store.journal/note!
+                  (fn [_ _ kind m] (swap! notes conj (assoc m ::kind kind)) nil)]
+      ((:handler (cell/get-cell! :compaction/cap))
+       {:conn ::conn :run-id "r1" :llm-config {:context-window 128000}}
+       data))
+    (let [n (first (filter #(= "cap" (get-in % [:data :action])) @notes))]
+      (is (some? n))
+      (is (= "B7" (:branch-id n)))
+      (is (= 4 (:turn n))))))
+
+(deftest a-framed-shell-result-still-prunes-to-its-command
+  ;; karamazov-o4wm.3: the frame's opening tag is the first line of every
+  ;; tool result now, and the shell template's `first-line` is the command.
+  ;; The summariser reads the body, not the frame.
+  (cells/load-cells!)
+  (let [long-out (apply str (repeat 900 "x"))
+        msgs (into [{:role "user" :tool "shell"
+                     :content (samizdat.llm.message/frame-result
+                               "shell" (str "jolt -M:test\n" long-out))}]
+                   (repeat 6 {:role "user" :content "recent"}))
+        out (get-in ((:handler (cell/get-cell! :compaction/prune))
+                     {} {:branch {:messages msgs}})
+                    [:branch :messages])]
+    (is (str/starts-with? (:content (nth out 0)) "[shell] ran `jolt -M:test`")
+        "the command, not the frame's opening tag")))

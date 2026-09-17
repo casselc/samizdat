@@ -41,6 +41,8 @@
             [clojure.string :as str]
             [instaparse.combinators :as c]
             [instaparse.core :as insta]
+            [samizdat.lexicon :as lexicon]
+            [samizdat.llm.repetition :as repetition]
             [samizdat.prompt :as prompt]))
 
 ;; Any opener paired with any closer.
@@ -763,10 +765,17 @@
   reading that as a model too weak to emit a tool call would be wrong — the
   fix is more tokens, not more steering. It was the first thing a live
   deepseek-v4-flash call did here, so it is not a hypothetical."
-  [{:keys [finish-reason]} parsed]
-  (let [truncated (= "length" finish-reason)]
+  [{:keys [finish-reason content]} parsed]
+  (let [truncated (= "length" finish-reason)
+        ;; A reply repeating itself, checked only where it matters — a
+        ;; truncated reply, or one that made no call — so a long healthy
+        ;; reply that reached its fence is not scanned (karamazov-o4wm.5).
+        periodic (when (or truncated (nil? parsed))
+                   (repetition/periodic content (lexicon/policy :repetition)))]
     {:no-fence (and (nil? parsed) (not truncated))
      :truncated truncated
+     :periodic (some? periodic)
+     :periodic-repeats (:repeats periodic)
      :parse-error (= "__parse_error__" (:name parsed))
      :auto-repaired (boolean (:auto-repaired? parsed))
      ;; The call was recovered from INSIDE the reasoning. Its own signal, not

@@ -6,7 +6,8 @@
   the beam starts with its own callbacks, keeps the canceller of, and cancels
   at the deadline; the branch forfeits while its cancelled turn has not yet
   terminated, and never runs beside it. Abort is the same cancel from outside."
-  (:require [clojure.test :refer [deftest testing is]]
+  (:require [clojure.string :as str]
+            [clojure.test :refer [deftest testing is]]
             [ebb.core :as ebb]
             [samizdat.agent.beam :as beam]
             [samizdat.agent.critic :as critic]
@@ -158,3 +159,53 @@
                                    :turn turn})]
       (let [[r] (ebb/? (ebb/sp (beam/ensure-scored {} [b] 1)))]
         (is (= 3 (get-in r [:critic :scores :progress])))))))
+
+(deftest a-forfeited-turn-tells-the-branch-what-was-in-flight
+  ;; karamazov-o4wm.2. The forfeit kept the pre-turn branch, so the call the
+  ;; model made was gone from its tape and the only word it got was
+  ;; "abandoned". If that call was a mutating shell, the obvious next move —
+  ;; make it again — is the unsafe one. The dispatch note the turn wrote
+  ;; before running the tool is what the forfeit reads back.
+  (let [c (db/open! ":memory:")]
+    (try
+      (db/migrate! c)
+      (let [rid (runs/start-run! c {:problem "p" :beam-width 1})
+            _ (runs/open-branch! c rid {:branch-id "B1" :created-at-turn 0})
+            b (state/new-branch {:id "B1" :problem "p"})
+            n (count (:messages b))]
+        (with-redefs [beam/advance-branch
+                      (fn [_ b turn]
+                        ;; the turn journals its dispatch, then hangs in the tool
+                        (samizdat.store.journal/record-dispatch!
+                         c rid {:branch-id "B1" :turn turn :tool "shell"
+                                :args {:cmd "make deploy"} :said "deploying"})
+                        (ebb/? (ebb/sleep 2000))
+                        b)]
+          (let [[r] (beam/advance-all (assoc (ctx 50) :conn c :run-id rid) [b] 1)
+                msgs (drop n (:messages r))]
+            (is (= 1 (:timeouts r)))
+            (is (= ["assistant" "user"] (mapv :role msgs))
+                "the call it made, then what the harness knows")
+            (is (= "deploying" (:content (first msgs))))
+            (is (str/includes? (:content (second msgs)) "`shell`"))
+            (is (str/includes? (:content (second msgs)) "not known whether"))
+            (testing "and the forfeit is on the record, with what it interrupted"
+              (is (= {:tool "shell" :side-effect "unknown" :seconds 0}
+                     (samizdat.store.journal/last-note c rid :forfeit)))))))
+      (finally (db/close c)))))
+
+(deftest a-forfeit-with-nothing-in-flight-says-only-that-the-turn-was-lost
+  (let [c (db/open! ":memory:")]
+    (try
+      (db/migrate! c)
+      (let [rid (runs/start-run! c {:problem "p" :beam-width 1})
+            _ (runs/open-branch! c rid {:branch-id "B1" :created-at-turn 0})
+            b (state/new-branch {:id "B1" :problem "p"})
+            n (count (:messages b))]
+        (with-redefs [beam/advance-branch (fn [_ b _] (ebb/? (ebb/sleep 2000)) b)]
+          (let [[r] (beam/advance-all (assoc (ctx 50) :conn c :run-id rid) [b] 1)
+                msgs (drop n (:messages r))]
+            (is (= ["user"] (mapv :role msgs)))
+            (is (str/includes? (:content (first msgs)) "deadline"))
+            (is (nil? (:tool (samizdat.store.journal/last-note c rid :forfeit)))))))
+      (finally (db/close c)))))

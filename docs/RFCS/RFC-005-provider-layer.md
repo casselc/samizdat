@@ -97,7 +97,10 @@ Bounds: `default-max-retries` 2, `default-timeout-ms` 300000,
 
 `(parse-tool-call content {:prefill p})` → `{:name :args}`, `{:name "__parse_error__"}`,
 or `nil`. `(signals response parsed)` → `{:no-fence :truncated :parse-error
-:auto-repaired :multiple-fences}`. `(reattach content prefill)` → the complete
+:auto-repaired :multiple-fences :periodic :periodic-repeats}` — the last two
+from `samizdat.llm.repetition`, computed only for a truncated or call-less
+reply, and what keeps a reply that is repeating itself from being retried at a
+doubled budget (karamazov-o4wm.5). `(reattach content prefill)` → the complete
 assistant turn.
 
 `:no-fence` and `:truncated` are separated deliberately: a reply that hit the

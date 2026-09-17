@@ -147,6 +147,17 @@ A block held at a fixed early position and rewritten when its subject changes
 invalidates every cached token behind it; one carrying anything per-turn means
 the cache never warms at all.
 
+**Measured, not assumed.** Every committed call fingerprints the wire
+messages it sent (`infer/wire-fingerprint`, one `[hash chars]` per prepared
+message) and compares them with the branch's previous render
+(`infer/prefix-stats`). The turn row records how much of the request was
+byte-identical from the front, whether only the tail moved or history behind
+it was rewritten, and the tool a native `tool_choice` named (migration v30);
+compaction notes carry the branch and turn they fired on. `journal/cache-misses`
+groups the low-hit turns by those causes and `introspect` shows the grouping,
+so a drop in the hit rate is attributable to a fold, to a forced call, or to
+the provider, rather than argued about (karamazov-o4wm.1).
+
 One deliberate, bounded exception: `strip-stale-ledgers` (RFC-005) blanks the
 previous turn's settled-state block on the way to the wire, so the byte-stable
 prefix ends one ledger position earlier than the newest message. The cost is

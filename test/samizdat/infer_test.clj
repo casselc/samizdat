@@ -248,3 +248,124 @@
         (let [b' (aloop/provider-error-step {} b 3 "boom" :call-failed)]
           (is (nil? (:context-squeeze b')))
           (is (= (inc n) (count (:messages b')))))))))
+
+;; --- prefix identity: what the cache could have kept ------------------------
+
+(deftest prefix-stats-classifies-what-changed-since-the-last-render
+  ;; A cache miss has three shapes and the journal could not tell them apart
+  ;; (karamazov-o4wm.1): a branch's first call, the normal turn where only
+  ;; the tail moved (the previous last message lost its ledger, two new
+  ;; messages arrived), and a rewrite of history behind the tail — a fold, a
+  ;; cap, a withheld digest — which is the only one compaction is responsible
+  ;; for. The comparison is over per-message fingerprints of the WIRE
+  ;; messages, so it measures exactly what the provider hashed.
+  (let [fp (fn [& contents]
+             (infer/wire-fingerprint (map (fn [c] {:role "user" :content c}) contents)))]
+    (testing "no previous render: everything is new"
+      (is (= {:change :first :stable-msgs 0 :stable-chars 0 :chars 5}
+             (infer/prefix-stats nil (fp "abcde")))))
+    (testing "an identical render is all tail"
+      (let [w (fp "sys" "problem" "reply")]
+        (is (= :tail (:change (infer/prefix-stats w w))))
+        (is (= 15 (:stable-chars (infer/prefix-stats w w))))))
+    (testing "the normal turn: the previous last message changed and two were appended"
+      (let [prev (fp "sys" "problem" "result<ledger>")
+            cur (fp "sys" "problem" "result" "call" "result2<ledger>")
+            s (infer/prefix-stats prev cur)]
+        (is (= :tail (:change s)))
+        (is (= 2 (:stable-msgs s)))
+        (is (= 10 (:stable-chars s)) "sys + problem")
+        (is (= (count "sysproblemresultcallresult2<ledger>") (:chars s)))))
+    (testing "a message behind the tail was rewritten: compaction's doing"
+      (let [prev (fp "sys" "problem" "big result" "call" "result2")
+            cur (fp "sys" "problem" "[unloaded] t3" "call" "result2" "call2" "r3")
+            s (infer/prefix-stats prev cur)]
+        (is (= :rewritten (:change s)))
+        (is (= 2 (:stable-msgs s)))
+        (is (= 10 (:stable-chars s)))))))
+
+(deftest complete-fn-fingerprints-the-wire-it-sent
+  ;; The fingerprint rides the RESPONSE, beside :prefilled, because that is
+  ;; the value the loop already threads from the call to the journal. It is
+  ;; taken over the PREPARED messages — think blocks stripped, stale ledgers
+  ;; dropped — since those are the bytes the provider saw.
+  (with-redefs [samizdat.llm.client/chat
+                (fn [_ _ messages _]
+                  {:content (fenced "verify" "{\"claim\": \"c\"}")
+                   :finish-reason "stop"
+                   :sent-count (count messages)})]
+    (let [r ((infer/complete-fn {:llm-adapter ::a :llm-config {}})
+             base-tape)
+          wire (get-in r [:response :wire])]
+      (is (:ok r))
+      (is (vector? wire))
+      (is (= (get-in r [:response :sent-count]) (count wire))
+          "one fingerprint per message that went over the wire")
+      (is (every? (fn [[h n]] (and (integer? h) (integer? n))) wire)
+          "each entry is [hash chars]"))))
+
+(deftest absorb-response-records-the-prefix-identity-on-the-branch
+  (let [b (state/new-branch {:id "B1" :problem "p"})
+        reply (fenced "verify" "{\"claim\": \"c\"}")
+        wire1 (infer/wire-fingerprint (:messages b))
+        {b1 :branch} (aloop/absorb-response
+                      b {:content reply :finish-reason "stop"
+                         :wire wire1 :forced "done"} 1)]
+    (testing "the first call is :first, and the forced tool is remembered"
+      (is (= :first (get-in b1 [:last-prefix :change])))
+      (is (= "done" (get-in b1 [:last-prefix :forced-tool])))
+      (is (= wire1 (:last-wire b1))))
+    (testing "the next call compares against the previous render"
+      (let [wire2 (infer/wire-fingerprint
+                   (conj (:messages b1) {:role "user" :content "result"}))
+            {b2 :branch} (aloop/absorb-response
+                          b1 {:content reply :finish-reason "stop" :wire wire2} 2)]
+        (is (= :tail (get-in b2 [:last-prefix :change])))
+        (is (nil? (get-in b2 [:last-prefix :forced-tool])))
+        (is (= wire2 (:last-wire b2)))))
+    (testing "a response without a fingerprint (a stub, a replay) records nothing"
+      (let [{b3 :branch} (aloop/absorb-response
+                          b1 {:content reply :finish-reason "stop"} 2)]
+        (is (= (:last-wire b1) (:last-wire b3)) "the last real render is kept")
+        (is (nil? (:last-prefix b3)))))))
+
+;; --- a loop is not retried at a doubled budget (karamazov-o4wm.5) ------------
+
+(def ^:private loop-text
+  (apply str (repeat 12 "I will now inspect the file to understand the failing test and then fix it. ")))
+
+(deftest a-truncated-periodic-reply-is-not-retried-at-a-doubled-budget
+  (let [calls (atom [])]
+    (with-redefs [samizdat.llm.client/chat
+                  (fn [_ _ _ opts]
+                    (swap! calls conj (:max-tokens opts))
+                    {:content loop-text :finish-reason "length"})]
+      (let [r ((infer/complete-fn {:llm-adapter ::a :llm-config {:max-tokens 100}}) base-tape)]
+        (is (:ok r))
+        (is (= [100] @calls) "one call: a loop twice as long is not more room")))))
+
+(deftest a-truncated-reply-that-is-not-repeating-still-gets-its-doubled-retry
+  (let [calls (atom [])]
+    (with-redefs [samizdat.llm.client/chat
+                  (fn [_ _ _ opts]
+                    (swap! calls conj (:max-tokens opts))
+                    {:content "Let me think about this carefully. The parser expects"
+                     :finish-reason "length"})]
+      ((infer/complete-fn {:llm-adapter ::a :llm-config {:max-tokens 100}}) base-tape)
+      (is (= [100 200] @calls)))))
+
+(deftest a-periodic-no-call-is-told-it-is-looping-and-clamped
+  (with-redefs [journal/record-turn! (fn [& _] nil)]
+    (let [b (state/new-branch {:id "B1" :problem "p"})
+          b' (aloop/no-call-step {} b 3
+                                 {:parsed nil
+                                  :signals {:periodic true :periodic-repeats 7
+                                            :truncated true}
+                                  :said loop-text
+                                  :response {:content loop-text :finish-reason "length"}})
+          m (:content (peek (:messages b')))]
+      (is (str/includes? m "repeated the same passage 7 times"))
+      (is (not (str/includes? m "Think less")) "not the generic truncation advice")
+      (is (= "```tool-call\n" (:prefill b')) "the next request opens inside the fence")
+      (is (= 1 (get-in (state/record-mechanics b {:periodic true}) [:mechanics :periodic]))
+          "and the tally the parse step keeps counts it"))))

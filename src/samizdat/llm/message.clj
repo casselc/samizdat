@@ -230,6 +230,47 @@
                  messages
                  due))))))
 
+(def result-close
+  "The tag that ends a framed tool result. A constant, like the unloaded
+  marker: a message framed once never changes again."
+  "</tool_result>")
+
+(defn frame-result
+  "`text` as the model is shown a tool's output: inside a frame naming the
+  tool, with the only closing tag the output itself contained escaped.
+
+  THE ONE THING THE MODEL CAN TRUST ABOUT PROVENANCE (karamazov-o4wm.3). The
+  turn's user message joined tool output, the context block, a `---` rule and
+  the steer with nothing marking where the tool stopped talking, so a file
+  read or a fetched page carrying that rule followed by `[harness]` read as
+  the harness. Floatboat escapes every observation and seals its envelope;
+  here the frame is enough, because harness text is APPENDED after it and
+  the only way in is to close it — which the escape forbids. Nothing else in
+  the output is rewritten: a coding model reads file contents through this
+  and writes them back, so a `---` or a `[harness]` inside stays exactly as
+  the file has it.
+
+  Applied where a tool result becomes a user message — the live turn, a
+  replayed row, a handoff — and never to the harness's own messages, which
+  are the thing the frame distinguishes from."
+  [tool text]
+  (str "<tool_result" (when (seq (str tool)) (str " tool=\"" tool "\"")) ">\n"
+       (str/replace (str text) result-close "<\\/tool_result>")
+       "\n" result-close))
+
+(defn unframe
+  "The body of a framed result — the frame's two lines off, the escape left
+  as it is — or `s` unchanged when it is not framed. For a summariser that
+  wants a result's first line to be the result's, not the frame's."
+  [s]
+  (let [s (str s)]
+    (if (and (str/starts-with? s "<tool_result")
+             (str/ends-with? s (str "\n" result-close)))
+      (let [body-start (inc (or (str/index-of s "\n") -1))
+            body-end (- (count s) (count result-close) 1)]
+        (if (<= body-start body-end) (subs s body-start body-end) ""))
+      s)))
+
 (def ledger-open "<!--settled-state-->")
 (def ledger-close "<!--/settled-state-->")
 
