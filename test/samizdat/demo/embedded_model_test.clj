@@ -587,6 +587,114 @@
       (is (= "public retained evidence" (slurp raw)))
       (finally (java.nio.file.Files/deleteIfExists (.toPath raw))))))
 
+(deftest retirement-evidence-never-guesses-an-exit-or-exposes-payloads
+  (is (= {:terminal? false :closed? false :graceful? false :exit nil
+          :confirmed-close-count nil}
+         (demo/retirement-evidence {:terminal? false :closed? true :graceful? true
+                                    :exit 143 :confirmed-close-count "DO_NOT_LEAK"
+                                    :exception "DO_NOT_LEAK"})))
+  (is (nil? (:exit (demo/retirement-evidence {:terminal? true :exit nil}))))
+  (doseq [[terminal? count expected] [[false 1 nil] [true 0 0] [true 1 1]
+                                     [true -1 nil] [true 65537 nil]]]
+    (is (= expected (:confirmed-close-count
+                      (demo/retirement-evidence {:terminal? terminal?
+                                                 :confirmed-close-count count})))))
+  (is (= 137 (:exit (demo/retirement-evidence {:terminal? true :exit 137}))))
+  (is (false? (:graceful? (demo/shutdown-evidence true 137
+                          "embedded telemetry stopped {:status :closed, :phase :closed}")))))
+
+(deftest cached-terminal-retirement-never-reobserves-or-resignals-old-pid
+  (let [receipt {:terminal? true :closed? true :exit 143 :graceful? true
+                 :confirmed-close-count 1}
+        called (atom [])]
+    (with-redefs-fn
+      {#'demo/wait-for-child! (fn [& _] (swap! called conj :wait) false)
+       #'demo/owned-pid (fn [& _] (swap! called conj :pid) 101)
+       #'demo/signal! (fn [& _] (swap! called conj :signal) 0)}
+      #(is (= receipt (#'demo/stop-server! {:terminal (atom true)
+                                          :retirement (atom receipt)} 5000))))
+    (is (empty? @called))))
+
+(deftest retirement-publication-failure-does-not-mask-primary-task-failure
+  (let [primary (ex-info "public primary failure" {})
+        receipt {:terminal? true :closed? true :graceful? true :exit 143
+                 :confirmed-close-count 1}
+        server {:label "server-a" :terminal (atom true) :retirement (atom receipt)}
+        cleanup (atom nil)]
+    (with-redefs-fn
+      {#'demo/publish-sanitized-logs! (fn [& _] (throw (ex-info "DO_NOT_LEAK" {})))
+       #'demo/write-retirement! (fn [& _] (throw (ex-info "DO_NOT_LEAK" {})))
+       #'clojure.core/println (fn [& _] (throw (ex-info "DO_NOT_LEAK" {})))}
+      #(is (identical? primary
+                      (try (try (throw primary)
+                                (finally (reset! cleanup (#'demo/cleanup-server! server "/unused"))))
+                           (catch Throwable error error)))))
+    (is (= 143 (:exit @cleanup)))
+    (is (:terminal? @cleanup))
+    (is (= :publication-failed (:log-publication @cleanup)))
+    (is (false? (:receipt-published? @cleanup)))
+    (is (not (str/includes? (str @cleanup) "DO_NOT_LEAK")))))
+
+(deftest owned-offline-child-persists-measured-exit-in-exceptional-finally
+  (doseq [[expected-exit log-read-fault?] [[143 false] [0 false] [0 true]]]
+    (let [output (io/file (str (java.nio.file.Files/createTempDirectory
+                               "samizdat-retirement-" (make-array java.nio.file.attribute.FileAttribute 0))))
+          raw-out (io/file output ".stdout.raw")
+          raw-err (io/file output ".stderr.raw")
+          code (if (= expected-exit 143)
+                 (str "import signal,sys,time\n"
+                      "def stop(*_):\n print('embedded telemetry stopped {:status :closed, :phase :closed}',flush=True);sys.exit(143)\n"
+                      "signal.signal(signal.SIGTERM,stop)\nprint('ready',flush=True)\n"
+                      "while True: time.sleep(.1)\n")
+                 "print('ready',flush=True)\n")
+          child (jolt.process/process ["/usr/bin/python3" "-u" "-c" code]
+                                      {:env {"PATH" "/usr/bin:/bin"} :in (io/file "/dev/null")
+                                       :out :write :out-file raw-out :err :write :err-file raw-err})
+          server {:label "server-a" :child child :raw-out (str raw-out) :raw-err (str raw-err)
+                  :terminal (atom false) :retirement (atom nil)}
+          primary (ex-info "public task failed before verification" {})]
+      (try
+        (let [deadline (+ (System/currentTimeMillis) 3000)]
+          (loop []
+            (when-not (str/includes? (#'demo/bounded-tail raw-out 1024) "ready")
+              (when (>= (System/currentTimeMillis) deadline)
+                (throw (ex-info "offline child readiness timed out" {})))
+              (Thread/sleep 10)
+              (recur))))
+        (when (zero? expected-exit)
+          (is (#'demo/wait-for-child! child 3000)))
+        (is (identical? primary
+                        (try (try (throw primary)
+                                  (finally
+                                    (if log-read-fault?
+                                      (with-redefs-fn
+                                        {#'demo/bounded-tail
+                                         (fn [& _] (throw (ex-info "DO_NOT_LEAK" {})))}
+                                        #(#'demo/cleanup-server! server output))
+                                      (#'demo/cleanup-server! server output))))
+                             (catch Throwable error error))))
+        (let [receipt-file (io/file output "server-a-retirement.json")
+              _ (is (.isFile receipt-file))
+              receipt (when (.isFile receipt-file)
+                        (json/read-str (slurp receipt-file) :key-fn keyword))]
+          (is (= expected-exit (:exit receipt)))
+          (is (= expected-exit (.exitValue (:proc child))))
+          (is (:terminal? receipt))
+          (is (:closed? receipt))
+          (is (= (and (= 143 expected-exit) (not log-read-fault?)) (:graceful? receipt)))
+          (is (= (when-not log-read-fault? (if (= expected-exit 143) 1 0))
+                 (:confirmed-close-count receipt)))
+          (is (= (if log-read-fault? "publication-failed" "published") (:log-publication receipt)))
+          (prn :offline-retirement-receipt
+               (assoc (select-keys receipt [:exit :terminal? :closed? :graceful?
+                                           :confirmed-close-count :log-publication])
+                      :expected-exit expected-exit :log-read-fault? log-read-fault?)))
+        (finally
+          (#'demo/cleanup-server! server output)
+          (when (true? @(:terminal server))
+            (doseq [file (.listFiles output)] (.delete file))
+            (.delete output)))))))
+
 (deftest unconfirmed-server-a-close-prevents-fresh-reopen
   (let [output (java.nio.file.Files/createTempDirectory
                 "samizdat-demo-unconfirmed-"

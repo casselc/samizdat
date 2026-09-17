@@ -584,6 +584,7 @@
         raw-err (str (:output options) "/." label ".stderr.raw")]
     {:label label
      :terminal (atom false)
+     :retirement (atom nil)
      :raw-out raw-out :raw-err raw-err
      :child (process/process (embedded-command options)
                              {:dir (:checkout-root options)
@@ -609,8 +610,10 @@
                      (str logs)))
     :jolt-fiber-state))
 
-(defn- stop-server! [{:keys [child raw-out raw-err terminal]} timeout-ms]
-  (let [started-ms (System/currentTimeMillis)
+(defn- stop-server! [{:keys [child raw-out raw-err terminal retirement]} timeout-ms]
+  (if (true? (:terminal? (some-> retirement deref)))
+    @retirement
+    (let [started-ms (System/currentTimeMillis)
         already-terminal? (wait-for-child! child 0)
         pid (when-not already-terminal?
               (let [pid (owned-pid child)] (when (positive-pid? pid) pid)))
@@ -619,10 +622,21 @@
         finished? (or already-terminal? (and pid (wait-for-child! child wait-ms)))
         retired? (or finished? (:terminal? (force-reap! child)))]
     (when terminal (reset! terminal (true? retired?)))
-    (let [logs (str (bounded-tail raw-out 65536)
-                    (bounded-tail raw-err 65536))]
-      (assoc (shutdown-evidence finished? (when finished? (:exit @child)) logs)
-             :terminal? (true? retired?) :term-exit signaled))))
+      (let [exit (when (true? retired?)
+                   (try (let [value (.exitValue (:proc child))]
+                          (when (integer? value) value))
+                        (catch Throwable _ nil)))
+            minimal {:exit exit :closed? (true? retired?) :terminal? (true? retired?)
+                     :graceful? false :confirmed-close-count nil :term-exit signaled}]
+        ;; Cache terminal ownership and the actual exit before observing logs.
+        ;; A later log-read failure must not lose the retirement observation.
+        (when retirement (reset! retirement minimal))
+        (let [logs (str (bounded-tail raw-out 65536)
+                        (bounded-tail raw-err 65536))
+              result (assoc (shutdown-evidence (true? retired?) exit logs)
+                            :terminal? (true? retired?) :term-exit signaled)]
+          (when retirement (reset! retirement result))
+          result)))))
 
 (defn- bounded-tail [file limit]
   (let [source (io/file file)]
@@ -675,22 +689,51 @@
 (defn- cleanup-diagnostic! [message]
   (try (println message) (catch Throwable _ nil)))
 
+(defn retirement-evidence
+  "Public evidence contains only measured bounded scalars, never a PID, raw
+  exception, launch command or backend/log payload. Missing exit stays nil."
+  [result]
+  (let [terminal? (true? (:terminal? result))
+        count (:confirmed-close-count result)]
+    {:terminal? terminal?
+     :closed? (and terminal? (true? (:closed? result)))
+     :graceful? (and terminal? (true? (:closed? result)) (true? (:graceful? result)))
+     :exit (when (and terminal? (integer? (:exit result))) (:exit result))
+     :confirmed-close-count (when (and terminal? (integer? count) (<= 0 count 65536)) count)}))
+
+(defn- write-retirement! [server output result publication-status]
+  (let [label (if (contains? #{"server-a" "server-b"} (:label server))
+                (:label server) "unknown")]
+    (spit (io/file output (str label "-retirement.json"))
+          (json/write-str (assoc (retirement-evidence result)
+                                :retirement/version 1 :server label
+                                :log-publication publication-status)
+                          :escape-slash false))))
+
 (defn- cleanup-server! [server output]
   ;; Finally cleanup is observational and must not mask the original failure.
   ;; Unknown liveness is not proof of exit; retain raw files and scratch.
-  (let [retired? (or (true? (some-> server :terminal deref))
-                     (try (:terminal? (stop-server! server 5000))
-                          (catch Throwable _ false)))]
-    (if (true? retired?)
-      (try
-        (publish-sanitized-logs! server output)
-        {:terminal? true :status :closed}
-        (catch Throwable _
-          (cleanup-diagnostic! "demo cleanup incomplete: evidence publication failed")
-          {:terminal? true :status :publication-failed}))
-      (do
-        (cleanup-diagnostic! "demo cleanup incomplete: child termination unconfirmed; evidence retained")
-        {:terminal? false :status :cleanup-incomplete}))))
+  (let [cached (some-> server :retirement deref)
+        result (if (true? (some-> server :terminal deref))
+                 (or cached {:terminal? true :closed? true})
+                 (try (stop-server! server 5000)
+                      (catch Throwable _ (or (some-> server :retirement deref)
+                                             {:terminal? false}))))
+        publication-status
+        (if (true? (:terminal? result))
+          (try (publish-sanitized-logs! server output) :published
+               (catch Throwable _
+                 (cleanup-diagnostic! "demo cleanup incomplete: evidence publication failed")
+                 :publication-failed))
+          (do (cleanup-diagnostic! "demo cleanup incomplete: child termination unconfirmed; evidence retained")
+              :retained-unconfirmed))
+        receipt-published?
+        (try (write-retirement! server output result publication-status) true
+             (catch Throwable _
+               (cleanup-diagnostic! "demo cleanup incomplete: retirement receipt publication failed")
+               false))]
+    (assoc (retirement-evidence result) :log-publication publication-status
+           :receipt-published? receipt-published?)))
 
 (defn- oscope-evidence! [base run-id deadline-ms]
   (let [index (raw-get base "/oscope/telemetry?window=1h"
@@ -719,9 +762,11 @@
    :run (select-keys run [:run-id :status :turns :steering-count])
    :verification test-result
    :model-readiness model-readiness
-   :process-a {:stopped-before-reopen (:closed? stopped-a) :trace trace-a}
+   :process-a {:stopped-before-reopen (:closed? stopped-a)
+               :retirement (retirement-evidence stopped-a) :trace trace-a}
    :process-b {:same-durable-root true :no-model-call true
                :closed (:closed? stopped-b) :graceful (:graceful? stopped-b)
+               :retirement (retirement-evidence stopped-b)
                :trace trace-b}
    :content-enabled false
    :external-export false})

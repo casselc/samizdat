@@ -279,6 +279,16 @@ a separate bounded retirement allowance of up to 4 seconds. If terminal state
 cannot be confirmed, the check fails closed before collector acquisition and
 preserves private scratch rather than deleting files a child may still write.
 The JSON parser also retains its 65,536-character validation guard.
+After each server's final cleanup, the harness attempts to write
+`server-a-retirement.json` or `server-b-retirement.json`, including when a task
+fails before verification. These contain measured exit, terminal/closed/graceful
+flags, close-announcement count and log-publication status—not raw errors, PIDs,
+launch commands or telemetry values. Missing exit observations stay `null`;
+unknown retirement does not allow process B or deletion of original logs.
+Filesystem publication can fail, so the existence of a complete receipt is
+evidence, not an unconditional promise. Cleanup publication never replaces the
+original task failure. Successful evidence also includes these retirement
+scalars; historical sample files without them remain unchanged.
 Run the loopback-only transport regression without model calls:
 
 ```bash
