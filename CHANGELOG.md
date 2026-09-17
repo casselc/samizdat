@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Refresh the observability pack's upstream provenance to 83eb99a, retaining
+  the same nine run seams and explicit source-only versus woven-build limits.
+
 - Guard background start/resume secondary storage and approval cleanup so the
   original task outcome survives and owned active state is always released.
   Release only the terminating run's approvals, with bounded secondary

@@ -3,9 +3,10 @@
 Bounded observability for the harness (casselc/samizdat issue #21). This
 document is the contract; the code is `samizdat.telemetry.*`.
 
-**This tree is upstream main `22be90ddf9b05ba8406d6ec231d2748a4da22d8e` plus
-instrumentation only**: the contract, the hook, the nine harness run seams,
-the `:telemetry` alias and the `serve` entry. The five
+**This tree integrates upstream main `83eb99a4f6d01923ddee199d453d960a45dd732b`
+with the fork's telemetry and task-ownership fixes**: the contract, the hook,
+the nine harness run seams, the `:telemetry` alias and the `serve` entry,
+early ownership, cancellation cleanup, and persisted branch ceilings. The five
 `samizdat.store.lifecycle` seams of the pilot lineage
 (`agent/onbox/observability-v1`) do not exist upstream and are not here.
 The re-anchor keeps current main's acceptance behavior and its three workflow
@@ -39,8 +40,8 @@ one.
 | build | what loads | behaviour |
 |---|---|---|
 | **source mode** (stock `jolt -M:test`, `jolt serve`, Jolt ≥ 0.8.0) | `samizdat.telemetry.contract`, `samizdat.telemetry.hook` (both `src/`, no new dependency) | `hook/observe!` calls the thunk directly; the seam functions behave exactly as before (`test/samizdat/telemetry/hook_test.clj`; the stock suite is the equivalence check). No otel namespace exists on the path. |
-| **alias-enabled** (`jolt -M:telemetry …`, Jolt 0.8.3) | additionally `telemetry/samizdat/telemetry/otel.clj` and casselc/otel `88503a6` | `otel/init!` reads `SAMIZDAT_TELEMETRY` and installs the observer; one span per run seam, semantic wrappers for executions, generations, tools and evaluators. |
-| **woven** (aspect pack `resources/META-INF/jolt/aspects/samizdat-observability-run-22be90d.edn`, the nine harness seams verified against upstream main `22be90d`) | `samizdat.telemetry.aspect-provider` role `:samizdat.telemetry/run` at the same entries | Statically validated against this tree (`test/samizdat/telemetry/aspect_manifest_test.clj`: each entry resolves once at the stated arity). Not qualified as a build here — see the bootstrap work product report. |
+| **alias-enabled** (`jolt -M:telemetry …`, current qualification lane Jolt 0.8.6) | additionally `telemetry/samizdat/telemetry/otel.clj` and casselc/otel `4d61f8e` (see the exact pin in `deps.edn`) | `otel/init!` reads `SAMIZDAT_TELEMETRY` and installs the observer; one span per run seam, semantic wrappers for executions, generations, tools and evaluators. |
+| **woven** (aspect pack `resources/META-INF/jolt/aspects/samizdat-observability-run-83eb99a.edn`, the nine harness seams verified against upstream main `83eb99a`) | `samizdat.telemetry.aspect-provider` role `:samizdat.telemetry/run` at the same entries | Statically validated against this tree (`test/samizdat/telemetry/aspect_manifest_test.clj`: each entry resolves once at the stated arity). Not qualified as a build here — see the bootstrap work product report. |
 
 Optional aspect behaviour never becomes a runtime dependency: the stock
 build does not require `otel.*`, and the hook is a no-op until something
@@ -91,7 +92,7 @@ only). Every run span carries `samizdat.execution.kind = "run"` and
 `samizdat.observation.mode = "live"`; the run id is mirrored to
 `langfuse.trace.metadata.run_id` and used as the session id. The aspect form
 of the seam list is
-`resources/META-INF/jolt/aspects/samizdat-observability-run-22be90d.edn`.
+`resources/META-INF/jolt/aspects/samizdat-observability-run-83eb99a.edn`.
 
 ### Content override (prompts and outputs on live spans)
 
@@ -324,10 +325,11 @@ commit that produced them.
 
 ## Tests
 
-- stock: `jolt -M:test` (Jolt 0.8.3, upstream's minimum) includes
+- stock: `jolt -M:test` (CI pins Jolt 0.8.6) includes
   `samizdat.telemetry.{contract,hook,aspect-manifest}-test`;
 - alias: `jolt telemetry-test` = `jolt -M:telemetry:telemetry-test`
-  (Jolt 0.8.3) adds `samizdat.telemetry.{otel,pipelines}-test`: typed
+  (current local qualification uses the Jolt 0.8.6 AEA lane; older releases
+  are not requalified by this update) adds `samizdat.telemetry.{otel,pipelines}-test`: typed
   attributes incl. false/0/negatives, the Langfuse mirror, observer failure
   isolation, suppression, TRACEPARENT
   parenting, a throwing destination beside a healthy one, bounded queue
