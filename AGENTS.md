@@ -151,8 +151,9 @@ a time with `:reload`; `:reload-all` on the runner currently dies inside
   rule is here, and a session-scoped directive does not override it. It also
   holds when editing text that already carries one — remove it rather than
   preserving it, and say that you did.
-- This repository has no `user.email` configured; its commits are authored
-  `Yogthos <yogthos@gmail.com>`. Match that rather than inventing an identity.
+- In the casselc fork, author new commits as
+  `Chuck Cassel <619504+casselc@users.noreply.github.com>`.
+  Do not reuse the upstream author's identity or rewrite existing commits.
 - `bd init` set `core.hooksPath` to `.beads/hooks`, so `.git/hooks` is bypassed.
 
 ## Non-interactive shell commands

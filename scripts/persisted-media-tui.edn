@@ -1,0 +1,15 @@
+;; Presentation-only arrangement of the real widgets. No mutation controls.
+{:prose-turns 12
+ :layout
+ [:vbox
+  [:text {:bold true} "PERSISTED LOCAL SESSION - viewing recorded turns, not live inference"]
+  [:widget/status]
+  [:hbox {:flex true}
+   [:vbox {:width 36}
+    [:widget/runs {:title "RUNS - Enter selects" :height 5}]
+    [:widget/branches {:title "BEAM" :height 5}]
+    [:widget/context {:title "CONTEXT / BUDGET" :height 11}]
+    [:widget/files {:title "FILES" :height 5}]]
+   [:widget/conversation {:title "RECORDED TOOL TURNS - Tab / Enter opens folds"
+                          :turns 12 :flex true}]]
+  ]}
