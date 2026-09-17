@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Guard background start/resume secondary storage and approval cleanup so the
+  original task outcome survives and owned active state is always released.
+  Release only the terminating run's approvals, with bounded secondary
+  diagnostics and deterministic cleanup regressions. Refs #40.
+
 - Integrate current upstream handoff, framed tool results, and cache/context
   diagnostics while preserving embedded telemetry and owned task cleanup.
   Reconcile databases from either v30 migration lineage without dropping rows

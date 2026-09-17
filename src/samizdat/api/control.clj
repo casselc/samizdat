@@ -48,7 +48,8 @@
   owners. Only a still-running row may transition; a terminal winner gets no
   misleading task-exit event. The initial durable lookup may itself throw;
   owners that must preserve the task exception must guard this call separately."
-  [conn run-id e]
+  ([conn run-id e] (close-exceptional-task! conn run-id e nil))
+  ([conn run-id e secondary-report]
   ;; The beam records failures inside run-rounds, but task setup and teardown
   ;; sit outside that recorder. If one of those throws after on-start delivered
   ;; the id, the task is gone and a `running` row is a false liveness claim.
@@ -59,13 +60,17 @@
     (if (cancel/control-signal? e)
       (try (runs/finish-run! conn run-id :aborted nil)
            (catch Throwable close-error
-             (log/warn "closing cancelled run" run-id "failed:"
-                       (ex-message close-error))))
+             (if secondary-report
+               (secondary-report :cancelled-transition)
+               (log/warn "closing cancelled run" run-id "failed:"
+                         (ex-message close-error)))))
       (let [closed? (try
                       (pos? (runs/finish-run! conn run-id :failed nil))
                       (catch Throwable close-error
-                        (log/warn "closing failed run" run-id "failed:"
-                                  (ex-message close-error))
+                        (if secondary-report
+                          (secondary-report :failed-transition)
+                          (log/warn "closing failed run" run-id "failed:"
+                                    (ex-message close-error)))
                         false))]
         ;; Journal only when this task won the terminal transition. A stale
         ;; `running` read followed by a concurrent completion or abort must
@@ -77,8 +82,27 @@
                                    :type (some-> (:via (Throwable->map e)) first :type str)
                                    :phase :task-exit}})
             (catch Throwable note-error
-              (log/warn "recording task-level failure for run" run-id "failed:"
-                        (ex-message note-error)))))))))
+              (if secondary-report
+                (secondary-report :failure-journal)
+                (log/warn "recording task-level failure for run" run-id "failed:"
+                          (ex-message note-error)))))))))))
+
+(defn- secondary-cleanup-warning! [phase]
+  ;; Secondary failures must not mask the task outcome or print storage/error
+  ;; content. Even a failed logger must not interrupt the remaining cleanup.
+  (try (log/warn "background task secondary cleanup failed" {:phase phase})
+       (catch Throwable _ nil)))
+
+(defn- close-background-exception! [conn run-id failure]
+  (try (close-exceptional-task! conn run-id failure secondary-cleanup-warning!)
+       (catch Throwable _ (secondary-cleanup-warning! :exceptional-storage))))
+
+(defn- release-background-owner! [run-id]
+  ;; Keep one terminal cleanup path for success, failure and cancellation.
+  ;; The scheduler settles the canonical done only after this finally returns.
+  (try (approval/abandon! run-id)
+       (catch Throwable _ (secondary-cleanup-warning! :approval-release))
+       (finally (swap! active dissoc run-id))))
 
 (defn run-llm-config
   "The llm config this run should use, after the request's own overrides.
@@ -185,22 +209,19 @@
                                                               :done done
                                                               :cancel (fn [] (some-> @cancel* (apply [])))})
                                                       (deliver promised rid))})]
-                        (swap! active dissoc (:run-id r))
-                        ;; Release anything parked on a question this run
-                        ;; asked. Without it an aborted or finished run
-                        ;; leaves threads waiting on an answer nobody will
-                        ;; ever give, and the process never gets them back.
-                        (approval/abandon! (:run-id r))
                         r)
                       (catch Throwable e
-                        (if (cancel/control-signal? e)
-                          (log/info "run aborted:" (ex-message e))
-                          (log/error "run failed:" (ex-message e)))
+                        (try
+                          (if (cancel/control-signal? e)
+                            (log/info "run aborted:" (ex-message e))
+                            (log/error "run failed:" (ex-message e)))
+                          (catch Throwable _ (secondary-cleanup-warning! :task-failure-report)))
                         (when-let [rid (deref promised 0 nil)]
-                          (close-exceptional-task! conn rid e)
-                          (swap! active dissoc rid)
-                          (approval/abandon! rid))
-                        {:status :error :error (ex-message e)}))))
+                          (close-background-exception! conn rid e))
+                        {:status :error :error (ex-message e)})
+                      (finally
+                        (when-let [rid (deref promised 0 nil)]
+                          (release-background-owner! rid))))))
                  done)
         _ (reset! cancel* (:cancel started))
         ;; How long the request waits for the run row before answering 503.
@@ -290,15 +311,16 @@
                                                    :llm-config llm-config
                                                    :run-id run-id :abort abort
                                                    :max-turns max-turns})]
-                            (swap! active dissoc run-id)
                             r)
                           (catch Throwable e
-                            (if (cancel/control-signal? e)
-                              (log/info "resume aborted:" (ex-message e))
-                              (log/error "resume failed:" (ex-message e)))
-                            (close-exceptional-task! conn run-id e)
-                            (swap! active dissoc run-id)
-                            {:status :error :error (ex-message e)}))))
+                            (try
+                              (if (cancel/control-signal? e)
+                                (log/info "resume aborted:" (ex-message e))
+                                (log/error "resume failed:" (ex-message e)))
+                              (catch Throwable _ (secondary-cleanup-warning! :task-failure-report)))
+                            (close-background-exception! conn run-id e)
+                            {:status :error :error (ex-message e)})
+                          (finally (release-background-owner! run-id)))))
                      done)]
         (reset! cancel* (:cancel started)))
       ;; The budget this resume is running under, from what the caller asked

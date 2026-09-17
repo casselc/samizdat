@@ -27,6 +27,8 @@
             [clojure.data.json :as json]
             [clojure.string :as str]
             [clojure.test :refer [deftest testing is]]
+            [clojure.tools.logging :as log]
+            [samizdat.approval :as approval]
             [samizdat.agent.beam :as beam]
             [samizdat.agent.gates :as gates]
             [samizdat.agent.roles :as roles]
@@ -254,6 +256,95 @@
         (is (some #(= "run-error" (:kind %))
                   (journal/events-since c rid 0 100))
             "the durable journal names the task-level failure")))))
+
+(deftest background-secondary-cleanup-cannot-replace-the-task-outcome
+  (doseq [path [:start :resume]
+          secondary [:lookup :finish :journal :finish-logger :approval :approval-before :logger :terminal]]
+    (testing (str path " / " secondary)
+      (with-db [c]
+        (let [rid (runs/start-run! c {:problem "p"})
+              failure (ex-info "original background failure" {})
+              entered (promise) release (promise) done* (atom nil)
+              lookup-count (atom 0) abandon-count (atom 0) warnings (atom [])
+              get-run runs/get-run finish runs/finish-run! note journal/note!
+              abandon approval/abandon!
+              run-body (fn [options]
+                         (when-let [on-start (:on-start options)] (on-start rid))
+                         (reset! done* (get-in @api-control/active [rid :done]))
+                         (approval/request! {:run-id rid :input "owned"})
+                         (deliver entered true)
+                         (when-not (deref release 3000 false)
+                           (throw (ex-info "test release deadline" {})))
+                         (when (= :terminal secondary)
+                           (runs/finish-run! c rid :completed "winner"))
+                         (throw failure))]
+          (approval/reset!)
+          (approval/request! {:run-id "unrelated" :input "retain"})
+          (try
+            (with-redefs [beam/run! run-body
+                          resume/resume! run-body
+                          resume/resumable? (constantly true)
+                          runs/finish-run! (fn [& args]
+                                             (if (#{:finish :finish-logger} secondary)
+                                               (throw (ex-info "PRIVATE secondary finish" {}))
+                                               (apply finish args)))
+                          journal/note! (fn [conn run-id kind data]
+                                          (if (and (= :journal secondary) (= :run-error kind))
+                                            (throw (ex-info "PRIVATE secondary journal" {}))
+                                            (note conn run-id kind data)))
+                          runs/get-run (fn [& args]
+                                         (swap! lookup-count inc)
+                                         (if (= :lookup secondary)
+                                           (throw (ex-info "PRIVATE secondary storage" {}))
+                                           (apply get-run args)))
+                          approval/abandon! (fn [run-id]
+                                              (swap! abandon-count inc)
+                                              (when (= :approval-before secondary)
+                                                (throw (ex-info "PRIVATE secondary approval-before" {})))
+                                              (let [n (abandon run-id)]
+                                                (when (= :approval secondary)
+                                                  (throw (ex-info "PRIVATE secondary approval" {})))
+                                                n))
+                          log/log* (fn [_ level throwable message]
+                                     (when (and (= :logger secondary)
+                                                (#{:error :info} level))
+                                       (throw (ex-info "PRIVATE secondary logger" {})))
+                                     (when (= :warn level)
+                                       (swap! warnings conj [throwable (str message)])
+                                       (when (= :finish-logger secondary)
+                                         (throw (ex-info "PRIVATE secondary warn logger" {})))))]
+              (if (= :start path)
+                (api-control/start-run! {:conn c :config {:llm {:provider :local}}}
+                                        {:problem "p" :max_total_branches 1})
+                (api-control/resume! {:conn c :config {:llm {:provider :local}}}
+                                     rid {:max_turns 1}))
+              (is (true? (deref entered 3000 false)) "actual background task entered")
+              (is (some? @done*) "capture canonical completion before release")
+              (deliver release true)
+              (is (= [:ok {:status :error :error "original background failure"}]
+                     (when @done* (deref @done* 3000 ::deadline)))
+                  "secondary failure cannot replace existing background outcome shape")
+              (is (not (contains? @api-control/active rid)))
+              (is (= 1 @abandon-count) "owned approval cleanup runs exactly once")
+              (is (= (if (= :approval-before secondary) 1 0)
+                     (count (approval/pending rid)))
+                  "release is best effort when registry fails before mutation")
+              (is (= 1 (count (approval/pending "unrelated"))))
+              (is (pos? @lookup-count) "exceptional closer really reached durable lookup")
+              (when (not= :terminal secondary)
+                (is (seq @warnings) "secondary failure has bounded diagnostics")
+                (is (every? #(and (nil? (first %))
+                                  (not (str/includes? (second %) "PRIVATE"))) @warnings)))
+              (when (= :terminal secondary)
+                (is (= "completed" (:status (get-run c rid))))
+                (is (= "winner" (:final_answer (get-run c rid))))
+                (is (not-any? #(= "run-error" (:kind %))
+                              (journal/events-since c rid 0 100)))))
+            (finally
+              (deliver release true)
+              (when @done* (deref @done* 3000 nil))
+              (swap! api-control/active dissoc rid)
+              (approval/reset!))))))))
 
 (deftest a-task-error-after-a-terminal-winner-is-a-no-op
   ;; close-exceptional-task! observes the row after the run has already won
