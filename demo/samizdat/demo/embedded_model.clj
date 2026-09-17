@@ -41,6 +41,7 @@
 (ffi/defcfn ^:private c-kill "kill" [:int :int] :int)
 (declare sanitize-log)
 (declare bounded-tail)
+(declare bounded-health-get!)
 
 (defn fail! [message data]
   (throw (ex-info message (assoc data :samizdat.demo.embedded-model/error true))))
@@ -268,6 +269,7 @@
   ([args] (parse-options args #(System/getenv %)))
   ([args getenv]
    (let [defaults {:base-url default-base-url :model default-model
+                   :model-preflight :lemonade-loaded
                    :timeout-ms default-timeout-ms :jolt default-jolt
                    :expected-jolt-rev (or (getenv expected-jolt-rev-env)
                                           default-expected-jolt-rev)
@@ -284,6 +286,13 @@
             (case flag
               "--base-url" (assoc options :base-url value)
               "--model" (assoc options :model value)
+              "--model-preflight"
+              (assoc options :model-preflight
+                     (case value
+                       "lemonade-loaded" :lemonade-loaded
+                       "none" :none
+                       (fail! "invalid model preflight mode"
+                              {:phase :arguments :flag flag})))
               "--timeout-ms" (assoc options :timeout-ms (parse-long! flag value))
               "--jolt" (assoc options :jolt value)
               "--wrapper" (assoc options :wrapper value)
@@ -292,6 +301,68 @@
               "--output" (assoc options :output value)
               (fail! (str "unknown option " flag) {:phase :arguments :flag flag}))
             more)))))))
+
+(defn assert-loaded-model!
+  "Validate Lemonade metadata only; this does not establish inference success.
+  Neither raw health payloads nor parser/transport exceptions escape."
+  [model {:keys [status body]}]
+  (when-not (= 200 status)
+    (fail! "model readiness preflight failed"
+           {:phase :model-preflight :reason :health-http
+            :http-status (if (and (integer? status) (<= 100 status 599)) status 0)}))
+  (let [health (try
+                 (when (and (string? body) (<= (count body) 65536))
+                   ;; This callback also rejects legal trailing whitespace.
+                   ;; Keep the raw guard, then strip only JSON whitespace.
+                   (json/read-str (str/replace body #"[ \t\r\n]+$" "") :key-fn keyword
+                                  :extra-data-fn json/on-extra-throw))
+                 (catch Throwable _ nil))
+        loaded (:all_models_loaded health)]
+    (when-not (and (map? health) (= "ok" (:status health))
+                   (vector? loaded)
+                   (every? #(and (map? %) (string? (:model_name %))
+                                 (not (str/blank? (:model_name %)))) loaded))
+      (fail! "model readiness preflight failed"
+             {:phase :model-preflight :reason :health-malformed :http-status 200}))
+    (when-not (some #(= model (:model_name %)) loaded)
+      (fail! "requested model is not loaded; operator action is required"
+             {:phase :model-preflight :reason :model-not-loaded :http-status 200}))
+    {:mode :lemonade-loaded :metadata-ready? true}))
+
+(defn model-preflight!
+  "Explicit read-only Lemonade check before any collector acquisition.
+  Generic OpenAI-compatible endpoints must opt out with mode :none."
+  [{:keys [base-url model model-preflight deadline-ms]}]
+  (case (or model-preflight :lemonade-loaded)
+    :none {:mode :none :metadata-ready? false}
+    :lemonade-loaded
+    (let [base (str/replace (str base-url) #"/+$" "")
+          valid-endpoint? (try
+                            (let [url (java.net.URL. base)]
+                              (and (contains? #{"http" "https"} (.getProtocol url))
+                                   (not (str/blank? (.getHost url)))
+                                   (nil? (.getUserInfo url))
+                                   (not (str/includes? base "?"))
+                                   (not (str/includes? base "#"))))
+                            (catch Throwable _ false))]
+      (when-not (and valid-endpoint? (string? model) (not (str/blank? model)))
+        (fail! "invalid model readiness configuration"
+               {:phase :model-preflight :reason :invalid-configuration}))
+      (let [response (try (bounded-health-get! (str base "/health") deadline-ms)
+                          (catch Throwable error
+                            (let [reason (:reason (ex-data error))]
+                              (fail! "model readiness preflight failed"
+                                     {:phase :model-preflight :http-status 0
+                                      :reason (if (contains? #{:health-timeout :health-unsettled
+                                                               :health-size :curl-unavailable} reason)
+                                                reason :health-transport)}))))]
+        (remaining-timeout! deadline-ms 10000 :model-preflight)
+        (when-not response
+          (fail! "model readiness preflight failed"
+                 {:phase :model-preflight :reason :health-transport :http-status 0}))
+        (assert-loaded-model! model response)))
+    (fail! "invalid model preflight mode"
+           {:phase :model-preflight :reason :invalid-configuration})))
 
 (defn- copy-tree! [source target]
   (let [source-path (.toPath (io/file source))]
@@ -344,6 +415,80 @@
             (signal! pid 9)
             {:terminal? (wait-for-child! child 2000)})))
       {:terminal? false :status :ownership-unavailable})))
+
+(defn bounded-health-get!
+  "Demo-only curl transport. No output drain promises or provider payloads
+  enter diagnostics. Setup/version/transfer share one monotonic deadline;
+  direct-child retirement has a separate bounded four-second allowance."
+  [url overall-deadline-ms]
+  (let [budget (remaining-timeout! overall-deadline-ms 10000 :model-preflight)
+        deadline (+ (System/nanoTime) (* budget 1000000))
+        remaining (fn []
+                    (let [ms (quot (- deadline (System/nanoTime)) 1000000)]
+                      (when-not (pos? ms)
+                        (fail! "model readiness preflight failed"
+                               {:phase :model-preflight :reason :health-timeout :http-status 0}))
+                      (min ms (remaining-timeout! overall-deadline-ms 10000 :model-preflight))))
+        scratch (io/file (str (java.nio.file.Files/createTempDirectory
+                              "samizdat-health-" (make-array java.nio.file.attribute.FileAttribute 0))))
+        output (io/file scratch "status")
+        body (io/file scratch "body")
+        settled? (atom true)
+        run (fn [argv]
+              (let [_ (remaining)
+                    child (try (process/process argv {:env {"PATH" "/usr/bin:/bin"}
+                                                       :in (io/file "/dev/null") :out :write :out-file output
+                                                       :err :discard})
+                               (catch Throwable _
+                                 (fail! "model readiness preflight failed"
+                                        {:phase :model-preflight :reason :health-transport :http-status 0})))]
+                (reset! settled? false)
+                (try
+                  ;; Recompute after spawn; setup must not buy a fresh wait.
+                  (if (wait-for-child! child (remaining))
+                    (do (reset! settled? true)
+                        ;; Redirected files have no asynchronous drain workers.
+                        (try (.exitValue (:proc child))
+                             (catch Throwable _ -1)))
+                    (fail! "model readiness preflight failed"
+                           {:phase :model-preflight :reason :health-timeout :http-status 0}))
+                  (catch Throwable _
+                    (when-not @settled?
+                      (reset! settled? (:terminal? (force-reap! child))))
+                    (fail! "model readiness preflight failed"
+                           {:phase :model-preflight
+                            :reason (if @settled? :health-timeout :health-unsettled)
+                            :http-status 0})))))]
+    (try
+      (when-not (and (zero? (run ["/usr/bin/curl" "--disable" "--version"]))
+                     (<= (.length output) 2048)
+                     (let [[_ major minor] (re-find #"^curl ([0-9]+)\.([0-9]+)\." (slurp output))]
+                       (and major (or (> (parse-long major) 8)
+                                      (and (= 8 (parse-long major)) (>= (parse-long minor) 5))))))
+        (fail! "model readiness preflight failed"
+               {:phase :model-preflight :reason :curl-unavailable :http-status 0}))
+      (let [ms (remaining)
+            exit (run ["/usr/bin/curl" "--disable" "--silent" "--globoff"
+                       "--disallow-username-in-url" "--proxy" "" "--noproxy" "*"
+                       "--proto" "=http,https" "--max-time" (str (/ ms 1000.0))
+                       "--connect-timeout" (str (/ (min ms 3000) 1000.0))
+                       "--max-filesize" "65536" "--output" (str body)
+                       "--write-out" "%{http_code}" "--url" url])]
+        (remaining)
+        (when-not (and (zero? exit) (<= (.length body) 65536)
+                       (= 3 (.length output)))
+          (fail! "model readiness preflight failed"
+                 {:phase :model-preflight
+                  :reason (case exit 28 :health-timeout 63 :health-size :health-transport)
+                  :http-status 0}))
+        {:status (try (parse-long (slurp output)) (catch Throwable _ 0))
+         :body (slurp body)})
+      (finally
+        ;; Unknown ownership/settlement fails closed and preserves private
+        ;; scratch. Never unlink a file which an unconfirmed child can write.
+        (when @settled?
+          (doseq [file [output body scratch]]
+            (try (.delete file) (catch Throwable _ nil))))))))
 
 (defn- bounded-process!
   [command {:keys [dir env timeout-ms out-file err-file]
@@ -563,7 +708,8 @@
 
 (defn evidence-record
   "Assemble the bounded artifact independently of the cost-bearing runner."
-  [{:keys [baseline request run test-result stopped-a trace-a stopped-b trace-b]}]
+  [{:keys [baseline request run test-result stopped-a trace-a stopped-b trace-b
+           model-readiness]}]
   {:evidence/version 1
    :fixture {:version 1 :baseline-commit baseline
              :historical-reference lost-baseline
@@ -572,6 +718,7 @@
                                   :beam_width :max_total_branches])
    :run (select-keys run [:run-id :status :turns :steering-count])
    :verification test-result
+   :model-readiness model-readiness
    :process-a {:stopped-before-reopen (:closed? stopped-a) :trace trace-a}
    :process-b {:same-durable-root true :no-model-call true
                :closed (:closed? stopped-b) :graceful (:graceful? stopped-b)
@@ -599,6 +746,7 @@
         durable-root (str output "/durable")
         db-path (str output "/samizdat.sqlite3")
         deadline-ms (+ (System/currentTimeMillis) (:timeout-ms options))
+        model-readiness (model-preflight! (assoc options :deadline-ms deadline-ms))
         options (assoc options :checkout-root checkout-root :output output
                        :deadline-ms deadline-ms
                        :project-root project-root :durable-root durable-root
@@ -673,7 +821,7 @@
                                    server-b
                                    (remaining-timeout! deadline-ms 120000 :server-b-stop))
                         evidence (evidence-record
-                                  {:baseline baseline
+                                  {:baseline baseline :model-readiness model-readiness
                                    :request (run-request problem (:model options))
                                    :run run :test-result verified-result
                                    :stopped-a stopped-a :trace-a trace-a

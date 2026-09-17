@@ -88,6 +88,18 @@ jobs:
       - name: Fetch dependencies
         run: jolt -P
 
+      - name: Demo preflight mocks and bounded loopback transport
+        timeout-minutes: 3
+        # No model/provider/storage owner. The installed release is
+        # self-contained; env is its launcher, not a source-build Chez choice.
+        run: |
+          jolt -Srepro -A:telemetry:embedded-telemetry:telemetry-test -e '
+            (require (quote clojure.test) (quote samizdat.demo.embedded-model-test))
+            (let [r (clojure.test/run-tests (quote samizdat.demo.embedded-model-test))]
+              (System/exit (if (zero? (+ (:fail r) (:error r))) 0 1)))'
+          python3 scripts/test-preflight-transport.py \
+            --jolt "$(command -v jolt)" --wrapper /usr/bin/env
+
       - name: Test suite
         # Offline and deterministic: maestro, mycelium, the store, the task
         # board, the arbiter and gates, fence parsing, the prompt contract.

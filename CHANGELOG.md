@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Add explicit Lemonade loaded-model preflight before demo acquisition, with
+  safe fixed diagnostics and generic-endpoint opt-out. Bound the demo-only
+  curl request deadline and received body bytes, confirming direct-child
+  retirement before collector acquisition. Refs #51.
+
 - Document the current local Durable steered sample with fresh recovered-viewer
   screenshots and real harness evidence, keeping exhausted task state separate
   from successful arithmetic, telemetry and fresh-process readback checks.

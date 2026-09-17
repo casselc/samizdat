@@ -255,6 +255,43 @@ defaults to the reviewed `aea91781` substring and must occur exactly in the
 selected binary's `--version` output; a diagnostic binary can name its own
 revision (for example `a7d07660`) without weakening that check.
 
+Before creating the project fixture, opening ports or acquiring a collector, the demo
+defaults to `--model-preflight lemonade-loaded`. It reads Lemonade's `/health`
+metadata and requires the exact requested model in `all_models_loaded`;
+a `/models` registry listing or the most-recent `model_loaded` field is not
+enough. It never loads, unloads or chooses a replacement model. Generic
+OpenAI-compatible endpoints without this health contract must explicitly pass
+`--model-preflight none`; this skips readiness verification, not provider errors.
+New success evidence records the selected mode and a metadata-readiness flag.
+Loaded metadata is not proof that a later inference request will succeed.
+
+The GET sends no authentication headers and follows no redirects; preflight
+URLs with user information, query parameters or fragments are rejected. Failures
+expose only fixed reasons and HTTP status, not server bodies or exceptions.
+The demo uses `/usr/bin/curl` 8.5 or newer for this check only. Private transport
+scratch files are acquired before the project or collector. Version checking,
+setup and the entire request share a monotonic deadline of at most 10 seconds,
+also limited by the overall harness budget. Connect time is at most 3 seconds;
+curl stops received response bodies above 65,536 bytes, including responses
+without a declared length. No decompression, proxy, curl configuration files,
+authentication or redirect following is enabled. A timed-out direct child has
+a separate bounded retirement allowance of up to 4 seconds. If terminal state
+cannot be confirmed, the check fails closed before collector acquisition and
+preserves private scratch rather than deleting files a child may still write.
+The JSON parser also retains its 65,536-character validation guard.
+Run the loopback-only transport regression without model calls:
+
+```bash
+python3 scripts/test-preflight-transport.py --jolt /path/to/selected/jolt \
+  --wrapper /home/chuck/ai-src/tools/jolt-with-chez-10.4.1
+```
+
+It checks exact body-byte boundaries, unknown-length and chunked responses,
+UTF-8 bytes versus characters, partial headers, slow bodies and no redirects.
+The cap applies to response bodies, not HTTP headers or bytes outside a message
+whose declared Content-Length is smaller. Private scratch deletion is attempted
+only after confirmed exit; filesystem cleanup failures do not erase the cause.
+
 The harness starts Samizdat with a complete environment allowlist: no Langfuse,
 OTLP, or provider credentials are inherited. It submits one run at 14 turns,
 120,000 tokens, beam width 1, and a hard total-branch cap of 1. After the first
