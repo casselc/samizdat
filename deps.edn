@@ -213,8 +213,12 @@
            ;; dependency aliases: -M:telemetry:embedded-telemetry:embedded-serve.
            :embedded-serve
            {:main-opts ["-m" "samizdat.telemetry.embedded-bootstrap"]}
+           ;; Explicit cost-bearing entry point; tests only exercise fake seams.
+           :embedded-model-demo
+           {:extra-paths ["demo"]
+            :main-opts ["-m" "samizdat.demo.embedded-model"]}
            ;; The otel-dependent tests; always combined: jolt -M:telemetry:telemetry-test
-           :telemetry-test {:extra-paths ["telemetry-test" "test"]
+           :telemetry-test {:extra-paths ["telemetry-test" "test" "demo"]
                             :main-opts ["-m" "samizdat.telemetry.test-runner"]}
            ;; The dev tree (the nREPL client, the ebb spike) plus the tests, so
            ;; a live image can run the suite without paying startup — with

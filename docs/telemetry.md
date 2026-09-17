@@ -3,9 +3,10 @@
 Bounded observability for the harness (casselc/samizdat issue #21). This
 document is the contract; the code is `samizdat.telemetry.*`.
 
-**This tree is upstream main `22be90ddf9b05ba8406d6ec231d2748a4da22d8e` plus
-instrumentation only**: the contract, the hook, the nine harness run seams,
-the `:telemetry` alias and the `serve` entry. The five
+**This tree integrates upstream main `83eb99a4f6d01923ddee199d453d960a45dd732b`
+with the fork's telemetry and task-ownership fixes**: the contract, the hook,
+the nine harness run seams, the `:telemetry` alias and the `serve` entry,
+early ownership, cancellation cleanup, and persisted branch ceilings. The five
 `samizdat.store.lifecycle` seams of the pilot lineage
 (`agent/onbox/observability-v1`) do not exist upstream and are not here.
 The re-anchor keeps current main's acceptance behavior and its three workflow
@@ -39,8 +40,8 @@ one.
 | build | what loads | behaviour |
 |---|---|---|
 | **source mode** (stock `jolt -M:test`, `jolt serve`, Jolt ≥ 0.8.0) | `samizdat.telemetry.contract`, `samizdat.telemetry.hook` (both `src/`, no new dependency) | `hook/observe!` calls the thunk directly; the seam functions behave exactly as before (`test/samizdat/telemetry/hook_test.clj`; the stock suite is the equivalence check). No otel namespace exists on the path. |
-| **alias-enabled** (`jolt -M:telemetry …`, Jolt 0.8.3) | additionally `telemetry/samizdat/telemetry/otel.clj` and casselc/otel `88503a6` | `otel/init!` reads `SAMIZDAT_TELEMETRY` and installs the observer; one span per run seam, semantic wrappers for executions, generations, tools and evaluators. |
-| **woven** (aspect pack `resources/META-INF/jolt/aspects/samizdat-observability-run-22be90d.edn`, the nine harness seams verified against upstream main `22be90d`) | `samizdat.telemetry.aspect-provider` role `:samizdat.telemetry/run` at the same entries | Statically validated against this tree (`test/samizdat/telemetry/aspect_manifest_test.clj`: each entry resolves once at the stated arity). Not qualified as a build here — see the bootstrap work product report. |
+| **alias-enabled** (`jolt -M:telemetry …`, current qualification lane Jolt 0.8.6) | additionally `telemetry/samizdat/telemetry/otel.clj` and casselc/otel `4d61f8e` (see the exact pin in `deps.edn`) | `otel/init!` reads `SAMIZDAT_TELEMETRY` and installs the observer; one span per run seam, semantic wrappers for executions, generations, tools and evaluators. |
+| **woven** (aspect pack `resources/META-INF/jolt/aspects/samizdat-observability-run-83eb99a.edn`, the nine harness seams verified against upstream main `83eb99a`) | `samizdat.telemetry.aspect-provider` role `:samizdat.telemetry/run` at the same entries | Statically validated against this tree (`test/samizdat/telemetry/aspect_manifest_test.clj`: each entry resolves once at the stated arity). Not qualified as a build here — see the bootstrap work product report. |
 
 Optional aspect behaviour never becomes a runtime dependency: the stock
 build does not require `otel.*`, and the hook is a no-op until something
@@ -91,7 +92,7 @@ only). Every run span carries `samizdat.execution.kind = "run"` and
 `samizdat.observation.mode = "live"`; the run id is mirrored to
 `langfuse.trace.metadata.run_id` and used as the session id. The aspect form
 of the seam list is
-`resources/META-INF/jolt/aspects/samizdat-observability-run-22be90d.edn`.
+`resources/META-INF/jolt/aspects/samizdat-observability-run-83eb99a.edn`.
 
 ### Content override (prompts and outputs on live spans)
 
@@ -226,6 +227,144 @@ this bound before the startup error escapes.
 The stock `jolt serve` and standalone `off`/`local`/`langfuse`/`dual` launcher
 are unchanged.
 
+### Reproducible steered model demo
+
+`fixtures/embedded-model/calc-v1` is a versioned, deliberately failing project:
+`square` multiplies by 2 and its one test fails. The historical baseline named
+in its provenance, `b15ba4e125c7a57a924e16df403b9a2ddebff816`, is unavailable
+both locally and from this repository's remote. The demo therefore copies the
+fixture into a scratch directory and creates a new deterministic Git commit. It
+records both identifiers and refuses to claim that the new commit is the lost
+object.
+
+The cost-bearing run is explicit and is never invoked by a test. Only with
+authorization to contact the configured model endpoint, run:
+
+```sh
+scripts/embedded-model-demo.sh
+```
+
+Defaults are the Lemonade-compatible endpoint
+`http://marvin.asymptote-city.ts.net:13305/v1`, model
+`Qwen3.6-27B-MTP-GGUF`, the selected `aea91781` Jolt binary, chDB 26.7.3, and
+a 30-minute overall deadline. Override them with
+`SAMIZDAT_DEMO_BASE_URL`, `SAMIZDAT_DEMO_MODEL`, `SAMIZDAT_DEMO_JOLT`,
+`SAMIZDAT_DEMO_EXPECTED_JOLT_REV`, `SAMIZDAT_DEMO_WRAPPER`, `SAMIZDAT_DEMO_CHDB_LIB`,
+`SAMIZDAT_DEMO_TIMEOUT_MS`, or `SAMIZDAT_DEMO_OUTPUT`. The expected revision
+defaults to the reviewed `aea91781` substring and must occur exactly in the
+selected binary's `--version` output; a diagnostic binary can name its own
+revision (for example `a7d07660`) without weakening that check.
+
+The harness starts Samizdat with a complete environment allowlist: no Langfuse,
+OTLP, or provider credentials are inherited. It submits one run at 14 turns,
+120,000 tokens, beam width 1, and a hard total-branch cap of 1. After the first
+durable `turn` event it submits the cube requirement exactly once. Success
+accepts terminal `completed` or `exhausted`, then independently requires
+`jolt -M:test` reporting exactly 6 tests, 6 assertions, 0 failures, and 0 errors.
+Because the model can edit those tests, that summary is not a trusted semantic
+oracle. A separate fresh `jolt -Srepro -e` process runs a fixed, host-owned
+expression calling square on 0, 3, -4 and cube on 0, 3, -2. Its complete output
+must be `[0 9 16 0 27 -8]`, with a successful exit and no stderr, before telemetry
+qualification or process B starts. Success evidence records
+`trusted-semantic-check: true` and `semantic-case-count: 6` separately from the
+six-test counts. This checks those six cases, not all possible inputs, and
+does not defend against deliberately hostile runtime or dependency changes.
+Both Jolt's concise summary and the JVM-style summary are recognized; extra
+summaries, changed counts, failures, errors, timeout, or nonzero exit fail closed.
+An exhausted orchestration remains exhausted in evidence; passing fixture and
+telemetry gates does not relabel it completed.
+
+For runtime diagnostics only, `JOLT_FIBER_TRACE_LIMIT` is passed to server A
+and B when present and must be a canonical integer from 1 through 4096. It is
+absent by default and is never added to toolchain, fixture, Git, or verification
+children.
+
+Telemetry qualification uses only the supported mounted UI. It discovers the
+run trace from `/oscope/telemetry?window=1h`, reads
+`/oscope/telemetry/traces/<trace-id>`, and requires `samizdat.run.id` plus all
+nine families: `run`, `run.rounds`, `branch.open`, `branch.close`, `turn`,
+`model.chat`, `tool.selection`, `tool`, and `steer`. Content attribute keys must
+be absent. Process A must close after TERM before process B starts against the
+same Durable root; B performs no model call, must recover the same run trace
+through the UI, and must also close cleanly. Each close requires exactly one
+confirmed `{:status :closed, :phase :closed}` diagnostic and TERM exit 143.
+
+Each run writes bounded, redacted server-log tails and `evidence.json` below
+`target/embedded-model-demo/<session-id>`. Evidence contains configuration
+bounds, IDs, counts, and pass/fail facts, not prompts, model replies, HTTP
+authorization, or credentials. These files are the input for later VHS or
+Playwright capture; the presentation tools do not need to repeat the model run.
+After qualification, reopen the same local database and Durable root with an
+independently owned local reader. `scripts/embedded-model-capture.cjs` takes
+the loopback base URL, `evidence.json`, a fresh screenshot directory, and the
+root of an existing Playwright installation. It only permits same-origin GET
+requests and refuses credential/content markers before saving the trace and
+index screenshots. It does not save HTTP bodies or browser traces.
+
+`scripts/embedded-model-tui.tape` captures the actual HTTP-client TUI with VHS.
+Set `SAMIZDAT_DEMO_TUI_COMMAND` to the selected Jolt command with a local
+`ftxui-jolt` dependency and that reader's loopback URL, then invoke VHS from a
+fresh capture directory. It never submits, resumes, or steers a run. The TUI
+can show the public fixture's task and code; unlike the telemetry view, it is
+not a content-off surface. Do not use this tape against private sessions.
+
+The 30-minute limit remains the cost bound for legitimate long responses. A
+structural `jolt-fiber-run` state failure is different: it can kill a task
+without changing a run row that already says `running`. The demo recognizes
+that exact bounded-log marker, aborts the row on its next one-second poll, and
+fails without waiting out the remaining model budget. Samizdat also records an
+ordinary exceptional run-task exit as `run-error` and closes its row `failed`.
+
+### Historical recovery snapshot
+
+One real run completed after 12 turns, with the cube request applied at turn 2.
+Its independent fixture command passed six tests and six assertions. The first
+harness invocation still failed: its parser expected JVM wording rather than
+Jolt's concise test summary. That parser now has strict tests for both formats.
+No model run was repeated to repair the evidence.
+
+A fresh process reopened the same Durable root and recovered all nine
+content-off span families. It closed exactly once with confirmed closed state
+and exit 143. The original process's close was confirmed, but its signal exit
+and live trace query were not retained; those observations are explicitly
+unavailable in the [historical recovery summary](examples/embedded-model-recovery.json).
+This summary was hand-assembled from recovered observations; it is not output
+from the current harness's `evidence-record` success path. It does not qualify
+the current integration end to end, nor claim that the first harness invocation
+passed end to end. Its `evidence-kind` and `current-harness-output` fields make
+that distinction explicit; the unavailable process-A observations remain
+unavailable rather than being reconstructed as successful gates.
+
+These are actual Playwright captures of a later read-only reopen, not mocked
+screens or pages repaired with injected CSS. The index shows one trace and 68
+spans; the detail shows the run, rounds, model, tool, and steering timings.
+No Langfuse destination was configured, and content attributes are absent.
+
+![Actual embedded Oscope index](images/embedded-model/oscope-index.png)
+
+![Actual embedded Oscope trace detail](images/embedded-model/oscope-trace.png)
+
+The actual Samizdat TUI also opens this completed session through the local
+reader. This recording only views the existing run; it does not submit a new
+model request. Its task, code, and tool output belong to the public fixture,
+so the TUI recording is not a demonstration of content-off telemetry.
+
+![Samizdat TUI viewing the completed local run](images/embedded-model/samizdat-local-demo.gif)
+
+[Full-resolution TUI screenshot](images/embedded-model/samizdat-local-demo.png)
+and [WebM recording](images/embedded-model/samizdat-local-demo.webm).
+
+The pale heading on a white outer canvas and wrapped long attribute labels
+are existing readability defects tracked in
+[Oscope #106](https://github.com/chucklehead-dev/oscope/issues/106).
+
+Runtime provenance for this example: Jolt `v0.8.6-13-gaea91781`, source
+`aea91781bbab68bf174fef4a689bb00dcf834ded`, binary SHA-256
+`7adde574ec02b1297cf3af792ba525f19ffa44be167093d07e54d4345fbe490b`;
+chDB 26.7.3, library SHA-256
+`36ad4e999882821ef13cf2d0f52c93f48e6ee1b4498b35a201c23ce4b8d15bf5`;
+Playwright 1.61.1 with cached Chromium 149.0.7827.55, revision 1228.
+
 ## Dependencies under the alias
 
 Only the alias adds dependencies; the stock `:deps` are unchanged.
@@ -324,10 +463,11 @@ commit that produced them.
 
 ## Tests
 
-- stock: `jolt -M:test` (Jolt 0.8.3, upstream's minimum) includes
+- stock: `jolt -M:test` (CI pins Jolt 0.8.6) includes
   `samizdat.telemetry.{contract,hook,aspect-manifest}-test`;
 - alias: `jolt telemetry-test` = `jolt -M:telemetry:telemetry-test`
-  (Jolt 0.8.3) adds `samizdat.telemetry.{otel,pipelines}-test`: typed
+  (current local qualification uses the Jolt 0.8.6 AEA lane; older releases
+  are not requalified by this update) adds `samizdat.telemetry.{otel,pipelines}-test`: typed
   attributes incl. false/0/negatives, the Langfuse mirror, observer failure
   isolation, suppression, TRACEPARENT
   parenting, a throwing destination beside a healthy one, bounded queue

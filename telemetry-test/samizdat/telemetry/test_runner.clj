@@ -20,6 +20,7 @@
   "jolt -M:telemetry:telemetry-test — the otel-dependent telemetry tests plus
   the dependency-free contract/hook tests they build on."
   (:require [clojure.test :as t]
+            [samizdat.demo.embedded-model-test]
             [samizdat.telemetry.aspect-manifest-test]
             [samizdat.telemetry.contract-test]
             [samizdat.telemetry.embedded-bootstrap-test]
@@ -32,7 +33,8 @@
             [samizdat.telemetry.pipelines-test]))
 
 (def namespaces
-  '[samizdat.telemetry.aspect-manifest-test
+  '[samizdat.demo.embedded-model-test
+    samizdat.telemetry.aspect-manifest-test
     samizdat.telemetry.contract-test
     samizdat.telemetry.embedded-bootstrap-test
     samizdat.telemetry.embedded-dependency-test

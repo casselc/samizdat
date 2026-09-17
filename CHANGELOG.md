@@ -2,6 +2,27 @@
 
 ## Unreleased
 
+- Refresh the observability pack's upstream provenance to 83eb99a, retaining
+  the same nine run seams and explicit source-only versus woven-build limits.
+
+- Require a fixed host-owned arithmetic verifier in the embedded model demo,
+  in addition to six passing model-authored tests, before telemetry/readback
+  qualification. Record the separate six-case semantic check in success evidence.
+
+- Label the embedded demo's historical recovery summary separately from fresh
+  harness success evidence, retaining the original run's unavailable observations
+  and keeping current integration qualification distinct.
+
+- Guard the real-model demo's direct-child signals against invalid/broadcast
+  PIDs and preserve raw evidence when termination cannot be confirmed. Cleanup
+  diagnostics do not replace the original run failure; Durable data and captured
+  telemetry values are unchanged.
+
+- Add a bounded, local Durable real-model demo with a versioned fixture,
+  exactly-once steering, independent six-test verification, nine content-off
+  span families, and fresh-process readback. Exhausted orchestration remains
+  exhausted even when the independent application and telemetry gates pass.
+
 - Guard background start/resume secondary storage and approval cleanup so the
   original task outcome survives and owned active state is always released.
   Release only the terminating run's approvals, with bounded secondary

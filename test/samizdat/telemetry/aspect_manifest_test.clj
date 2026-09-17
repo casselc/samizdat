@@ -19,7 +19,7 @@
 (ns samizdat.telemetry.aspect-manifest-test
   "The observability aspect pack names exactly the nine harness run seams the
   source-mode hook wraps, each resolving to one real var of the stated arity
-  on this tree (upstream main 22be90d plus instrumentation; the lifecycle pack
+  on this tree (upstream main 83eb99a plus fork instrumentation; the lifecycle pack
   of the pilot lineage does not apply here — samizdat.store.lifecycle is not
   upstream)."
   (:require [clojure.edn :as edn]
@@ -32,13 +32,13 @@
             [samizdat.llm.client]
             [samizdat.store.runs]))
 
-(def run-resource-name "META-INF/jolt/aspects/samizdat-observability-run-22be90d.edn")
+(def run-resource-name "META-INF/jolt/aspects/samizdat-observability-run-83eb99a.edn")
 
 (defn- arities [v]
   (set (map count (:arglists (meta v)))))
 
 (def run-seams
-  "entry -> arity, as verified against upstream main 22be90d and this tree."
+  "entry -> arity, as verified against upstream main 83eb99a and this tree."
   {'samizdat.agent.beam/run! 1
    'samizdat.agent.beam/run-rounds 3
    'samizdat.agent.beam/advance-branch 3
@@ -54,7 +54,7 @@
     (is (some? manifest))
     (is (= 1 (:schema manifest)))
     (is (= 'yogthos/samizdat (get-in manifest [:library :id])))
-    (is (= "22be90ddf9b05ba8406d6ec231d2748a4da22d8e" (get-in manifest [:library :version])))
+    (is (= "83eb99a4f6d01923ddee199d453d960a45dd732b" (get-in manifest [:library :version])))
     (is (= 9 (count (:aspects manifest))))
     (is (= 9 (count (set (map :id (:aspects manifest))))) "ids unique")
     (is (= run-seams

@@ -260,7 +260,7 @@
     (is (= (contract/schema-version) (get a "samizdat.telemetry.schema")))))
 
 (deftest harness-run-seams-emit-a-run-trace-through-the-hook
-  ;; The seams named by samizdat-observability-run-22be90d.edn,
+  ;; The seams named by samizdat-observability-run-83eb99a.edn,
   ;; driven directly through the hook: a run whose turn runs in a future (as
   ;; beam/advance-all does), one model call with usage, one tool, one steer.
   (let [problem "write a function that returns 42"

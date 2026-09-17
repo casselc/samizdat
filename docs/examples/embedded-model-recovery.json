@@ -1,0 +1,53 @@
+{
+  "version": 1,
+  "evidence-kind": "historical-recovery-summary",
+  "current-harness-output": false,
+  "recovery": true,
+  "original-harness": {
+    "status": "failed",
+    "phase": "verify-summary-format"
+  },
+  "run": {
+    "run-id": "f0ae74c0-45f6-4428-a78f-b767f6b57f39",
+    "status": "completed",
+    "turns": 12,
+    "steering-count": 1
+  },
+  "verification": {
+    "exit": 0,
+    "tests": 6,
+    "assertions": 6,
+    "failures": 0,
+    "errors": 0
+  },
+  "content-enabled": false,
+  "external-export": false,
+  "process-a": {
+    "confirmed-close-count": 1,
+    "signal-exit-unavailable": true,
+    "trace-not-observed-before-close": true
+  },
+  "process-b": {
+    "same-durable-root": true,
+    "no-model-call": true,
+    "closed": true,
+    "graceful": true,
+    "exit": 143,
+    "confirmed-close-count": 1,
+    "trace": {
+      "trace-id": "ed2b94b3902a95e263b72a9af2623d98",
+      "span-families": [
+        "run",
+        "run.rounds",
+        "branch.open",
+        "branch.close",
+        "turn",
+        "model.chat",
+        "tool.selection",
+        "tool",
+        "steer"
+      ],
+      "content-enabled": false
+    }
+  }
+}
