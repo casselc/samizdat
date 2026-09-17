@@ -321,6 +321,45 @@ that exact bounded-log marker, aborts the row on its next one-second poll, and
 fails without waiting out the remaining model budget. Samizdat also records an
 ordinary exceptional run-task exit as `run-error` and closes its row `failed`.
 
+### Current local Durable sample (2026-09-16)
+
+The [current harness evidence](examples/embedded-model-live-2026-09-16.json)
+comes from published checkpoint `ba7f35a65b3273b5241a9286f9b0926e72e4cbaf`,
+using the already-loaded `Qwen3.6-35B-A3B-MTP-GGUF` model. The application
+exhausted its token budget after 12 turns and one scripted steering request;
+it did not report completion. Separately, all six tests and six fixed
+host-owned arithmetic checks passed. Process A showed all nine content-off
+span families, closed before B opened the same Durable data, and B recovered
+the same trace without a model call and closed gracefully.
+
+These fresh screenshots came from another owned viewer process, C, reopened
+on that retained data. Capture used loopback GET requests only; its inference
+endpoint was deliberately disabled. C's retained shutdown receipt confirms
+exit 143, one closed announcement, and terminal state; no owned process remained.
+No new model run was needed for these images.
+
+![Fresh embedded trace index: one trace and 66 persisted spans](images/embedded-model/2026-09-16/oscope-index.png)
+
+![Fresh same-Durable-root trace showing run metadata and all nine span families](images/embedded-model/2026-09-16/oscope-trace.png)
+
+The captured index reports zero logs, and the selected metrics view is empty.
+The Samizdat emitter used here emits spans, not metric instruments or OTel
+log records. Its
+[empty metrics view](images/embedded-model/2026-09-16/oscope-metrics.png)
+records that coverage gap; it is not a metrics demo. Langfuse-named attributes
+are compatibility metadata here, not evidence of remote export: this run was
+purely local, with content and external export disabled.
+
+This qualifies the selected SDK `4d61f8e`, exporter `14a2998`, Oscope `7ee3ec4`,
+chDB binding `95d7b2b`, native chDB 26.7.3 and Jolt `aea91781` graph. It does
+not qualify newer pins, typed-schema consumption, Langfuse interoperability,
+every UI feature, or the full hosted release. The 120,000-token budget is
+checked after inference calls; exhausted task state is retained truthfully.
+No orphan-wrapper repair fired in this sample, so it is not live
+proof that the parser compatibility fix caused success. The current evidence
+records A's required close-before-reopen result, not its numeric exit; the
+exact C exit above is a separate capture receipt.
+
 ### Historical recovery snapshot
 
 One real run completed after 12 turns, with the cube request applied at turn 2.

@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Document the current local Durable steered sample with fresh recovered-viewer
+  screenshots and real harness evidence, keeping exhausted task state separate
+  from successful arithmetic, telemetry and fresh-process readback checks.
+
 - Recover complete fenced tool-call JSON followed by the observed orphan XML
   closing tags, with strict whole-input and no-extra-JSON checks. Preserve tool
   permissions and mark wrapper repairs explicitly. Refs #52.
