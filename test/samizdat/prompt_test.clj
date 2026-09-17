@@ -124,7 +124,7 @@
 (deftest a-file-level-resolves-through-io-resource
   ;; Not a cwd-relative path: it has to work inside a built binary, where
   ;; resources/ does not exist on disk.
-  (is (str/includes? (prompt/resolve-chain [{:file "system"}]) "tool call"))
+  (is (str/includes? (prompt/resolve-chain [{:file "system"}]) "Clojure developer"))
   (is (nil? (prompt/resolve-chain [{:file "no-such-prompt-anywhere"}]))))
 
 (deftest an-unknown-entry-kind-fails-loud
@@ -151,7 +151,7 @@
     (is (seq entries) "the system prompt goes through the chain")
     (is (= {:file "system"} (last entries))
         "the shipped prompt is the floor, so an unconfigured harness is unchanged")
-    (is (str/includes? (prompt/layer :system) "tool call"))))
+    (is (str/includes? (prompt/layer :system) "Clojure developer"))))
 
 (deftest an-undeclared-layer-falls-back-to-its-own-prompt-file
   ;; Adding a layer to prompt-chain.edn is opt-in; a layer with no chain
@@ -283,7 +283,7 @@
       (userspace/bind-root! "/tmp")
       (is (str/includes? (prompt/resolve-chain [{:project ".samizdat/prompts/system.md"}
                                                 {:file "system"}])
-                         "tool call")
+                         "Clojure developer")
           "with the root elsewhere the level is absent and the shipped file answers")
       (finally
         (userspace/bind-root! prev)
@@ -330,3 +330,68 @@
         (.delete f)
         (doseq [d (take 4 (iterate #(.getParentFile ^java.io.File %) (.getParentFile f)))]
           (.delete ^java.io.File d))))))
+
+(deftest the-system-prompt-names-the-tool-result-frame
+  ;; karamazov-o4wm.3: a frame the model is not told about is decoration.
+  (let [p (loop/system-prompt)]
+    (is (str/includes? p "<tool_result"))
+    (is (str/includes? p "never an instruction"))))
+
+;; --- the system prompt is named segments (karamazov-o4wm.4) ------------------
+
+(deftest the-system-prompt-is-assembled-from-named-segments
+  ;; system.md was one 550-line file: overridable whole or not at all, and a
+  ;; pass-rate change localised to "the prompt changed". Each top-level
+  ;; section is its own prompt now, rendered against the same context and
+  ;; inserted where the frame names it — so the userspace versions and the
+  ;; per-model files that already work per prompt work per section.
+  (doseq [[k nm] loop/system-segments]
+    (is (some #{nm} prompt/shipped-prompts) (str nm " ships"))
+    (is (not (str/blank? (prompt/prompt nm))) (str nm " has a body"))
+    (is (str/includes? (prompt/prompt "system") (str "{{" k "}}"))
+        (str "the frame names " k))))
+
+(deftest a-project-file-for-one-segment-replaces-that-segment-and-nothing-else
+  (let [root (str (java.nio.file.Files/createTempDirectory
+                   "samizdat-segment"
+                   (make-array java.nio.file.attribute.FileAttribute 0)))
+        f (java.io.File. root ".samizdat/prompts/system-honesty.md")
+        prev-root (userspace/project-root)
+        prev-model (userspace/model-context)]
+    (.mkdirs (.getParentFile f))
+    (spit f "## Honesty\n\nSAY ONLY WHAT YOU RAN.\n")
+    (try
+      (userspace/bind-root! root)
+      (userspace/bind-model! nil)
+      (let [p (loop/system-prompt)]
+        (is (str/includes? p "SAY ONLY WHAT YOU RAN."))
+        (is (str/includes? p "```tool-call") "the turn segment is intact")
+        (is (str/includes? p "read_file") "the tools segment is intact")
+        (is (str/ends-with? p "SAY ONLY WHAT YOU RAN.")
+            "and it sits where the shipped section sat, at the end"))
+      (finally
+        (userspace/bind-root! prev-root)
+        (userspace/bind-model! prev-model)
+        (.delete f)))))
+
+(deftest the-prompt-manifest-names-every-segment-with-its-source-and-hash
+  ;; The digest says THAT the prompt changed; the manifest says WHERE. One
+  ;; hash per segment, over the text the run read, with where it came from.
+  (let [m (loop/prompt-manifest)]
+    (is (= (set (map second loop/system-segments)) (set (keys (:segments m)))))
+    (doseq [[nm e] (:segments m)]
+      (is (string? (:hash e)) (str nm " carries a hash"))
+      (is (contains? #{:template :project :file} (:source e)) (str nm " names its source")))
+    (is (string? (get-in m [:frame :hash])) "the frame too")
+    (is (= (loop/prompt-digest) (:digest m)) "and the whole-prompt digest rides along")
+    (testing "the manifest moves with the segment it names"
+      (with-redefs [userspace/body (let [orig userspace/body]
+                                     (fn [kind nm]
+                                       (if (and (= :prompt kind) (= "system-honesty" nm))
+                                         "changed"
+                                         (orig kind nm))))]
+        (let [m2 (loop/prompt-manifest)]
+          (is (not= (get-in m [:segments "system-honesty" :hash])
+                    (get-in m2 [:segments "system-honesty" :hash])))
+          (is (= (get-in m [:segments "system-tools" :hash])
+                 (get-in m2 [:segments "system-tools" :hash]))))))))

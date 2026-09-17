@@ -40,6 +40,7 @@
             [samizdat.agent.arbiter :as arbiter]
             [samizdat.agent.files :as files]
             [samizdat.agent.gates :as gates]
+            [samizdat.agent.handoff :as handoff]
             [samizdat.agent.gitdiff :as gitdiff]
             [samizdat.agent.infer :as infer]
             [samizdat.config :as config]
@@ -68,6 +69,36 @@
   from one reading hand-written namespaces, which is why it is not a constant."
   []
   (:tool-result-chars (gates/threshold :context-budget)))
+
+(def system-segments
+  "The named sections the system prompt is assembled from, in reading order,
+  as [frame-variable prompt-name]. Each is its own prompt — userspace
+  versioned, per-model overridable, listed by the `prompt` tool — rendered
+  against the same context as the frame and inserted where system.md names
+  it (karamazov-o4wm.4). The overridable unit is a section, not the file:
+  a per-model wording of one section is one file, not a fork of five
+  hundred lines, and a pass-rate change localises to the section whose hash
+  moved (see `prompt-manifest`)."
+  [["structure" "system-structure"]
+   ["turn" "system-turn"]
+   ["tools" "system-tools"]
+   ["honesty" "system-honesty"]])
+
+(defn- chomp
+  "One trailing newline off: a segment file ends the way every file does,
+  and the frame's own line end follows the variable, so keeping both would
+  double it. Exactly one, so a section that ends in a blank line keeps it."
+  [s]
+  (if (str/ends-with? s "\n") (subs s 0 (dec (count s))) s))
+
+(defn- render-segments
+  "Every segment rendered against `ctx`, keyed by its frame variable. Values
+  are inserted into the frame as text and never re-parsed, so each segment
+  has to render its own conditionals here, against the same context."
+  [ctx]
+  (into {}
+        (map (fn [[k nm]] [(keyword k) (chomp (prompt/render nm ctx))]))
+        system-segments))
 
 (defn system-prompt-for
   "The system prompt as ROLE sees it: the tool catalogue filtered to that
@@ -111,26 +142,29 @@
         ;; separate project image while its evals land in the harness would be
         ;; the same false claim this is meant to remove.
         image (config/eval-image eval-mode role)]
-    (roles/scope-catalogue
-     (prompt/render-str (or (prompt/layer :system) "")
-       {:templates ""
-        :skills (skills/render-catalog)
-        :self-hosting (userspace/self-hosting?)
-        :repl (not= :off image)
-        :harness-image (= :harness image)
-        ;; From the config FILES rather than the merged run config, which
-        ;; prompt assembly is not handed. Both layers — a machine-wide
-        ;; reference tree is a real thing to declare once — and they are the
-        ;; operator's rather than the agent's.
-        :reference-paths (seq (files/reference-roots
-                               (get-in (config/file-config root)
-                                       [:run :reference-paths])
-                               root))
-        ;; The split decision is its own prompt so a provider/model file can
-        ;; replace the 8 lines that were measured to matter without forking
-        ;; the other 490 (karamazov-1g6b.3).
-        :split-decision (prompt/prompt "split-decision")})
-     role eval-mode)))
+    (let [ctx {:templates ""
+               :skills (skills/render-catalog)
+               :self-hosting (userspace/self-hosting?)
+               :repl (not= :off image)
+               :harness-image (= :harness image)
+               ;; From the config FILES rather than the merged run config,
+               ;; which prompt assembly is not handed. Both layers — a
+               ;; machine-wide reference tree is a real thing to declare
+               ;; once — and they are the operator's rather than the
+               ;; agent's.
+               :reference-paths (seq (files/reference-roots
+                                      (get-in (config/file-config root)
+                                              [:run :reference-paths])
+                                      root))
+               ;; The split decision is its own prompt so a provider/model
+               ;; file can replace the 8 lines that were measured to matter
+               ;; without forking the other 490 (karamazov-1g6b.3) — the
+               ;; first extract; the sections are the rest (system-segments).
+               :split-decision (prompt/prompt "split-decision")}]
+      (roles/scope-catalogue
+       (prompt/render-str (or (prompt/layer :system) "")
+                          (merge ctx (render-segments ctx)))
+       role eval-mode))))
 
 (defn system-prompt
   "The whole system prompt, unscoped — every tool the harness has.
@@ -165,6 +199,29 @@
   ([prompt-suffix]
    (str (hash (cond-> [(system-prompt) (gates/config) (judge-exemptions)]
                 (not (str/blank? prompt-suffix)) (conj prompt-suffix))))))
+
+(defn- segment-entry
+  "Where a prompt's text comes from and a hash of it — of the TEXT the run
+  read, not of a render, which varies by role and mode."
+  [nm]
+  (merge (or (userspace/prompt-source nm) {:source :missing})
+         {:hash (str (hash (or (userspace/body :prompt nm) "")))}))
+
+(defn prompt-manifest
+  "What the system prompt was made of: the frame and every segment, each
+  with its source (template, a project version, a project or per-model
+  file) and a hash, beside the whole-prompt digest (karamazov-o4wm.4).
+
+  The digest says THAT the prompt changed between two runs; this says WHERE.
+  Journalled at run start as a :prompt-manifest note by every driver that
+  records the digest."
+  ([] (prompt-manifest nil))
+  ([prompt-suffix]
+   {:digest (prompt-digest prompt-suffix)
+    :frame (segment-entry "system")
+    :segments (into {}
+                    (map (fn [[_ nm]] [nm (segment-entry nm)]))
+                    system-segments)}))
 
 (defn shareable?
   "Whether a just-produced artifact belongs in the run's shared pool.
@@ -342,10 +399,10 @@
                    [:artifacts (artifacts/render ahits)]])]
       {:block (when (seq parts) (str/join "\n\n" (map second parts)))
        ;; What each part cost this turn, in the order it was read, for
-       ;; `introspect` to render. In memory on the branch beside
-       ;; :shared-served rather than journalled: it describes the block the
-       ;; branch was last shown, and a row per turn per part would cost more
-       ;; than the question is worth.
+       ;; `introspect` to render. On the branch beside :shared-served for
+       ;; the last-turn view; steer-step also journals it once per turn as
+       ;; a :context-block note (one row per turn, not one per part), which
+       ;; is where the run-wide average comes from (karamazov-o4wm.6).
        :branch (-> branch
                    (assoc :learned-shown? true)
                    (update :shared-served (fnil into #{}) (map :id fresh))
@@ -518,14 +575,28 @@
          ;; move is noise.
          pressure (state/context-pressure
                    (get-in response [:usage :prompt-tokens])
-                   (gates/threshold :context-pressure))]
+                   (gates/threshold :context-pressure))
+         ;; WHAT THE CACHE WAS ASKED (karamazov-o4wm.1). The response carries
+         ;; the fingerprint of the wire messages it answered; against the
+         ;; branch's previous render that says whether only the tail moved
+         ;; or history behind it was rewritten, and the forced tool rides
+         ;; along because a native tool_choice misses with the bytes
+         ;; unchanged. Branch memory, read by the journal step; absent when
+         ;; the call was a stub or a replay, and absent is recorded as
+         ;; absent rather than as a first call.
+         wire (:wire response)
+         prefix (when wire
+                  (assoc (infer/prefix-stats (:last-wire branch) wire)
+                         :forced-tool (:forced response)))]
      {:parsed parsed
       :signals signals
       :said said
       :pressure pressure
       :branch (cond-> (-> (infer/into-branch branch tape)
-                          (state/record-mechanics signals))
-                (contains? #{:urgent :over} pressure) state/squeeze-context)})))
+                          (state/record-mechanics signals)
+                          (dissoc :last-prefix))
+                (contains? #{:urgent :over} pressure) state/squeeze-context
+                wire (assoc :last-wire wire :last-prefix prefix))})))
 
 (defn no-call-step
   "No usable call. Say exactly what was wrong; a bare \"try again\" produces
@@ -561,6 +632,12 @@
         msg (cond
               runaway?
               (prompt/prompt "thinking-runaway")
+              ;; A reply repeating itself, before the generic truncation
+              ;; advice: "think less and call a tool" is wrong for a loop,
+              ;; which was not thinking (karamazov-o4wm.5).
+              (:periodic signals)
+              (prompt/render "no-call-periodic"
+                             {:repeats (or (:periodic-repeats signals) 0)})
               (:truncated signals)
               (str "[harness] Your response hit the token limit before you"
                    " emitted a tool call. Think less and call a tool.")
@@ -600,7 +677,9 @@
                            :reasoning-text (:reasoning response)
                            ;; A turn that produced no usable call still cost
                            ;; tokens, and those are the ones worth counting.
-                           :usage (:usage response)})
+                           :usage (:usage response)
+                           :prefix (:last-prefix branch)
+                           :forced-tool (:forced-tool (:last-prefix branch))})
     (-> branch
         (state/record-outcome {:category :mechanics :progress? false})
         (cond-> runaway? thinking/recovery)
@@ -648,7 +727,10 @@
         ;;     mechanics failure with the harness doing the reasoning.
         (as-> b
               (if (and (not imitation?)
-                       (or (>= streak 2) (:truncated signals) runaway?))
+                       (or (>= streak 2) (:truncated signals) runaway?
+                           ;; A loop wants the clamp on its first showing:
+                           ;; the text it would continue is the loop.
+                           (:periodic signals)))
                 (assoc b :prefill "```tool-call\n")
                 (dissoc b :prefill))))))
 
@@ -770,6 +852,24 @@
         refusal (tools/phase-refusal
                  (assoc ctx :branch branch :turn turn
                         :tool-name tool :args (:args parsed)))
+        ;; WHAT IS ABOUT TO BE IN FLIGHT, on record before it is
+        ;; (karamazov-o4wm.2). The turn row is written after the tool, so a
+        ;; turn cancelled or crashed inside it left no trace of what it had
+        ;; called; forfeit and resume read this note back and hand the
+        ;; branch the call it made with its side-effect state. Clipped by
+        ;; gates.edn :handoff; best effort, because a note that fails must
+        ;; not cost the call.
+        _ (when (and (not refusal) (:conn ctx) (:run-id ctx))
+            (let [{:keys [args-chars said-chars]} (gates/threshold :handoff)
+                  last-m (peek (vec (:messages branch)))]
+              (try
+                (journal/record-dispatch!
+                 (:conn ctx) (:run-id ctx)
+                 {:branch-id (:id branch) :turn turn :tool tool
+                  :args (handoff/clip-args (:args parsed) args-chars)
+                  :said (when (= "assistant" (str (:role last-m)))
+                          (handoff/clip (:content last-m) said-chars))})
+                (catch Throwable _ nil))))
         result (or refusal
                    (tools/run-tool (assoc ctx :branch branch :turn turn
                                           :tool-name tool :args (:args parsed))))
@@ -892,7 +992,11 @@
                          :auto-repaired (:auto-repaired? parsed)
                          :assistant-text said
                          :reasoning-text (:reasoning response)
-                         :usage (:usage response)})
+                         :usage (:usage response)
+                         ;; What the cache was asked, beside what it answered
+                         ;; (karamazov-o4wm.1); absorb-response wrote it.
+                         :prefix (:last-prefix branch)
+                         :forced-tool (:forced-tool (:last-prefix branch))})
   (when-let [a (:artifact result)]
     (journal/record-artifact! conn run-id
                               (assoc a :branch-id (:id branch) :turn turn))
@@ -1044,7 +1148,8 @@
       ;; its command, a grep's is its match count, a read's is its size — and
       ;; a message that does not say which tool produced it gets the generic
       ;; preview instead, which is the one shape that carries nothing.
-      (state/add-message branch "user" (truncate (:result result))
+      (state/add-message branch "user"
+                         (message/frame-result tool (truncate (:result result)))
                          {:turn turn :tool tool})
       ;; Coverage answers whether the safe-state rung's fallback is honest:
       ;; the green cursor still points into a turn log the journal can
@@ -1076,7 +1181,23 @@
             (context-block conn run-id branch
                            (get-in parsed [:args :claim])
                            (get-in ctx [:config :run :share-artifacts?]))
-            body (str (truncate (:result result))
+            ;; What the block cost, durably: one note per turn per branch,
+            ;; sizes by part (karamazov-o4wm.6). The branch keeps the same
+            ;; vector for introspect's last-turn view; the note is what a
+            ;; run-wide average — the number a budget decision needs — is
+            ;; read from. Best effort, like every note.
+            _ (when-let [sizes (seq (:context-sizes branch))]
+                (try
+                  (journal/note! conn run-id :context-block
+                                 {:branch-id (:id branch) :turn turn
+                                  :data {:sizes (vec sizes)
+                                         :total (reduce + 0 (map second sizes))}})
+                  (catch Throwable _ nil)))
+            ;; The tool's output inside a frame it cannot close, and only
+            ;; then the harness's own blocks (karamazov-o4wm.3): what the
+            ;; model can trust about who is speaking is the frame, not the
+            ;; `---` rule — a file can carry one of those.
+            body (str (message/frame-result tool (truncate (:result result)))
                       (when ctx-block (str "\n\n" ctx-block))
                       (when decision (str "\n\n---\n\n" (:message decision))))
             ;; Recorded exactly once. The row id is what a later turn settles,

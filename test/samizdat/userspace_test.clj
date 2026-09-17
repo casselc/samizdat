@@ -94,7 +94,10 @@
 (deftest unbound-reads-the-shipped-template
   (us/unbind!)
   (is (re-find #"defcell :loop/assemble" (us/body :cell "loop")))
-  (is (re-find #"tool call" (us/body :prompt "system")))
+  ;; The frame; the turn format moved into the system-turn segment
+  ;; (karamazov-o4wm.4), so both are read here.
+  (is (re-find #"Clojure developer" (us/body :prompt "system")))
+  (is (re-find #"tool call" (us/body :prompt "system-turn")))
   (is (map? (us/edn-body :manifest "loop")))
   (is (map? (us/edn-body :policy "gates")))
   (testing "and stores nothing, because there is no project to store it in"

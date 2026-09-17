@@ -88,7 +88,7 @@
    ;; progress signals: a signal may tune a guard that fires on the same thing
    ;; the signal measures (dirge PR 740).
    :mechanics {:calls 0 :parse-errors 0 :auto-repairs 0
-               :unknown-tools 0 :truncations 0 :multi-fences 0}
+               :unknown-tools 0 :truncations 0 :multi-fences 0 :periodic 0}
   ;; The draft/commit split (vf-b25): :explore until the cap, :build
   ;; after — the phase-valve message tells the branch why. Withholding
   ;; here is the harness's one reliably-working gate: explore cannot
@@ -346,7 +346,8 @@
        (:parse-error signals) (update-in [:mechanics :parse-errors] inc)
        (:auto-repaired signals) (update-in [:mechanics :auto-repairs] inc)
        (:truncated signals) (update-in [:mechanics :truncations] inc)
-       (:multiple-fences signals) (update-in [:mechanics :multi-fences] inc))))
+       (:multiple-fences signals) (update-in [:mechanics :multi-fences] inc)
+       (:periodic signals) (update-in [:mechanics :periodic] (fnil inc 0)))))
 
 ;; Tier 1c: the list is wordlists.edn :claim-relevance — data, retunable at
 ;; runtime. A separate loader from gates.clj because this namespace sits

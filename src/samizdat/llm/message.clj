@@ -78,6 +78,21 @@
   []
   (lexicon/budget :compaction-chars))
 
+(defn default-compaction-batch
+  "How many exchanges the compaction frontier moves by at once.
+
+  Measured live (karamazov-pdes, run 5e78b96a): once a branch had more than
+  `keep-pairs` exchanges, EVERY turn rewrote history behind the tail, because
+  the frontier advanced one exchange per turn and the whole verbatim window
+  behind it — a quarter of every request — was re-prefilled on every call.
+  In steps, the window floats between keep-pairs and keep-pairs+batch-1 and
+  batch-1 turns in every batch send a byte-identical history.
+
+  `:context-budget :compaction-batch`, for the reason `default-keep-pairs`
+  gives."
+  []
+  (lexicon/budget :compaction-batch))
+
 (def ^:private frame-size
   "Messages at the head of a tape that are never compaction candidates: the
   system prompt and the problem statement.
@@ -195,10 +210,23 @@
   the branch's own history is untouched and a resume replays what was really
   sent at the time."
   ([messages turns] (compact messages turns nil))
-  ([messages turns {:keys [keep-pairs threshold-chars floor]}]
+  ([messages turns {:keys [keep-pairs threshold-chars floor batch]}]
    (let [messages (vec messages)
          keep-pairs (or keep-pairs (default-keep-pairs))
          threshold (or threshold-chars (default-compaction-threshold))
+         batch (or batch (default-compaction-batch))
+         ;; THE FRONTIER MOVES IN STEPS (karamazov-pdes). Applied on every
+         ;; render from the untouched tape, "once per message" still moved
+         ;; the boundary one exchange per turn, and the verbatim window
+         ;; behind it was re-prefilled on every call. So the number of
+         ;; exchanges compacted is always a multiple of `batch`: the window
+         ;; is widened by the remainder, and the boundary holds still for
+         ;; batch-1 turns out of every batch. A batch of one, or none, is
+         ;; the old behaviour.
+         aged (- (count (filter #(= "assistant" (:role %)) messages)) keep-pairs)
+         keep (if (and (number? batch) (> batch 1) (pos? aged))
+                (+ keep-pairs (mod aged (long batch)))
+                keep-pairs)
          total (reduce + 0 (map (comp count str :content) messages))]
      ;; Nothing to do below the threshold, and nothing to do when the tape is
      ;; the frame plus at most nothing: there is no message past it.
@@ -222,13 +250,54 @@
              ;; which leading messages are load-bearing, so the frame is
              ;; protected here, by the caller that owns it.
              due (remove #(< % frame-size)
-                         (tape/due-indices messages keep-pairs compactable-roles))]
+                         (tape/due-indices messages keep compactable-roles))]
          (reduce (fn [ms i]
                    (tape/compact-at ms i
                                     (replacement-for (nth ms i) turns-by-number)
                                     opts))
                  messages
                  due))))))
+
+(def result-close
+  "The tag that ends a framed tool result. A constant, like the unloaded
+  marker: a message framed once never changes again."
+  "</tool_result>")
+
+(defn frame-result
+  "`text` as the model is shown a tool's output: inside a frame naming the
+  tool, with the only closing tag the output itself contained escaped.
+
+  THE ONE THING THE MODEL CAN TRUST ABOUT PROVENANCE (karamazov-o4wm.3). The
+  turn's user message joined tool output, the context block, a `---` rule and
+  the steer with nothing marking where the tool stopped talking, so a file
+  read or a fetched page carrying that rule followed by `[harness]` read as
+  the harness. Floatboat escapes every observation and seals its envelope;
+  here the frame is enough, because harness text is APPENDED after it and
+  the only way in is to close it — which the escape forbids. Nothing else in
+  the output is rewritten: a coding model reads file contents through this
+  and writes them back, so a `---` or a `[harness]` inside stays exactly as
+  the file has it.
+
+  Applied where a tool result becomes a user message — the live turn, a
+  replayed row, a handoff — and never to the harness's own messages, which
+  are the thing the frame distinguishes from."
+  [tool text]
+  (str "<tool_result" (when (seq (str tool)) (str " tool=\"" tool "\"")) ">\n"
+       (str/replace (str text) result-close "<\\/tool_result>")
+       "\n" result-close))
+
+(defn unframe
+  "The body of a framed result — the frame's two lines off, the escape left
+  as it is — or `s` unchanged when it is not framed. For a summariser that
+  wants a result's first line to be the result's, not the frame's."
+  [s]
+  (let [s (str s)]
+    (if (and (str/starts-with? s "<tool_result")
+             (str/ends-with? s (str "\n" result-close)))
+      (let [body-start (inc (or (str/index-of s "\n") -1))
+            body-end (- (count s) (count result-close) 1)]
+        (if (<= body-start body-end) (subs s body-start body-end) ""))
+      s)))
 
 (def ledger-open "<!--settled-state-->")
 (def ledger-close "<!--/settled-state-->")

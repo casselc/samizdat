@@ -29,6 +29,9 @@
   Fidelity contract, per field:
 
   REPLAYS EXACTLY, from tables verbatim:
+  - the call in flight when the process died (the dispatch note no turn row
+    settled), re-appended as the assistant's own message plus a handoff
+    naming the tool and its side-effect state (karamazov-o4wm.2).
   - branch status, inactive-reason, created-at-turn, and thesis (branches row).
   - artifacts with claim-status / verdict / witness (artifacts rows).
   - failures are re-read fresh by the loop from the shared log, as always.
@@ -99,6 +102,9 @@
   - :critic scores and :fork-invited markers are branch memory; a resumed
     branch is re-scored at its next boundary, and may be re-invited to fork
     sooner than the cooldown would otherwise allow.
+  - :last-wire, the fingerprint of the branch's last render, is branch
+    memory; a resumed branch's first call records its prefix identity as
+    :first (karamazov-o4wm.1), which is also true of it.
   - the per-turn :error that repeating-failure? compares is not replayed, so a
     branch that was looping on one identical failure gets one un-escalated
     answer after a resume before the harness can see the loop again. The turns
@@ -110,6 +116,8 @@
             [clojure.data.json :as json]
             [samizdat.agent.beam :as beam]
             [samizdat.agent.gates :as gates]
+            [samizdat.agent.handoff :as handoff]
+            [samizdat.llm.message :as message]
             [samizdat.agent.gitdiff :as gitdiff]
             [samizdat.agent.loop :as branch-loop]
             [samizdat.agent.state :as state]
@@ -153,7 +161,13 @@
               (seq (:assistant_text t))
               (conj {:role "assistant" :content (:assistant_text t)})
               (seq (:result t))
-              (conj {:role "user" :content (:result t)})))
+              ;; Framed as the live turn framed it (karamazov-o4wm.3) —
+              ;; except the harness's own rows, whose tool name is the
+              ;; loop's `__…__` marker and whose result is harness text.
+              (conj {:role "user"
+                     :content (if (clojure.string/starts-with? (str (:tool_name t)) "__")
+                                (:result t)
+                                (message/frame-result (:tool_name t) (:result t)))})))
           (branch-loop/initial-messages problem prompt-suffix role)
           turns))
 
@@ -262,7 +276,10 @@
                                   :parse-errors (count (filter :parse_error branch-turns))
                                   :auto-repairs (count (filter #(pos? (:auto_repaired %))
                                                                branch-turns))
-                                  :unknown-tools 0 :truncations 0 :multi-fences 0}
+                                  :unknown-tools 0 :truncations 0 :multi-fences 0
+                                  ;; Not journalled per turn; a resumed
+                                  ;; branch's loops are counted from here on.
+                                  :periodic 0}
                       ;; The fractions already crossed are told, so the
                       ;; turn-budget notice does not re-fire on them.
                       :notified-fractions (gates/crossed-fractions branch max-turns))]
@@ -365,11 +382,19 @@
                                  ;; (karamazov-blt.21). The pinned statement
                                  ;; is re-appended through the same renderer
                                  ;; the claim used.
-                                 held (tasks/held-by conn run-id (:id b))]
+                                 held (tasks/held-by conn run-id (:id b))
+                                 ;; What was in flight when the process died
+                                 ;; (karamazov-o4wm.2): the dispatch note no
+                                 ;; turn row settled, handed back as the call
+                                 ;; it made plus its side-effect state. Last,
+                                 ;; because it is the most recent thing that
+                                 ;; happened to the branch.
+                                 in-flight (handoff/after-crash conn run-id (:id b))]
                              (cond-> b
                                held (assoc :task {:id (:id held)
                                                   :title (:title held)})
-                               held (task-tool/task-statement held))))
+                               held (task-tool/task-statement held)
+                               (seq in-flight) (update :messages into in-flight))))
                          (runs/branches conn run-id))
           ;; The anchor: rounds completed are the max turn in the journal, so
           ;; the loop continues one past it. max-turns is the ORIGINAL budget.

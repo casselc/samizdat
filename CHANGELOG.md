@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- Integrate current upstream handoff, framed tool results, and cache/context
+  diagnostics while preserving embedded telemetry and owned task cleanup.
+  Reconcile databases from either v30 migration lineage without dropping rows
+  or inventing historical prefix measurements; refuse incompatible existing
+  column types, nullability, or defaults rather than accepting names alone.
+
 - Close synchronous OpenAI agent runs durably on exceptional task exit,
   preserving cancellation and concurrent terminal winners without masking the
   original exception or leaving active ownership behind.

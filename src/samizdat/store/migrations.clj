@@ -776,7 +776,54 @@
   preserving existing stores' behavior when they migrate."
   ["ALTER TABLE runs ADD COLUMN max_total_branches INTEGER NOT NULL DEFAULT 8"])
 
+(def v31
+  "WHAT THE CACHE WAS ASKED, beside what it answered (karamazov-o4wm.1).
+
+  A turn row held the provider's cache split and nothing about the request
+  that earned it, so a miss after a compaction fold, a miss after a forced
+  native tool_choice and a branch's first call all read the same. On
+  endless-flight (GLM-5.3, 2026-09-13) 33 of 1352 turns hit under half their
+  prompt, 19 of them the turn after a gate fired, and none could be joined
+  to the 249 caps and 11 folds the run also recorded.
+
+  `prefix_stable_chars` is how many of this call's wire characters were
+  identical to the previous call's, counted from the front in whole
+  messages; `prefix_chars` is the whole request. `prefix_change` is one of
+  first | tail | rewritten: a branch's first call, the normal turn where
+  only the tail moved, or a message behind the tail rewritten — which is
+  compaction's doing and nobody else's. `forced_tool` is the tool a native
+  tool_choice named, recorded because that busts GLM's cache with the
+  prefix byte-stable, so a forced miss and a rewritten miss are different
+  findings.
+
+  Nullable: a replayed or stubbed call has no fingerprint, and a pre-v30
+  row was never measured. Nothing here changes a byte of what goes over the
+  wire; it records what did."
+  ;; v30 independently shipped with different shapes in the fork and
+  ;; upstream. Reconcile both using the explicit column guards below; never
+  ;; assume user_version 30 tells us which lineage produced the database.
+  ["ALTER TABLE runs ADD COLUMN max_total_branches INTEGER NOT NULL DEFAULT 8"
+   "ALTER TABLE turns ADD COLUMN prefix_stable_chars INTEGER"
+   "ALTER TABLE turns ADD COLUMN prefix_chars INTEGER"
+   "ALTER TABLE turns ADD COLUMN prefix_change TEXT"
+   "ALTER TABLE turns ADD COLUMN forced_tool TEXT"])
+
+(def existing-column-guards
+  "Only v31's divergent-history reconciliation may skip an ALTER whose
+  column already exists. Ordinary migrations retain fail-closed SQL errors."
+  {31 (zipmap v31
+              [{:table "runs" :column "max_total_branches"
+                :shape {:type "INTEGER" :notnull 1 :dflt_value "8"}}
+               {:table "turns" :column "prefix_stable_chars"
+                :shape {:type "INTEGER" :notnull 0 :dflt_value nil}}
+               {:table "turns" :column "prefix_chars"
+                :shape {:type "INTEGER" :notnull 0 :dflt_value nil}}
+               {:table "turns" :column "prefix_change"
+                :shape {:type "TEXT" :notnull 0 :dflt_value nil}}
+               {:table "turns" :column "forced_tool"
+                :shape {:type "TEXT" :notnull 0 :dflt_value nil}}])})
+
 (def migrations
   "Ordered. Index 0 is migration 1; PRAGMA user_version holds the count applied."
   [v1 v2 v3 v4 v5 v6 v7 v8 v9 v10 v11 v12 v13 v14 v15 v16 v17 v18 v19 v20 v21 v22 v23 v24
-   v25 v26 v27 v28 v29 v30])
+   v25 v26 v27 v28 v29 v30 v31])

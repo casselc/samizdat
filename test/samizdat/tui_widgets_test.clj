@@ -252,6 +252,66 @@
     (is (str/includes? (texts out) "4") "turns taken, which lives on the usage map")
     (is (str/includes? (texts out) "20"))))
 
+(deftest the-context-panel-shows-the-branch-s-fill-and-whether-the-cache-served
+  ;; karamazov-pdes: the panel showed the run's spend against its budget and
+  ;; nothing about the context WINDOW — how full the branch being read is
+  ;; right now — or the cache, which is the number that says whether a
+  ;; long run is paying full price per turn. The fill is the selected
+  ;; branch's newest measured request, off the branch row's :context; the
+  ;; hit rate and its low-hit causes come off :usage.
+  (let [out (render :widget/context
+                    {:project {:context_window 128000} :branch-id "B1"
+                     :detail {:run {:usage {:total-tokens 4000 :turns 4
+                                            :cache-hit-rate 0.82
+                                            :cache-misses {:low 33 :by-cause {:forced 19 :rewritten 3}}
+                                            :context-block {:turns 12 :avg-total 1240
+                                                            :parts {"ledger" 800 "task" 40}}}
+                                    :token_budget 10000 :max_turns 20}
+                              :branches [{:id "B2" :status "done"
+                                          :context {:turn 9 :prompt-tokens 90000 :hit 0.5}}
+                                         {:id "B1" :status "active"
+                                          :context {:turn 4 :prompt-tokens 43000 :hit 0.9}}]}}
+                    {:title "CONTEXT"})
+        said (texts out)]
+    (is (re-find #"43k */ *128k" said) "the selected branch's last request against the window")
+    (is (str/includes? said "33%") "as a share of it")
+    (is (not (re-find #"90k" said)) "not another branch's")
+    (is (str/includes? said "82%") "the run's cache hit rate")
+    (is (str/includes? said "33 low") "how many turns missed")
+    (is (str/includes? said "forced 19") "and why")
+    (is (str/includes? said "1240") "and what the harness's own block adds per turn")
+    (is (>= (count (nodes-of :gauge out)) 3) "the fill is a gauge like the other two"))
+  (testing "no measured branch, no window: the fill line is simply absent"
+    (let [said (texts (render :widget/context
+                              {:detail {:run {:usage {:total-tokens 4000 :turns 4}
+                                              :token_budget 10000 :max_turns 20}}}
+                              {:title "CONTEXT"}))]
+      (is (not (re-find #"(?i)cache" said)))
+      (is (str/includes? said "4000")))))
+
+(deftest each-turn-says-what-its-request-cost-and-whether-the-cache-served-it
+  ;; The conversation is where a reader watches a run turn by turn, so it is
+  ;; where a cache that stopped serving — after a fold, after a forced call —
+  ;; should be visible at the turn it happened.
+  (let [said (texts (render :widget/conversation
+                            {:branch-id "B1"
+                             :branch {:turns [{:turn 7 :tool_name "read_file"
+                                               :prompt_tokens 43000 :cache_hit_tokens 40000
+                                               :prefix_change "tail"}
+                                              {:turn 8 :tool_name "done"
+                                               :prompt_tokens 44000 :cache_hit_tokens 0
+                                               :prefix_change "tail" :forced_tool "done"}
+                                              {:turn 9 :tool_name "edit_file"
+                                               :prompt_tokens 12000 :cache_hit_tokens 100
+                                               :prefix_change "rewritten"}
+                                              {:turn 10 :tool_name "shell"}]}}
+                            {:title "BRANCH"}))]
+    (is (str/includes? said "ctx 43k") "the request's size")
+    (is (str/includes? said "hit 93%") "and the share the cache served")
+    (is (str/includes? said "forced done") "a forced call names the tool it forced")
+    (is (str/includes? said "rewritten") "a rewritten history says so")
+    (is (not (re-find #"turn 10.*ctx" said)) "a turn with no usage says nothing about it")))
+
 (deftest the-gate-panel-separates-what-fired-from-what-is-still-open
   (let [said (texts (render :widget/gates
                             {:detail {:gates [{:gate "stuck" :fired 2 :open 1}]}}
@@ -372,15 +432,19 @@
   ;; they think it is.
   (let [said (texts (render :widget/status
                             {:connected? true :run-id "61aba012-b68a-4adc"
-                             :project proj
+                             :project proj :branch-id "B1"
                              :detail {:run {:status "running" :model "glm-5.3"
                                             :max_turns 40
-                                            :usage {:total-tokens 9475 :turns 3}}}}
+                                            :usage {:total-tokens 250000 :turns 3}}
+                                      :branches [{:id "B1" :status "active"
+                                                  :context {:turn 3 :prompt-tokens 9475}}]}}
                             {}))]
     (is (str/includes? said "samizdat:tui-start-a-run")
         "project and branch, the way dirge writes it")
     (is (str/includes? said "glm-5.3") "the model actually answering")
-    (is (re-find #"9\.?5?k */ *128k" said) "tokens against the window, abbreviated")
+    (is (re-find #"9\.?5?k */ *128k" said)
+        "the branch's last request against the window, abbreviated — not the
+         run's total, which is every branch's every turn summed")
     (is (str/includes? said "7%") "and as a percentage of it")
     (is (re-find #"3 */ *40" said) "turns against the ceiling")
     (is (str/includes? said "running") "and what the run is doing")
@@ -404,13 +468,27 @@
   ;; dirge's own refinement: the denominator is the window, so the gauge reads
   ;; 0-100 and a fold is flagged by a marker instead of the percentage running
   ;; past 100 (dirge-l4rp, dirge-cx7t).
+  ;;
+  ;; THE NUMERATOR IS THE BRANCH'S LAST REQUEST (karamazov-pdes). It used to
+  ;; be the run's cumulative total, which on a beam of five is every branch's
+  ;; every turn summed, so the strip said "fold!" a handful of turns into any
+  ;; run and never stopped — a gauge that is always full measures nothing.
   (let [at (fn [used] (texts (render :widget/status
-                                     {:connected? true :project proj
-                                      :detail {:run {:usage {:total-tokens used}}}}
+                                     {:connected? true :project proj :branch-id "B1"
+                                      :detail {:run {:usage {:total-tokens 900000}}
+                                               :branches [{:id "B1"
+                                                           :context {:prompt-tokens used}}]}}
                                      {})))]
     (is (not (re-find #"fold" (at 10000))) "quiet well below the window")
     (is (re-find #"fold" (at 100000)) "flagged approaching it")
-    (is (re-find #"fold!" (at 120000)) "and urgently at the top")))
+    (is (re-find #"fold!" (at 120000)) "and urgently at the top"))
+  (testing "a run whose branch has no measured request draws no fill at all"
+    (let [said (texts (render :widget/status
+                              {:connected? true :project proj
+                               :detail {:run {:usage {:total-tokens 900000 :turns 2}}}}
+                              {}))]
+      (is (not (re-find #"128k" said)))
+      (is (not (re-find #"fold" said))))))
 
 (deftest the-git-panel-shows-the-branch-and-what-is-dirty
   ;; dirge's left-panel GIT box: branch, the three counts git itself

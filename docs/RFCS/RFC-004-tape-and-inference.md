@@ -140,12 +140,34 @@ to protect. Violating it does not fail a test — it silently doubles cost.
 |---|---|---|
 | compaction, before | appended to the **problem** message | rewrote index 1 on every compaction: cache invalid from there, every turn |
 | compaction, now | each aged-out message, in place, once | prefix before the newest rewrite is byte-stable |
+| compaction frontier, before | advanced one exchange per turn | the verbatim window behind it re-prefilled every call: a quarter of every request on run 5e78b96a |
+| compaction frontier, now | advances `:compaction-batch` exchanges at once | batch−1 turns in every batch send a byte-identical history |
 | current task | appended once on claim, `:pinned?`, never rewritten | free — an append lands where the cache boundary already is |
 | per-turn context block | appended | free |
 
 A block held at a fixed early position and rewritten when its subject changes
 invalidates every cached token behind it; one carrying anything per-turn means
 the cache never warms at all.
+
+**Measured, not assumed.** Every committed call fingerprints the wire
+messages it sent (`infer/wire-fingerprint`, one `[hash chars]` per prepared
+message) and compares them with the branch's previous render
+(`infer/prefix-stats`). The turn row records how much of the request was
+byte-identical from the front, whether only the tail moved or history behind
+it was rewritten, and the tool a native `tool_choice` named (migration v30);
+compaction notes carry the branch and turn they fired on. `journal/cache-misses`
+groups the low-hit turns by those causes and `introspect` shows the grouping,
+so a drop in the hit rate is attributable to a fold, to a forced call, or to
+the provider, rather than argued about (karamazov-o4wm.1). A rewrite also
+leaves a `:prefix-rewrite` note naming the message that changed, its role
+and its size before and after, which is how the first live run of these
+columns showed that every turn past `:keep-pairs` was a rewrite with no
+compaction note beside it — the frontier moving, not a fold — and why the
+frontier now moves in batches (karamazov-pdes). The operator sees
+the same numbers: `GET /v1/runs/:id` carries the grouping beside the hit rate
+and each branch's newest measured request (`journal/branch-context`, how full
+that branch is now), and the TUI draws them per branch and per turn
+(karamazov-pdes).
 
 One deliberate, bounded exception: `strip-stale-ledgers` (RFC-005) blanks the
 previous turn's settled-state block on the way to the wire, so the byte-stable

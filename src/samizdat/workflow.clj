@@ -321,6 +321,11 @@
                                       :beam-width 1
                                       :prompt-digest (branch-loop/prompt-digest
                                                       (workflow-prompt definition))})
+        ;; Per segment, beside the digest (karamazov-o4wm.4). Best effort.
+        _ (try (journal/note! conn run-id :prompt-manifest
+                              {:data (branch-loop/prompt-manifest
+                                      (workflow-prompt definition))})
+               (catch Throwable _ nil))
         branch (state/new-branch {:id "B1" :problem problem
                                   :messages (branch-loop/initial-messages
                                              problem (workflow-prompt definition))})

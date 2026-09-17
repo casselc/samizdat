@@ -311,3 +311,24 @@
                      "no context block")
       "a branch that has not taken a turn yet says so, in words a project can
        reword — prompts/context-empty.md, not a literal in src"))
+
+(deftest the-usage-line-names-the-low-hit-turns-by-cause
+  ;; karamazov-o4wm.1: a hit rate says how much the cache served and nothing
+  ;; about why it did not. The causes are the turn row's prefix identity.
+  (let [out (introspect/render-spend
+             {:total-tokens 10 :side-calls 0 :cache-hit-rate 0.8
+              :cache-misses {:low 33 :by-cause {:forced 19 :first 5 :tail 6 :rewritten 3}}})]
+    (is (str/includes? out "low-hit turns: 33"))
+    (is (str/includes? out "forced 19"))
+    (is (str/includes? out "rewritten 3")))
+  (testing "no causes, no clause"
+    (is (not (str/includes? (introspect/render-spend {:total-tokens 1 :cache-hit-rate 0.5})
+                            "low-hit")))))
+
+(deftest the-context-view-shows-the-run-average-beside-the-last-turn
+  (let [out (introspect/render-context [[:task 40] [:ledger 1200]]
+                                       {:turns 12 :avg-total 900
+                                        :parts {"ledger" 800 "task" 40}})]
+    (is (str/includes? out "total: 1240"))
+    (is (str/includes? out "over 12 turns"))
+    (is (str/includes? out "ledger: 800"))))

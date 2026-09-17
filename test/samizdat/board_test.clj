@@ -85,7 +85,13 @@
           (is (every? #(str/includes? (str (:prompt_suffix %))
                                       (workflow/prompt-text "roles/implementor"))
                       rows)
-              "each owner's row records the owner prompt it opened on (v24)"))))))
+              "each owner's row records the owner prompt it opened on (v24)"))
+        (let [rows (db/fetch conn ["SELECT id, status FROM branches
+                                    WHERE id IN (SELECT DISTINCT branch_id FROM turns)"])]
+          (is (every? #(= "done" (:status %)) rows)
+              "and each owner's row is closed with the loop's outcome once the
+               loop ends — every row of every finished run used to stay
+               'active' (karamazov-pdes)"))))))
 
 (deftest a-task-with-open-children-is-not-workable-until-they-are-done
   ;; The owner of a composite task splits it; the parent is then a container,
@@ -690,6 +696,8 @@
             r (run-board conn {:max-turns 40})
             owner-turns (count (db/fetch conn ["SELECT id FROM turns WHERE branch_id LIKE 'T0%'"]))]
         (is (<= owner-turns 3) "the owner stopped at its own budget, not the run's")
+        (is (= "exhausted" (:status (first (db/fetch conn ["SELECT status FROM branches WHERE id LIKE 'T0%'"]))))
+            "and its row says how it ended (karamazov-pdes)")
         (is (not= "done" (:status (tasks/get-task conn id))) "the task is not closed")
         (is (not= :completed (:status r)) "and the run does not claim success")
         (let [rid (:id (first (db/fetch conn ["SELECT id FROM runs"])))
@@ -857,4 +865,19 @@
             (is (not (str/includes? (:result (first turns)) "changed no files"))
                 "not the construction refusal aimed at a branch that was never meant to change one"))
           (testing "construction still ran and the task closed"
-            (is (= "done" (:status (first (db/fetch conn ["SELECT status FROM tasks"])))))))))))
+            (is (= "done" (:status (first (db/fetch conn ["SELECT status FROM tasks"]))))))
+          (testing "the design branch has a row of its own, closed on its plan (karamazov-pdes)"
+            ;; It took its turns under an id no branches row carried — 14 of
+            ;; the 24 branch ids on run 5f8de58c — so the beam panel could not
+            ;; show or select it, a resume could not rebuild it, and nothing
+            ;; per-branch could attach to it.
+            (let [row (first (db/fetch conn ["SELECT id, status, parent_id, role, problem, prompt_suffix
+                                                FROM branches WHERE id LIKE 'design-%'"]))]
+              (is (some? row) "a row, like every other branch that takes turns")
+              (is (= "done" (:status row)) "closed with the loop's outcome, not left active")
+              (is (= (str/replace (str (:id row)) #"^design-" "") (:parent_id row))
+                  "under the owner whose task it planned")
+              (is (= "implementor" (:role row)))
+              (is (str/includes? (str (:prompt_suffix row)) "PLANNING")
+                  "the brief it opened on, so a rebuild opens the same messages")
+              (is (not (str/blank? (str (:problem row))))))))))))
