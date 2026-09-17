@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Recover complete fenced tool-call JSON followed by the observed orphan XML
+  closing tags, with strict whole-input and no-extra-JSON checks. Preserve tool
+  permissions and mark wrapper repairs explicitly. Refs #52.
+
 - Refresh the observability pack's upstream provenance to 83eb99a, retaining
   the same nine run seams and explicit source-only versus woven-build limits.
 

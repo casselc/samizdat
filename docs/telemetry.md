@@ -271,6 +271,12 @@ six-test counts. This checks those six cases, not all possible inputs, and
 does not defend against deliberately hostile runtime or dependency changes.
 Both Jolt's concise summary and the JVM-style summary are recognized; extra
 summaries, changed counts, failures, errors, timeout, or nonzero exit fail closed.
+Tool-call parsing also recognizes the observed hybrid wrapper: a response
+consisting only of a documented tool-call fence opener, complete call JSON,
+and orphan `</parameter>` then `</invoke>` closing tags. It requires a nonempty
+tool name and an argument object, rejects extra JSON or trailing prose, and
+marks the wrapper as repaired. This repairs formatting, not authority: the
+normal tool registry and permission checks still decide whether it can run.
 An exhausted orchestration remains exhausted in evidence; passing fixture and
 telemetry gates does not relabel it completed.
 

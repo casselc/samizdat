@@ -40,6 +40,48 @@
 
 (defn- fenced [body] (str "prose before\n```tool-call\n" body "\n```\nprose after"))
 
+(defn- orphan-xml-wrapper [body]
+  (str "```tool-call\n" body "\n</parameter>\n</invoke>"))
+
+(deftest complete-fenced-json-with-orphan-xml-closers-is-recovered
+  (let [body "{\"name\":\"shell\",\"args\":{\"command\":\"pwd\"}}"
+        got (fence/parse-tool-call (orphan-xml-wrapper body))]
+    (is (= "shell" (:name got)))
+    (is (= {:command "pwd"} (:args got)))
+    (is (= 1 (:fences got)))
+    (is (true? (:orphan-xml-closers? got)))
+    (is (true? (:auto-repaired? got)))))
+
+(deftest orphan-xml-recovery-is-not-a-general-json-or-prose-scavenger
+  (let [body "{\"name\":\"shell\",\"args\":{\"command\":\"pwd\"}}"]
+    (doseq [input [(str body "\n</parameter>\n</invoke>")
+                   (str "example: " (orphan-xml-wrapper body))
+                   (str (orphan-xml-wrapper body) "\nprose")
+                   (str "```tool-call\n" body "\n</unknown>\n</invoke>")
+                   (str "```tool-call\n" body "\n</invoke>")
+                   (orphan-xml-wrapper (str body "\n" body))
+                   (orphan-xml-wrapper "{\"name\":\"shell\",\"args\":{")
+                   (orphan-xml-wrapper "{\"name\":\"shell\",}")
+                   (orphan-xml-wrapper "{\"name\":\"\",\"args\":{}}")
+                   (orphan-xml-wrapper "{\"name\":3,\"args\":{}}")
+                   (orphan-xml-wrapper "{\"name\":\"shell\"}")
+                   (orphan-xml-wrapper "{\"name\":\"shell\",\"args\":3}")
+                   (orphan-xml-wrapper "[1,2,3]")
+                   (orphan-xml-wrapper "prose before JSON")
+                   (orphan-xml-wrapper (str "```tool-call\n" body))]]
+      (is (nil? (fence/parse-tool-call input)) (str "unsafe wrapper accepted")))))
+
+(deftest orphan-wrapper-repair-preserves-normal-parsing-and-data
+  (let [body "{\"name\":\"shell\",\"args\":{\"command\":\"echo </parameter> </invoke>\",\"count\":0,\"flag\":false}}"
+        normal (fence/parse-tool-call (fenced body))
+        repaired (fence/parse-tool-call (orphan-xml-wrapper body))]
+    (is (= (:name normal) (:name repaired)))
+    (is (= (:args normal) (:args repaired)))
+    (is (false? (get-in repaired [:args :flag])))
+    (is (= 0 (get-in repaired [:args :count])))
+    (is (nil? (:orphan-xml-closers? normal)))
+    (is (nil? (:auto-repaired? normal)))))
+
 (deftest the-repair-ladder-handles-commas-and-dangling-keys
   ;; karamazov-avk, dirge's remaining rungs, each validated by the caller's
   ;; re-parse. Nothing here invents content: a filled key is null, which the
