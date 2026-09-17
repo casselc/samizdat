@@ -255,6 +255,27 @@ defaults to the reviewed `aea91781` substring and must occur exactly in the
 selected binary's `--version` output; a diagnostic binary can name its own
 revision (for example `a7d07660`) without weakening that check.
 
+Before creating the fixture, opening ports or acquiring a collector, the demo
+defaults to `--model-preflight lemonade-loaded`. It reads Lemonade's `/health`
+metadata and requires the exact requested model in `all_models_loaded`;
+a `/models` registry listing or the most-recent `model_loaded` field is not
+enough. It never loads, unloads or chooses a replacement model. Generic
+OpenAI-compatible endpoints without this health contract must explicitly pass
+`--model-preflight none`; this skips readiness verification, not provider errors.
+New success evidence records the selected mode and a metadata-readiness flag.
+Loaded metadata is not proof that a later inference request will succeed.
+
+The GET sends no authentication headers and follows no redirects; preflight
+URLs with user information, query parameters or fragments are rejected. Failures
+expose only fixed reasons and HTTP status, not server bodies or exceptions.
+Connect timeout is at most 3 seconds and read timeout at most 10 seconds, both
+limited by the remaining overall budget. These are transport settings, **not**
+a hard whole-request deadline: slow trickle responses can outlive them. A late
+return fails before acquisition; the external harness deadline remains the
+outer bound. The 65,536-character JSON guard applies after downloading the
+body, not to transferred bytes. A maintained request deadline and response cap
+remain follow-up work in #51.
+
 The harness starts Samizdat with a complete environment allowlist: no Langfuse,
 OTLP, or provider credentials are inherited. It submits one run at 14 turns,
 120,000 tokens, beam width 1, and a hard total-branch cap of 1. After the first

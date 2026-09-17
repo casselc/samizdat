@@ -3,7 +3,8 @@
 ;; SPDX-License-Identifier: GPL-3.0-or-later
 
 (ns samizdat.demo.embedded-model-test
-  (:require [clojure.string :as str]
+  (:require [clojure.data.json :as json]
+            [clojure.string :as str]
             [clojure.test :refer [deftest is testing thrown?]]
             [clojure.java.io :as io]
             [samizdat.demo.embedded-model :as demo]))
@@ -116,7 +117,8 @@
     (try
       (let [result
             (with-redefs-fn
-              {#'demo/prepare-project! (fn [_] "baseline")
+              {#'demo/model-preflight! (constantly {:mode :none :metadata-ready? false})
+               #'demo/prepare-project! (fn [_] "baseline")
                #'clojure.core/slurp (constantly "fixture instruction")
                #'demo/bounded-process! (fn [command _]
                                         (cond
@@ -157,6 +159,138 @@
       (finally
         (doseq [file (reverse (file-seq (io/file (str root))))]
           (java.nio.file.Files/deleteIfExists (.toPath file)))))))
+
+(defn- public-health [names]
+  {:status 200 :body (json/write-str {:status "ok" :model_loaded "another-model"
+                                     :all_models_loaded
+                                     (mapv #(hash-map :model_name %) names)})})
+
+(deftest loaded-model-metadata-is-not-a-registry-listing
+  (is (= :lemonade-loaded (:model-preflight (demo/parse-options [] (constantly nil)))))
+  (is (= :none (:model-preflight (demo/parse-options ["--model-preflight" "none"]
+                                                   (constantly nil)))))
+  (is (thrown? Throwable (demo/parse-options ["--model-preflight" "auto"]
+                                            (constantly nil))))
+  (is (= {:mode :lemonade-loaded :metadata-ready? true}
+         (demo/assert-loaded-model! "selected" (public-health ["another-model" "selected"]))))
+  (doseq [response [(public-health []) (public-health ["wrong-model"])
+                   {:status 200 :body "{\"data\":[{\"id\":\"selected\"}]}"}
+                   {:status 200 :body "{\"status\":\"ok\",\"model_loaded\":\"selected\"}"}
+                   {:status 200 :body "{\"status\":\"ok\",\"all_models_loaded\":{}}"}
+                   {:status 200 :body "{\"status\":\"ok\",\"all_models_loaded\":[null]}"}
+                   {:status 200 :body "{\"status\":\"error\",\"all_models_loaded\":[]}"}
+                   {:status 200 :body "not JSON DO_NOT_LEAK"}
+                   (update (public-health ["selected"]) :body str " {}")
+                   {:status 503 :body "DO_NOT_LEAK"}]]
+    (let [failure (try (demo/assert-loaded-model! "selected" response)
+                       (catch Throwable error error))]
+      (is (instance? Throwable failure))
+      (is (= :model-preflight (:phase (ex-data failure))))
+      (is (nil? (ex-cause failure)))
+      (is (not (str/includes? (str (ex-message failure) (ex-data failure)) "DO_NOT_LEAK"))))))
+
+(deftest preflight-get-uses-explicit-transport-settings-and-opt-out
+  (let [calls (atom [])
+        options {:base-url "http://fixture.invalid/v1/" :model "selected"
+                 :deadline-ms (+ (System/currentTimeMillis) 60000)}]
+    (with-redefs-fn {#'jolt.http-client/get
+                    (fn [url opts]
+                      (swap! calls conj [url opts]) (public-health ["selected"]))}
+      #(do
+         (is (= {:mode :lemonade-loaded :metadata-ready? true}
+                (demo/model-preflight! options)))
+         (is (= [["http://fixture.invalid/v1/health"
+                  {:headers {} :follow-redirects false :throw-exceptions false
+                   :socket-timeout 10000 :conn-timeout 3000}]] @calls))
+         (is (= {:mode :none :metadata-ready? false}
+                (demo/model-preflight! (assoc options :model-preflight :none))))
+         (is (= 1 (count @calls)))
+         (doseq [base ["http://user:secret@fixture.invalid/v1"
+                       "http://fixture.invalid/v1?token=inert"
+                       "http://fixture.invalid/v1#inert" "file:///tmp/inert"]]
+           (is (thrown? Throwable (demo/model-preflight! (assoc options :base-url base)))))
+         (is (= 1 (count @calls)))))))
+
+(deftest failed-preflight-prevents-all-collector-and-fixture-acquisitions
+  (doseq [response [(public-health []) (public-health ["wrong-model"])
+                   {:status 200 :body "malformed DO_NOT_LEAK"}
+                   {:status 503 :body "DO_NOT_LEAK"} :transport-error]]
+    (let [acquired (atom [])
+          acquire (fn [name] (fn [& _] (swap! acquired conj name) nil))
+          failure
+          (with-redefs-fn
+            {#'jolt.http-client/get (fn [& _]
+                                     (if (= :transport-error response)
+                                       (throw (ex-info "DO_NOT_LEAK" {:payload "DO_NOT_LEAK"}))
+                                       response))
+             #'demo/free-port (acquire :port)
+             #'demo/prepare-project! (acquire :fixture)
+             #'demo/bounded-process! (acquire :toolchain)
+             #'demo/start-server! (acquire :collector)}
+            #(try (demo/run-demo! {:output "/unused-public-preflight-output"
+                                  :timeout-ms 60000 :base-url "http://fixture.invalid/v1"
+                                  :model "selected"})
+                  (catch Throwable error error)))]
+      (is (instance? Throwable failure))
+      (is (= :model-preflight (:phase (ex-data failure))))
+      (is (empty? @acquired))
+      (is (nil? (ex-cause failure)))
+      (is (not (str/includes? (str (ex-message failure) (ex-data failure)) "DO_NOT_LEAK"))))))
+
+(deftest late-health-return-is-rejected-before-acquisition
+  (let [expired? (atom false) requests (atom 0) acquired (atom [])
+        acquire (fn [name] (fn [& _] (swap! acquired conj name) nil))
+        failure
+        (with-redefs-fn
+          {#'jolt.http-client/get (fn [& _] (swap! requests inc) (reset! expired? true)
+                                   (public-health ["selected"]))
+           #'demo/remaining-timeout! (fn [& _]
+                                      (if @expired?
+                                        (demo/fail! "demo exceeded the overall deadline"
+                                                    {:phase :model-preflight})
+                                        10000))
+           #'demo/free-port (acquire :port)
+           #'demo/prepare-project! (acquire :fixture)
+           #'demo/bounded-process! (acquire :toolchain)
+           #'demo/start-server! (acquire :collector)}
+          #(try (demo/run-demo! {:output "/unused-public-preflight-output"
+                                :timeout-ms 60000 :base-url "http://fixture.invalid/v1"
+                                :model "selected"})
+                (catch Throwable error error)))]
+    (is (instance? Throwable failure))
+    (is (= :model-preflight (:phase (ex-data failure))))
+    (is (= 1 @requests))
+    (is (empty? @acquired))))
+
+(deftest strict-health-parser-allows-only-json-trailing-whitespace
+  (doseq [suffix ["\n" " " "\t" "\r\n" " \t\r\n"]]
+    (is (= {:mode :lemonade-loaded :metadata-ready? true}
+           (demo/assert-loaded-model! "selected"
+                                      (update (public-health ["selected"]) :body str suffix)))))
+  (doseq [suffix [" {}" " prose" "\u000b" "\f" "\u00a0"]]
+    (let [failure (try (demo/assert-loaded-model!
+                       "selected" (update (public-health ["selected"]) :body str suffix))
+                       (catch Throwable error error))]
+      (is (instance? Throwable failure))
+      (is (= :health-malformed (:reason (ex-data failure))))
+      (is (nil? (ex-cause failure))))))
+
+(deftest health-json-character-guard-has-an-exact-post-download-boundary
+  (let [body (:body (public-health ["selected"]))
+        padded (str body (apply str (repeat (- 65536 (count body)) " ")))]
+    (is (= 65536 (count padded)))
+    (is (= {:mode :lemonade-loaded :metadata-ready? true}
+           (demo/assert-loaded-model! "selected" {:status 200 :body padded})))
+    (let [failure (try (demo/assert-loaded-model!
+                       "selected" {:status 200 :body (str padded " ")})
+                       (catch Throwable error error))]
+      (is (= 65537 (count (str padded " "))))
+      (is (instance? Throwable failure))
+      (is (= {:phase :model-preflight :reason :health-malformed :http-status 200
+              :samizdat.demo.embedded-model/error true}
+             (ex-data failure)))
+      (is (= "model readiness preflight failed" (ex-message failure)))
+      (is (nil? (ex-cause failure))))))
 
 (deftest trusted-verifier-is-host-owned-and-nonvacuous
   (is (= ["/wrapper" "/jolt" "-Srepro" "-e" demo/trusted-verifier-expression]
@@ -441,7 +575,8 @@
         starts (atom [])]
     (try
       (with-redefs-fn
-        {#'demo/prepare-project! (constantly "baseline")
+        {#'demo/model-preflight! (constantly {:mode :none :metadata-ready? false})
+         #'demo/prepare-project! (constantly "baseline")
          #'clojure.core/slurp (constantly "public fixture")
          #'demo/bounded-process! (fn [command _]
                                   {:exit 0 :out (cond

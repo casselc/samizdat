@@ -268,6 +268,7 @@
   ([args] (parse-options args #(System/getenv %)))
   ([args getenv]
    (let [defaults {:base-url default-base-url :model default-model
+                   :model-preflight :lemonade-loaded
                    :timeout-ms default-timeout-ms :jolt default-jolt
                    :expected-jolt-rev (or (getenv expected-jolt-rev-env)
                                           default-expected-jolt-rev)
@@ -284,6 +285,13 @@
             (case flag
               "--base-url" (assoc options :base-url value)
               "--model" (assoc options :model value)
+              "--model-preflight"
+              (assoc options :model-preflight
+                     (case value
+                       "lemonade-loaded" :lemonade-loaded
+                       "none" :none
+                       (fail! "invalid model preflight mode"
+                              {:phase :arguments :flag flag})))
               "--timeout-ms" (assoc options :timeout-ms (parse-long! flag value))
               "--jolt" (assoc options :jolt value)
               "--wrapper" (assoc options :wrapper value)
@@ -292,6 +300,70 @@
               "--output" (assoc options :output value)
               (fail! (str "unknown option " flag) {:phase :arguments :flag flag}))
             more)))))))
+
+(defn assert-loaded-model!
+  "Validate Lemonade metadata only; this does not establish inference success.
+  Neither raw health payloads nor parser/transport exceptions escape."
+  [model {:keys [status body]}]
+  (when-not (= 200 status)
+    (fail! "model readiness preflight failed"
+           {:phase :model-preflight :reason :health-http
+            :http-status (if (and (integer? status) (<= 100 status 599)) status 0)}))
+  (let [health (try
+                 (when (and (string? body) (<= (count body) 65536))
+                   ;; This callback also rejects legal trailing whitespace.
+                   ;; Keep the raw guard, then strip only JSON whitespace.
+                   (json/read-str (str/replace body #"[ \t\r\n]+$" "") :key-fn keyword
+                                  :extra-data-fn json/on-extra-throw))
+                 (catch Throwable _ nil))
+        loaded (:all_models_loaded health)]
+    (when-not (and (map? health) (= "ok" (:status health))
+                   (vector? loaded)
+                   (every? #(and (map? %) (string? (:model_name %))
+                                 (not (str/blank? (:model_name %)))) loaded))
+      (fail! "model readiness preflight failed"
+             {:phase :model-preflight :reason :health-malformed :http-status 200}))
+    (when-not (some #(= model (:model_name %)) loaded)
+      (fail! "requested model is not loaded; operator action is required"
+             {:phase :model-preflight :reason :model-not-loaded :http-status 200}))
+    {:mode :lemonade-loaded :metadata-ready? true}))
+
+(defn model-preflight!
+  "Explicit read-only Lemonade check before any collector acquisition.
+  Generic OpenAI-compatible endpoints must opt out with mode :none."
+  [{:keys [base-url model model-preflight deadline-ms]}]
+  (case (or model-preflight :lemonade-loaded)
+    :none {:mode :none :metadata-ready? false}
+    :lemonade-loaded
+    (let [base (str/replace (str base-url) #"/+$" "")
+          valid-endpoint? (try
+                            (let [url (java.net.URL. base)]
+                              (and (contains? #{"http" "https"} (.getProtocol url))
+                                   (not (str/blank? (.getHost url)))
+                                   (nil? (.getUserInfo url))
+                                   (not (str/includes? base "?"))
+                                   (not (str/includes? base "#"))))
+                            (catch Throwable _ false))]
+      (when-not (and valid-endpoint? (string? model) (not (str/blank? model)))
+        (fail! "invalid model readiness configuration"
+               {:phase :model-preflight :reason :invalid-configuration}))
+      (let [timeout-ms (remaining-timeout! deadline-ms 10000 :model-preflight)
+            response (try
+                       (http/get (str base "/health")
+                                 {:headers {} :follow-redirects false
+                                  :throw-exceptions false
+                                  :socket-timeout timeout-ms
+                                  :conn-timeout (min 3000 timeout-ms)})
+                       (catch Throwable _ nil))]
+        ;; These transport settings are not a whole-request deadline. Reject
+        ;; a late return before acquiring ports, fixtures or collector state.
+        (remaining-timeout! deadline-ms 10000 :model-preflight)
+        (when-not response
+          (fail! "model readiness preflight failed"
+                 {:phase :model-preflight :reason :health-transport :http-status 0}))
+        (assert-loaded-model! model response)))
+    (fail! "invalid model preflight mode"
+           {:phase :model-preflight :reason :invalid-configuration})))
 
 (defn- copy-tree! [source target]
   (let [source-path (.toPath (io/file source))]
@@ -563,7 +635,8 @@
 
 (defn evidence-record
   "Assemble the bounded artifact independently of the cost-bearing runner."
-  [{:keys [baseline request run test-result stopped-a trace-a stopped-b trace-b]}]
+  [{:keys [baseline request run test-result stopped-a trace-a stopped-b trace-b
+           model-readiness]}]
   {:evidence/version 1
    :fixture {:version 1 :baseline-commit baseline
              :historical-reference lost-baseline
@@ -572,6 +645,7 @@
                                   :beam_width :max_total_branches])
    :run (select-keys run [:run-id :status :turns :steering-count])
    :verification test-result
+   :model-readiness model-readiness
    :process-a {:stopped-before-reopen (:closed? stopped-a) :trace trace-a}
    :process-b {:same-durable-root true :no-model-call true
                :closed (:closed? stopped-b) :graceful (:graceful? stopped-b)
@@ -599,6 +673,7 @@
         durable-root (str output "/durable")
         db-path (str output "/samizdat.sqlite3")
         deadline-ms (+ (System/currentTimeMillis) (:timeout-ms options))
+        model-readiness (model-preflight! (assoc options :deadline-ms deadline-ms))
         options (assoc options :checkout-root checkout-root :output output
                        :deadline-ms deadline-ms
                        :project-root project-root :durable-root durable-root
@@ -673,7 +748,7 @@
                                    server-b
                                    (remaining-timeout! deadline-ms 120000 :server-b-stop))
                         evidence (evidence-record
-                                  {:baseline baseline
+                                  {:baseline baseline :model-readiness model-readiness
                                    :request (run-request problem (:model options))
                                    :run run :test-result verified-result
                                    :stopped-a stopped-a :trace-a trace-a
