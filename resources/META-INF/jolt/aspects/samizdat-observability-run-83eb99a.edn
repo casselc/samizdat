@@ -1,15 +1,15 @@
 {:schema 1
  :library {:id yogthos/samizdat
            ;; The upstream main commit these nine harness run seams were
-           ;; verified against (github.com/yogthos/samizdat, 2026-09-15).
+           ;; verified against (github.com/yogthos/samizdat, 2026-09-16).
            ;; They are the entries samizdat.telemetry.hook observes in source
            ;; mode (:run :control-loop :turn :branch-open :branch-close :model
            ;; :tool-selection :tool :steer); a woven build advises the same
            ;; entries with samizdat.telemetry.aspect-provider/run-around and
-           ;; carries identity only (:proceed-v1 sees no arguments). The same
+           ;; carries identity only (:proceed-v1 sees no arguments).
            ;; The current outcome model records :shipped, :failed, and :error;
            ;; the source hook around run! preserves that distinction.
-           :version "22be90ddf9b05ba8406d6ec231d2748a4da22d8e"}
+           :version "83eb99a4f6d01923ddee199d453d960a45dd732b"}
  :aspects
  [{:id :samizdat.agent.beam/run
    :match {:entry samizdat.agent.beam/run! :arity 1}

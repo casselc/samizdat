@@ -650,6 +650,24 @@
       (str/replace think-re "")
       (str/replace open-think-re "")))
 
+(def ^:private orphan-xml-fence-re
+  #"(?s)\A\s*```tool-call[ \t]*\r?\n(\{.*\})\s*</parameter>\s*</invoke>\s*\z")
+
+(defn- orphan-xml-fenced-call
+  "Recover only a complete fenced call with the observed orphan XML suffix.
+  No JSON repairs or prose scavenging: the whole input must match, and a
+  second JSON value must not disappear behind data.json's one-value reader."
+  [response]
+  (when-let [[_ body] (re-matches orphan-xml-fence-re (or response ""))]
+    (try
+      (let [value (json/read-str body :key-fn keyword
+                                :extra-data-fn json/on-extra-throw)]
+        (when (and (map? value) (string? (:name value))
+                   (not (str/blank? (:name value))) (map? (:args value)))
+          {:name (:name value) :args (:args value) :fences 1
+           :auto-repaired? true :orphan-xml-closers? true}))
+      (catch Throwable _ nil))))
+
 (defn- parse-tool-call* [response]
   (let [fenced (extract-fences response)
         ;; A response that ends in a well-formed call but omits the fence is
@@ -676,7 +694,8 @@
       (or (when-let [x (xml-call response)]
             (assoc x :fences 0 :xml-call? true))
           (when-let [x (tagged-call response)]
-            (assoc x :fences 0 :tagged-call? true)))
+            (assoc x :fences 0 :tagged-call? true))
+          (orphan-xml-fenced-call response))
       (when (seq bodies)
       (let [body (peek bodies)
             n (count fenced)

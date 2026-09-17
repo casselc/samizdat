@@ -1,0 +1,9 @@
+{:fixture/version 1
+ :fixture/name "calc-v1-broken-square"
+ :historical/reference "b15ba4e125c7a57a924e16df403b9a2ddebff816"
+ :historical/reference-available? false
+ :historical/note "The referenced object is unavailable locally and from the repository remote. This fixture honestly recreates the described broken-square baseline under a new deterministic commit."
+ :baseline/bug "calc.core/square multiplies by 2"
+ :baseline/tests 1
+ :final/tests 6
+ :final/assertions 6}

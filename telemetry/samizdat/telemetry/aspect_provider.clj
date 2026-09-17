@@ -19,8 +19,8 @@
   "Advice provider for the observability pack under
   resources/META-INF/jolt/aspects/:
 
-    samizdat-observability-run-22be90d.edn  nine harness run seams, verified against
-                                            upstream main 22be90d (role :samizdat.telemetry/run)
+    samizdat-observability-run-83eb99a.edn  nine harness run seams, verified against
+                                            upstream main 83eb99a (role :samizdat.telemetry/run)
 
   The :samizdat.telemetry/lifecycle role is kept for the pilot lineage's
   lifecycle pack (samizdat.store.lifecycle is not on this tree).
@@ -65,6 +65,6 @@
 
 (def aspect-provider
   {:schema 1
-   :libraries {'yogthos/samizdat "22be90d"}
+   :libraries {'yogthos/samizdat "83eb99a"}
    :roles {:samizdat.telemetry/lifecycle 'samizdat.telemetry.aspect-provider/lifecycle-around
            :samizdat.telemetry/run 'samizdat.telemetry.aspect-provider/run-around}})
