@@ -41,6 +41,7 @@
 (ffi/defcfn ^:private c-kill "kill" [:int :int] :int)
 (declare sanitize-log)
 (declare bounded-tail)
+(declare bounded-health-get!)
 
 (defn fail! [message data]
   (throw (ex-info message (assoc data :samizdat.demo.embedded-model/error true))))
@@ -347,16 +348,14 @@
       (when-not (and valid-endpoint? (string? model) (not (str/blank? model)))
         (fail! "invalid model readiness configuration"
                {:phase :model-preflight :reason :invalid-configuration}))
-      (let [timeout-ms (remaining-timeout! deadline-ms 10000 :model-preflight)
-            response (try
-                       (http/get (str base "/health")
-                                 {:headers {} :follow-redirects false
-                                  :throw-exceptions false
-                                  :socket-timeout timeout-ms
-                                  :conn-timeout (min 3000 timeout-ms)})
-                       (catch Throwable _ nil))]
-        ;; These transport settings are not a whole-request deadline. Reject
-        ;; a late return before acquiring ports, fixtures or collector state.
+      (let [response (try (bounded-health-get! (str base "/health") deadline-ms)
+                          (catch Throwable error
+                            (let [reason (:reason (ex-data error))]
+                              (fail! "model readiness preflight failed"
+                                     {:phase :model-preflight :http-status 0
+                                      :reason (if (contains? #{:health-timeout :health-unsettled
+                                                               :health-size :curl-unavailable} reason)
+                                                reason :health-transport)}))))]
         (remaining-timeout! deadline-ms 10000 :model-preflight)
         (when-not response
           (fail! "model readiness preflight failed"
@@ -416,6 +415,80 @@
             (signal! pid 9)
             {:terminal? (wait-for-child! child 2000)})))
       {:terminal? false :status :ownership-unavailable})))
+
+(defn bounded-health-get!
+  "Demo-only curl transport. No output drain promises or provider payloads
+  enter diagnostics. Setup/version/transfer share one monotonic deadline;
+  direct-child retirement has a separate bounded four-second allowance."
+  [url overall-deadline-ms]
+  (let [budget (remaining-timeout! overall-deadline-ms 10000 :model-preflight)
+        deadline (+ (System/nanoTime) (* budget 1000000))
+        remaining (fn []
+                    (let [ms (quot (- deadline (System/nanoTime)) 1000000)]
+                      (when-not (pos? ms)
+                        (fail! "model readiness preflight failed"
+                               {:phase :model-preflight :reason :health-timeout :http-status 0}))
+                      (min ms (remaining-timeout! overall-deadline-ms 10000 :model-preflight))))
+        scratch (io/file (str (java.nio.file.Files/createTempDirectory
+                              "samizdat-health-" (make-array java.nio.file.attribute.FileAttribute 0))))
+        output (io/file scratch "status")
+        body (io/file scratch "body")
+        settled? (atom true)
+        run (fn [argv]
+              (let [_ (remaining)
+                    child (try (process/process argv {:env {"PATH" "/usr/bin:/bin"}
+                                                       :in (io/file "/dev/null") :out :write :out-file output
+                                                       :err :discard})
+                               (catch Throwable _
+                                 (fail! "model readiness preflight failed"
+                                        {:phase :model-preflight :reason :health-transport :http-status 0})))]
+                (reset! settled? false)
+                (try
+                  ;; Recompute after spawn; setup must not buy a fresh wait.
+                  (if (wait-for-child! child (remaining))
+                    (do (reset! settled? true)
+                        ;; Redirected files have no asynchronous drain workers.
+                        (try (.exitValue (:proc child))
+                             (catch Throwable _ -1)))
+                    (fail! "model readiness preflight failed"
+                           {:phase :model-preflight :reason :health-timeout :http-status 0}))
+                  (catch Throwable _
+                    (when-not @settled?
+                      (reset! settled? (:terminal? (force-reap! child))))
+                    (fail! "model readiness preflight failed"
+                           {:phase :model-preflight
+                            :reason (if @settled? :health-timeout :health-unsettled)
+                            :http-status 0})))))]
+    (try
+      (when-not (and (zero? (run ["/usr/bin/curl" "--disable" "--version"]))
+                     (<= (.length output) 2048)
+                     (let [[_ major minor] (re-find #"^curl ([0-9]+)\.([0-9]+)\." (slurp output))]
+                       (and major (or (> (parse-long major) 8)
+                                      (and (= 8 (parse-long major)) (>= (parse-long minor) 5))))))
+        (fail! "model readiness preflight failed"
+               {:phase :model-preflight :reason :curl-unavailable :http-status 0}))
+      (let [ms (remaining)
+            exit (run ["/usr/bin/curl" "--disable" "--silent" "--globoff"
+                       "--disallow-username-in-url" "--proxy" "" "--noproxy" "*"
+                       "--proto" "=http,https" "--max-time" (str (/ ms 1000.0))
+                       "--connect-timeout" (str (/ (min ms 3000) 1000.0))
+                       "--max-filesize" "65536" "--output" (str body)
+                       "--write-out" "%{http_code}" "--url" url])]
+        (remaining)
+        (when-not (and (zero? exit) (<= (.length body) 65536)
+                       (= 3 (.length output)))
+          (fail! "model readiness preflight failed"
+                 {:phase :model-preflight
+                  :reason (case exit 28 :health-timeout 63 :health-size :health-transport)
+                  :http-status 0}))
+        {:status (try (parse-long (slurp output)) (catch Throwable _ 0))
+         :body (slurp body)})
+      (finally
+        ;; Unknown ownership/settlement fails closed and preserves private
+        ;; scratch. Never unlink a file which an unconfirmed child can write.
+        (when @settled?
+          (doseq [file [output body scratch]]
+            (try (.delete file) (catch Throwable _ nil))))))))
 
 (defn- bounded-process!
   [command {:keys [dir env timeout-ms out-file err-file]

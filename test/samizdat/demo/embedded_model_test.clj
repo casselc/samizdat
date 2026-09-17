@@ -189,19 +189,17 @@
       (is (nil? (ex-cause failure)))
       (is (not (str/includes? (str (ex-message failure) (ex-data failure)) "DO_NOT_LEAK"))))))
 
-(deftest preflight-get-uses-explicit-transport-settings-and-opt-out
+(deftest preflight-uses-bounded-transport-and-opt-out
   (let [calls (atom [])
         options {:base-url "http://fixture.invalid/v1/" :model "selected"
                  :deadline-ms (+ (System/currentTimeMillis) 60000)}]
-    (with-redefs-fn {#'jolt.http-client/get
+    (with-redefs-fn {#'demo/bounded-health-get!
                     (fn [url opts]
                       (swap! calls conj [url opts]) (public-health ["selected"]))}
       #(do
          (is (= {:mode :lemonade-loaded :metadata-ready? true}
                 (demo/model-preflight! options)))
-         (is (= [["http://fixture.invalid/v1/health"
-                  {:headers {} :follow-redirects false :throw-exceptions false
-                   :socket-timeout 10000 :conn-timeout 3000}]] @calls))
+         (is (= [["http://fixture.invalid/v1/health" (:deadline-ms options)]] @calls))
          (is (= {:mode :none :metadata-ready? false}
                 (demo/model-preflight! (assoc options :model-preflight :none))))
          (is (= 1 (count @calls)))
@@ -211,17 +209,38 @@
            (is (thrown? Throwable (demo/model-preflight! (assoc options :base-url base)))))
          (is (= 1 (count @calls)))))))
 
+(deftest unsettled-health-child-fails-closed-and-preserves-private-scratch
+  (let [scratch (atom nil)
+        failure (with-redefs-fn
+                  {#'jolt.process/process
+                   (fn [_ opts] (reset! scratch (.getParentFile (:out-file opts))) {})
+                   #'demo/wait-for-child! (constantly false)
+                   #'demo/force-reap! (constantly {:terminal? false})}
+                  #(try (demo/bounded-health-get! "http://fixture.invalid/health"
+                                                  (+ (System/currentTimeMillis) 60000))
+                        (catch Throwable error error)))]
+    (try
+      (is (= :health-unsettled (:reason (ex-data failure))))
+      (is (nil? (ex-cause failure)))
+      (is (.isDirectory @scratch))
+      (finally
+        ;; The injected child never exists. Remove only its exact test scratch.
+        (.delete @scratch)))))
+
 (deftest failed-preflight-prevents-all-collector-and-fixture-acquisitions
   (doseq [response [(public-health []) (public-health ["wrong-model"])
                    {:status 200 :body "malformed DO_NOT_LEAK"}
-                   {:status 503 :body "DO_NOT_LEAK"} :transport-error]]
+                   {:status 503 :body "DO_NOT_LEAK"} :transport-error :unsettled-error]]
     (let [acquired (atom [])
           acquire (fn [name] (fn [& _] (swap! acquired conj name) nil))
           failure
           (with-redefs-fn
-            {#'jolt.http-client/get (fn [& _]
-                                     (if (= :transport-error response)
-                                       (throw (ex-info "DO_NOT_LEAK" {:payload "DO_NOT_LEAK"}))
+            {#'demo/bounded-health-get! (fn [& _]
+                                     (if (contains? #{:transport-error :unsettled-error} response)
+                                       (throw (ex-info "DO_NOT_LEAK"
+                                                       {:payload "DO_NOT_LEAK"
+                                                        :reason (when (= response :unsettled-error)
+                                                                  :health-unsettled)}))
                                        response))
              #'demo/free-port (acquire :port)
              #'demo/prepare-project! (acquire :fixture)
@@ -242,7 +261,7 @@
         acquire (fn [name] (fn [& _] (swap! acquired conj name) nil))
         failure
         (with-redefs-fn
-          {#'jolt.http-client/get (fn [& _] (swap! requests inc) (reset! expired? true)
+          {#'demo/bounded-health-get! (fn [& _] (swap! requests inc) (reset! expired? true)
                                    (public-health ["selected"]))
            #'demo/remaining-timeout! (fn [& _]
                                       (if @expired?
