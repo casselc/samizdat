@@ -441,10 +441,44 @@ reader. This recording only views the existing run; it does not submit a new
 model request. Its task, code, and tool output belong to the public fixture,
 so the TUI recording is not a demonstration of content-off telemetry.
 
-![Samizdat TUI viewing the completed local run](images/embedded-model/samizdat-local-demo.gif)
+![Recorded local session: opening tool arguments and results](images/embedded-model/2026-09-17/samizdat-persisted-tour.gif)
 
-[Full-resolution TUI screenshot](images/embedded-model/samizdat-local-demo.png)
-and [WebM recording](images/embedded-model/samizdat-local-demo.webm).
+The September 17 tour lasts 42.8 seconds. It shows the recorded run and branch,
+then opens real tool arguments and results using the TUI's normal controls.
+[TUI WebM](images/embedded-model/2026-09-17/samizdat-persisted-tour.webm),
+[expanded arguments](images/embedded-model/2026-09-17/tui-tool-arguments.png)
+and [expanded result](images/embedded-model/2026-09-17/tui-tool-result.png)
+are also available.
+
+The separate [browser tour](images/embedded-model/2026-09-17/oscope-persisted-tour.webm)
+lasts 42.9 seconds and visits the trace index, waterfall, model call, tool and
+steering metadata. See the [model span](images/embedded-model/2026-09-17/oscope-model-chat.png)
+and [steering span](images/embedded-model/2026-09-17/oscope-steer.png).
+These captures use the historical sample's qualified dependency graph, not a
+fresh inference run or qualification of the latest integration graph.
+
+The original [3.96-second GIF](images/embedded-model/samizdat-local-demo.gif),
+[screenshot](images/embedded-model/samizdat-local-demo.png) and
+[WebM](images/embedded-model/samizdat-local-demo.webm) remain for comparison.
+The replacement workflow is `scripts/persisted-media.sh`; it checks duration,
+sample trace identity, original data hashes and confirmed viewer shutdown.
+
+For this local public fixture, the workflow copies SQLite (including any WAL),
+the project and Durable data into a new owned directory. The reader has an
+unusable inference endpoint and no inherited credentials. A loopback proxy
+permits GET requests only; the presentation layout also removes start, resume,
+abort, steering and permission controls. Run IDs, statuses, turn count and
+steering records must match before and after capture. Reopening the copied data
+with the embedded collector can publish lifecycle checkpoints and update the
+Durable head or lease. This is a read-only UI tour, not a side-reader collector
+or a claim of bitwise read-only object storage. Original payload hashes must
+remain unchanged, and the selected sample trace's IDs and families must match.
+
+The browser tour shows existing spans and metadata. This sample has no logs
+or metrics, so it does not present invented charts. The script requires the
+already-installed local toolkit and Playwright, and is intentionally scoped
+to the retained public fixture paths in this workspace; reserve the local
+native runtime before running it. No model call or toolkit build is needed.
 
 The pale heading on a white outer canvas and wrapped long attribute labels
 are existing readability defects tracked in

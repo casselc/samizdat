@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- Add a 42.8-second recorded-session TUI tour with expanded tool arguments and
+  results, plus a 42.9-second browser trace tour and linked screenshots.
+  Copy the public fixture before opening
+  its local Durable collector, block mutation requests, and retain shutdown
+  and media-duration receipts. Historical recordings remain unchanged.
+
 - Persist bounded per-server retirement receipts even after demo task failure,
   recording observed exits rather than guessing TERM status. Reuse confirmed
   terminal observations without resignal or output-drain waits; receipt/log
