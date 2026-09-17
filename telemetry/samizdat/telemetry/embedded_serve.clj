@@ -14,6 +14,7 @@
             [samizdat.system :as system]
             [samizdat.telemetry.embedded :as embedded]
             [samizdat.telemetry.embedded-http :as embedded-http]
+            [samizdat.telemetry.otel :as tel]
             [samizdat.server :as server]))
 
 (def durable-root-env "SAMIZDAT_EMBEDDED_DURABLE_ROOT")
@@ -208,7 +209,11 @@
 
 (defn- start-owner! [args publish-stop!]
   (try
-    (embedded/start! {:durable-root (durable-root args)
+    (embedded/start! {:durable-root (durable-root (remove #{"--demo-signals"} args))
+                      :sdk-options (when (some #{"--demo-signals"} args)
+                                     {:metrics? true :logs? true
+                                      :runtime-metrics? false :bridge-logging? false
+                                      :metric-interval-ms 200})
                       ;; Embedded mode is explicit and local-only;
                       ;; never consult content or exporter env.
                       :content {:enabled? false}})
@@ -250,6 +255,9 @@
         stop! (terminal-stop #(stop-owned! runtime viewer))]
     (try
       (when (publish-stop! stop!)
+        ;; The stop capability exists before optional instrumentation.
+        (when (some #{"--demo-signals"} args)
+          (try (tel/enable-demo-signals!) (catch Throwable _ nil)))
         (core/run! handler {:own-shutdown? false}))
       (finally
         (stop!)))))

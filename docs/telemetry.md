@@ -1,5 +1,24 @@
 # Telemetry: the Samizdat OpenTelemetry contract
 
+The embedded model demo opts its first server into run/turn completion counters,
+actual elapsed operation durations (seconds), and fixed run lifecycle logs.
+These borrow the embedded SDK owner; the harness and fresh reader create no
+second SDK. Metric labels contain only operation kind and success/error, never
+run IDs, prompts, tool payloads or exception messages. Ordinary logging is not
+bridged. This producer slice is not yet proof of native ingestion, fresh-reader
+metric/log readback or useful UI charts; those gates remain open.
+
+The signal gate only qualifies a fresh, harness-owned Durable store, not a
+historical shared store. The run observer requests a confirmed flush through
+the existing embedded owner after recording its actual completion, and the
+harness requires that fixed confirmation before reading. Each readback uses
+a fresh process with a public read-only Durable snapshot and closes its reader
+before exiting. Fixed native queries compare exact run/turn counts, finite
+nonnegative measured duration sums and the two fixed logs correlated to the
+current trace. The same values must survive process A closure and process B
+reopen. Metric IDs are not labels. Native and real-model execution of these
+new gates is still pending; earlier trace screenshots are not their proof.
+
 Bounded observability for the harness (casselc/samizdat issue #21). This
 document is the contract; the code is `samizdat.telemetry.*`.
 

@@ -7,6 +7,11 @@
   terminal observations without resignal or output-drain waits; receipt/log
   publication failure never replaces the primary task failure. Refs #45.
 
+- Add opt-in embedded demo run/turn counters, measured operation durations and
+  fixed content-off lifecycle log records through the existing SDK owner.
+  Native ingestion, fresh-reader readback and useful charts remain to qualify.
+  Refs #53.
+
 - Add explicit Lemonade loaded-model preflight before demo acquisition, with
   safe fixed diagnostics and generic-endpoint opt-out. Bound the demo-only
   curl request deadline and received body bytes, confirming direct-child

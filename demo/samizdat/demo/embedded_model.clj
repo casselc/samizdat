@@ -100,9 +100,10 @@
            {:phase :toolchain :expected-revision expected-revision}))
   result)
 
-(defn embedded-command [{:keys [wrapper jolt durable-root]}]
-  [wrapper jolt "-M:telemetry:embedded-telemetry:embedded-serve"
-   "--" "--durable-root" durable-root])
+(defn embedded-command [{:keys [wrapper jolt durable-root demo-signals?]}]
+  (cond-> [wrapper jolt "-M:telemetry:embedded-telemetry:embedded-serve"
+           "--" "--durable-root" durable-root]
+    demo-signals? (conj "--demo-signals")))
 
 (defn run-request [problem model]
   {:problem problem
@@ -586,7 +587,8 @@
      :terminal (atom false)
      :retirement (atom nil)
      :raw-out raw-out :raw-err raw-err
-     :child (process/process (embedded-command options)
+     :child (process/process (embedded-command
+                              (assoc options :demo-signals? (= "server-a" label)))
                              {:dir (:checkout-root options)
                               :env (server-child-env options)
                               :out :write :out-file (io/file raw-out)
@@ -771,6 +773,89 @@
    :content-enabled false
    :external-export false})
 
+(def signal-queries
+  {:counter (str "SELECT Attributes['samizdat.operation.kind'], "
+                 "Attributes['samizdat.operation.outcome'], max(Value) "
+                 "FROM otel_metrics_sum WHERE ScopeName='samizdat.demo' "
+                 "AND MetricName='samizdat.operation.completed' GROUP BY 1,2 ORDER BY 1,2")
+   :histogram (str "SELECT Attributes['samizdat.operation.kind'], "
+                   "Attributes['samizdat.operation.outcome'], max(Count), max(Sum) "
+                   "FROM otel_metrics_histogram WHERE ScopeName='samizdat.demo' "
+                   "AND MetricName='samizdat.operation.duration' GROUP BY 1,2 ORDER BY 1,2")
+   :logs (str "SELECT EventName, Body, TraceId FROM otel_logs "
+              "WHERE ScopeName='samizdat.demo' AND EventName IN "
+              "('samizdat.run.started','samizdat.run.finished') ORDER BY EventName")})
+
+(defn- finite-nonnegative? [value]
+  (and (number? value) (<= 0 value) (< value ##Inf)))
+
+(defn assert-signal-snapshot!
+  "Validate fixed producer facts, not arbitrary telemetry or query output."
+  [snapshot turns trace-id]
+  (let [counter (:counter snapshot) histogram (:histogram snapshot)
+        log-rows (:logs snapshot)]
+    (when-not (and (integer? turns) (pos? turns)
+                   (= 2 (count counter)) (= 2 (count histogram))
+                   (every? (fn [rows]
+                             (and (= #{["run" "success"] ["turn" "success"]}
+                                     (set (map #(vec (take 2 %)) rows)))
+                                  (every? #(and (finite-nonnegative? (nth % 2 nil))
+                                                 (== (if (= "run" (first %)) 1 turns)
+                                                     (nth % 2))) rows)))
+                           [counter histogram])
+                   (every? #(= 3 (count %)) counter)
+                   (every? #(and (= 4 (count %))
+                                 (finite-nonnegative? (last %))) histogram)
+                   (= 2 (count log-rows))
+                   (= #{["samizdat.run.started" "Samizdat run started"]
+                        ["samizdat.run.finished" "Samizdat run finished"]}
+                      (set (map #(vec (take 2 %)) log-rows)))
+                   (every? #(and (= 3 (count %))
+                                 (re-matches #"[0-9a-f]{32}" (last %))) log-rows)
+                   (= #{trace-id} (set (map last log-rows))))
+      (fail! "demo metric/log readback did not qualify" {:phase :signal-readback}))
+    snapshot))
+
+(defn read-signal-snapshot!
+  "ONE fresh native lifetime in an explicitly spawned reader child. No SDK,
+  lease or model call. Public Durable reader close settles before returning."
+  [root]
+  (let [backend ((requiring-resolve 'jdbc.chdb.durable.local-posix/local-backend) root)
+        reader ((requiring-resolve 'jdbc.chdb.durable/open-reader!) {:store backend})
+        query! (requiring-resolve 'jdbc.chdb.durable.reader/query!)
+        close! (requiring-resolve 'jdbc.chdb.durable.reader/close!)]
+    (try
+      (into {} (map (fn [[kind sql]]
+                      [kind (:rows (query! reader sql []))]) signal-queries))
+      (finally (close! reader)))))
+
+(defn assert-signals-flush! [logs]
+  (when-not (some #{"samizdat demo signals flush confirmed"} (str/split-lines logs))
+    (fail! "demo metric/log flush did not confirm" {:phase :signal-readback})))
+
+(defn assert-fresh-demo-output! [output]
+  (when (.exists (io/file output))
+    (fail! "demo requires a fresh owned output store" {:phase :signal-readback})))
+
+(defn- signal-reader-child! [options turns trace-id]
+  (let [result (command-ok!
+                :signal-readback
+                (bounded-process!
+                 [(:wrapper options) (:jolt options) "-Srepro"
+                  "-A:telemetry:embedded-telemetry:embedded-model-demo"
+                  "-m" "samizdat.demo.embedded-model" "--read-signals"
+                  (:durable-root options)]
+                 {:dir (:checkout-root options)
+                  :env (sanitized-child-env options)
+                  :timeout-ms (remaining-timeout! (:deadline-ms options)
+                                                  120000 :signal-readback)}))]
+    (try
+      (assert-signal-snapshot!
+       (json/read-str (str/replace (:out result) #"[ \t\r\n]+$" "")
+                      :key-fn keyword :extra-data-fn json/on-extra-throw) turns trace-id)
+      (catch Throwable _
+        (fail! "demo metric/log readback did not qualify" {:phase :signal-readback})))))
+
 (defn verify-terminal-run!
   "Independently verify completed or exhausted tasks. This does not change
   orchestration truth: an exhausted run stays exhausted in the evidence."
@@ -787,6 +872,7 @@
   (let [checkout-root (.getCanonicalPath (io/file "."))
         session-id (str (java.util.UUID/randomUUID))
         output (.getCanonicalPath (io/file (:output options) session-id))
+        _ (assert-fresh-demo-output! output)
         project-root (str output "/project")
         durable-root (str output "/durable")
         db-path (str output "/samizdat.sqlite3")
@@ -845,6 +931,8 @@
                                                          :trusted-semantics)}))
                   verified-result (merge test-result semantic-result)
                   trace-a (oscope-evidence! base (:run-id run) deadline-ms)
+                  _ (assert-signals-flush! (bounded-tail (:raw-err server-a) 65536))
+                  signals-a (signal-reader-child! options (:turns run) (:trace-id trace-a))
                   stopped-a (stop-server!
                              server-a
                              (remaining-timeout! deadline-ms 120000 :server-a-stop))]
@@ -862,15 +950,22 @@
                   (await-ready! base-b
                                 (min deadline-ms (+ (System/currentTimeMillis) 120000)))
                   (let [trace-b (oscope-evidence! base-b (:run-id run) deadline-ms)
+                        signals-b (signal-reader-child! options-b (:turns run) (:trace-id trace-b))
+                        _ (when-not (= signals-a signals-b)
+                            (fail! "fresh reader metric/log values changed"
+                                   {:phase :signal-readback}))
                         stopped-b (stop-server!
                                    server-b
                                    (remaining-timeout! deadline-ms 120000 :server-b-stop))
-                        evidence (evidence-record
+                        evidence (assoc (evidence-record
                                   {:baseline baseline :model-readiness model-readiness
                                    :request (run-request problem (:model options))
                                    :run run :test-result verified-result
                                    :stopped-a stopped-a :trace-a trace-a
-                                   :stopped-b stopped-b :trace-b trace-b})]
+                                   :stopped-b stopped-b :trace-b trace-b})
+                                        :signals {:process-a signals-a
+                                                  :process-b signals-b
+                                                  :same-values true})]
                     (publish-sanitized-logs! server-b output)
                     (when-not (and (:closed? stopped-b) (:graceful? stopped-b))
                       (fail! "fresh reopen process did not close cleanly"
@@ -886,5 +981,13 @@
             (cleanup-server! server-a output)))))))
 
 (defn -main [& args]
-  (let [evidence (run-demo! (parse-options args))]
-    (println (json/write-str evidence :escape-slash false))))
+  (if (= "--read-signals" (first args))
+    (try
+      (when-not (= 2 (count args))
+        (fail! "invalid signal-reader arguments" {:phase :signal-readback}))
+      (println (json/write-str (read-signal-snapshot! (second args)) :escape-slash false))
+      (catch Throwable _
+        (binding [*out* *err*] (println "demo signal reader failed"))
+        (System/exit 1)))
+    (let [evidence (run-demo! (parse-options args))]
+      (println (json/write-str evidence :escape-slash false)))))
