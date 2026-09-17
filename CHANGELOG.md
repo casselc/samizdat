@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Persist bounded per-server retirement receipts even after demo task failure,
+  recording observed exits rather than guessing TERM status. Reuse confirmed
+  terminal observations without resignal or output-drain waits; receipt/log
+  publication failure never replaces the primary task failure. Refs #45.
+
 - Add explicit Lemonade loaded-model preflight before demo acquisition, with
   safe fixed diagnostics and generic-endpoint opt-out. Bound the demo-only
   curl request deadline and received body bytes, confirming direct-child
