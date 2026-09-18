@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+- Converge the opt-in telemetry time provider without changing stock DB source
+  or ordinary dependencies. Opt-in source-provider qualification passed;
+  stock time-provider ambiguity is still tracked separately in #13.
+
+- Prepare a coherent embedded Oscope/OTel/exporter/chDB dependency update while
+  retaining optimized application JSON and stock nontelemetry dependencies.
+  Five dependency graphs, maintained Jolt JSON 26 checks and viewer dependency
+  3 tests/50 assertions passed. Native application/Durable capture, approved typed
+  schemas and Langfuse/dual export remain unqualified by these checks.
+
 - Add a 42.8-second recorded-session TUI tour with expanded tool arguments and
   results, plus a 42.9-second browser trace tour and linked screenshots.
   Copy the public fixture before opening

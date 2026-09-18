@@ -13,13 +13,13 @@
 
 (def ^:private expected-shas
   {'io.github.casselc/otel
-   "4d61f8e921d1310bc7ba39d7208cc38ac14a3215"
+   "88a63fd90e0969635dda75fbb9fe5ba2264c09d8"
    'io.github.chucklehead-dev/oscope
-   "7ee3ec4f6aaa4d085d88384f85934280d421fa1a"
+   "9a35e58100a00deb5a50f80045f066ce7d09bb3a"
    'io.github.chucklehead-dev/jolt-chdb
-   "95d7b2b31c95e007d5065e3950deb1869e2d0f8a"
+   "19e0ecf9e9f5e2c3f24ac8758f5d6953fd021774"
    'io.github.chucklehead-dev/jolt-otel-clickhouse
-   "14a2998a27f64a9bff329811461be9157a00c849"
+   "0f8bf3de8c225ed4ab4f700fe60bb7c85229136d"
    'io.github.casselc/jolt-http
    "35d1d7f9ebdc796ee9bd4c80745298b2c8b7fdf8"
    'io.github.chucklehead-dev/jolt-otel-viewer
@@ -27,13 +27,14 @@
 
 (def ^:private expected-roots
   {"clojure/data/json.clj" "data.json.git/3174868a7baa06e118fb8d1201edd98c5769b335/"
-   "db/sqlite.clj" "casselc_db.git/96324713500c96ae97c0deaf84691f31df158f25/"
-   "jdbc/chdb/durable.clj" "jolt-chdb.git/95d7b2b31c95e007d5065e3950deb1869e2d0f8a/"
+   "db/sqlite.clj" "casselc_db.git/6db791634e5a4c65c24646833b2e82d3a5d7a121/"
+   "jdbc/chdb/durable.clj" "jolt-chdb.git/19e0ecf9e9f5e2c3f24ac8758f5d6953fd021774/"
+   "jolt/time.clj" "chucklehead-dev_time.git/2494b21b25cd959573c3e6050cd475e4bf302fdb/"
    "jolt/crypto.clj" "jolt-crypto.git/5effcc89a3258499a79a2a3d69edad9e7800d1bf/"
    "jolt/http_client.clj" "http-client.git/eab6b78d5957f88690faf6768360572a3f185341/"
    "jolt/http/server.clj" "jolt-http.git/35d1d7f9ebdc796ee9bd4c80745298b2c8b7fdf8/"
-   "otel/sdk.clj" "casselc_otel.git/4d61f8e921d1310bc7ba39d7208cc38ac14a3215/"
-   "otel/exporter/chdb.clj" "jolt-otel-clickhouse/14a2998a27f64a9bff329811461be9157a00c849/"
+   "otel/sdk.clj" "casselc_otel.git/88a63fd90e0969635dda75fbb9fe5ba2264c09d8/"
+   "otel/exporter/chdb.clj" "jolt-otel-clickhouse.git/0f8bf3de8c225ed4ab4f700fe60bb7c85229136d/"
    "otel/viewer.clj" "jolt-otel-viewer.git/5723a7c28c3bb3ae7cb27f9856b90463e77df523/"})
 
 (defn- sanitized-resolution-env []
@@ -60,15 +61,32 @@
 
 (defn- classpath-roots [classpath source-path]
   (->> (str/split (str classpath) #":")
-       (filter #(.isFile (java.io.File. % source-path)))
+       (mapcat (fn [root]
+                 (for [path [source-path
+                             (str/replace source-path #"\.clj$" ".cljc")]
+                       :let [file (java.io.File. root path)]
+                       :when (.isFile file)]
+                   (.getPath file))))
        vec))
 
 (deftest embedded-alias-pins-the-reviewed-viewer-graph
   (let [deps (edn/read-string (slurp "deps.edn"))
         telemetry (get-in deps [:aliases :telemetry :extra-deps])
+        telemetry-overrides (get-in deps [:aliases :telemetry :override-deps])
         embedded (get-in deps [:aliases :embedded-telemetry])
         direct (:extra-deps embedded)
         overrides (:override-deps embedded)]
+    (is (= "https://github.com/chucklehead-dev/time.git"
+           (get-in telemetry ['jolt-lang/time :git/url])))
+    (is (= "2494b21b25cd959573c3e6050cd475e4bf302fdb"
+           (get-in telemetry ['jolt-lang/time :git/sha])))
+    (is (= "https://github.com/jolt-lang/db"
+           (get-in telemetry-overrides ['jolt-lang/db :git/url])))
+    (is (= "v0.4.0" (get-in telemetry-overrides ['jolt-lang/db :git/tag])))
+    (is (= "d85f391ca521da389b935c38f3d78b30eaa23208"
+           (get-in telemetry-overrides ['jolt-lang/db :git/sha])))
+    (is (= ['io.github.jolt-lang/time]
+           (get-in telemetry-overrides ['jolt-lang/db :exclusions])))
     (is (= (expected-shas 'io.github.casselc/otel)
            (get-in telemetry ['io.github.casselc/otel :git/sha])))
     (doseq [lib ['io.github.chucklehead-dev/oscope
@@ -79,8 +97,16 @@
                  'io.github.chucklehead-dev/jolt-chdb
                  'io.github.chucklehead-dev/jolt-otel-clickhouse]]
       (is (= (expected-shas lib) (get-in overrides [lib :git/sha]))))
-    (is (= "96324713500c96ae97c0deaf84691f31df158f25"
+    (is (= "6db791634e5a4c65c24646833b2e82d3a5d7a121"
            (get-in overrides ['jolt-lang/db :git/sha])))
+    (is (= ['io.github.jolt-lang/time]
+           (get-in overrides ['jolt-lang/db :exclusions])))
+    (is (= "2494b21b25cd959573c3e6050cd475e4bf302fdb"
+           (get-in overrides ['jolt-lang/time :git/sha])))
+    (is (= "https://github.com/chucklehead-dev/time.git"
+           (get-in overrides ['jolt-lang/time :git/url])))
+    (is (= "eab6b78d5957f88690faf6768360572a3f185341"
+           (get-in telemetry ['jolt-lang/http-client :git/sha])))
     (is (= "3174868a7baa06e118fb8d1201edd98c5769b335"
            (get-in overrides ['org.clojure/data.json :git/sha])))
     (is (= "5effcc89a3258499a79a2a3d69edad9e7800d1bf"
@@ -93,11 +119,11 @@
   (let [result (run-jolt "-A:telemetry:embedded-telemetry" "-Spath")]
     (is (map? result))
     (when (map? result)
-      (is (zero? (:exit result)) (str (:out result) (:err result)))
+      (is (zero? (:exit result)) "physical resolution must exit zero")
       (doseq [[source-path expected-root] expected-roots]
         (let [providers (classpath-roots (:out result) source-path)]
           (testing source-path
-            (is (= 1 (count providers)) (pr-str providers))
+            (is (= 1 (count providers)) "exactly one physical namespace provider")
             (is (str/includes? (or (first providers) "") expected-root))))))))
 
 (deftest viewer-handlers-load-without-loading-a-listener-or-receiver-owner

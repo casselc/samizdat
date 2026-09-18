@@ -146,7 +146,7 @@
                          ;; Canonical coordinate shared with Oscope's embedded
                          ;; profile. Keep the HTTP client under Samizdat's stock
                          ;; coordinate below so one checkout provides it.
-                         :git/sha "4d61f8e921d1310bc7ba39d7208cc38ac14a3215"
+                         :git/sha "88a63fd90e0969635dda75fbb9fe5ba2264c09d8"
                          :exclusions [io.github.casselc/http-client]}
                         ;; The exact HTTP revision current otel selects, under
                         ;; Samizdat's stock lib id: one physical provider and
@@ -159,24 +159,24 @@
                         jolt-lang/jolt-crypto
                         {:git/url "https://github.com/jolt-lang/jolt-crypto"
                          :git/sha "44da69bad08a2fd7631bd4061e3fb53938dafff6"}
-                        ;; jolt-crypto declares :jolt/provides, which
-                        ;; switches the resolver to explicit-provides mode; the
-                        ;; root time pin bc85090 predates time's own provides
-                        ;; declaration (33c5e98), so under this alias time is
-                        ;; the first revision that declares java.time.* —
-                        ;; otherwise data.json fails to load (no provider for
-                        ;; java.time.format.DateTimeFormatter).
+                        ;; One provider supplies java.time.* and Locale under
+                        ;; this opt-in alias; stock dependencies stay unchanged.
                         jolt-lang/time
-                        {:git/url "https://github.com/jolt-lang/time"
-                         :git/sha "91cef5b692c624806ea92ba280200162314cdb52"}}}
+                        {:git/url "https://github.com/chucklehead-dev/time.git"
+                         :git/sha "2494b21b25cd959573c3e6050cd475e4bf302fdb"}}
+                       :override-deps
+                       {jolt-lang/db
+                        {:git/url "https://github.com/jolt-lang/db"
+                         :git/tag "v0.4.0"
+                         :git/sha "d85f391ca521da389b935c38f3d78b30eaa23208"
+                         :exclusions [io.github.jolt-lang/time]}}}
            ;; Embedded Oscope/chDB is a separate opt-in layer over :telemetry.
-           ;; The existing standalone OTLP modes and their dependency graph are
-           ;; unchanged unless callers explicitly combine both aliases.
+           ;; Both layers are opt-in; neither changes the ordinary root graph.
            :embedded-telemetry
            {:extra-deps
             {io.github.chucklehead-dev/oscope
              {:git/url "https://github.com/chucklehead-dev/oscope.git"
-              :git/sha "7ee3ec4f6aaa4d085d88384f85934280d421fa1a"
+              :git/sha "9a35e58100a00deb5a50f80045f066ce7d09bb3a"
               :deps/root "profiles/embedded"}
              ;; Viewer-only dependencies are explicit: this slice qualifies
              ;; the handlers but does not load a listener or receiver owner.
@@ -189,19 +189,24 @@
             :override-deps
             {io.github.casselc/otel
              {:git/url "https://github.com/casselc/otel.git"
-              :git/sha "4d61f8e921d1310bc7ba39d7208cc38ac14a3215"
+              :git/sha "88a63fd90e0969635dda75fbb9fe5ba2264c09d8"
               :exclusions [io.github.casselc/http-client]}
              io.github.chucklehead-dev/jolt-chdb
              {:git/url "https://github.com/chucklehead-dev/jolt-chdb.git"
-              :git/sha "95d7b2b31c95e007d5065e3950deb1869e2d0f8a"}
+              :git/sha "19e0ecf9e9f5e2c3f24ac8758f5d6953fd021774"}
              io.github.chucklehead-dev/jolt-otel-clickhouse
              {:git/url "https://github.com/chucklehead-dev/jolt-otel-clickhouse.git"
-              :git/sha "14a2998a27f64a9bff329811461be9157a00c849"}
+              :git/sha "0f8bf3de8c225ed4ab4f700fe60bb7c85229136d"}
              jolt-lang/db
              {:git/url "https://github.com/casselc/db.git"
-              :git/sha "96324713500c96ae97c0deaf84691f31df158f25"
+              :git/sha "6db791634e5a4c65c24646833b2e82d3a5d7a121"
               ;; Avoid a second jolt.time.* provider under a different key.
               :exclusions [io.github.jolt-lang/time]}
+             ;; Select one canonical time coordinate for the embedded graph.
+             ;; Physical provider and stock feature compatibility remain gates.
+             jolt-lang/time
+             {:git/url "https://github.com/chucklehead-dev/time.git"
+              :git/sha "2494b21b25cd959573c3e6050cd475e4bf302fdb"}
              org.clojure/data.json
              {:git/url "https://github.com/casselc/data.json.git"
               :git/sha "3174868a7baa06e118fb8d1201edd98c5769b335"}
