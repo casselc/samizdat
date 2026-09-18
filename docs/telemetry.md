@@ -39,8 +39,8 @@ one.
 
 | build | what loads | behaviour |
 |---|---|---|
-| **source mode** (stock `jolt -M:test`, `jolt serve`, Jolt ≥ 0.8.0) | `samizdat.telemetry.contract`, `samizdat.telemetry.hook` (both `src/`, no new dependency) | `hook/observe!` calls the thunk directly; the seam functions behave exactly as before (`test/samizdat/telemetry/hook_test.clj`; the stock suite is the equivalence check). No otel namespace exists on the path. |
-| **alias-enabled** (`jolt -M:telemetry …`, current qualification lane Jolt 0.8.6) | additionally `telemetry/samizdat/telemetry/otel.clj` and casselc/otel `4d61f8e` (see the exact pin in `deps.edn`) | `otel/init!` reads `SAMIZDAT_TELEMETRY` and installs the observer; one span per run seam, semantic wrappers for executions, generations, tools and evaluators. |
+| **source mode** (stock `jolt -M:test`, `jolt serve`, Jolt ≥ 0.8.6) | `samizdat.telemetry.contract`, `samizdat.telemetry.hook` (both `src/`, no new dependency) | `hook/observe!` calls the thunk directly; the seam functions behave exactly as before (`test/samizdat/telemetry/hook_test.clj`; the stock suite is the equivalence check). No otel namespace exists on the path. |
+| **alias-enabled** (`jolt -M:telemetry …`, current qualification lane Jolt 0.8.6) | additionally `telemetry/samizdat/telemetry/otel.clj` and casselc/otel `88a63fd` (see the exact pin in `deps.edn`) | `otel/init!` reads `SAMIZDAT_TELEMETRY` and installs the observer; one span per run seam, semantic wrappers for executions, generations, tools and evaluators. |
 | **woven** (aspect pack `resources/META-INF/jolt/aspects/samizdat-observability-run-83eb99a.edn`, the nine harness seams verified against upstream main `83eb99a`) | `samizdat.telemetry.aspect-provider` role `:samizdat.telemetry/run` at the same entries | Statically validated against this tree (`test/samizdat/telemetry/aspect_manifest_test.clj`: each entry resolves once at the stated arity). Not qualified as a build here — see the bootstrap work product report. |
 
 Optional aspect behaviour never becomes a runtime dependency: the stock
@@ -144,6 +144,22 @@ delegates to `samizdat.core/-main`. `HARNESS_*` variables configure the
 harness exactly as for `jolt serve`.
 
 ### Embedded local-only server
+
+The telemetry-only alias selects the canonical time fork and excludes the
+second time coordinate from its unchanged DB revision. This is an opt-in
+provider correction, not a repair of the stock graph's known duplicate time
+providers (Samizdat #13), which remain unresolved.
+
+The embedded dependency candidate updates Oscope, OTel, its exporter and chDB
+together. It retains the application's optimized data.json revision3174868;
+the older932444 benchmark control is not an application downgrade.
+Five physical dependency graphs passed qualification: the original and candidate
+stock graphs match, while telemetry, embedded and test graphs each select one
+qualified source provider. The unchanged maintained Jolt JSON compatibility
+suite passed 26 checks, and viewer dependency tests passed 3 tests/50 assertions.
+These checks do not qualify native application startup, Durable capture,
+approved typed schemas or Langfuse/dual export. The previously recorded local
+sample remains evidence of its historical dependency graph.
 
 The explicit embedded launcher keeps Oscope, its in-process chDB exporter,
 and Durable storage in the Samizdat process. It opens no telemetry listener,
@@ -493,18 +509,21 @@ Playwright 1.61.1 with cached Chromium 149.0.7827.55, revision 1228.
 
 ## Dependencies under the alias
 
-Only the alias adds dependencies; the stock `:deps` are unchanged.
+Opt-in aliases add dependencies and overrides; stock `:deps` remain unchanged.
+This table describes current metadata/handler-qualified pins, not new native
+application qualification. Historical samples above retain their original graph.
 
 | lib | revision | why |
 |---|---|---|
-| Oscope embedded profile | `7ee3ec4f6aaa4d085d88384f85934280d421fa1a` | reviewed in-process owner and UI handler sources, without the standalone server profile |
-| casselc/otel | `4d61f8e921d1310bc7ba39d7208cc38ac14a3215` | reviewed SDK revision shared by Samizdat and Oscope |
-| jolt-chdb | `95d7b2b31c95e007d5065e3950deb1869e2d0f8a` | current reviewed Durable/native lifecycle revision |
-| jolt-otel-clickhouse | `14a2998a27f64a9bff329811461be9157a00c849` | embedded chDB exporter selected by Oscope |
+| Oscope embedded profile | `9a35e58100a00deb5a50f80045f066ce7d09bb3a` | in-process owner and UI handler sources, without the standalone server profile |
+| casselc/otel | `88a63fd90e0969635dda75fbb9fe5ba2264c09d8` | SDK revision shared by Samizdat and Oscope |
+| jolt-chdb | `19e0ecf9e9f5e2c3f24ac8758f5d6953fd021774` | selected Durable/native lifecycle source |
+| jolt-otel-clickhouse | `0f8bf3de8c225ed4ab4f700fe60bb7c85229136d` | embedded chDB exporter source |
 | casselc/jolt-http | `35d1d7f9ebdc796ee9bd4c80745298b2c8b7fdf8` | viewer-only Ring dependency; the handlers use Samizdat's existing listener |
 | jolt-otel-viewer | `5723a7c28c3bb3ae7cb27f9856b90463e77df523` | trace workbench rendering used by Oscope's handlers |
 | jolt-lang/http-client → casselc/http-client | `eab6b78d5957f88690faf6768360572a3f185341` | the exact revision selected by otel; the otel edge uses a second lib id for the same `jolt.http.*` namespaces, so the alias excludes that edge and selects this source once under Samizdat's stock coordinate |
-| jolt-lang/db → casselc/db | `96324713500c96ae97c0deaf84691f31df158f25` | one database namespace provider shared by Samizdat and Durable |
+| jolt-lang/db → casselc/db | `6db791634e5a4c65c24646833b2e82d3a5d7a121` | embedded database provider; telemetry-only retains stock DB d85 with its second time edge excluded |
+| jolt-lang/time → chucklehead-dev/time | `2494b21b25cd959573c3e6050cd475e4bf302fdb` | canonical time/Locale provider for the opt-in graphs |
 | org.clojure/data.json → casselc/data.json | `3174868a7baa06e118fb8d1201edd98c5769b335` | one JSON implementation across the embedded graph |
 | jolt-lang/jolt-crypto | `5effcc89a3258499a79a2a3d69edad9e7800d1bf` | one canonical crypto provider across chDB, viewer, OTel, and HTTP |
 
