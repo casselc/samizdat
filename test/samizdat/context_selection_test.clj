@@ -6,7 +6,8 @@
   (:require [clojure.string :as str]
             [clojure.test :refer [deftest is testing]]
             [samizdat.agent.context-selection :as cs]
-            [samizdat.agent.skills :as skills]))
+            [samizdat.agent.skills :as skills]
+            [samizdat.prompt :as prompt]))
 
 (def a-decision
   {:seam-version "samizdat-context-selection/1"
@@ -27,8 +28,16 @@
   (let [block (cs/skills-block a-decision)]
     (is (str/includes? block (skills/render-catalog))
         "the catalogue survives: the worker may still load anything on demand")
-    (is (str/includes? block "already loaded"))
-    (is (str/includes? block "skill:repl-workflow"))))
+    (is (str/includes? block "skill:repl-workflow"))
+    (is (str/includes? block "tool:grep")
+        "what is already in the prompt is named so the worker does not re-load it")))
+
+(deftest the-model-facing-prose-lives-in-a-template
+  (is (str/includes? (prompt/prompt "context-selected") "already loaded")
+      "the sentence is in resources/prompts/context-selected.md, editable without a rebuild")
+  (let [rendered (cs/render-block (cs/materialize a-decision))]
+    (is (str/includes? rendered "already loaded"))
+    (is (str/includes? rendered "- skill:repl-workflow") "ids render as a list")))
 
 (deftest each-kind-is-materialised-according-to-what-the-prompt-already-carries
   (let [m (cs/materialize a-decision)

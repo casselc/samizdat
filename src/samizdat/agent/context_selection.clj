@@ -59,26 +59,32 @@
   injected, once as loaded — because both are tokens the run paid for."
   (:require [clojure.string :as str]
             [samizdat.agent.skills :as skills]
-            [samizdat.lexicon :as lexicon]))
+            [samizdat.prompt :as prompt]))
 
 (def seam-version
   "The contract this implements. Bump with the decision shape, never silently."
   "samizdat-context-selection/1")
 
 (defn- entry
-  "One resolved selection: the id, its kind, and the text to inject (nil when
-  the material is already in the prompt or cannot be resolved here)."
+  "One resolved selection: the id, its DISPLAY NAME, its kind, and the text to
+  inject (nil when the material is already in the prompt or cannot be resolved
+  here).
+
+  The name travels even though nothing selects on it: `already-loaded?` is asked
+  about whatever the worker typed at `skill load`, which is the name, and an
+  entry that dropped it could not recognise the repeat."
   [dirs {:keys [id kind name] :as sel}]
-  (case (some-> kind keyword)
-    :skill (if-let [body (skills/load-skill dirs (or name id))]
-             {:id id :kind :skill :status :injected :text body}
-             {:id id :kind :skill :status :unresolved})
-    :tool {:id id :kind :tool :status :already-present}
-    :manual (if-let [line (:summary sel)]
-              {:id id :kind :manual :status :injected
-               :text (str (or name id) " — " line)}
-              {:id id :kind :manual :status :unresolved})
-    {:id id :kind (or kind :unknown) :status :unresolved}))
+  (let [base {:id id :name name}]
+    (case (some-> kind keyword)
+      :skill (if-let [body (skills/load-skill dirs (or name id))]
+               (assoc base :kind :skill :status :injected :text body)
+               (assoc base :kind :skill :status :unresolved))
+      :tool (assoc base :kind :tool :status :already-present)
+      :manual (if-let [line (:summary sel)]
+                (assoc base :kind :manual :status :injected
+                       :text (str (or name id) " — " line))
+                (assoc base :kind :manual :status :unresolved))
+      (assoc base :kind (or kind :unknown) :status :unresolved))))
 
 (defn materialize
   "Resolve a decision's selections against what THIS run can see.
@@ -101,17 +107,18 @@
       :injected-cost-load (reduce + 0 (keep :cost-load (:injected by)))})))
 
 (defn render-block
-  "The injected context block, or nil when nothing was injected. It names what
-  is already loaded so the worker does not spend a turn re-loading it."
+  "The injected context block, or nil when nothing was injected.
+
+  The prose lives in resources/prompts/context-selected.md, not here: every
+  sentence the model reads has to be editable without a rebuild, and base_test
+  enforces it. This function supplies the data — which ids were injected, which
+  were already in the prompt, and the bodies — and the template says it."
   [{:keys [injected already-present]}]
   (when (seq injected)
-    (str "Context selected for this task and already loaded — do not load it again:\n"
-         (str/join "\n" (for [{:keys [id]} injected] (str "- " id)))
-         (when (seq already-present)
-           (str "\nAlready in your prompt: "
-                (str/join ", " (map :id already-present))))
-         "\n\n"
-         (str/join "\n\n" (keep :text injected)))))
+    (prompt/render "context-selected"
+                   {:injected (mapv :id injected)
+                    :already-present (mapv :id already-present)
+                    :bodies (str/join "\n\n" (keep :text injected))})))
 
 (defn already-loaded?
   "Was `name` injected up front? Lets a `skill load` of the same material be
