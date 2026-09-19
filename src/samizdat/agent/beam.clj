@@ -126,7 +126,7 @@
   FRESH tape only: a child that inherits its parent's conversation inherits
   the system message the suffix is already part of, and appending it again
   would put the workflow's instructions in the transcript twice."
-  [{:keys [problem prompt-suffix]} parent id thesis turn]
+  [{:keys [problem prompt-suffix run-id]} parent id thesis turn]
   (let [{:keys [inherit? depth]} (gates/threshold :fork-inherit)]
     (if (and parent inherit?)
       (state/fork-branch parent {:id id :depth depth :turn turn
@@ -134,7 +134,7 @@
       (cond-> (state/new-branch
                {:id id :parent-id (:id parent) :problem problem
                 :created-at-turn turn
-                :messages (branch-loop/initial-messages problem prompt-suffix)})
+                :messages (branch-loop/initial-messages problem prompt-suffix nil run-id)})
         thesis (assoc :thesis thesis)))))
 
 (defn- open-branch!

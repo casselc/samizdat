@@ -25,7 +25,8 @@
   exactly the one that will never reach another boundary — that is the RAX
   manager pattern, and it is why the stop path does not share machinery with
   the steer path."
-  (:require [samizdat.lexicon :as lexicon]
+  (:require [samizdat.agent.context-selection :as context-selection]
+            [samizdat.lexicon :as lexicon]
             [clojure.string :as str]
             [clojure.tools.logging :as log]
             [samizdat.agent.beam :as beam]
@@ -88,14 +89,31 @@
         beam-width (or (:beam_width body) (:beam-width body))
         token-budget (or (:token_budget body) (:token-budget body))
         seed-run (or (:seed_run body) (:seed-run body))
-        quarantine (or (:quarantine body) (get body "quarantine"))]
+        quarantine (or (:quarantine body) (get body "quarantine"))
+        ;; Context selection, bound to THIS run (samizdat-context-selection/1).
+        ;; Absent is the normal case and means today's behaviour.
+        decision (or (:context_decision body) (:context-decision body)
+                     (get body "context_decision"))]
   ;; A {} body used to start a REAL run on a nil problem — a selection model
   ;; call plus a full beam of provider spend answering nothing, while
   ;; /v1/chat/completions 400s the same input (blt.38).
-  (if (str/blank? (str problem))
+  (cond
+    (str/blank? (str problem))
     {:status 400
      :body {:error {:message "a run needs a non-blank `problem`"
                     :type "invalid_request_error"}}}
+
+    ;; A malformed decision is REFUSED rather than ignored: silently starting a
+    ;; run without the context it was asked to carry would make an experiment's
+    ;; treatment arm quietly identical to its control.
+    (and decision (not (context-selection/valid-decision? decision)))
+    {:status 400
+     :body {:error {:message (str "`context_decision` must be "
+                                  "{:selected [{:id \"kind:name\"} ...]} with a "
+                                  "string id on every selection")
+                    :type "invalid_request_error"}}}
+
+    :else
   (let [llm-config (run-llm-config (:llm config) body)
         adapter (registry/adapter-for (:provider llm-config))
         abort (atom false)
@@ -118,11 +136,17 @@
                                           :quarantine quarantine
                                           :abort abort
                                           :on-start (fn [rid]
+                                                      ;; bound BEFORE the first
+                                                      ;; branch opens, so the
+                                                      ;; opening prompt carries it
+                                                      (context-selection/bind-decision! rid decision)
                                                       (swap! active assoc rid
                                                              {:abort abort
                                                               :cancel (fn [] (some-> @cancel* (apply [])))})
                                                       (deliver promised rid))})]
                         (swap! active dissoc (:run-id r))
+                        ;; the accounting outlives the run; the decision does not
+                        (context-selection/release! (:run-id r))
                         ;; Release anything parked on a question this run
                         ;; asked. Without it an aborted or finished run
                         ;; leaves threads waiting on an answer nobody will
@@ -135,6 +159,7 @@
                           (log/error "run failed:" (ex-message e)))
                         (when-let [rid (deref promised 0 nil)]
                           (swap! active dissoc rid)
+                          (context-selection/release! rid)
                           (approval/abandon! rid))
                         {:status :error :error (ex-message e)})))))
         _ (reset! cancel* (:cancel started))
@@ -149,6 +174,7 @@
       ;; Wrapped in :body like resume, so one route shape serves both the
       ;; success and the refusal and neither has to be special-cased.
       {:body {:run_id run-id :status "running"
+              :context_decision (when decision {:n_selected (count (:selected decision))})
               :beam_width (or beam-width (get-in config [:run :beam-width]))
               :max_turns (or max-turns (get-in config [:run :max-turns]))
               :token_budget (or token-budget (get-in config [:run :token-budget]))}}

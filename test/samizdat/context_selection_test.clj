@@ -128,6 +128,55 @@
              (:context-consumed-cost-load a))
           "context consumed is injected plus loaded, repeats included"))))
 
+(deftest a-decision-is-bound-to-its-run-and-cannot-cross
+  (let [r1 (str (java.util.UUID/randomUUID))
+        r2 (str (java.util.UUID/randomUUID))
+        d1 {:selected [{:id "skill:repl-workflow"}]}
+        d2 {:selected [{:id "skill:mycelium"}]}]
+    (cs/bind-decision! r1 d1)
+    (cs/bind-decision! r2 d2)
+    (is (= d1 (cs/decision-for r1)))
+    (is (= d2 (cs/decision-for r2)) "two live runs keep their own decisions")
+    (is (nil? (cs/decision-for (str (java.util.UUID/randomUUID))))
+        "a run nobody bound has none, which is the default behaviour")
+    (let [b1 (cs/skills-block skills/default-dirs :all (cs/decision-for r1))
+          b2 (cs/skills-block skills/default-dirs :all (cs/decision-for r2))]
+      (is (str/includes? b1 "skill:repl-workflow"))
+      (is (not (str/includes? b1 "skill:mycelium")) "run 1 did not get run 2's context")
+      (is (str/includes? b2 "skill:mycelium"))
+      (is (not (str/includes? b2 "skill:repl-workflow"))))
+    (cs/release! r1)
+    (is (nil? (cs/decision-for r1)) "a finished run's decision is not inherited")
+    (is (= d2 (cs/decision-for r2)) "and releasing one does not disturb the other")
+    (cs/release! r2)))
+
+(deftest a-malformed-decision-is-refused-rather-than-ignored
+  (is (cs/valid-decision? {:selected [{:id "skill:x"}]}))
+  (is (cs/valid-decision? {:selected []}))
+  (is (not (cs/valid-decision? {:selected [{:name "x"}]})) "an id is required")
+  (is (not (cs/valid-decision? {:selected [{:id ""}]})))
+  (is (not (cs/valid-decision? {:selected "skill:x"})))
+  (is (not (cs/valid-decision? nil))))
+
+(deftest accounting-is-unknown-rather-than-zero-for-a-run-we-never-saw
+  (let [a (cs/accounting (str (java.util.UUID/randomUUID)))]
+    (is (false? (:known a)))
+    (is (nil? (:loaded-cost-load a)) "unknown, not 0")
+    (is (nil? (:n-loads a)))
+    (is (str/includes? (:note a) "unknown, not zero"))))
+
+(deftest partial-accounting-survives-a-run-that-stops-early
+  (let [run-id (str (java.util.UUID/randomUUID))]
+    (cs/reset-accounting! run-id (cs/materialize a-decision))
+    (base/run-tool {:branch {:id "B1"} :tool-name "skill" :run-id run-id
+                    :args {:action "load" :name "mycelium"}})
+    ;; the run now "stops" - nothing else happens - and what it did is still there
+    (let [a (cs/accounting run-id)]
+      (is (true? (:known a)))
+      (is (= 1 (:n-loads a)))
+      (is (pos? (:loaded-cost-load a))
+          "the load it managed before stopping is real, not discarded"))))
+
 (deftest telemetry-is-metadata-only
   (let [m (cs/materialize a-decision)
         attrs (cs/telemetry-attrs a-decision m)]

@@ -733,6 +733,22 @@
     "Applied now. Commands matching the pattern are allowed for the rest of this run; a hard deny still wins."
     "Queued. It applies at the branch's next turn boundary, not now."
     "a grant intervention needs payload.pattern — the shell glob to allow"
+    ;; The 400 for a malformed context_decision, the same shape as the grant
+    ;; message above: it answers the HTTP CALLER, never the model, and it names
+    ;; the field and the required key so a client can fix its request.
+    "{:selected [{:id \"kind:name\"} ...]} with a "
+    "string id on every selection"
+    }
+
+   "src/samizdat/agent/context_selection.clj"
+   #{
+    ;; The two `:note` strings in the accounting map. They are read by whoever
+    ;; reads a run's context report — an operator, an experiment's report step —
+    ;; and never by the model: nothing puts the accounting in a prompt. They say
+    ;; what the figures mean, which is the whole point of reporting partial
+    ;; accounting rather than a silent zero.
+    "partial figures are real: this is what the run paid before it stopped"
+    "this process has no record of that run; the figures are unknown, not zero"
     }
    "src/samizdat/api/openai.clj"
    #{

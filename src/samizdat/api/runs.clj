@@ -27,7 +27,8 @@
   The tail endpoint is a cursor over `events` rather than a stream, because a
   cursor works over any HTTP server and a stream does not — see PLAN.md on the
   vendored adapter."
-  (:require ;; the java.time.* host shim, before data.json — see samizdat.store.journal
+  (:require [samizdat.agent.context-selection :as context-selection]
+            ;; the java.time.* host shim, before data.json — see samizdat.store.journal
             [jolt.time]
             [clojure.data.json :as json]
             [samizdat.agent.gates :as gates]
@@ -112,7 +113,12 @@
                      ;; What the run has spent, beside the budget the row
                      ;; carries, so an operator watching a metered provider
                      ;; can see the one against the other (karamazov-aqsr.3).
-                     :usage (journal/run-usage conn run-id)))
+                     :usage (journal/run-usage conn run-id)
+                     ;; What this run paid for context. Present for a failed or
+                     ;; aborted run too - partial figures are real - and
+                     ;; `:known false` when this process has no record, because
+                     ;; unknown is not zero.
+                     :context (context-selection/accounting conn run-id)))
        ;; Reuses the rows already read for the active count above.
        :branches (mapv #(update % :thesis parse-json) branches)
        :artifacts (mapv #(update % :witness parse-json)

@@ -97,7 +97,8 @@
   the read-only trees this project declared — both facts about the run's
   target, and both previously rendered as if every run worked on samizdat with
   nothing beside it."
-  [role]
+  ([role] (system-prompt-for role nil))
+  ([role run-id]
   (let [root (userspace/project-root)
         ;; WHICH IMAGE, or none. The prompt's opening sentence and its whole
         ;; REPL-first section are claims about where `eval` runs, and both were
@@ -119,7 +120,15 @@
         ;; none this is `skills/render-catalog` unchanged, which is the
         ;; behaviour every run has had. The decision is computed OUTSIDE the
         ;; harness and names candidate ids; nothing here scores anything.
-        :skills (context-selection/skills-block (config/context-decision root))
+        ;; Proactive context selection, bound to THIS RUN. With no decision
+        ;; this is `skills/render-catalog` unchanged, which is what every run
+        ;; has had. Looked up by run id rather than read from the project
+        ;; config, because the project root is one atom for the process and a
+        ;; config-file decision would be shared by every concurrent run.
+        :skills (context-selection/skills-block
+                 skills/default-dirs
+                 (roles/surface (or role :implementor))
+                 (context-selection/decision-for run-id))
         :self-hosting (userspace/self-hosting?)
         :repl (not= :off image)
         :harness-image (= :harness image)
@@ -135,7 +144,7 @@
         ;; replace the 8 lines that were measured to matter without forking
         ;; the other 490 (karamazov-1g6b.3).
         :split-decision (prompt/prompt "split-decision")})
-     role eval-mode)))
+     role eval-mode))))
 
 (defn system-prompt
   "The whole system prompt, unscoped — every tool the harness has.
@@ -204,10 +213,13 @@
   its own instructions at the start (a review workflow adds review guidance on
   top of the base prompt, keeping the whole tool surface). nil/blank leaves the
   base prompt untouched."
-  ([problem] (initial-messages problem nil nil))
-  ([problem prompt-suffix] (initial-messages problem prompt-suffix nil))
-  ([problem prompt-suffix role]
-   [{:role "system" :content (cond-> (system-prompt-for role)
+  ([problem] (initial-messages problem nil nil nil))
+  ([problem prompt-suffix] (initial-messages problem prompt-suffix nil nil))
+  ([problem prompt-suffix role] (initial-messages problem prompt-suffix role nil))
+  ;; `run-id` is optional and defaults to nil, so every existing caller keeps
+  ;; its arity and its behaviour; only the path that knows the run passes it.
+  ([problem prompt-suffix role run-id]
+   [{:role "system" :content (cond-> (system-prompt-for role run-id)
                                (not (str/blank? prompt-suffix))
                                (str "\n\n" prompt-suffix))}
     ;; The opening user turn is prose the model reads and a project may want

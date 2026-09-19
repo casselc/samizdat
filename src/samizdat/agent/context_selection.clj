@@ -206,6 +206,49 @@
 
 (defonce ^:private ledger (atom {}))
 
+;; --- per-run decisions --------------------------------------------------------
+;;
+;; KEYED BY RUN ID, not by project config. `userspace/project-root` is one atom
+;; for the process, so a decision written into the project's config file would
+;; be read by every concurrent run — two runs with different decisions would
+;; silently share one. A registry keyed by the run id cannot cross, and
+;; `release!` ends a run's entry so a later run cannot inherit it.
+
+(defonce ^:private decisions (atom {}))
+
+(defn valid-decision?
+  "Whether a decision is one this harness will accept: a map whose `:selected`
+  is a sequence of maps each carrying a non-blank string `:id`. Nothing else is
+  required, because nothing else is believed."
+  [d]
+  (and (map? d)
+       (sequential? (:selected d))
+       (every? (fn [sel] (and (map? sel)
+                              (string? (or (:id sel) (get sel "id")))
+                              (not (str/blank? (str (or (:id sel) (get sel "id")))))))
+               (:selected d))))
+
+(defn bind-decision!
+  "Bind `decision` to `run-id` for the life of the run. nil unbinds, which is
+  the default behaviour: no decision, catalogue only."
+  [run-id decision]
+  (if decision
+    (swap! decisions assoc run-id decision)
+    (swap! decisions dissoc run-id))
+  nil)
+
+(defn decision-for
+  "The decision bound to `run-id`, or nil — and nil is the normal case."
+  [run-id]
+  (when run-id (get @decisions run-id)))
+
+(defn release!
+  "Forget a finished run's decision. Its accounting is kept: a report is read
+  after the run ends."
+  [run-id]
+  (swap! decisions dissoc run-id)
+  nil)
+
 (defn reset-accounting!
   "Start a run's accounting. `materialized` is what the prompt was built with,
   so a later load can be classified against it."
@@ -218,35 +261,58 @@
 
   A load of material that was injected up front is a REPEAT: the tokens are
   paid a second time, so its cost is counted again and flagged, rather than
-  being quietly dropped because the material was 'already there'."
-  [run-id name body]
-  (let [m (get-in @ledger [run-id :materialized])
-        repeat? (and m (already-loaded? m name))
-        e {:name (str name) :cost-load (cost-of body) :repeat repeat?}]
-    (swap! ledger update run-id
-           (fn [r] (update (or r {:materialized m :loads []}) :loads conj e)))
-    e))
+  being quietly dropped because the material was 'already there'.
+
+  Written to the journal as well as the in-memory ledger when a `conn` is
+  available, so a run that fails or is aborted still has the loads it did make
+  — partial accounting is the honest answer there, not zero."
+  ([run-id name body] (record-load! nil run-id name body))
+  ([conn run-id name body]
+   (let [m (get-in @ledger [run-id :materialized])
+         repeat? (and m (already-loaded? m name))
+         e {:name (str name) :cost-load (cost-of body) :repeat repeat?}]
+     (swap! ledger update run-id
+            (fn [r] (update (or r {:materialized m :loads []}) :loads conj e)))
+     (when (and conn run-id)
+       (try
+         (when-let [note (resolve 'samizdat.store.journal/note!)]
+           (note conn run-id :context-load e))
+         (catch Throwable _ nil)))
+     e)))
 
 (defn accounting
-  "What this run actually paid for context: what the prompt carried up front,
-  what the worker loaded afterwards, and how much of that was a repeat of
-  material it had already been given.
+  "What this run actually paid for context.
 
-  `context-consumed-cost-load` is injected + loaded, repeats included, because
-  both are tokens the run paid."
-  [run-id]
-  (let [{:keys [materialized loads]} (get @ledger run-id)
-        injected (long (or (:injected-cost-load materialized) 0))
-        loaded (reduce + 0 (map :cost-load loads))
-        repeats (filter :repeat loads)]
-    {:run-id run-id
-     :injected-cost-load injected
-     :loaded-cost-load loaded
-     :repeat-load-cost-load (reduce + 0 (map :cost-load repeats))
-     :n-loads (count loads)
-     :n-repeat-loads (count repeats)
-     :loads (vec loads)
-     :context-consumed-cost-load (+ injected loaded)}))
+  Present for a run that failed or was aborted too: whatever it managed before
+  it stopped is the honest partial answer. A run this process never saw returns
+  `:known false` with nil figures — UNKNOWN, never zero, because zero is a
+  measurement and absence is not."
+  ([run-id] (accounting nil run-id))
+  ([conn run-id]
+   (let [entry (get @ledger run-id)
+         from-journal (when (and conn run-id (nil? entry))
+                        (try
+                          (when-let [f (resolve 'samizdat.store.journal/notes)]
+                            (seq (f conn run-id :context-load)))
+                          (catch Throwable _ nil)))
+         loads (vec (or (:loads entry) from-journal))
+         known (boolean (or entry from-journal))
+         materialized (:materialized entry)
+         injected (when materialized (long (or (:injected-cost-load materialized) 0)))
+         loaded (when known (reduce + 0 (keep :cost-load loads)))
+         repeats (filter :repeat loads)]
+     {:run-id run-id
+      :known known
+      :injected-cost-load injected
+      :loaded-cost-load loaded
+      :repeat-load-cost-load (when known (reduce + 0 (keep :cost-load repeats)))
+      :n-loads (when known (count loads))
+      :n-repeat-loads (when known (count repeats))
+      :loads loads
+      :context-consumed-cost-load (when (and injected loaded) (+ injected loaded))
+      :note (if known
+              "partial figures are real: this is what the run paid before it stopped"
+              "this process has no record of that run; the figures are unknown, not zero")})))
 
 (defn skills-block
   "What the system prompt's `{{skills}}` is rendered with.
