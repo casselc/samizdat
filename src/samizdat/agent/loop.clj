@@ -49,6 +49,7 @@
             [samizdat.agent.storm :as storm]
             [samizdat.agent.thinking :as thinking]
             [samizdat.agent.tools :as tools]
+            [samizdat.agent.context-selection :as context-selection]
             [samizdat.agent.skills :as skills]
             [samizdat.llm.message :as message]
             [samizdat.prompt :as prompt]
@@ -114,7 +115,11 @@
     (roles/scope-catalogue
      (prompt/render-str (or (prompt/layer :system) "")
        {:templates ""
-        :skills (skills/render-catalog)
+        ;; Proactive context selection, when a run supplies a decision; with
+        ;; none this is `skills/render-catalog` unchanged, which is the
+        ;; behaviour every run has had. The decision is computed OUTSIDE the
+        ;; harness and names candidate ids; nothing here scores anything.
+        :skills (context-selection/skills-block (config/context-decision root))
         :self-hosting (userspace/self-hosting?)
         :repl (not= :off image)
         :harness-image (= :harness image)

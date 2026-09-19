@@ -186,6 +186,27 @@
   [root]
   (:sandbox (eval-settings (when root (file-config root)))))
 
+(defn context-decision
+  "The context-selection decision for this run, or nil — and nil is the normal
+  case: with no decision the prompt keeps the catalogue-only behaviour every run
+  has had.
+
+  Read from the config files under `[:run :context-selection :decision-file]`, an
+  EDN file holding one `samizdat-context-selection/1` decision. It is a FILE
+  rather than a live call on purpose: the harness does not score anything, and a
+  decision computed elsewhere is evidence a run can be replayed against. A
+  missing or unreadable file yields nil, so a broken experiment configuration
+  degrades to today's behaviour instead of failing a run."
+  [root]
+  (when root
+    (when-let [path (get-in (file-config root) [:run :context-selection :decision-file])]
+      (try
+        (let [f (java.io.File. (str path))
+              f (if (.isAbsolute f) f (java.io.File. (str root) (str path)))]
+          (when (.isFile f)
+            (edn/read-string (slurp f))))
+        (catch Exception _ nil)))))
+
 (def harness-image-roles
   "The roles that keep the LIVE harness image under `:mode :project`.
 
