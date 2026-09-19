@@ -7,17 +7,21 @@
             [clojure.test :refer [deftest is testing]]
             [samizdat.agent.context-selection :as cs]
             [samizdat.agent.skills :as skills]
+            [samizdat.agent.tools.base :as base]
+            [samizdat.agent.tools.skills]
             [samizdat.prompt :as prompt]))
 
 (def a-decision
+  "A decision is a list of ids. Everything else it carries here - a name, a
+  summary, a cost - is deliberately WRONG, so the tests prove the harness reads
+  none of it."
   {:seam-version "samizdat-context-selection/1"
    :outcome :selected
    :policy :selector/2
-   :selected [{:id "skill:repl-workflow" :kind :skill :name "repl-workflow" :cost-load 1399}
-              {:id "tool:grep" :kind :tool :name "grep" :cost-load 120}
-              {:id "manual:samizdat.agent.files/glob-project" :kind :manual
-               :name "samizdat.agent.files/glob-project"
-               :summary "find files by name under the project root" :cost-load 40}]})
+   :selected [{:id "skill:repl-workflow" :name "not-this-name" :cost-load 999999}
+              {:id "tool:grep" :name "not-this-either" :cost-load 999999}
+              {:id "manual:samizdat.agent.files/glob-project"
+               :summary "PROSE FROM OUTSIDE THE HARNESS" :cost-load 999999}]})
 
 (deftest with-no-decision-the-prompt-block-is-exactly-todays-catalogue
   (is (= (skills/render-catalog) (cs/skills-block))
@@ -39,46 +43,90 @@
     (is (str/includes? rendered "already loaded"))
     (is (str/includes? rendered "- skill:repl-workflow") "ids render as a list")))
 
-(deftest each-kind-is-materialised-according-to-what-the-prompt-already-carries
+(deftest each-kind-is-materialised-from-the-local-resource
   (let [m (cs/materialize a-decision)
         by-id (into {} (map (juxt :id identity)) (:entries m))]
-    (testing "a skill body is injected"
+    (testing "a skill body is injected, read locally by the id's own name"
       (is (= :injected (:status (by-id "skill:repl-workflow"))))
+      (is (= "repl-workflow" (:name (by-id "skill:repl-workflow")))
+          "the decision's :name was ignored")
       (is (str/includes? (:text (by-id "skill:repl-workflow")) "REPL")))
-    (testing "a tool's documentation is already in the prompt and is not injected twice"
+    (testing "a tool on the role's surface is already in the prompt"
       (is (= :already-present (:status (by-id "tool:grep")))))
-    (testing "a manual line is injected as a line"
-      (is (= :injected (:status (by-id "manual:samizdat.agent.files/glob-project"))))
-      (is (str/includes? (:text (by-id "manual:samizdat.agent.files/glob-project"))
-                         "find files by name")))))
+    (testing "a manual line is rendered from THIS image's manual, not the decision"
+      (let [e (by-id "manual:samizdat.agent.files/glob-project")]
+        (is (= :injected (:status e)))
+        (is (not (str/includes? (:text e) "PROSE FROM OUTSIDE THE HARNESS"))
+            "a decision cannot write prose into the model's prompt")))))
 
-(deftest injected-cost-counts-only-what-this-prompt-actually-carries
-  (let [m (cs/materialize a-decision)]
-    (is (= (+ 1399 40) (:injected-cost-load m))
-        "the already-present tool contributes nothing")))
+(deftest cost-is-recomputed-locally-and-never-taken-from-the-decision
+  (let [m (cs/materialize a-decision)
+        skill (first (filter #(= "skill:repl-workflow" (:id %)) (:injected m)))]
+    (is (= (cs/cost-of (skills/load-skill "repl-workflow")) (:cost-load skill))
+        "cost comes from the resolved body under the frozen estimator")
+    (is (< (:injected-cost-load m) 999999)
+        "the decision's inflated cost is not believed")
+    (is (= (:injected-cost-load m) (reduce + 0 (map :cost-load (:injected m))))
+        "and the total is the sum of what was actually injected")))
+
+(deftest the-budget-is-enforced-by-the-harness
+  (let [full (cs/materialize a-decision)
+        tight (cs/materialize skills/default-dirs :all (assoc a-decision :budget 50))]
+    (is (pos? (:injected-cost-load full)))
+    (is (<= (:injected-cost-load tight) 50) "nothing over budget is injected")
+    (is (seq (:dropped-over-budget tight)) "and what did not fit is recorded")
+    (is (every? #(= :dropped-over-budget (:status %)) (:dropped-over-budget tight)))))
+
+(deftest a-tool-off-this-roles-surface-is-not-claimed-to-be-present
+  (let [m (cs/materialize skills/default-dirs #{"read_file"}
+                          {:selected [{:id "tool:grep"} {:id "tool:read_file"}]})
+        by-id (into {} (map (juxt :id identity)) (:entries m))]
+    (is (= :already-present (:status (by-id "tool:read_file"))))
+    (is (= :unresolved (:status (by-id "tool:grep"))))
+    (is (= :not-on-role-surface (:reason (by-id "tool:grep")))
+        "claiming a tool is in the prompt when the role cannot see it would be a lie")))
 
 (deftest an-id-this-run-cannot-resolve-is-dropped-and-recorded
-  (let [m (cs/materialize {:selected [{:id "skill:no-such-thing" :kind :skill
-                                       :name "no-such-thing" :cost-load 999}]})]
-    (is (empty? (:injected m)))
-    (is (= 1 (count (:unresolved m))))
-    (is (zero? (:injected-cost-load m)))
-    (is (nil? (cs/render-block m)) "nothing resolved -> nothing injected")))
+  (doseq [[id reason] {"skill:no-such-thing" :no-such-skill
+                       "manual:no.such/entry" :no-such-manual-entry
+                       "mystery:thing" :unknown-kind}]
+    (let [m (cs/materialize {:selected [{:id id}]})]
+      (is (empty? (:injected m)) id)
+      (is (= 1 (count (:unresolved m))) id)
+      (is (= reason (:reason (first (:unresolved m)))) id)
+      (is (zero? (:injected-cost-load m)) id)
+      (is (nil? (cs/render-block m)) "nothing resolved -> nothing injected"))))
 
 (deftest identity-is-the-id-so-a-shared-display-name-cannot-shadow
-  (let [m (cs/materialize {:selected [{:id "skill:repl-workflow" :kind :skill
-                                       :name "repl-workflow" :cost-load 10}
-                                      {:id "adv:repl-workflow" :kind :skill
-                                       :name "repl-workflow" :cost-load 20}]})]
-    (is (= 2 (count (:injected m))) "two ids, two entries, even with one display name")
-    (is (= #{"skill:repl-workflow" "adv:repl-workflow"} (set (map :id (:injected m)))))
-    (is (= 30 (:injected-cost-load m)))))
+  (let [m (cs/materialize {:selected [{:id "skill:repl-workflow"}
+                                      {:id "skill:mycelium"}]})]
+    (is (= 2 (count (:injected m))))
+    (is (= #{"skill:repl-workflow" "skill:mycelium"} (set (map :id (:injected m)))))
+    (is (= (reduce + 0 (map :cost-load (:injected m))) (:injected-cost-load m)))))
 
 (deftest a-repeat-load-can-be-recognised-as-a-repeat
   (let [m (cs/materialize a-decision)]
     (is (cs/already-loaded? m "repl-workflow"))
     (is (cs/already-loaded? m "skill:repl-workflow"))
     (is (not (cs/already-loaded? m "mycelium")))))
+
+(deftest the-skill-tool-records-every-load-and-charges-the-repeats
+  (let [run-id (str (java.util.UUID/randomUUID))
+        m (cs/materialize a-decision)]
+    (cs/reset-accounting! run-id m)
+    (is (zero? (:n-loads (cs/accounting run-id))))
+    ;; the tool itself, not the helper: a load of injected material and a fresh one
+    (base/run-tool {:branch {:id "B1"} :tool-name "skill" :run-id run-id
+                    :args {:action "load" :name "repl-workflow"}})
+    (base/run-tool {:branch {:id "B1"} :tool-name "skill" :run-id run-id
+                    :args {:action "load" :name "mycelium"}})
+    (let [a (cs/accounting run-id)]
+      (is (= 2 (:n-loads a)) "both loads are recorded by the tool")
+      (is (= 1 (:n-repeat-loads a)) "the injected one is a repeat")
+      (is (pos? (:repeat-load-cost-load a)) "and the repeat is charged, not waived")
+      (is (= (+ (:injected-cost-load a) (:loaded-cost-load a))
+             (:context-consumed-cost-load a))
+          "context consumed is injected plus loaded, repeats included"))))
 
 (deftest telemetry-is-metadata-only
   (let [m (cs/materialize a-decision)

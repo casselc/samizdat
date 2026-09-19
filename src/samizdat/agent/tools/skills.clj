@@ -7,13 +7,14 @@
   context — so a guide (like structuring the loop with mycelium) costs context
   only when the agent reaches for it, not every turn."
   (:require [clojure.string :as str]
+            [samizdat.agent.context-selection :as context-selection]
             [samizdat.agent.skills :as skills]
             [samizdat.agent.tools.base :as base]))
 
 (def ^:private usage
   "Actions: list (the catalogue), load {name} (a skill's full guidance).")
 
-(defmethod base/run-tool "skill" [{:keys [branch root] :as ctx}]
+(defmethod base/run-tool "skill" [{:keys [branch root run-id] :as ctx}]
   ;; Project skills resolve under the RUN's root, not the harness's cwd — a
   ;; run working on another checkout reads THAT project's .samizdat/skills
   ;; (karamazov-blt.33). The shipped skills come off the classpath either way.
@@ -43,7 +44,12 @@
           (nil? name) (base/malformed branch (base/missing ctx :name))
           :else
           (if-let [content (skills/load-skill dirs name)]
-            (base/ok branch content)
+            (do
+              ;; Every completed load is recorded, so a load of material the
+              ;; prompt already carried is counted as the repeat it is rather
+              ;; than vanishing from the run's context bill.
+              (context-selection/record-load! run-id name content)
+              (base/ok branch content))
             (base/malformed branch (str "No skill named '" name "'. " usage)))))
 
       (base/malformed branch (str "Unknown skill action `" action "`. " usage)))))

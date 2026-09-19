@@ -195,7 +195,15 @@
   only where every hit in the file is one class with one reason, and it is
   the weaker form: a new literal of that class in that file will not fail.
   Everywhere else the entry names the literal, so a new one does."
-  {"src/samizdat/config.clj"
+  {"src/samizdat/agent/context_selection.clj"
+   {:threshold {4 "the cost_load estimator's divisor, ceil(len/4). Mechanism, not
+                   policy: it is the unit the evaluation's catalog freeze measured
+                   candidates in, and a budget is only meaningful if the harness
+                   measures in the same unit the selector did. A project that
+                   changed it would spend a different currency from the one its
+                   decision was computed in."}}
+
+   "src/samizdat/config.clj"
    {:threshold {:all "config.clj IS the defaults layer: every number here is
                       the fallback for a key an operator sets in samizdat.edn,
                       and the file's whole subject is what to do when that key
