@@ -52,6 +52,48 @@
       (is (true? (:pending again)) "pending, because there is no run to replay")
       (is (nil? (:run-id again)) "and no run id is invented"))))
 
+(deftest the-original-claimant-is-fenced-out-after-a-reclaim
+  (let [conn (db/open! ":memory:")
+        ;; the original claimant: alive, just slow — it claims and is then paused
+        first-claim (runs/claim-idempotency-key! conn "k" "d")
+        ;; somebody decides it is gone, reclaims, and starts a run
+        taken (runs/reclaim-idempotency-key! conn "k" "d")
+        their-run (runs/start-run! conn {:problem "the replacement"})]
+    (is (true? (:claimed first-claim)))
+    (is (true? (:reclaimed taken)))
+    (is (true? (runs/bind-idempotency-run! conn "k" their-run (:owner taken)))
+        "the reclaimer binds its run")
+    ;; the original wakes up and tries to bind the run IT started
+    (let [its-run (runs/start-run! conn {:problem "the original"})]
+      (is (false? (runs/bind-idempotency-run! conn "k" its-run (:owner first-claim)))
+          "the original no longer owns the key and must not overwrite the binding")
+      (is (= their-run (runs/idempotency-run conn "k"))
+          "the binding still names the reclaimer's run"))))
+
+(deftest a-second-crash-after-a-reclaim-is-recoverable
+  (let [conn (db/open! ":memory:")]
+    (runs/claim-idempotency-key! conn "twice" "d")
+    (let [second-owner (runs/reclaim-idempotency-key! conn "twice" "d")]
+      (is (true? (:reclaimed second-owner)))
+      ;; that caller dies too, still without starting anything
+      (let [third (runs/reclaim-idempotency-key! conn "twice" "d")]
+        (is (true? (:reclaimed third))
+            "ownership can move again: a set-once column would have stranded the key")
+        (is (not= (:owner second-owner) (:owner third)))
+        (let [rid (runs/start-run! conn {:problem "finally"})]
+          (is (true? (runs/bind-idempotency-run! conn "twice" rid (:owner third))))
+          (is (false? (runs/bind-idempotency-run! conn "twice" rid (:owner second-owner)))
+              "and the previous owner is fenced out too"))))))
+
+(deftest a-bound-key-cannot-be-reclaimed
+  (let [conn (db/open! ":memory:")
+        c (runs/claim-idempotency-key! conn "bound" "d")
+        rid (runs/start-run! conn {:problem "p"})]
+    (runs/bind-idempotency-run! conn "bound" rid (:owner c))
+    (let [r (runs/reclaim-idempotency-key! conn "bound" "d")]
+      (is (false? (:reclaimed r)))
+      (is (= rid (:run-id r))))))
+
 (deftest a-pending-claim-can-be-reclaimed-by-exactly-one-caller
   (let [conn (db/open! ":memory:")]
     (runs/claim-idempotency-key! conn "abandoned" "d")
@@ -64,15 +106,6 @@
       (doseq [t threads] (.join t))
       (is (= 1 (count (filter :reclaimed @results)))
           "one caller takes over the abandoned claim; the rest do not"))))
-
-(deftest a-claim-with-a-run-bound-is-never-reclaimed
-  (let [conn (db/open! ":memory:")
-        rid (runs/start-run! conn {:problem "p"})]
-    (runs/claim-idempotency-key! conn "live" "d")
-    (runs/bind-idempotency-run! conn "live" rid)
-    (let [r (runs/reclaim-idempotency-key! conn "live" "d")]
-      (is (false? (:reclaimed r)) "a started run is not restarted")
-      (is (= rid (:run-id r)) "the caller is pointed at the run that exists"))))
 
 (deftest a-pending-claim-survives-a-reopen
   (let [path (str (System/getProperty "java.io.tmpdir") "/idem-pending-" (random-uuid) ".db")
@@ -90,8 +123,8 @@
   (let [path (str (System/getProperty "java.io.tmpdir") "/idem-" (random-uuid) ".db")
         conn (db/open! path)
         rid (runs/start-run! conn {:problem "p"})]
-    (runs/claim-idempotency-key! conn "durable" "d")
-    (runs/bind-idempotency-run! conn "durable" rid)
+    (let [c (runs/claim-idempotency-key! conn "durable" "d")]
+      (runs/bind-idempotency-run! conn "durable" rid (:owner c)))
     (db/close conn)
     (let [reopened (db/open! path)]
       (is (= rid (runs/idempotency-run reopened "durable"))

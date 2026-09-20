@@ -349,19 +349,20 @@
 (defn claim-idempotency-key!
   "Claim `key` for a request whose inputs hash to `digest`.
 
-  Returns `{:claimed true}` when this caller won the key and should start the
-  run; `{:claimed false :run-id id}` when somebody already started one;
-  `{:claimed false :pending true :claimed-at t}` when the key was claimed but no
-  run was ever bound to it — a caller that crashed between claiming and starting,
-  which is a state the caller must RESOLVE rather than a run it may replay; or
-  `{:conflict true :digest ...}` when the key exists with DIFFERENT inputs —
-  a caller bug, not a recovery, refused rather than answered with the wrong run.
+  Returns `{:claimed true :owner token}` when this caller won the key and should
+  start the run — the token is its proof of ownership, and `bind-idempotency-run!`
+  records a run only for the caller that still holds it; `{:claimed false :run-id
+  id}` when a run already exists; `{:claimed false :pending true}` when the key is
+  claimed and no run was ever bound — a caller that died in between, which is a
+  state to RESOLVE rather than a run to replay; or `{:conflict true :digest ...}`
+  when the key exists with DIFFERENT inputs, which is a caller bug and is refused.
 
-  The uniqueness is the PRIMARY KEY's, so two processes racing on one key
-  cannot both claim it."
+  The uniqueness is the PRIMARY KEY's, so two processes racing on one key cannot
+  both claim it."
   [conn key digest]
-  (let [existing (db/fetch-one conn ["SELECT key, run_id, digest FROM run_idempotency
-                                        WHERE key = ?" key])]
+  (let [token (str (random-uuid))
+        existing (db/fetch-one conn ["SELECT key, run_id, digest, created_at
+                                        FROM run_idempotency WHERE key = ?" key])]
     (cond
       (and existing (not= (:digest existing) digest))
       {:conflict true :digest (:digest existing) :run-id (:run_id existing)}
@@ -373,53 +374,80 @@
 
       :else
       (try
-        (db/execute! conn ["INSERT INTO run_idempotency (key, run_id, digest, created_at)
-                              VALUES (?, NULL, ?, ?)" key digest (db/now)])
-        {:claimed true}
+        (db/execute! conn ["INSERT INTO run_idempotency (key, run_id, digest, created_at,
+                                                         owner_token)
+                              VALUES (?, NULL, ?, ?, ?)" key digest (db/now) token])
+        {:claimed true :owner token}
         (catch Exception _
-          ;; lost the insert race: somebody else claimed it between the read and
-          ;; the write, which is exactly what the primary key is for
-          (let [won (db/fetch-one conn ["SELECT run_id, digest FROM run_idempotency
-                                           WHERE key = ?" key])]
-            (if (and won (not= (:digest won) digest))
-              {:conflict true :digest (:digest won) :run-id (:run_id won)}
-              {:claimed false :run-id (:run_id won)})))))))
+          ;; Lost the insert race, which is what the primary key is for. Whatever
+          ;; the winner left is read back — and a winner that has not bound a run
+          ;; yet is PENDING, not an existing run with a nil id. Answering the
+          ;; latter would let a caller replay a run that does not exist.
+          (let [won (db/fetch-one conn ["SELECT run_id, digest, created_at
+                                           FROM run_idempotency WHERE key = ?" key])]
+            (cond
+              (nil? won) {:claimed false :pending true}
+              (not= (:digest won) digest) {:conflict true :digest (:digest won)
+                                           :run-id (:run_id won)}
+              (nil? (:run_id won)) {:claimed false :pending true
+                                    :claimed-at (:created_at won)}
+              :else {:claimed false :run-id (:run_id won)})))))))
 
 (defn reclaim-idempotency-key!
   "Take over a PENDING claim — one whose run was never bound, because the caller
   that made it died before starting anything.
 
-  Atomic: the UPDATE names `run_id IS NULL`, so of two callers reclaiming the
-  same abandoned key exactly one changes a row and the other is told to look
-  again. A claim with a run bound to it is never reclaimed, because that run
-  exists and replaying it would be a second run doing the same work."
+  Returns `{:reclaimed true :owner token}` for the one caller that takes it.
+
+  A compare-and-swap on the CURRENT owner, not a set-once column: of several
+  callers reading the same owner exactly one swap matches a row, and ownership can
+  move again afterwards, so a caller that crashes AFTER reclaiming is as
+  recoverable as the first one was. A set-once column left no second recovery. A
+  claim with a run bound to it is never reclaimed — that run exists, and replaying
+  it would be a second run doing the same work."
   [conn key digest]
-  ;; ONE SHOT, decided by the database. `reclaimed_by` starts NULL and is set
-  ;; once: `WHERE ... AND reclaimed_by IS NULL` matches for exactly one caller
-  ;; however the writes interleave. An earlier version wrote a token into an
-  ;; existing column and read it back, and three of four concurrent reclaimers
-  ;; each read their own token and believed they had won — which is the bug this
-  ;; shape cannot have. `changes()` is SQLite's own count for the statement just
-  ;; run on this connection, so the answer does not depend on the driver's
-  ;; return shape either.
-  (let [token (str (random-uuid))]
-    (db/execute! conn ["UPDATE run_idempotency SET digest = ?, created_at = ?, reclaimed_by = ?
-                          WHERE key = ? AND run_id IS NULL AND reclaimed_by IS NULL"
-                       digest (db/now) token key])
-    (let [changed (:n (db/fetch-one conn ["SELECT changes() AS n"]))
-          row (db/fetch-one conn ["SELECT run_id FROM run_idempotency WHERE key = ?" key])]
-      (cond
-        (and changed (pos? changed)) {:reclaimed true :token token}
-        (:run_id row) {:reclaimed false :run-id (:run_id row)}
-        ;; still pending and not ours: another caller took it over. The flag says
-        ;; so; a sentence here would be prose in the base for no reader.
-        :else {:reclaimed false :pending true}))))
+  (let [token (str (random-uuid))
+        cur (db/fetch-one conn ["SELECT run_id, owner_token FROM run_idempotency
+                                   WHERE key = ?" key])]
+    (cond
+      (nil? cur) {:reclaimed false :missing true}
+      (:run_id cur) {:reclaimed false :run-id (:run_id cur)}
+      :else
+      (do
+        (let [changed (db/update-count!
+                       conn
+                       ["UPDATE run_idempotency
+                           SET digest = ?, created_at = ?, owner_token = ?, reclaimed_by = ?
+                           WHERE key = ? AND run_id IS NULL
+                             AND ((owner_token = ?) OR (owner_token IS NULL AND ? IS NULL))"
+                        digest (db/now) token token key
+                        (:owner_token cur) (:owner_token cur)])]
+          (if (pos? changed)
+            {:reclaimed true :owner token}
+            (let [now-row (db/fetch-one conn ["SELECT run_id FROM run_idempotency
+                                                 WHERE key = ?" key])]
+              (if (:run_id now-row)
+                {:reclaimed false :run-id (:run_id now-row)}
+                {:reclaimed false :pending true}))))))))
 
 (defn bind-idempotency-run!
-  "Record which run a claimed key produced, so a later ask can be answered."
-  [conn key run-id]
-  (db/execute! conn ["UPDATE run_idempotency SET run_id = ? WHERE key = ?" run-id key])
-  nil)
+  "Record which run a claimed key produced — but only for the caller that still
+  OWNS the key.
+
+  `owner` is the token `claim-idempotency-key!` or `reclaim-idempotency-key!`
+  returned. A claimant that was merely PAUSED while its claim was reclaimed still
+  holds a run it started, and must not overwrite the binding of the run that
+  replaced it: its bind matches no row and returns false, which is how it learns
+  to abandon its own run. Returns true when the binding was recorded."
+  ([conn key run-id] (bind-idempotency-run! conn key run-id nil))
+  ([conn key run-id owner]
+   (pos? (db/update-count!
+          conn
+          (if owner
+            ["UPDATE run_idempotency SET run_id = ?
+                WHERE key = ? AND owner_token = ? AND run_id IS NULL" run-id key owner]
+            ["UPDATE run_idempotency SET run_id = ?
+                WHERE key = ? AND run_id IS NULL" run-id key])))))
 
 (defn idempotency-run
   "The run a key produced, or nil."

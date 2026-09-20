@@ -176,8 +176,17 @@
                                                       ;; branch opens, so the
                                                       ;; opening prompt carries it
                                                       (context-selection/bind-decision! rid decision)
+                                                      ;; Only the caller that still OWNS the
+                                                      ;; key may bind. A claim reclaimed while
+                                                      ;; this request was paused belongs to
+                                                      ;; somebody else now, and this run is
+                                                      ;; aborted rather than left running
+                                                      ;; beside the one that replaced it.
                                                       (when idem-key
-                                                        (runs/bind-idempotency-run! conn idem-key rid))
+                                                        (when-not (runs/bind-idempotency-run!
+                                                                   conn idem-key rid
+                                                                   (:owner claim))
+                                                          (reset! abort true)))
                                                       (swap! active assoc rid
                                                              {:abort abort
                                                               :cancel (fn [] (some-> @cancel* (apply [])))})

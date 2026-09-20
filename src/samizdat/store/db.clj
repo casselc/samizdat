@@ -112,6 +112,20 @@
   ([conn q] (with-conn (jdbc/execute! conn q)))
   ([conn q opts] (with-conn (jdbc/execute! conn q opts))))
 
+(defn update-count!
+  "Run one statement and return how many rows it changed, INSIDE ONE lock.
+
+  `execute!` then a separate `SELECT changes()` is two acquisitions of the
+  connection lock, and `changes()` is a property of the CONNECTION rather than of
+  a statement — so between the two calls another thread's write can land and be
+  counted as this one's. That is not hypothetical: a compare-and-swap written
+  that way handed two of four concurrent callers the same claim. `locking` is
+  reentrant, so nesting inside `with-conn` is safe."
+  [conn q]
+  (with-conn
+    (jdbc/execute! conn q)
+    (or (:n (jdbc/fetch-one conn ["SELECT changes() AS n"])) 0)))
+
 (defn last-insert-id
   "clojure.jdbc has no last-insert-id — it was jolt-lang/db's own helper, and it
   called sqlite's last_insert_rowid(). Asking for that directly keeps every call

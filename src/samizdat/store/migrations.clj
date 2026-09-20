@@ -778,7 +778,22 @@
   NULL` matches for exactly one caller, whatever the interleaving."
   ["ALTER TABLE run_idempotency ADD COLUMN reclaimed_by TEXT"])
 
+(def ^:private v31
+  "Who currently owns a claim.
+
+  `reclaimed_by` (v30) records that a takeover happened; it does not say who may
+  act now, and two things need that. A reclaimed key's ORIGINAL claimant can
+  still be alive — paused, not dead — and must be fenced out rather than allowed
+  to bind a second run over the first. And a caller that crashes AFTER reclaiming
+  must itself be recoverable, which a set-once column cannot express.
+
+  `owner_token` is the current holder: set when the key is claimed, moved by a
+  reclaim, and checked when a run is bound. Ownership can move any number of
+  times, so a second crash is as recoverable as the first, while a bind from a
+  caller that no longer owns the key matches no row."
+  ["ALTER TABLE run_idempotency ADD COLUMN owner_token TEXT"])
+
 (def migrations
   "Ordered. Index 0 is migration 1; PRAGMA user_version holds the count applied."
   [v1 v2 v3 v4 v5 v6 v7 v8 v9 v10 v11 v12 v13 v14 v15 v16 v17 v18 v19 v20 v21 v22 v23 v24
-   v25 v26 v27 v28 v29 v30])
+   v25 v26 v27 v28 v29 v30 v31])
