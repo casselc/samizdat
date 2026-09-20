@@ -53,6 +53,7 @@
    "experiment-line" "experiment-tool" "explore-cap" "failure-log"
    "fetch-turn-miss" "file-thrash" "file-tool" "fork-thesis"
    "glob-tool" "grep-tool" "image-denied" "image-down" "image-off"
+   "idempotency-fenced" "idempotency-unresolved"
    "image-timeout" "intervene-tool" "judge" "judge-exemptions" "judge-plan" "judge-verify"
    "learned-since"
    "judge-user" "juvenile-grace" "kernel-write-refused" "last-call"

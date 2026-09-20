@@ -8,6 +8,9 @@
   has one winner, reuse with different inputs is refused rather than answered
   with the wrong run, and the claim survives a reopen because it is a row."
   (:require [clojure.test :refer [deftest is testing]]
+            [samizdat.agent.beam :as beam]
+            [samizdat.api.control :as api-control]
+            [samizdat.prompt :as prompt]
             [samizdat.store.db :as db]
             [samizdat.store.runs :as runs]))
 
@@ -132,3 +135,110 @@
       (is (false? (:claimed (runs/claim-idempotency-key! reopened "durable" "d")))
           "and a restarted client is told the run exists rather than starting a second")
       (db/close reopened))))
+
+;; --- the fence is at the START of work, not at the bind --------------------
+;;
+;; These cover the counterexample the Quint model produced (spec/idempotency.qnt
+;; in the jev-eval work product). A claimant that is merely PAUSED, not dead, has
+;; its key reclaimed; with the fence at bind time it went on to select a workflow
+;; and run a whole beam, discovering the reclaim only when it tried to bind. That
+;; prevents a duplicate binding while permitting duplicate WORK and untracked
+;; spending. `begin-execution!` moves the fence ahead of every provider call.
+
+(deftest a-key-whose-execution-began-is-never-reclaimed
+  (let [conn (db/open! ":memory:")
+        c (runs/claim-idempotency-key! conn "started" "d")]
+    (is (true? (runs/begin-execution! conn "started" (:owner c) "e1"))
+        "the owner may begin work exactly once")
+    (let [r (runs/reclaim-idempotency-key! conn "started" "d")]
+      (is (false? (:reclaimed r))
+          "work may have begun, so a takeover would be a SECOND execution")
+      (is (true? (:unresolved r)))
+      (is (= "e1" (:exec-id r))))))
+
+(deftest no-work-started-is-distinguished-from-outcome-unknown
+  (testing "claimed, nothing begun: recoverable"
+    (let [conn (db/open! ":memory:")]
+      (runs/claim-idempotency-key! conn "a" "d")
+      (let [again (runs/claim-idempotency-key! conn "a" "d")]
+        (is (true? (:pending again)))
+        (is (nil? (:unresolved again))))
+      (is (true? (:reclaimed (runs/reclaim-idempotency-key! conn "a" "d"))))))
+  (testing "execution begun, no run bound: outcome unknown, blocked"
+    (let [conn (db/open! ":memory:")
+          c (runs/claim-idempotency-key! conn "b" "d")]
+      (runs/begin-execution! conn "b" (:owner c) "e")
+      (let [again (runs/claim-idempotency-key! conn "b" "d")]
+        (is (true? (:unresolved again)))
+        (is (nil? (:pending again)))
+        (is (= "e" (:exec-id again))))
+      (is (= {:exec-id "e" :exec-started-at (:exec-started-at
+                                             (runs/unresolved-execution conn "b"))}
+             (runs/unresolved-execution conn "b"))))))
+
+(deftest only-one-caller-can-begin-execution
+  ;; four threads holding the same token: the exec_id guard admits exactly one,
+  ;; so a retry storm cannot produce four runs for one key.
+  (let [conn (db/open! ":memory:")
+        c (runs/claim-idempotency-key! conn "race" "d")
+        wins (atom 0)
+        threads (doall (for [i (range 4)]
+                         (Thread. (fn []
+                                    (when (runs/begin-execution!
+                                           conn "race" (:owner c) (str "e" i))
+                                      (swap! wins inc))))))]
+    (doseq [t threads] (.start t))
+    (doseq [t threads] (.join t))
+    (is (= 1 @wins) "exactly one execution identity is recorded")))
+
+(deftest a-fenced-claimant-is-not-merely-unbound-it-starts-nothing
+  ;; The counterexample driven through the REAL handler with a paused claimant.
+  ;; The pause is placed exactly where the model puts it: between this request's
+  ;; claim and its start of work. `beam/run!` must never be entered - not aborted
+  ;; after the fact, never entered - because entering it is the spend.
+  (let [c (db/open! ":memory:")
+        beam-calls (atom 0)
+        real-begin runs/begin-execution!]
+    (try
+      (with-redefs [beam/run! (fn [{:keys [on-start]}]
+                                (swap! beam-calls inc)
+                                (let [rid (runs/start-run! c {:problem "p"})]
+                                  (on-start rid)
+                                  {:status :completed :run-id rid}))
+                    ;; the claimant is paused here; a reclaim lands in the window
+                    runs/begin-execution! (fn [conn key owner exec-id]
+                                            (runs/reclaim-idempotency-key! conn key "other")
+                                            (real-begin conn key owner exec-id))]
+        (let [r (api-control/start-run!
+                 {:conn c :config {:llm {:provider :local :model "m"}}}
+                 {:problem "p" :idempotency_key "k"})]
+          (is (= 409 (:status r)))
+          (is (= "idempotency_fenced" (get-in r [:body :error :type])))
+          (is (zero? @beam-calls)
+              "the fenced claimant made no provider call, not even workflow selection")
+          (is (nil? (runs/idempotency-run c "k"))
+              "and bound nothing")))
+      (finally (db/close c)))))
+
+(deftest an-unresolved-execution-blocks-the-handler-even-with-reclaim-requested
+  ;; `reclaim_idempotency` is the caller asserting the earlier attempt started
+  ;; nothing. Once an execution identity exists that assertion is false, and the
+  ;; request is refused rather than granted a second execution.
+  (let [c (db/open! ":memory:")]
+    (try
+      (let [body {:problem "p" :idempotency_key "u" :reclaim_idempotency true}
+            digest (str (hash ["p" nil nil nil nil]))
+            claim (runs/claim-idempotency-key! c "u" digest)]
+        (runs/begin-execution! c "u" (:owner claim) "e-live")
+        (let [r (api-control/start-run!
+                 {:conn c :config {:llm {:provider :local :model "m"}}} body)]
+          (is (= 409 (:status r)))
+          (is (= "idempotency_unresolved" (get-in r [:body :error :type])))
+          (is (= "e-live" (get-in r [:body :exec_id])))))
+      (finally (db/close c)))))
+
+(deftest the-refusal-sentences-live-in-templates
+  ;; Every word a caller reads has to be editable without a rebuild, same as the
+  ;; model-facing prose. These two are refusals a caller acts on.
+  (is (re-find #"reconcile" (prompt/prompt "idempotency-unresolved")))
+  (is (re-find #"started nothing" (prompt/prompt "idempotency-fenced"))))

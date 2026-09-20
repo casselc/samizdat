@@ -361,11 +361,19 @@
   both claim it."
   [conn key digest]
   (let [token (str (random-uuid))
-        existing (db/fetch-one conn ["SELECT key, run_id, digest, created_at
+        existing (db/fetch-one conn ["SELECT key, run_id, digest, created_at,
+                                             exec_id, exec_started_at
                                         FROM run_idempotency WHERE key = ?" key])]
     (cond
       (and existing (not= (:digest existing) digest))
       {:conflict true :digest (:digest existing) :run-id (:run_id existing)}
+
+      ;; Unbound, but execution BEGAN: the outcome is unknown, not merely pending.
+      ;; Reclaiming it would start a second execution beside one that may still be
+      ;; running, so it is reported as unresolved and blocks.
+      (and existing (nil? (:run_id existing)) (:exec_id existing))
+      {:claimed false :unresolved true :exec-id (:exec_id existing)
+       :claimed-at (:created_at existing) :exec-started-at (:exec_started_at existing)}
 
       (and existing (nil? (:run_id existing)))
       {:claimed false :pending true :claimed-at (:created_at existing)}
@@ -383,12 +391,16 @@
           ;; the winner left is read back — and a winner that has not bound a run
           ;; yet is PENDING, not an existing run with a nil id. Answering the
           ;; latter would let a caller replay a run that does not exist.
-          (let [won (db/fetch-one conn ["SELECT run_id, digest, created_at
+          (let [won (db/fetch-one conn ["SELECT run_id, digest, created_at,
+                                                exec_id, exec_started_at
                                            FROM run_idempotency WHERE key = ?" key])]
             (cond
               (nil? won) {:claimed false :pending true}
               (not= (:digest won) digest) {:conflict true :digest (:digest won)
                                            :run-id (:run_id won)}
+              (and (nil? (:run_id won)) (:exec_id won))
+              {:claimed false :unresolved true :exec-id (:exec_id won)
+               :claimed-at (:created_at won) :exec-started-at (:exec_started_at won)}
               (nil? (:run_id won)) {:claimed false :pending true
                                     :claimed-at (:created_at won)}
               :else {:claimed false :run-id (:run_id won)})))))))
@@ -407,28 +419,69 @@
   it would be a second run doing the same work."
   [conn key digest]
   (let [token (str (random-uuid))
-        cur (db/fetch-one conn ["SELECT run_id, owner_token FROM run_idempotency
-                                   WHERE key = ?" key])]
+        cur (db/fetch-one conn ["SELECT run_id, owner_token, exec_id, exec_started_at
+                                    FROM run_idempotency WHERE key = ?" key])]
     (cond
       (nil? cur) {:reclaimed false :missing true}
       (:run_id cur) {:reclaimed false :run-id (:run_id cur)}
+      ;; Execution began and no run is bound: the outcome is UNKNOWN. Taking the
+      ;; key over would start a second execution beside work that may still be
+      ;; running and may already have spent. Blocked until the run is reconciled.
+      (:exec_id cur) {:reclaimed false :unresolved true :exec-id (:exec_id cur)
+                      :exec-started-at (:exec_started_at cur)}
       :else
       (do
         (let [changed (db/update-count!
                        conn
                        ["UPDATE run_idempotency
                            SET digest = ?, created_at = ?, owner_token = ?, reclaimed_by = ?
-                           WHERE key = ? AND run_id IS NULL
+                           WHERE key = ? AND run_id IS NULL AND exec_id IS NULL
                              AND ((owner_token = ?) OR (owner_token IS NULL AND ? IS NULL))"
                         digest (db/now) token token key
                         (:owner_token cur) (:owner_token cur)])]
           (if (pos? changed)
             {:reclaimed true :owner token}
-            (let [now-row (db/fetch-one conn ["SELECT run_id FROM run_idempotency
+            (let [now-row (db/fetch-one conn ["SELECT run_id, exec_id FROM run_idempotency
                                                  WHERE key = ?" key])]
-              (if (:run_id now-row)
-                {:reclaimed false :run-id (:run_id now-row)}
-                {:reclaimed false :pending true}))))))))
+              (cond
+                (:run_id now-row) {:reclaimed false :run-id (:run_id now-row)}
+                (:exec_id now-row) {:reclaimed false :unresolved true
+                                    :exec-id (:exec_id now-row)}
+                :else {:reclaimed false :pending true}))))))))
+
+(defn begin-execution!
+  "Turn an OWNED claim into a durable execution identity, atomically, BEFORE any
+  provider call is made — including workflow selection.
+
+  This is the fence. It is one statement, so ownership is re-checked and the
+  execution identity is recorded in the same transition: there is no window in
+  which a caller has verified it owns the key and not yet recorded that work is
+  starting. Checking ownership and then starting work as two steps is NOT a fence
+  — a reclaim lands in the gap and both callers proceed. `spec/buggy.qnt` in the
+  jev-eval work product models that exact mistake and the model refutes it.
+
+  Returns true for the one caller that may start work. False means the claim was
+  reclaimed away while this request was paused: the caller must NOT start a run,
+  and since nothing was spent there is nothing to reconcile.
+
+  Once this succeeds the key is never reclaimed — see `reclaim-idempotency-key!`."
+  [conn key owner exec-id]
+  (pos? (db/update-count!
+         conn
+         ["UPDATE run_idempotency SET exec_id = ?, exec_started_at = ?
+             WHERE key = ? AND owner_token = ? AND exec_id IS NULL AND run_id IS NULL"
+          exec-id (db/now) key owner])))
+
+(defn unresolved-execution
+  "The execution identity of a key whose work began and never bound a run, or nil.
+
+  This is the `work outcome unknown` state: something may have run and may have
+  spent. It is reported so the unit can be reconciled or blocked — never replaced."
+  [conn key]
+  (let [r (db/fetch-one conn ["SELECT run_id, exec_id, exec_started_at
+                                 FROM run_idempotency WHERE key = ?" key])]
+    (when (and r (nil? (:run_id r)) (:exec_id r))
+      {:exec-id (:exec_id r) :exec-started-at (:exec_started_at r)})))
 
 (defn bind-idempotency-run!
   "Record which run a claimed key produced — but only for the caller that still
@@ -439,13 +492,20 @@
   holds a run it started, and must not overwrite the binding of the run that
   replaced it: its bind matches no row and returns false, which is how it learns
   to abandon its own run. Returns true when the binding was recorded."
-  ([conn key run-id] (bind-idempotency-run! conn key run-id nil))
-  ([conn key run-id owner]
+  ([conn key run-id] (bind-idempotency-run! conn key run-id nil nil))
+  ([conn key run-id owner] (bind-idempotency-run! conn key run-id owner nil))
+  ([conn key run-id owner exec-id]
    (pos? (db/update-count!
           conn
-          (if owner
+          (cond
+            (and owner exec-id)
+            ["UPDATE run_idempotency SET run_id = ?
+                WHERE key = ? AND owner_token = ? AND exec_id = ? AND run_id IS NULL"
+             run-id key owner exec-id]
+            owner
             ["UPDATE run_idempotency SET run_id = ?
                 WHERE key = ? AND owner_token = ? AND run_id IS NULL" run-id key owner]
+            :else
             ["UPDATE run_idempotency SET run_id = ?
                 WHERE key = ? AND run_id IS NULL" run-id key])))))
 

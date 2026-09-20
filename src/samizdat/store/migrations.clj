@@ -793,7 +793,26 @@
   caller that no longer owns the key matches no row."
   ["ALTER TABLE run_idempotency ADD COLUMN owner_token TEXT"])
 
+(def ^:private v32
+  "When execution began, so a key is fenced at the START of work rather than at
+  the bind.
+
+  `owner_token` (v31) fences the BIND. That is too late: a claimant fenced out by
+  a reclaim only discovers it at bind time, after it has already selected a
+  workflow and called a provider. The mechanism then prevents a duplicate binding
+  while permitting duplicate WORK and untracked spending, which is not what an
+  idempotency key is for.
+
+  `exec_id` is written in the same statement that checks ownership, before any
+  provider call. Once it is set the key is NEVER reclaimed: work may have begun,
+  and a takeover would be a second execution. That splits the unbound states in
+  two — `exec_id IS NULL` is provably no work started and is recoverable;
+  `exec_id` set with no `run_id` is work whose outcome is UNKNOWN, which blocks
+  and is resolved by reconciling the run, not by replacing it."
+  ["ALTER TABLE run_idempotency ADD COLUMN exec_id TEXT"
+   "ALTER TABLE run_idempotency ADD COLUMN exec_started_at TEXT"])
+
 (def migrations
   "Ordered. Index 0 is migration 1; PRAGMA user_version holds the count applied."
   [v1 v2 v3 v4 v5 v6 v7 v8 v9 v10 v11 v12 v13 v14 v15 v16 v17 v18 v19 v20 v21 v22 v23 v24
-   v25 v26 v27 v28 v29 v30 v31])
+   v25 v26 v27 v28 v29 v30 v31 v32])

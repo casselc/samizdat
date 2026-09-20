@@ -107,9 +107,12 @@
         ;; starting anything. It is reported as pending rather than replayed,
         ;; because there is no run to replay; a caller that has established the
         ;; earlier attempt started nothing asks again with reclaim_idempotency.
+        ;; The owner token has to survive the reclaim. Dropping it here left
+        ;; `(:owner claim)` nil, and a nil owner takes the UNFENCED branch of
+        ;; `bind-idempotency-run!` - so the reclaiming caller was not fenced at all.
         claim (if (and reclaim? (:pending claim0))
                 (let [r (runs/reclaim-idempotency-key! conn idem-key idem-digest)]
-                  (if (:reclaimed r) {:claimed true} (merge claim0 r)))
+                  (if (:reclaimed r) {:claimed true :owner (:owner r)} (merge claim0 r)))
                 claim0)]
   ;; A {} body used to start a REAL run on a nil problem — a selection model
   ;; call plus a full beam of provider spend answering nothing, while
@@ -144,6 +147,17 @@
                     :type "idempotency_pending"}
             :pending true :claimed_at (:claimed-at claim)}}
 
+    ;; Execution BEGAN and no run was ever bound: the outcome is unknown. This is
+    ;; not the pending case and `reclaim_idempotency` does not clear it - work may
+    ;; be running and may already have spent. The unit blocks until the run is
+    ;; reconciled, because replacing it would be a second execution.
+    (and claim (:unresolved claim))
+    {:status 409
+     :body {:error {:message (str/trim (prompt/render "idempotency-unresolved" {}))
+                    :type "idempotency_unresolved"}
+            :unresolved true :exec_id (:exec-id claim)
+            :exec_started_at (:exec-started-at claim)}}
+
     ;; somebody already started this unit of work: answer with THAT run
     (and claim (not (:claimed claim)))
     {:body {:run_id (:run-id claim) :status "existing"
@@ -152,14 +166,26 @@
     :else
   (let [llm-config (run-llm-config (:llm config) body)
         adapter (registry/adapter-for (:provider llm-config))
+        exec-id (when idem-key (str (random-uuid)))
+        ;; THE FENCE, and it is placed BEFORE any provider call rather than at the
+        ;; bind. The workflow-selection call below runs before the run row exists
+        ;; (see :run-start-deadline-ms), so a fence at bind time lets a claimant
+        ;; that was reclaimed away select a workflow and spend before it finds out.
+        ;; One statement re-checks ownership and records the execution identity, so
+        ;; there is no gap between the two. False means this caller lost the key
+        ;; while paused: it starts nothing, and since nothing ran there is nothing
+        ;; to reconcile.
+        began? (or (nil? idem-key)
+                   (runs/begin-execution! conn idem-key (:owner claim) exec-id))
         abort (atom false)
         promised (promise)
         cancel* (atom nil)
         ;; The run is a TASK (RFC-013): abort cancels it, and the cancel is
         ;; observed at the round's next step or a turn's next check. The abort
         ;; flag stays beside it for the waits a cancel cannot reach.
-        started (cancel/start!
-                 (cancel/spawn
+        started (when began?
+                  (cancel/start!
+                   (cancel/spawn
                   (fn []
                     (try
                       (let [r (beam/run! {:conn conn :config config
@@ -185,7 +211,7 @@
                                                       (when idem-key
                                                         (when-not (runs/bind-idempotency-run!
                                                                    conn idem-key rid
-                                                                   (:owner claim))
+                                                                   (:owner claim) exec-id)
                                                           (reset! abort true)))
                                                       (swap! active assoc rid
                                                              {:abort abort
@@ -208,7 +234,7 @@
                           (swap! active dissoc rid)
                           (context-selection/release! rid)
                           (approval/abandon! rid))
-                        {:status :error :error (ex-message e)})))))
+                        {:status :error :error (ex-message e)}))))))
         _ (reset! cancel* (:cancel started))
         ;; How long the request waits for the run row before answering 503.
         ;; gates.edn :run-start-deadline-ms: the selection model call runs
@@ -216,8 +242,16 @@
         ;; live (2026-09-07), so a 30 s literal here answered 503 to a run
         ;; that then started anyway.
         start-deadline (lexicon/policy :run-start-deadline-ms)
-        run-id (deref promised start-deadline nil)]
-    (if run-id
+        run-id (when began? (deref promised start-deadline nil))]
+    (cond
+      ;; Lost the key to a reclaim while this request was paused. Nothing started,
+      ;; so nothing is owed and nothing needs reconciling.
+      (not began?)
+      {:status 409
+       :body {:error {:message (str/trim (prompt/render "idempotency-fenced" {}))
+                      :type "idempotency_fenced"}}}
+
+      run-id
       ;; Wrapped in :body like resume, so one route shape serves both the
       ;; success and the refusal and neither has to be special-cased.
       {:body {:run_id run-id :status "running"
@@ -225,6 +259,7 @@
               :beam_width (or beam-width (get-in config [:run :beam-width]))
               :max_turns (or max-turns (get-in config [:run :max-turns]))
               :token_budget (or token-budget (get-in config [:run :token-budget]))}}
+      :else
       ;; 503, not 200: the request was well formed and the server could not
       ;; service it. Answering 200 with an error body made a caller that checks
       ;; the status code read this as a started run, which is why gui.api's
