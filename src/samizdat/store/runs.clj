@@ -405,6 +405,25 @@
                                     :claimed-at (:created_at won)}
               :else {:claimed false :run-id (:run_id won)})))))))
 
+(def default-lease-ms
+  "How old an unbound claim must be before anyone may take it over.
+
+  The reclaim used to have no staleness criterion at all: it read the current owner and
+  compare-and-swapped on it, so a claim made an instant ago was as reclaimable as one
+  abandoned an hour ago. Two concurrent callers therefore both succeeded - the second
+  reading the owner the first had just installed and swapping it again - and the four-
+  thread test that asserted one winner was asserting a timing accident.
+
+  A model of the protocol (spec/reclaim.qnt in the jev-eval work product) makes the
+  distinction precise: without a lease, `noClaimIsStolenWhileFresh` is violated and the
+  second caller takes the first's brand-new claim in 16% of sampled traces. With one, that
+  never happens, while ownership can still move repeatedly over time - which is what
+  recovery after a SECOND crash depends on.
+
+  Five minutes is longer than any start-to-bind window and far shorter than a human
+  noticing a stuck key."
+  (* 5 60 1000))
+
 (defn reclaim-idempotency-key!
   "Take over a PENDING claim — one whose run was never bound, because the caller
   that made it died before starting anything.
@@ -417,9 +436,12 @@
   recoverable as the first one was. A set-once column left no second recovery. A
   claim with a run bound to it is never reclaimed — that run exists, and replaying
   it would be a second run doing the same work."
-  [conn key digest]
+  ([conn key digest] (reclaim-idempotency-key! conn key digest default-lease-ms))
+  ([conn key digest lease-ms]
   (let [token (str (random-uuid))
-        cur (db/fetch-one conn ["SELECT run_id, owner_token, exec_id, exec_started_at
+        stale-before (db/iso-millis (.minusMillis (java.time.Instant/now) (long lease-ms)))
+        cur (db/fetch-one conn ["SELECT run_id, owner_token, exec_id, exec_started_at,
+                                        created_at
                                     FROM run_idempotency WHERE key = ?" key])]
     (cond
       (nil? cur) {:reclaimed false :missing true}
@@ -436,18 +458,23 @@
                        ["UPDATE run_idempotency
                            SET digest = ?, created_at = ?, owner_token = ?, reclaimed_by = ?
                            WHERE key = ? AND run_id IS NULL AND exec_id IS NULL
+                             AND created_at <= ?
                              AND ((owner_token = ?) OR (owner_token IS NULL AND ? IS NULL))"
-                        digest (db/now) token token key
+                        digest (db/now) token token key stale-before
                         (:owner_token cur) (:owner_token cur)])]
           (if (pos? changed)
             {:reclaimed true :owner token}
-            (let [now-row (db/fetch-one conn ["SELECT run_id, exec_id FROM run_idempotency
-                                                 WHERE key = ?" key])]
+            (let [now-row (db/fetch-one conn ["SELECT run_id, exec_id, created_at
+                                                  FROM run_idempotency WHERE key = ?" key])]
               (cond
                 (:run_id now-row) {:reclaimed false :run-id (:run_id now-row)}
                 (:exec_id now-row) {:reclaimed false :unresolved true
                                     :exec-id (:exec_id now-row)}
-                :else {:reclaimed false :pending true}))))))))
+                ;; The claim exists and is unbound, so what stopped the swap was either
+                ;; the lease or another reclaimer getting there first. Both mean the same
+                ;; thing to the caller: not yours, try again later.
+                :else {:reclaimed false :pending true
+                       :fresh (> (compare (str (:created_at now-row)) stale-before) 0)})))))))))
 
 (defn begin-execution!
   "Turn an OWNED claim into a durable execution identity, atomically, BEFORE any

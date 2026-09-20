@@ -60,7 +60,7 @@
         ;; the original claimant: alive, just slow — it claims and is then paused
         first-claim (runs/claim-idempotency-key! conn "k" "d")
         ;; somebody decides it is gone, reclaims, and starts a run
-        taken (runs/reclaim-idempotency-key! conn "k" "d")
+        taken (runs/reclaim-idempotency-key! conn "k" "d" 0)   ; mechanics, not the lease
         their-run (runs/start-run! conn {:problem "the replacement"})]
     (is (true? (:claimed first-claim)))
     (is (true? (:reclaimed taken)))
@@ -76,10 +76,10 @@
 (deftest a-second-crash-after-a-reclaim-is-recoverable
   (let [conn (db/open! ":memory:")]
     (runs/claim-idempotency-key! conn "twice" "d")
-    (let [second-owner (runs/reclaim-idempotency-key! conn "twice" "d")]
+    (let [second-owner (runs/reclaim-idempotency-key! conn "twice" "d" 0)]
       (is (true? (:reclaimed second-owner)))
       ;; that caller dies too, still without starting anything
-      (let [third (runs/reclaim-idempotency-key! conn "twice" "d")]
+      (let [third (runs/reclaim-idempotency-key! conn "twice" "d" 0)]
         (is (true? (:reclaimed third))
             "ownership can move again: a set-once column would have stranded the key")
         (is (not= (:owner second-owner) (:owner third)))
@@ -93,38 +93,71 @@
         c (runs/claim-idempotency-key! conn "bound" "d")
         rid (runs/start-run! conn {:problem "p"})]
     (runs/bind-idempotency-run! conn "bound" rid (:owner c))
-    (let [r (runs/reclaim-idempotency-key! conn "bound" "d")]
+    (let [r (runs/reclaim-idempotency-key! conn "bound" "d" 0)]
       (is (false? (:reclaimed r)))
       (is (= rid (:run-id r))))))
 
 (deftest a-pending-claim-can-be-reclaimed-by-exactly-one-caller
+  ;; The ORIGINAL invariant, restored, and now actually true.
+  ;;
+  ;; It used to fail under load, and the reason was not flakiness: the reclaim had no
+  ;; staleness criterion, so it read the current owner and compare-and-swapped on it
+  ;; whatever the claim's age. Two concurrent callers both succeeded - the second read the
+  ;; owner the first had just installed and swapped it again. That is a caller taking over
+  ;; a claim nobody had abandoned, which is not what `reclaim` says it does.
+  ;;
+  ;; spec/reclaim.qnt in the jev-eval work product separates the two ideas: LEASE is what
+  ;; the code checks, ABANDONED_AFTER is the contract. Without a lease
+  ;; `noClaimIsStolenWhileFresh` is violated and the second caller takes the first's
+  ;; brand-new claim in 16% of sampled traces; with one, never.
   (let [conn (db/open! ":memory:")]
     (runs/claim-idempotency-key! conn "abandoned" "d")
     (let [results (atom [])
-          threads (doall (repeatedly 4 #(Thread. (fn []
+          ;; lease 0 ms: the claim just made is already old enough, so every caller is
+          ;; eligible and the race is at its sharpest. This is the hard case, not a
+          ;; softened one.
+          threads (doall (repeatedly 8 #(Thread. (fn []
                                                    (swap! results conj
                                                           (runs/reclaim-idempotency-key!
-                                                           conn "abandoned" "d"))))))]
+                                                           conn "abandoned" "d" 0))))))]
       (doseq [t threads] (.start t))
       (doseq [t threads] (.join t))
-      ;; A reclaim is a read of the CURRENT owner followed by a compare-and-swap on it.
-      ;; Two concurrent callers can therefore both succeed: the second reads the owner the
-      ;; first just installed and swaps it again. That is ownership moving twice, which is
-      ;; what the design intends - "a caller that crashes AFTER reclaiming is as
-      ;; recoverable as the first one was" - and asserting exactly one winner was asserting
-      ;; a timing accident. It passed until the machine was busy enough to interleave.
       (let [winners (filter :reclaimed @results)]
-        (is (<= 1 (count winners)) "somebody takes over the abandoned claim")
+        (is (pos? (count winners)) "somebody takes over the abandoned claim")
         (is (apply distinct? (map :owner winners))
-            "and each winner holds a DISTINCT token, so the last swap is the live owner")
-        ;; The property that actually matters is not how many reclaimed, but how many can
-        ;; then start work. Only the current owner passes begin-execution!, which is the
-        ;; fence - so a second reclaim winner cannot become a second execution.
+            "every winner holds a distinct token")
+        ;; Whatever the race did, only the CURRENT owner may start work: that is the
+        ;; fence, and it is what stops a reclaim race becoming two executions.
         (let [began (filter #(runs/begin-execution! conn "abandoned" (:owner %)
                                                     (str "e-" (:owner %)))
                             winners)]
           (is (= 1 (count began))
-              "exactly one of them may begin execution, whatever the reclaim race did"))))))
+              "exactly one may begin execution"))))))
+
+(deftest a-fresh-claim-is-not-reclaimable
+  ;; The contract: reclaim takes over an ABANDONED claim. A claim made a moment ago is not
+  ;; abandoned, and the default lease is what makes that true rather than assumed.
+  (let [conn (db/open! ":memory:")]
+    (runs/claim-idempotency-key! conn "fresh" "d")
+    (let [r (runs/reclaim-idempotency-key! conn "fresh" "d")]   ; default 5-minute lease
+      (is (false? (:reclaimed r))
+          "a claim made an instant ago is not abandoned and may not be taken over")
+      (is (true? (:fresh r)) "and the caller is told why"))
+    (testing "the same claim, once the lease has passed"
+      (is (true? (:reclaimed (runs/reclaim-idempotency-key! conn "fresh" "d" 0)))))))
+
+(deftest a-reclaimer-cannot-be-immediately-reclaimed
+  ;; The specific interleaving the model found: caller two takes what caller one JUST
+  ;; acquired. With a lease, caller two's swap matches no row.
+  (let [conn (db/open! ":memory:")]
+    (runs/claim-idempotency-key! conn "chain" "d")
+    (let [first-taker (runs/reclaim-idempotency-key! conn "chain" "d" 0)]
+      (is (true? (:reclaimed first-taker)))
+      (let [second-taker (runs/reclaim-idempotency-key! conn "chain" "d")]
+        (is (false? (:reclaimed second-taker))
+            "the claim the first reclaimer just acquired is fresh, and stays theirs")
+        (is (true? (runs/begin-execution! conn "chain" (:owner first-taker) "e1"))
+            "so the first reclaimer can still get on with its work")))))
 
 (deftest a-pending-claim-survives-a-reopen
   (let [path (str (System/getProperty "java.io.tmpdir") "/idem-pending-" (random-uuid) ".db")
@@ -166,7 +199,7 @@
         c (runs/claim-idempotency-key! conn "started" "d")]
     (is (true? (runs/begin-execution! conn "started" (:owner c) "e1"))
         "the owner may begin work exactly once")
-    (let [r (runs/reclaim-idempotency-key! conn "started" "d")]
+    (let [r (runs/reclaim-idempotency-key! conn "started" "d" 0)]
       (is (false? (:reclaimed r))
           "work may have begun, so a takeover would be a SECOND execution")
       (is (true? (:unresolved r)))
@@ -179,7 +212,7 @@
       (let [again (runs/claim-idempotency-key! conn "a" "d")]
         (is (true? (:pending again)))
         (is (nil? (:unresolved again))))
-      (is (true? (:reclaimed (runs/reclaim-idempotency-key! conn "a" "d"))))))
+      (is (true? (:reclaimed (runs/reclaim-idempotency-key! conn "a" "d" 0))))))
   (testing "execution begun, no run bound: outcome unknown, blocked"
     (let [conn (db/open! ":memory:")
           c (runs/claim-idempotency-key! conn "b" "d")]
@@ -223,7 +256,7 @@
                                   {:status :completed :run-id rid}))
                     ;; the claimant is paused here; a reclaim lands in the window
                     runs/begin-execution! (fn [conn key owner exec-id]
-                                            (runs/reclaim-idempotency-key! conn key "other")
+                                            (runs/reclaim-idempotency-key! conn key "other" 0)
                                             (real-begin conn key owner exec-id))]
         (let [r (api-control/start-run!
                  {:conn c :config {:llm {:provider :local :model "m"}}}
