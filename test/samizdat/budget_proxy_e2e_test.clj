@@ -60,34 +60,36 @@
     ((infer/complete-fn ctx {:journal? false}) tape)))
 
 (deftest the-real-harness-through-the-real-proxy
+  ;; ONE ordered scenario, not two tests. They shared a four-attempt ledger and a scripted
+  ;; response queue: the truncation half needs the first "length" reply, and the exhaustion
+  ;; half consumes the whole reservation. Run in the other order the first could not
+  ;; succeed, so what they asserted depended on which ran first - which is not a property
+  ;; of the system under test.
   (if-not (configured?)
     (println "[e2e] SKIPPED: set JEV_E2E_PROXY and JEV_E2E_UPSTREAM (see ns docstring)")
-    (let [before (:count (upstream-state))]
-      (one-turn)
-      (let [{:keys [seen count]} (upstream-state)
-            mine (drop before seen)]
-        (testing "the turn and its truncation retry both arrived"
-          (is (= 2 (clojure.core/count mine))
-              "one turn is TWO requests when the first is truncated, which is why a
-               turn cap is not a call bound"))
-        (testing "the retry is clamped by the proxy, not by the harness"
-          ;; The harness asks for 4096 then doubles to 8192. The proxy's limit here is
-          ;; 4096, BELOW the doubled ask, so the second request must arrive at 4096.
-          (is (= [4096 4096] (mapv :max_tokens mine))
-              "the harness's doubled 8192 was brought down to the proxy's 4096; the
-               ceiling is the proxy's, not whatever the caller asked for"))
-        (is (= count (+ before 2)))))))
+    (let [start (:count (upstream-state))]
+      (is (zero? start)
+          "this scenario owns the fixture: a fresh ledger and a fresh recording upstream,
+           so the counts below mean what they say")
 
-(deftest exhaustion-stops-the-upstream-seeing-anything-further
-  (if-not (configured?)
-    (println "[e2e] SKIPPED: set JEV_E2E_PROXY and JEV_E2E_UPSTREAM")
-    (do
-      ;; Keep taking turns until the reservation runs out. Each turn is two requests
-      ;; while the fixture keeps answering "length"; once it answers "stop" it is one.
-      (dotimes [_ 6] (try (one-turn) (catch Exception _ nil)))
-      (let [{:keys [count]} (upstream-state)
-            after (do (try (one-turn) (catch Exception _ nil))
-                      (:count (upstream-state)))]
-        (is (= count after)
-            "once the reservation is exhausted the upstream sees nothing further,
-             however many more turns the harness tries to take")))))
+      (testing "step 1 - the turn, and its truncation retry, both reach the provider"
+        (one-turn)
+        (let [{:keys [seen count]} (upstream-state)]
+          (is (= 2 count)
+              "one turn is TWO requests when the first is truncated, which is why a turn
+               cap is not a call bound")
+          (testing "and the retry is clamped by the PROXY, not by the harness"
+            ;; The harness asks 4096 and doubles to 8192. The fixture's limit is 4096,
+            ;; BELOW the doubled ask, so 8192 must not arrive.
+            (is (= [4096 4096] (mapv :max_tokens seen))
+                "the harness's doubled 8192 came down to the proxy's 4096"))))
+
+      (testing "step 2 - exhaustion stops anything further reaching the provider"
+        (dotimes [_ 6] (try (one-turn) (catch Exception _ nil)))
+        (let [at-cap (:count (upstream-state))]
+          (is (= 4 at-cap)
+              "the upstream saw EXACTLY the reservation - not merely 'no more than
+               before', which also passes when nothing arrived at all")
+          (try (one-turn) (catch Exception _ nil))
+          (is (= 4 (:count (upstream-state)))
+              "and nothing further arrives however many more turns are attempted"))))))

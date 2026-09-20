@@ -409,19 +409,23 @@
   "How old an unbound claim must be before anyone may take it over.
 
   The reclaim used to have no staleness criterion at all: it read the current owner and
-  compare-and-swapped on it, so a claim made an instant ago was as reclaimable as one
-  abandoned an hour ago. Two concurrent callers therefore both succeeded - the second
-  reading the owner the first had just installed and swapping it again - and the four-
-  thread test that asserted one winner was asserting a timing accident.
+  compare-and-swapped on it, so a claim made an instant ago was as takeable as one whose
+  caller vanished an hour ago. Two concurrent callers therefore both succeeded - the
+  second reading the owner the first had just installed and swapping it again.
 
-  A model of the protocol (spec/reclaim.qnt in the jev-eval work product) makes the
-  distinction precise: without a lease, `noClaimIsStolenWhileFresh` is violated and the
-  second caller takes the first's brand-new claim in 16% of sampled traces. With one, that
-  never happens, while ownership can still move repeatedly over time - which is what
-  recovery after a SECOND crash depends on.
+  WHAT THE LEASE BUYS, exactly: **no takeover before the lease expires.** That is all a
+  clock can support. It does NOT establish that the previous owner died; expiry is
+  eligibility, not abandonment, and a merely SLOW owner still loses its claim once the
+  lease passes. What makes that safe is not this number but `begin-execution!`: the
+  displaced owner's fence check fails, so it cannot become a second execution.
 
-  Five minutes is longer than any start-to-bind window and far shorter than a human
-  noticing a stuck key."
+  spec/reclaim.qnt in the jev-eval work product models the distinction. Without a lease,
+  `noTakeoverBeforeLeaseExpiry` is violated and the second caller takes the first's
+  unexpired claim in sampled traces; with one, never - while ownership can still move
+  repeatedly over time, which is what recovery after a SECOND crash depends on.
+
+  Five minutes is a starting value, not a derived one. No measurement here establishes
+  what a start-to-bind window costs; when one exists, this should be set from it."
   (* 5 60 1000))
 
 (defn reclaim-idempotency-key!

@@ -97,25 +97,14 @@
       (is (false? (:reclaimed r)))
       (is (= rid (:run-id r))))))
 
-(deftest a-pending-claim-can-be-reclaimed-by-exactly-one-caller
-  ;; The ORIGINAL invariant, restored, and now actually true.
-  ;;
-  ;; It used to fail under load, and the reason was not flakiness: the reclaim had no
-  ;; staleness criterion, so it read the current owner and compare-and-swapped on it
-  ;; whatever the claim's age. Two concurrent callers both succeeded - the second read the
-  ;; owner the first had just installed and swapped it again. That is a caller taking over
-  ;; a claim nobody had abandoned, which is not what `reclaim` says it does.
-  ;;
-  ;; spec/reclaim.qnt in the jev-eval work product separates the two ideas: LEASE is what
-  ;; the code checks, ABANDONED_AFTER is the contract. Without a lease
-  ;; `noClaimIsStolenWhileFresh` is violated and the second caller takes the first's
-  ;; brand-new claim in 16% of sampled traces; with one, never.
+(deftest a-reclaim-race-still-yields-exactly-one-execution
+  ;; NOT an ownership test, and named so it cannot be mistaken for one. With a zero lease
+  ;; a claim is eligible the instant it is made, so a newly acquired claim is immediately
+  ;; eligible again and several callers legitimately reclaim in turn. What this pins is
+  ;; the fence underneath: however the race goes, only the CURRENT owner starts work.
   (let [conn (db/open! ":memory:")]
     (runs/claim-idempotency-key! conn "abandoned" "d")
     (let [results (atom [])
-          ;; lease 0 ms: the claim just made is already old enough, so every caller is
-          ;; eligible and the race is at its sharpest. This is the hard case, not a
-          ;; softened one.
           threads (doall (repeatedly 8 #(Thread. (fn []
                                                    (swap! results conj
                                                           (runs/reclaim-idempotency-key!
@@ -123,41 +112,92 @@
       (doseq [t threads] (.start t))
       (doseq [t threads] (.join t))
       (let [winners (filter :reclaimed @results)]
-        (is (pos? (count winners)) "somebody takes over the abandoned claim")
-        (is (apply distinct? (map :owner winners))
-            "every winner holds a distinct token")
-        ;; Whatever the race did, only the CURRENT owner may start work: that is the
-        ;; fence, and it is what stops a reclaim race becoming two executions.
+        (is (pos? (count winners)) "somebody takes over the eligible claim")
+        (is (apply distinct? (map :owner winners)) "every winner holds a distinct token")
         (let [began (filter #(runs/begin-execution! conn "abandoned" (:owner %)
                                                     (str "e-" (:owner %)))
                             winners)]
           (is (= 1 (count began))
-              "exactly one may begin execution"))))))
+              "exactly one may begin execution, whatever the reclaim race did"))))))
 
-(deftest a-fresh-claim-is-not-reclaimable
-  ;; The contract: reclaim takes over an ABANDONED claim. A claim made a moment ago is not
-  ;; abandoned, and the default lease is what makes that true rather than assumed.
+(defn- age-claim!
+  "Backdate a claim so it is older than `ms`, giving the lease a controlled clock.
+
+  The lease is measured against `created_at`, so moving that is moving time as far as
+  the reclaim is concerned - without sleeping, and without making the test's outcome
+  depend on how busy the machine is."
+  [conn key ms]
+  (db/execute! conn ["UPDATE run_idempotency SET created_at = ? WHERE key = ?"
+                     (db/iso-millis (.minusMillis (java.time.Instant/now) (long (+ ms 1000))))
+                     key]))
+
+(deftest exactly-one-reclaimer-wins-an-expired-claim
+  ;; THE OWNERSHIP TEST. A positive lease, an expired claim, controlled time, eight
+  ;; competing reclaimers: exactly one takes it. The winner's swap sets created_at to now,
+  ;; so the claim it now holds is unexpired and the other seven match no row.
+  (let [conn (db/open! ":memory:")
+        lease (* 5 60 1000)]
+    (runs/claim-idempotency-key! conn "expired" "d")
+    (age-claim! conn "expired" lease)
+    (let [results (atom [])
+          threads (doall (repeatedly 8 #(Thread. (fn []
+                                                   (swap! results conj
+                                                          (runs/reclaim-idempotency-key!
+                                                           conn "expired" "d" lease))))))]
+      (doseq [t threads] (.start t))
+      (doseq [t threads] (.join t))
+      (let [winners (filter :reclaimed @results)]
+        (is (= 1 (count winners))
+            "exactly one reclaimer takes an expired claim; the rest find it unexpired
+             again because the winner's swap renewed it")
+        (is (every? #(true? (:fresh %)) (remove :reclaimed @results))
+            "and the losers are told the claim is unexpired, not that it is missing")
+
+        (testing "the renewed lease then protects the new owner"
+          (is (false? (:reclaimed (runs/reclaim-idempotency-key! conn "expired" "d" lease)))
+              "a ninth caller arriving immediately finds the claim unexpired"))
+
+        (testing "and once THAT lease expires, recovery is possible again"
+          ;; Which is what a second crash depends on: ownership has to be able to move
+          ;; more than once.
+          (age-claim! conn "expired" lease)
+          (let [second-recovery (runs/reclaim-idempotency-key! conn "expired" "d" lease)]
+            (is (true? (:reclaimed second-recovery))
+                "the expired claim of the first reclaimer can itself be taken over")
+            (is (not= (:owner (first winners)) (:owner second-recovery)))
+            (is (true? (runs/begin-execution! conn "expired" (:owner second-recovery) "e2"))
+                "and the latest owner is the one that may start work")
+            (is (false? (runs/begin-execution! conn "expired" (:owner (first winners)) "e1"))
+                "while the owner it displaced cannot - which is what makes losing a
+                 lease safe even when the loser was merely slow rather than dead")))))))
+
+(deftest a-claim-is-not-reclaimable-before-its-lease-expires
+  ;; The guarantee, stated as narrowly as it is true: no takeover BEFORE expiry. It says
+  ;; nothing about whether the holder is alive.
   (let [conn (db/open! ":memory:")]
     (runs/claim-idempotency-key! conn "fresh" "d")
-    (let [r (runs/reclaim-idempotency-key! conn "fresh" "d")]   ; default 5-minute lease
+    (let [r (runs/reclaim-idempotency-key! conn "fresh" "d")]   ; default lease
       (is (false? (:reclaimed r))
-          "a claim made an instant ago is not abandoned and may not be taken over")
+          "a claim made an instant ago has not expired and may not be taken over")
       (is (true? (:fresh r)) "and the caller is told why"))
-    (testing "the same claim, once the lease has passed"
-      (is (true? (:reclaimed (runs/reclaim-idempotency-key! conn "fresh" "d" 0)))))))
+    (testing "once it has expired, it is eligible - eligible, not known to be dead"
+      (age-claim! conn "fresh" (* 5 60 1000))
+      (is (true? (:reclaimed (runs/reclaim-idempotency-key! conn "fresh" "d")))))))
 
 (deftest a-reclaimer-cannot-be-immediately-reclaimed
   ;; The specific interleaving the model found: caller two takes what caller one JUST
-  ;; acquired. With a lease, caller two's swap matches no row.
-  (let [conn (db/open! ":memory:")]
+  ;; acquired. Under a lease, caller two's swap matches no row.
+  (let [conn (db/open! ":memory:")
+        lease (* 5 60 1000)]
     (runs/claim-idempotency-key! conn "chain" "d")
-    (let [first-taker (runs/reclaim-idempotency-key! conn "chain" "d" 0)]
+    (age-claim! conn "chain" lease)
+    (let [first-taker (runs/reclaim-idempotency-key! conn "chain" "d" lease)]
       (is (true? (:reclaimed first-taker)))
-      (let [second-taker (runs/reclaim-idempotency-key! conn "chain" "d")]
+      (let [second-taker (runs/reclaim-idempotency-key! conn "chain" "d" lease)]
         (is (false? (:reclaimed second-taker))
-            "the claim the first reclaimer just acquired is fresh, and stays theirs")
+            "the claim the first reclaimer just acquired has not expired, and stays theirs")
         (is (true? (runs/begin-execution! conn "chain" (:owner first-taker) "e1"))
-            "so the first reclaimer can still get on with its work")))))
+            "so the first reclaimer can get on with its work")))))
 
 (deftest a-pending-claim-survives-a-reopen
   (let [path (str (System/getProperty "java.io.tmpdir") "/idem-pending-" (random-uuid) ".db")
