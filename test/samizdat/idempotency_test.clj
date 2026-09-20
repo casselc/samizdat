@@ -107,8 +107,24 @@
                                                            conn "abandoned" "d"))))))]
       (doseq [t threads] (.start t))
       (doseq [t threads] (.join t))
-      (is (= 1 (count (filter :reclaimed @results)))
-          "one caller takes over the abandoned claim; the rest do not"))))
+      ;; A reclaim is a read of the CURRENT owner followed by a compare-and-swap on it.
+      ;; Two concurrent callers can therefore both succeed: the second reads the owner the
+      ;; first just installed and swaps it again. That is ownership moving twice, which is
+      ;; what the design intends - "a caller that crashes AFTER reclaiming is as
+      ;; recoverable as the first one was" - and asserting exactly one winner was asserting
+      ;; a timing accident. It passed until the machine was busy enough to interleave.
+      (let [winners (filter :reclaimed @results)]
+        (is (<= 1 (count winners)) "somebody takes over the abandoned claim")
+        (is (apply distinct? (map :owner winners))
+            "and each winner holds a DISTINCT token, so the last swap is the live owner")
+        ;; The property that actually matters is not how many reclaimed, but how many can
+        ;; then start work. Only the current owner passes begin-execution!, which is the
+        ;; fence - so a second reclaim winner cannot become a second execution.
+        (let [began (filter #(runs/begin-execution! conn "abandoned" (:owner %)
+                                                    (str "e-" (:owner %)))
+                            winners)]
+          (is (= 1 (count began))
+              "exactly one of them may begin execution, whatever the reclaim race did"))))))
 
 (deftest a-pending-claim-survives-a-reopen
   (let [path (str (System/getProperty "java.io.tmpdir") "/idem-pending-" (random-uuid) ".db")

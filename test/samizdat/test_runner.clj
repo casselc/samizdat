@@ -111,6 +111,7 @@
             [samizdat.source-test]
             [samizdat.security.secrets-test]
             [samizdat.config-test]
+            [samizdat.budget-proxy-routing-test]
             [samizdat.context-selection-test]
             [samizdat.idempotency-test]
             [samizdat.files-test]
@@ -297,6 +298,7 @@
     samizdat.source-test
     samizdat.security.secrets-test
     samizdat.config-test
+    samizdat.budget-proxy-routing-test
     samizdat.context-selection-test
     samizdat.idempotency-test
     samizdat.files-test
