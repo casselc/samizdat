@@ -112,6 +112,7 @@
             [samizdat.security.secrets-test]
             [samizdat.config-test]
             [samizdat.context-selection-test]
+            [samizdat.idempotency-test]
             [samizdat.files-test]
             [samizdat.edit-test]
             [samizdat.eval-mode-test]
@@ -297,6 +298,7 @@
     samizdat.security.secrets-test
     samizdat.config-test
     samizdat.context-selection-test
+    samizdat.idempotency-test
     samizdat.files-test
     samizdat.edit-test
     samizdat.eval-mode-test

@@ -738,6 +738,12 @@
     ;; the field and the required key so a client can fix its request.
     "{:selected [{:id \"kind:name\"} ...]} with a "
     "string id on every selection"
+    ;; The two idempotency refusals, also caller-facing: one says the key was
+    ;; used with different inputs, the other that it is claimed with no run
+    ;; behind it. A client reads these to decide whether to reclaim; no model
+    ;; ever sees them.
+    "idempotency_key already used with different inputs"
+    "idempotency_key is claimed but no run was started"
     }
 
    "src/samizdat/agent/context_selection.clj"

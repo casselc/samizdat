@@ -93,7 +93,24 @@
         ;; Context selection, bound to THIS run (samizdat-context-selection/1).
         ;; Absent is the normal case and means today's behaviour.
         decision (or (:context_decision body) (:context-decision body)
-                     (get body "context_decision"))]
+                     (get body "context_decision"))
+        ;; A caller that cannot tell whether its POST started a run names its
+        ;; request, and asking again with the same name answers with the same
+        ;; run instead of starting a second one.
+        idem-key (or (:idempotency_key body) (:idempotency-key body)
+                     (get body "idempotency_key"))
+        idem-digest (when idem-key
+                      (str (hash [problem max-turns beam-width token-budget decision])))
+        reclaim? (boolean (or (:reclaim_idempotency body) (get body "reclaim_idempotency")))
+        claim0 (when idem-key (runs/claim-idempotency-key! conn idem-key idem-digest))
+        ;; A pending claim is one whose caller died between claiming the key and
+        ;; starting anything. It is reported as pending rather than replayed,
+        ;; because there is no run to replay; a caller that has established the
+        ;; earlier attempt started nothing asks again with reclaim_idempotency.
+        claim (if (and reclaim? (:pending claim0))
+                (let [r (runs/reclaim-idempotency-key! conn idem-key idem-digest)]
+                  (if (:reclaimed r) {:claimed true} (merge claim0 r)))
+                claim0)]
   ;; A {} body used to start a REAL run on a nil problem — a selection model
   ;; call plus a full beam of provider spend answering nothing, while
   ;; /v1/chat/completions 400s the same input (blt.38).
@@ -112,6 +129,25 @@
                                   "{:selected [{:id \"kind:name\"} ...]} with a "
                                   "string id on every selection")
                     :type "invalid_request_error"}}}
+
+    (:conflict claim)
+    {:status 409
+     :body {:error {:message (str "idempotency_key already used with different inputs")
+                    :type "idempotency_conflict"}
+            :run_id (:run-id claim)}}
+
+    ;; claimed, but no run was ever bound: the earlier caller died in between.
+    ;; Reported, never invented - there is nothing to replay.
+    (and claim (:pending claim))
+    {:status 409
+     :body {:error {:message "idempotency_key is claimed but no run was started"
+                    :type "idempotency_pending"}
+            :pending true :claimed_at (:claimed-at claim)}}
+
+    ;; somebody already started this unit of work: answer with THAT run
+    (and claim (not (:claimed claim)))
+    {:body {:run_id (:run-id claim) :status "existing"
+            :idempotent_replay true}}
 
     :else
   (let [llm-config (run-llm-config (:llm config) body)
@@ -140,6 +176,8 @@
                                                       ;; branch opens, so the
                                                       ;; opening prompt carries it
                                                       (context-selection/bind-decision! rid decision)
+                                                      (when idem-key
+                                                        (runs/bind-idempotency-run! conn idem-key rid))
                                                       (swap! active assoc rid
                                                              {:abort abort
                                                               :cancel (fn [] (some-> @cancel* (apply [])))})

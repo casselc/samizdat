@@ -746,7 +746,39 @@
   for the same reason plan is: a skipped or lightweight-planned task has none."
   ["ALTER TABLE tasks ADD COLUMN plan_kind TEXT"])
 
+(def ^:private v29
+  "Idempotent run creation.
+
+  POST /v1/runs answers 503 when the start deadline passes, and the server's own
+  comment records that such a run may start anyway; a socket timeout is equally
+  uncertain. A caller that retries then gets a SECOND run doing the same work,
+  and a caller that does not retry may have no run at all. Neither is
+  recoverable from the run table, because the API takes no client-supplied id.
+
+  So a caller may name its request. The key is the caller's identity for that
+  unit of work and is UNIQUE, which is what makes the recovery safe under
+  concurrency: two clients racing on the same key cannot both insert, so the
+  loser reads the winner's run rather than starting another. The digest is over
+  the request that key was first used with, so the same key with different
+  inputs is refused rather than silently answered with the wrong run."
+  ["CREATE TABLE IF NOT EXISTS run_idempotency (
+      key        TEXT PRIMARY KEY,
+      run_id     TEXT REFERENCES runs(id),
+      digest     TEXT NOT NULL,
+      created_at TEXT NOT NULL
+    )"])
+
+(def ^:private v30
+  "Who took over an abandoned claim.
+
+  Reclaiming a pending key has to be a ONE-SHOT transition, and a token written
+  into an existing column is not one: several callers can each write their own
+  token and each read it back, so each believes it won. A column that starts
+  NULL and is set once gives the database the decision — `WHERE reclaimed_by IS
+  NULL` matches for exactly one caller, whatever the interleaving."
+  ["ALTER TABLE run_idempotency ADD COLUMN reclaimed_by TEXT"])
+
 (def migrations
   "Ordered. Index 0 is migration 1; PRAGMA user_version holds the count applied."
   [v1 v2 v3 v4 v5 v6 v7 v8 v9 v10 v11 v12 v13 v14 v15 v16 v17 v18 v19 v20 v21 v22 v23 v24
-   v25 v26 v27 v28])
+   v25 v26 v27 v28 v29 v30])
