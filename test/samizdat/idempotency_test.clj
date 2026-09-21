@@ -123,9 +123,9 @@
 (defn- age-claim!
   "Backdate a claim so it is older than `ms`, giving the lease a controlled clock.
 
-  The lease is measured against `created_at`, so moving that is moving time as far as
-  the reclaim is concerned - without sleeping, and without making the test's outcome
-  depend on how busy the machine is."
+  The lease is measured against `created_at`, so moving that moves the claim's AGE - which
+  is what the guard reads. It is not control of the clock: the test still runs in real
+  time, and what it avoids is a sleep, not every timing dependency."
   [conn key ms]
   (db/execute! conn ["UPDATE run_idempotency SET created_at = ? WHERE key = ?"
                      (db/iso-millis (.minusMillis (java.time.Instant/now) (long (+ ms 1000))))
