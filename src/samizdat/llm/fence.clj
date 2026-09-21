@@ -512,9 +512,27 @@
   (when-let [m (last (re-seq invoke-re (or response "")))]
     (let [[_ nm body] m]
       (when-not (str/blank? nm)
-        {:name nm
-         :args (reduce (fn [acc [_ k v]] (assoc acc (keyword k) (xml-value v)))
-                       {} (re-seq parameter-re (or body "")))}))))
+        (let [params (reduce (fn [acc [_ k v]] (assoc acc (keyword k) (xml-value v)))
+                             {} (re-seq parameter-re (or body "")))]
+          {:name nm
+           ;; A THIRD spelling of the body, and the same failure as the two
+           ;; above it: Qwen3.6 opens `<invoke name="read_file">` and then
+           ;; writes the arguments as a JSON object rather than `<parameter>`
+           ;; tags. No parameter matched, so the call arrived with the right
+           ;; name and NO arguments and the branch was told "read_file needs a
+           ;; `path`" with the path sitting in the body — which sent it round
+           ;; four more turns trying different wrappers. ws-trial-A run
+           ;; 3b5baaf2 turns 1-5 (2026-09-21): six of twelve turns lost, the
+           ;; correct edit landing on the last one.
+           ;;
+           ;; Only when there are no parameters and the body really is a JSON
+           ;; object: a model that wrote both meant the tags, and a body that
+           ;; merely starts with a brace stays unparsed rather than becoming a
+           ;; call that looks well-formed and is wrong.
+           :args (if (seq params)
+                   params
+                   (let [{:keys [ok value]} (read-json (str/trim (or body "")))]
+                     (if (and ok (map? value)) value {})))})))))
 
 ;; Qwen's chat template wraps its native calls in <tool_call> tags around
 ;; plain JSON. Under a prefilled fence the model emits prose then its native

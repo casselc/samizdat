@@ -112,6 +112,7 @@
             [samizdat.security.secrets-test]
             [samizdat.config-test]
             [samizdat.budget-proxy-e2e-test]
+            [samizdat.fence-test]
             [samizdat.budget-proxy-routing-test]
             [samizdat.context-selection-test]
             [samizdat.idempotency-test]
@@ -300,6 +301,7 @@
     samizdat.security.secrets-test
     samizdat.config-test
     samizdat.budget-proxy-e2e-test
+    samizdat.fence-test
     samizdat.budget-proxy-routing-test
     samizdat.context-selection-test
     samizdat.idempotency-test
