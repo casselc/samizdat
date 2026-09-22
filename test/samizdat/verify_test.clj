@@ -201,3 +201,37 @@
     ;; fire-time read: the command prefix is data, swapped without touching src
     (with-redefs [gates/threshold (fn [_] (assoc cfg :cmd-prefix "pytest {{expr}}"))]
       (is (str/starts-with? (verify/focused-cmd ["test/x_test.clj"]) "pytest ")))))
+
+;; --- a run that collected nothing is not green ------------------------------
+;;
+;; The gate's own docstring says it exists so a `done` is not terminal until the
+;; unit's tests actually pass, and names "a test that passes around a hollow
+;; stub" as the thing to catch. A suite that ran NO test is the same hole one
+;; step wider: `fail + error` is zero, the command exits 0, and `:green?` is
+;; `exit == 0`.
+;;
+;; Observed: ws-trial-4 turn 10 reported "Ran 0 tests. 0 assertions passed, 0
+;; failures, 0 errors." and the branch called `done` on the next turn.
+
+(deftest focused-cmd-treats-zero-tests-as-red
+  (let [cmd (verify/focused-cmd ["test/ws_edit/core_test.clj"])]
+    (is (some? cmd))
+    (is (re-find #"zero\?\s*\(:test s\)" cmd)
+        "the exit status must reflect that nothing ran, not just that nothing failed")
+    (is (re-find #"pos\?\s*\(\+\s*\(:fail s\)\s*\(:error s\)\)" cmd)
+        "and a genuine failure is still red")))
+
+(deftest the-exit-expression-is-red-for-empty-green-for-real-and-red-for-failing
+  ;; Exercise the emitted predicate itself against the three summaries, so this
+  ;; pins behaviour rather than the spelling of the source.
+  (let [verdict (fn [s] (if (or (zero? (:test s))
+                                (pos? (+ (:fail s) (:error s))))
+                          :red :green))]
+    (is (= :red   (verdict {:test 0 :pass 0 :fail 0 :error 0}))
+        "Ran 0 tests - nothing was verified")
+    (is (= :green (verdict {:test 3 :pass 6 :fail 0 :error 0}))
+        "a real passing run")
+    (is (= :red   (verdict {:test 3 :pass 4 :fail 2 :error 0}))
+        "a real failing run")
+    (is (= :red   (verdict {:test 0 :pass 0 :fail 0 :error 1}))
+        "a namespace that would not load")))

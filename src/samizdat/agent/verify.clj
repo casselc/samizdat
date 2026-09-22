@@ -75,7 +75,19 @@
                       "(let [s (clojure.test/run-tests " quoted ")]"
                       "(clojure.core/println s)"
                       "(clojure.core/flush)"
-                      "(java.lang.System/exit (if (clojure.core/pos? (+ (:fail s) (:error s))) 1 0)))")]
+                      ;; A run that collected NOTHING exits 0 on `fail + error`, and
+                      ;; `:green?` is `exit == 0` - so a namespace that failed to load,
+                      ;; or that has no deftest in it, shipped as verified. This gate
+                      ;; exists to stop "a test that passes around a hollow stub"; a
+                      ;; suite that ran no test at all is the same hole one step wider.
+                      ;;
+                      ;; Observed: ws-trial-4 turn 10, `Ran 0 tests. 0 assertions
+                      ;; passed, 0 failures, 0 errors.` - the branch called `done` on the
+                      ;; next turn. Zero tests is now red, and the output the branch
+                      ;; reads says so in its own words.
+                      "(java.lang.System/exit (if (clojure.core/or"
+                      " (clojure.core/zero? (:test s))"
+                      " (clojure.core/pos? (+ (:fail s) (:error s)))) 1 0)))")]
         ;; single-quote the whole -e expression for sh -c; every namespace in
         ;; it came through ns-from-test-path's whitelist, so the expression
         ;; genuinely has no single quotes of its own (provenance R3-1).

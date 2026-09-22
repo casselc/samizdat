@@ -721,7 +721,7 @@
     }
    "src/samizdat/agent/verify.clj"
    #{
-    "(java.lang.System/exit (if (clojure.core/pos? (+ (:fail s) (:error s))) 1 0)))"
+    "(java.lang.System/exit (if (clojure.core/or"
     "The suite is green but you changed no files, so nothing was actually "
     "You added no test, so the new behaviour is not pinned. Write a focused "
     "done. Make the change on disk (edit_file/write_file), prove it with a "
