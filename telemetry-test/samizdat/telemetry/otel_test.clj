@@ -21,10 +21,13 @@
   false/zero/absent, signed negatives, the Langfuse mirror, lifecycle spans
   through the hook, suppression, and TRACEPARENT parenting."
   (:require [clojure.data.json :as json]
-            [clojure.string]
+            [clojure.string :as str]
             [clojure.test :refer [deftest is testing use-fixtures]]
             [otel.context :as ctx]
             [otel.exporter.memory :as memory]
+            [otel.sdk :as process-sdk]
+            [otel.metrics :as metrics]
+            [otel.logs :as logs]
             [otel.trace :as trace]
             [samizdat.agent.tools :as tools]
             [samizdat.agent.tools.base :as tool-base]
@@ -56,6 +59,110 @@
   (memory/spans *mem*))
 
 (defn- by-name [n] (first (filter #(= n (:name %)) (exported))))
+
+(deftest demo-signals-measure-real-thunk-and-preserve-application-outcomes
+  (let [events (atom []) calls (atom 0) ticks (atom -20000000)
+        original (ex-info "inert primary fixture" {})]
+    (reset! tel/demo-signals
+            {:now-ns #(swap! ticks + 20000000)
+             :started! #(swap! events conj [:start %])
+             :finished! #(swap! events conj [:finish %1 %2 %3])})
+    (is (= false (hook/observe! :turn {} #(do (swap! calls inc) false))))
+    (is (= 1 @calls))
+    (is (= [[:start :turn] [:finish :turn :success 0.02]] @events))
+    (reset! events [])
+    (is (identical? original
+                    (try (hook/observe! :run {} #(do (swap! calls inc)
+                                                    (throw original)))
+                         (catch Throwable error error))))
+    (is (= 2 @calls))
+    (is (= [[:start :run] [:finish :run :error 0.02]] @events))
+    (reset! events [])
+    (is (= :tool-result (hook/observe! :tool {} (constantly :tool-result))))
+    (is (empty? @events))))
+
+(deftest demo-signal-faults-never-replace-primary-value-or-error
+  (let [original (ex-info "inert primary fixture" {})]
+    (doseq [fault [:clock :start :finish]]
+      (let [calls (atom 0)
+            fail (fn [& _] (throw (ex-info "inert signal fixture" {})))]
+        (reset! tel/demo-signals
+                {:now-ns (if (= :clock fault) fail #(System/nanoTime))
+                 :started! (if (= :start fault) fail (fn [& _] nil))
+                 :finished! (if (= :finish fault) fail (fn [& _] nil))})
+        (is (= :original (hook/observe! :turn {} #(do (swap! calls inc) :original))))
+        (is (= 1 @calls))
+        (is (identical? original
+                        (try (hook/observe! :turn {} #(do (swap! calls inc)
+                                                        (throw original)))
+                             (catch Throwable error error))))
+        (is (= 2 @calls))))))
+
+(deftest demo-signal-api-borrows-owner-and-emits-only-fixed-private-safe-fields
+  (let [records (atom []) measurements (atom []) acquired (atom []) init-calls (atom 0)]
+    (with-redefs [process-sdk/init! (fn [& _]
+                                    (swap! init-calls inc)
+                                    (throw (ex-info "must borrow existing SDK" {})))
+                  process-sdk/meter #(do (swap! acquired conj [:meter %]) :meter)
+                  process-sdk/logger #(do (swap! acquired conj [:logger %]) :logger)
+                  metrics/counter (fn [m n opts]
+                                    (swap! acquired conj [:counter m n opts]) :counter)
+                  metrics/histogram (fn [m n opts]
+                                      (swap! acquired conj [:histogram m n opts]) :histogram)
+                  metrics/add! #(swap! measurements conj [:counter %1 %2 %3])
+                  metrics/record! #(swap! measurements conj [:histogram %1 %2 %3])
+                  logs/emit! (fn [_ record]
+                               (swap! records conj
+                                      [record (:trace-id
+                                               (trace/span-context-of
+                                                (trace/current-span)))]))]
+      (tel/enable-demo-signals!)
+      (is (= :primary (hook/observe! :run {:problem "DO_NOT_EMIT_PROMPT"
+                                         :run-id "DO_NOT_LABEL_ID"}
+                                     (constantly :primary))))
+      (is (zero? @init-calls))
+      (is (= [[:meter "samizdat.demo"] [:logger "samizdat.demo"]]
+             (take 2 @acquired)))
+      (is (= ["Samizdat run started" "Samizdat run finished"]
+             (map #(get-in % [0 :body]) @records)))
+      (is (= ["samizdat.run.started" "samizdat.run.finished"]
+             (map #(get-in % [0 :event-name]) @records)))
+      (is (every? #(re-matches #"[0-9a-f]{32}" (second %)) @records))
+      (is (= 1 (count (distinct (map second @records)))))
+      (is (= {"samizdat.operation.kind" "run"
+              "samizdat.operation.outcome" "success"}
+             (get-in @measurements [0 3])))
+      (is (= 1 (get-in @measurements [0 2])))
+      (is (<= 0.0 (get-in @measurements [1 2])))
+      (is (not (str/includes? (pr-str [@records @measurements]) "DO_NOT_")))
+      (doseq [mode [:missing :false :throw :true]]
+        (reset! records [])
+        (reset! measurements [])
+        (let [before-confirmation (atom nil)
+              diagnostics (java.io.StringWriter.)
+              flush! (case mode
+                       :missing nil
+                       :false (constantly false)
+                       :throw (fn [] (throw (ex-info "inert flush fault" {})))
+                       :true (fn []
+                               (reset! before-confirmation
+                                       [(count @records) (count @measurements)])
+                               true))]
+          (swap! tel/runtime assoc :flush-callback flush!)
+          (binding [*err* diagnostics]
+            (is (= :primary (hook/observe! :run {} (constantly :primary)))))
+          (is (= (= :true mode)
+                 (= "samizdat demo signals flush confirmed\n" (str diagnostics))))
+          (when-not (= :true mode) (is (= "" (str diagnostics))))
+          (when (= :true mode) (is (= [2 2] @before-confirmation))))))))
+
+(deftest demo-signal-api-with-no-sdk-is-inert-not-a-delivery-proof
+  (with-redefs [process-sdk/meter (constantly metrics/noop-meter)
+                process-sdk/logger (constantly logs/noop-logger)
+                process-sdk/init! (fn [& _] (throw (ex-info "no new SDK" {})))]
+    (tel/enable-demo-signals!)
+    (is (= false (hook/observe! :turn {} (constantly false))))
+    (is (nil? (hook/observe! :run {} (constantly nil))))))
 
 (deftest shutdown-awaits-exhausted-root-spans-before-the-sdk-closes
   ;; The real-model reproduction stored seven inner families but omitted the
