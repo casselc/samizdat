@@ -381,7 +381,7 @@
   (with-db [c]
     (let [rid (runs/start-run! c {:problem "p"})
           r (run-tool c rid "task" {:action "create" :title "fix the thing"
-                                    :claim true})
+                                    :claim-now true})
           id (re-find #"sz-[0-9a-f]+" (:result r))]
       (is (str/includes? (:result r) "Created and claimed"))
       (is (= :neutral (:category r))
@@ -415,9 +415,9 @@
           call (fn [b args] (tools/run-tool {:tool-name "task" :args args :branch b
                                              :conn c :run-id rid :turn 1}))
           b0 (state/new-branch {:id "B1" :problem "p"})
-          first-r (call b0 {:action "create" :title "first" :claim true})
+          first-r (call b0 {:action "create" :title "first" :claim-now true})
           b1 (:branch first-r)
-          r (call b1 {:action "create" :title "second" :claim true})]
+          r (call b1 {:action "create" :title "second" :claim-now true})]
       (is (some? b1) "the first call hands back a branch holding the task")
       (is (= :mechanics (:category r))
           "a refused claim is NOT reported as a successful create")
@@ -434,7 +434,7 @@
           (is (not= "in_progress" (:status t))))))))
 
 (deftest the-option-is-documented-where-the-model-reads-it
-  (is (str/includes? (prompt/prompt "system") "claim: true")
+  (is (str/includes? (prompt/prompt "system") "claim_now: true")
       "a model that never sees the option cannot use it, and the saving is
        conditional on it being used"))
 
@@ -445,7 +445,7 @@
       ;; the claim loses the row race
       (with-redefs [tasks/claim! (constantly nil)]
         (let [r (run-tool c rid "task" {:action "create" :title "contested"
-                                        :claim true})]
+                                        :claim-now true})]
           (is (= :mechanics (:category r)))
           (is (str/includes? (:result r) "could NOT claim it"))
           (is (str/includes? (:result r) "The task EXISTS")
@@ -456,7 +456,7 @@
   (with-db [c]
     (let [rid (runs/start-run! c {:problem "p"})
           r (run-tool c rid "task" {})]
-      (is (str/includes? (:result r) "claim?")
+      (is (str/includes? (:result r) "claim_now?")
           "a model that asks what `task` takes is told the option exists"))))
 
 (deftest a-partial-success-tells-the-worker-to-claim-not-recreate
@@ -468,8 +468,8 @@
           call (fn [b args] (tools/run-tool {:tool-name "task" :args args :branch b
                                              :conn c :run-id rid :turn 1}))
           b0 (state/new-branch {:id "B1" :problem "p"})
-          held (call b0 {:action "create" :title "first" :claim true})
-          r (call (:branch held) {:action "create" :title "second" :claim true})]
+          held (call b0 {:action "create" :title "first" :claim-now true})
+          r (call (:branch held) {:action "create" :title "second" :claim-now true})]
       (testing "it says the task exists and must not be made again"
         (is (str/includes? (:result r) "EXISTS"))
         (is (str/includes? (:result r) "do not create it again")))
@@ -483,7 +483,7 @@
     (let [rid (runs/start-run! c {:problem "p"})]
       (with-redefs [tasks/claim! (constantly nil)]
         (let [r (run-tool c rid "task" {:action "create" :title "contested"
-                                        :claim true})]
+                                        :claim-now true})]
           (is (str/includes? (:result r) "EXISTS"))
           (is (str/includes? (:result r) "do not create it again"))
           (is (re-find #"Claim sz-[0-9a-f]+ once it is free" (:result r))

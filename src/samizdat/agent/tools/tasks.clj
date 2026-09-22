@@ -92,7 +92,7 @@
 
 (def ^:private task-usage
   (str "Actions: create {title, body?, type?, priority?, parentId?, contract?, tests?,"
-       " claim?}, list, show {id}, update {id, ...fields}, claim {id},"
+       " claim_now?}, list, show {id}, update {id, ...fields}, claim {id},"
        " switch {id, reason}, close {id, status?}."))
 
 (defmethod base/run-tool "task" [{:keys [branch conn run-id] :as ctx}]
@@ -123,7 +123,7 @@
                                           :tests (base/arg ctx :tests)
                                           :run-id (when-not (base/arg ctx :backlog) run-id)})
                   made (tasks/get-task conn id)]
-              ;; `claim: true` takes the task in the same call. Optional and additive:
+              ;; `claim_now: true` takes the task in the same call. Optional and additive:
               ;; without it this behaves exactly as before, and the two-call form keeps
               ;; working.
               ;;
@@ -144,7 +144,11 @@
               ;; call failed" and invite the model to create the same task again - one
               ;; wasted turn and a duplicate on the board. The category says something was
               ;; wrong with the call; the text is what makes recovery possible.
-              (if-not (base/arg ctx :claim)
+              ;; NOT `claim`: samizdat.agent.loop reads :args :claim from every tool
+              ;; call as the similarity query for the context block, so a boolean
+              ;; there crashes the turn. The name is taken; this argument uses its
+              ;; own.
+              (if-not (base/arg ctx :claim-now)
                 (base/ok branch (str "Created " (task-line made)))
                 (if-let [held (holding conn branch)]
                   ;; Created but NOT claimed, and said so. The alternative - deleting

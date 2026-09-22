@@ -1090,7 +1090,18 @@
                        :safe-state-coverage coverage})
             {ctx-block :block branch :branch}
             (context-block conn run-id branch
-                           (get-in parsed [:args :claim])
+                           ;; The FTS query for the context block is whatever the
+                           ;; call put in :claim - a slot EVERY tool shares, not
+                           ;; one the claiming tools own. A tool that means
+                           ;; something else by `claim` (a boolean "and claim it")
+                           ;; reached str/blank? as a non-string and killed the
+                           ;; branch with "string-length: true is not a string",
+                           ;; reported only as "branch error: execution error".
+                           ;; A non-string here is not a query: treat it as absent
+                           ;; rather than trusting every tool to spell :claim the
+                           ;; way this line reads it.
+                           (let [c (get-in parsed [:args :claim])]
+                             (when (string? c) c))
                            (get-in ctx [:config :run :share-artifacts?]))
             body (str (truncate (:result result))
                       (when ctx-block (str "\n\n" ctx-block))

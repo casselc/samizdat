@@ -81,6 +81,7 @@
             [samizdat.store.artifacts :as artifacts]
             [samizdat.store.failures :as failures]
             [samizdat.store.interventions :as interventions]
+            [samizdat.security.secrets :as secrets]
             [samizdat.store.journal :as journal]
             [samizdat.store.knowledge :as knowledge]
             [samizdat.store.runs :as runs]
@@ -569,6 +570,85 @@
     (throw (ex-info "the beam was handed no :turn-workflow — a turn is defined by a manifest, and the scheduler cannot advance a branch without one"
                     {:branch (:id b) :turn turn}))))))
 
+(defn- unwrap-round-error
+  "The exception a cell actually threw, out of mycelium's execution wrapper.
+
+  Two reasons this matters, and both bit on the first manifest-driven run.
+  A caller of `run!` used to see the branch's own exception; wrapped, every
+  failure became the same opaque \"execution error\", which is a worse report
+  and breaks anything matching on the cause. And mycelium's wrapper carries the
+  ENTIRE compiled FSM in its ex-data — pr-str'ing that into the journal writes
+  a row the size of the workflow for every crash.
+
+  So: unwrap for both the record and the rethrow, and record only the small
+  keys. The failing NODE is worth keeping, because \"which step of the round
+  died\" is the first thing anyone asks."
+  [e]
+  ;; Unwrapped to the INNERMOST cell error, not one layer: a nested workflow
+  ;; (the round drives a turn manifest per branch) wraps once per level, and
+  ;; peeling a single layer still reports "execution error" from the level
+  ;; above.
+  (loop [cur e, node nil, depth 0]
+    (let [d (ex-data cur)
+          inner (:error d)
+          node (or (:last-state-id d) node)]
+      (if (and (instance? Throwable inner) (< depth 8))
+        (recur inner node (inc depth))
+        {:throwable cur :node node}))))
+
+
+(defn- cause-chain
+  "The exception's causes as {:type :message} pairs, outermost first.
+
+  `Throwable->map`'s `:via` is exactly that and nothing else - no ex-data, no
+  prompt text - so it is safe to journal as it stands."
+  [t]
+  (mapv (fn [v] {:type (some-> (:type v) str)
+                 :message (some-> (:message v) str)})
+        (:via (Throwable->map t))))
+
+(defn- record-branch-error!
+  "Write down WHAT failed when a branch dies, not merely that it did.
+
+  This path used to keep `(ex-message r)` of the OUTERMOST exception, which for
+  a wrapped cell error is the generic \"execution error\". A live run died on
+  turn 5 and left exactly that - no class, no cause, no failing node, nothing to
+  act on, and the run over because at beam width 1 the branch was the run.
+  `unwrap-round-error` already existed for the ROUND path and was never applied
+  here.
+
+  Recorded: run, branch, turn, operation, exception class, the whole cause
+  chain, and the stack trace. NOT recorded: prompts, messages, credentials.
+  `ex-data` is reduced to its KEYS - a wrapper\u0027s ex-data carries the entire
+  compiled FSM and a cell\u0027s may carry anything the caller passed - so the
+  shape is visible and the contents are not. Every string goes through the
+  secret redactor first.
+
+  Best effort, deliberately: a failure to record a failure must not replace it."
+  [ctx branch-id turn throwable node]
+  (try
+    (let [known (secrets/known-values (into {} (System/getenv)))
+          scrub (fn [x] (some-> x str (secrets/redact known)))
+          m (Throwable->map throwable)]
+      ;; branch-id and turn are COLUMNS on the events row; only :data is JSON.
+      (journal/note! (:conn ctx) (:run-id ctx) :branch-error
+                     {:branch-id branch-id
+                      :turn turn
+                      :data
+                      {:operation "turn"
+                       :type (scrub (some-> (:via m) first :type))
+                       :message (scrub (ex-message throwable))
+                       :node (scrub node)
+                       :causes (mapv (fn [c] {:type (scrub (:type c))
+                                              :message (scrub (:message c))})
+                                     (cause-chain throwable))
+                       ;; jolt's Throwable can carry an empty trace; recorded
+                       ;; either way, so "no trace available" is itself evidence.
+                       :trace (mapv scrub (take 25 (:trace m)))
+                       :trace-empty? (empty? (:trace m))
+                       :ex-data-keys (some->> (ex-data throwable) keys (mapv str))}}))
+    (catch Throwable _ nil)))
+
 (defn advance-all
   "One turn for every active branch, concurrently, each under a hard deadline.
 
@@ -651,9 +731,12 @@
                                 (when cancelling (swap! cancelling assoc (:id b) (:done t)))
                                 (forfeit b))
                             :err
-                            (do (log/warn "branch" (:id b) "died on turn" turn ":" (ex-message r))
-                                (assoc b :status :abandoned
-                                       :inactive-reason (str "branch error: " (ex-message r)))))))))
+                            (let [{:keys [throwable node]} (unwrap-round-error r)
+                                  why (or (ex-message throwable) (str (class throwable)))]
+                              (log/warn "branch" (:id b) "died on turn" turn ":" why)
+                              (record-branch-error! ctx (:id b) turn throwable node)
+                              (assoc b :status :abandoned
+                                     :inactive-reason (str "branch error: " why))))))))
               []
               pending)
       (catch Throwable e
@@ -768,32 +851,6 @@
   [conn config]
   (:compiled (workflow/load-loop! conn (or (get-in config [:run :beam])
                                           beam-manifest-name))))
-
-(defn- unwrap-round-error
-  "The exception a cell actually threw, out of mycelium's execution wrapper.
-
-  Two reasons this matters, and both bit on the first manifest-driven run.
-  A caller of `run!` used to see the branch's own exception; wrapped, every
-  failure became the same opaque \"execution error\", which is a worse report
-  and breaks anything matching on the cause. And mycelium's wrapper carries the
-  ENTIRE compiled FSM in its ex-data — pr-str'ing that into the journal writes
-  a row the size of the workflow for every crash.
-
-  So: unwrap for both the record and the rethrow, and record only the small
-  keys. The failing NODE is worth keeping, because \"which step of the round
-  died\" is the first thing anyone asks."
-  [e]
-  ;; Unwrapped to the INNERMOST cell error, not one layer: a nested workflow
-  ;; (the round drives a turn manifest per branch) wraps once per level, and
-  ;; peeling a single layer still reports "execution error" from the level
-  ;; above.
-  (loop [cur e, node nil, depth 0]
-    (let [d (ex-data cur)
-          inner (:error d)
-          node (or (:last-state-id d) node)]
-      (if (and (instance? Throwable inner) (< depth 8))
-        (recur inner node (inc depth))
-        {:throwable cur :node node}))))
 
 (defn- oversight-stream
   "Start the supervisor's parallel stream over this run.

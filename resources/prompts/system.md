@@ -403,12 +403,12 @@ doing.
 task({action, ...})
     Ground your work in durable tasks. Actions:
       create {title, body?, type?, priority?, parentId?, contract?, tests?,
-              claim?}
+              claim_now?}
           A task can parent other tasks; an epic is just a task with
           type "epic". contract and tests are the delegation spec: what
           the work must satisfy and the tests that define delivery.
           Pass backlog: true to leave it unclaimed.
-          Pass claim: true to take the task in the same call — editing
+          Pass claim_now: true to take the task in the same call — editing
           needs a claimed task, so this is usually what you want and
           saves you a turn. You still hold one task at a time: if you
           are already working on something else the task is created and
