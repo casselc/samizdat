@@ -91,8 +91,8 @@
       (when (and row (not (tasks/terminal? (:status row)))) row))))
 
 (def ^:private task-usage
-  (str "Actions: create {title, body?, type?, priority?, parentId?, contract?, tests?},"
-       " list, show {id}, update {id, ...fields}, claim {id},"
+  (str "Actions: create {title, body?, type?, priority?, parentId?, contract?, tests?,"
+       " claim?}, list, show {id}, update {id, ...fields}, claim {id},"
        " switch {id, reason}, close {id, status?}."))
 
 (defmethod base/run-tool "task" [{:keys [branch conn run-id] :as ctx}]
@@ -121,8 +121,42 @@
                                           :parent-id (base/arg ctx :parentId)
                                           :contract (base/arg ctx :contract)
                                           :tests (base/arg ctx :tests)
-                                          :run-id (when-not (base/arg ctx :backlog) run-id)})]
-              (base/ok branch (str "Created " (task-line (tasks/get-task conn id))))))
+                                          :run-id (when-not (base/arg ctx :backlog) run-id)})
+                  made (tasks/get-task conn id)]
+              ;; `claim: true` takes the task in the same call. Optional and additive:
+              ;; without it this behaves exactly as before, and the two-call form keeps
+              ;; working.
+              ;;
+              ;; Why: `edit_file` refuses without a claimed task, and create did not
+              ;; claim, so every run spent two turns on bookkeeping before it could edit
+              ;; anything. Measured across four live runs, that was 2 turns in every one
+              ;; of them - the only perfectly consistent overhead - plus a third turn in
+              ;; one run where an edit was attempted before claiming.
+              ;;
+              ;; It does NOT weaken the requirement. Ownership still goes through
+              ;; `tasks/claim!`, still binds to this BRANCH rather than the run, still
+              ;; refuses when the branch already holds something else, and still journals
+              ;; the same progress event.
+              (if-not (base/arg ctx :claim)
+                (base/ok branch (str "Created " (task-line made)))
+                (if-let [held (holding conn branch)]
+                  ;; Created but NOT claimed, and said so. The alternative - deleting
+                  ;; what was just written - throws away a title and body the model
+                  ;; meant, and reporting success would be a half-completed operation
+                  ;; wearing a success message.
+                  (base/malformed
+                   branch
+                   (prompt/render "task-created-not-claimed"
+                                  {:new-task (task-line made) :new-id id
+                                   :held-task (task-line held) :held-id (:id held)}))
+                  (if-let [t (tasks/claim! conn id run-id (:id branch))]
+                    (base/ok (take-task branch t)
+                             (str "Created and claimed " (task-line t))
+                             :progress? true)
+                    (base/malformed
+                     branch
+                     (prompt/render "task-created-claim-lost"
+                                    {:new-task (task-line made)})))))))
 
         "list"
         (let [rows (tasks/board conn {:run-id run-id})]

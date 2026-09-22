@@ -27,6 +27,7 @@
             [clojure.test :refer [deftest testing is]]
             [jolt.fs :as fs]
             [samizdat.agent.loop :as aloop]
+            [samizdat.prompt :as prompt]
             [samizdat.workflow :as wf]
             [samizdat.agent.state :as state]
             [samizdat.agent.tools :as tools]
@@ -363,3 +364,97 @@
       (is (= 1 (tasks/attempted! c id)))
       (is (= 2 (tasks/attempted! c id)))
       (is (= 2 (:attempts (tasks/get-task c id))) "and it is on the row, not in a process"))))
+
+;; --- create and claim in one call -------------------------------------------
+;;
+;; `edit_file` refuses without a claimed task and `create` did not claim, so
+;; every run spent two turns on bookkeeping before it could edit anything. Over
+;; four live runs that was 2 turns in every one of them - the only perfectly
+;; consistent overhead measured - plus a third turn in one run where an edit was
+;; attempted before claiming.
+;;
+;; The option is additive and does NOT weaken the requirement: ownership still
+;; goes through `tasks/claim!`, still binds to the BRANCH, still refuses a second
+;; task, and still journals progress.
+
+(deftest create-with-claim-takes-the-task-in-one-call
+  (with-db [c]
+    (let [rid (runs/start-run! c {:problem "p"})
+          r (run-tool c rid "task" {:action "create" :title "fix the thing"
+                                    :claim true})
+          id (re-find #"sz-[0-9a-f]+" (:result r))]
+      (is (str/includes? (:result r) "Created and claimed"))
+      (is (= :neutral (:category r))
+          "the same category the separate `claim` action returns - bookkeeping, not
+           progress toward the problem")
+      (testing "ownership is real, not just a message"
+        (let [t (tasks/get-task c id)]
+          (is (= rid (:run_id t)))
+          (is (= "B1" (:branch_id t)) "bound to the calling BRANCH, not the run")
+          (is (= "in_progress" (:status t))))))))
+
+(deftest create-without-claim-is-unchanged
+  (with-db [c]
+    (let [rid (runs/start-run! c {:problem "p"})
+          r (run-tool c rid "task" {:action "create" :title "later"})
+          id (re-find #"sz-[0-9a-f]+" (:result r))]
+      (is (str/includes? (:result r) "Created "))
+      (is (not (str/includes? (:result r) "claimed")))
+      (is (= :neutral (:category r)))
+      (is (nil? (:branch_id (tasks/get-task c id)))
+          "the two-call form still works the way it did"))))
+
+(deftest a-refused-claim-does-not-leave-a-silent-half-completed-operation
+  ;; The branch already holds something. The task is still created - throwing
+  ;; away a title and body the model meant is worse - but the result must say
+  ;; plainly that it was NOT claimed, and must not read as success.
+  ;; The branch must be carried forward, as it is in a real run: `holding` reads
+  ;; the branch's own task, not the row, so a fresh branch object holds nothing.
+  (with-db [c]
+    (let [rid (runs/start-run! c {:problem "p"})
+          call (fn [b args] (tools/run-tool {:tool-name "task" :args args :branch b
+                                             :conn c :run-id rid :turn 1}))
+          b0 (state/new-branch {:id "B1" :problem "p"})
+          first-r (call b0 {:action "create" :title "first" :claim true})
+          b1 (:branch first-r)
+          r (call b1 {:action "create" :title "second" :claim true})]
+      (is (some? b1) "the first call hands back a branch holding the task")
+      (is (= :mechanics (:category r))
+          "a refused claim is NOT reported as a successful create")
+      (is (str/includes? (:result r) "did NOT claim it"))
+      (is (str/includes? (:result r) "already working on"))
+      (testing "the created task is named so it is not lost"
+        (let [ids (re-seq #"sz-[0-9a-f]+" (:result r))]
+          (is (= 2 (count (distinct ids)))
+              "both the new task and the one already held are identified")))
+      (testing "and it really is unclaimed rather than half-claimed"
+        (let [second-id (first (re-seq #"sz-[0-9a-f]+" (:result r)))
+              t (tasks/get-task c second-id)]
+          (is (nil? (:branch_id t)))
+          (is (not= "in_progress" (:status t))))))))
+
+(deftest the-option-is-documented-where-the-model-reads-it
+  (is (str/includes? (prompt/prompt "system") "claim: true")
+      "a model that never sees the option cannot use it, and the saving is
+       conditional on it being used"))
+
+(deftest a-claim-lost-to-another-run-is-reported-not-swallowed
+  (with-db [c]
+    (let [rid (runs/start-run! c {:problem "p"})
+          other (runs/start-run! c {:problem "q"})]
+      ;; the claim loses the row race
+      (with-redefs [tasks/claim! (constantly nil)]
+        (let [r (run-tool c rid "task" {:action "create" :title "contested"
+                                        :claim true})]
+          (is (= :mechanics (:category r)))
+          (is (str/includes? (:result r) "could NOT claim it"))
+          (is (str/includes? (:result r) "The task exists")
+              "the caller is told the create stands, so it is not repeated")))
+      (is (some? other)))))
+
+(deftest the-usage-string-mentions-the-option
+  (with-db [c]
+    (let [rid (runs/start-run! c {:problem "p"})
+          r (run-tool c rid "task" {})]
+      (is (str/includes? (:result r) "claim?")
+          "a model that asks what `task` takes is told the option exists"))))
