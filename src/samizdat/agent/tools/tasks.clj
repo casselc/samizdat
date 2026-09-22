@@ -137,6 +137,13 @@
               ;; `tasks/claim!`, still binds to this BRANCH rather than the run, still
               ;; refuses when the branch already holds something else, and still journals
               ;; the same progress event.
+              ;;
+              ;; The operation can PARTIALLY succeed, and the response has to carry that:
+              ;; when the claim fails the created task remains, so the reply names it and
+              ;; says to claim THAT task when eligible. A bare refusal would read as "the
+              ;; call failed" and invite the model to create the same task again - one
+              ;; wasted turn and a duplicate on the board. The category says something was
+              ;; wrong with the call; the text is what makes recovery possible.
               (if-not (base/arg ctx :claim)
                 (base/ok branch (str "Created " (task-line made)))
                 (if-let [held (holding conn branch)]
@@ -156,7 +163,7 @@
                     (base/malformed
                      branch
                      (prompt/render "task-created-claim-lost"
-                                    {:new-task (task-line made)})))))))
+                                    {:new-task (task-line made) :new-id id})))))))
 
         "list"
         (let [rows (tasks/board conn {:run-id run-id})]

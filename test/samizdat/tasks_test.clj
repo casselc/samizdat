@@ -448,7 +448,7 @@
                                         :claim true})]
           (is (= :mechanics (:category r)))
           (is (str/includes? (:result r) "could NOT claim it"))
-          (is (str/includes? (:result r) "The task exists")
+          (is (str/includes? (:result r) "The task EXISTS")
               "the caller is told the create stands, so it is not repeated")))
       (is (some? other)))))
 
@@ -458,3 +458,33 @@
           r (run-tool c rid "task" {})]
       (is (str/includes? (:result r) "claim?")
           "a model that asks what `task` takes is told the option exists"))))
+
+(deftest a-partial-success-tells-the-worker-to-claim-not-recreate
+  ;; create-and-claim can partially succeed: the task is made, the claim is not.
+  ;; A bare "malformed" reads as "the call failed" and invites the model to create
+  ;; the same task again - a wasted turn and a duplicate on the board.
+  (with-db [c]
+    (let [rid (runs/start-run! c {:problem "p"})
+          call (fn [b args] (tools/run-tool {:tool-name "task" :args args :branch b
+                                             :conn c :run-id rid :turn 1}))
+          b0 (state/new-branch {:id "B1" :problem "p"})
+          held (call b0 {:action "create" :title "first" :claim true})
+          r (call (:branch held) {:action "create" :title "second" :claim true})]
+      (testing "it says the task exists and must not be made again"
+        (is (str/includes? (:result r) "EXISTS"))
+        (is (str/includes? (:result r) "do not create it again")))
+      (testing "and names the task to claim, and what is in the way"
+        (let [ids (re-seq #"sz-[0-9a-f]+" (:result r))]
+          (is (= 2 (count (distinct ids)))))
+        (is (str/includes? (:result r) "then claim"))))))
+
+(deftest a-lost-race-also-steers-to-claiming-the-existing-task
+  (with-db [c]
+    (let [rid (runs/start-run! c {:problem "p"})]
+      (with-redefs [tasks/claim! (constantly nil)]
+        (let [r (run-tool c rid "task" {:action "create" :title "contested"
+                                        :claim true})]
+          (is (str/includes? (:result r) "EXISTS"))
+          (is (str/includes? (:result r) "do not create it again"))
+          (is (re-find #"Claim sz-[0-9a-f]+ once it is free" (:result r))
+              "the id to claim is named, so recovery is one call and not a guess"))))))
