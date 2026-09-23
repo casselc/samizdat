@@ -116,6 +116,13 @@
       (is (= "green" (get-in api [:verification :reason])))
       (is (= "true" (get-in api [:verification :check]))
           "the identity of the check that ran, not merely that one did"))
+    ;; What this case does and does not establish. `true` is the shell builtin:
+    ;; it proves that a command which RUNS and exits 0 propagates through
+    ;; run-verify, verify-block, the run row and the API as `passed` with its
+    ;; own identity attached. It demonstrates nothing about a meaningful test
+    ;; suite - no test is executed here, and a green result from `true` is
+    ;; green for the trivial reason. Configuring the fixture's REAL test
+    ;; command is the next evaluation's job, not this regression's.
     (db/close conn)))
 
 (deftest a-missing-baseline-under-trust-completes-as-skipped

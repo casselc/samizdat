@@ -64,9 +64,14 @@
     (db/close c)))
 
 (deftest the_run_finished_event_carries_the_same_evidence
-  ;; finish-run! writes both from the SAME value, so these two cannot
-  ;; disagree. That is true of this write only - the ship-verify event is
-  ;; computed separately in ship.clj; see verification-integration-test.
+  ;; finish-run! writes both from the SAME value, so their CONTENT cannot
+  ;; disagree when both writes succeed. That is the whole of the claim. It is
+  ;; not atomicity: the row update and the journal append are separate
+  ;; operations, and a crash between them can still leave one of the two
+  ;; absent. Deliberately not redesigned into a transaction here.
+  ;;
+  ;; It is also true of this write only - the ship-verify event is computed
+  ;; separately in ship.clj; see verification-integration-test.
   (let [c (db/open! ":memory:")
         rid (a-running-run c)]
     (runs/finish-run! c rid :completed "a"
