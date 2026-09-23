@@ -118,7 +118,21 @@
                      ;; aborted run too - partial figures are real - and
                      ;; `:known false` when this process has no record, because
                      ;; unknown is not zero.
-                     :context (context-selection/accounting conn run-id)))
+                     :context (context-selection/accounting conn run-id)
+                     ;; Assurance, beside the lifecycle status rather than
+                     ;; inside it. `status` says the run ended by shipping;
+                     ;; this says whether anything CHECKED what it shipped -
+                     ;; "passed", "failed" or "skipped" with a reason and the
+                     ;; identity of the check. Without it a client had to
+                     ;; reconstruct assurance from ship-verify journal events,
+                     ;; and a run that shipped unverified was indistinguishable
+                     ;; from a green one in this response.
+                     ;;
+                     ;; nil is "no evidence recorded" - an older row, or a run
+                     ;; that never reached the ship gate - and is NOT the same
+                     ;; as {:status "skipped"}, which says the gate ran and
+                     ;; could not decide.
+                     :verification (runs/verification-of r)))
        ;; Reuses the rows already read for the active count above.
        :branches (mapv #(update % :thesis parse-json) branches)
        :artifacts (mapv #(update % :witness parse-json)

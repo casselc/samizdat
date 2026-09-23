@@ -347,6 +347,35 @@
                               (:message rung))))
           (gates/threshold :give-up-gates))))
 
+
+(defn- verification-evidence
+  "What the ship gate actually established, as a value the run row can hold.
+
+  Three statuses, and the distinction between them is the whole point:
+  `passed` the suite ran and was green, `failed` it ran and was not, `skipped`
+  it was configured and could not run. nil when verification is not configured
+  at all - an inert rung has nothing to say, which is different from a rung
+  that spoke and could not decide.
+
+  `:check` is the command that ran, or the one that would have, so a reader can
+  tell WHAT was or was not verified rather than only that something was not."
+  [{:keys [verify-on? result changed cmd]}]
+  (when verify-on?
+    (cond-> (cond
+              (and result (:timeout? result)) {:status "failed" :reason :timeout}
+              (and result (:green? result))   {:status "passed" :reason :green}
+              result                          {:status "failed" :reason :red}
+              :else
+              {:status "skipped"
+               ;; The same reasons the ship-verify note records, so the row and
+               ;; the journal cannot disagree about why.
+               :reason (cond
+                         (nil? changed) :no-git-baseline
+                         (empty? changed) :nothing-changed
+                         (nil? cmd) :no-test-among-changed
+                         :else :pre-checks-decided)})
+      cmd (assoc :check cmd))))
+
 (defn give-up-block
   "The first give_up rung that fires, or nil.
 
@@ -546,7 +575,17 @@
     (if block
       (base/fail branch (str "`done` refused.\n\n" block) :done-block block)
       (cond->
-       {:branch (assoc branch :final-answer answer :status :done)
+       {:branch (assoc branch :final-answer answer :status :done
+                       ;; The assurance fact, carried on the branch so the cell
+                       ;; that finishes the run can put it in the run row.
+                       ;; Consumers asking "was this checked?" read one field
+                       ;; instead of reconstructing it from ship-verify events.
+                       ;; nil when the rung is inert: no evidence either way is
+                       ;; not the same statement as `skipped`, which says the
+                       ;; gate ran and could not decide.
+                       :verification (verification-evidence
+                                      {:verify-on? verify-on? :result vresult
+                                       :changed changed :cmd cmd}))
         :category :success
         :progress? true
         :done? true

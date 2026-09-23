@@ -812,7 +812,27 @@
   ["ALTER TABLE run_idempotency ADD COLUMN exec_id TEXT"
    "ALTER TABLE run_idempotency ADD COLUMN exec_started_at TEXT"])
 
+(def ^:private v33
+  "Verification evidence on the run, separate from its lifecycle status.
+
+  `status` answers \"did the run end, and how\" — `completed` is a lifecycle
+  fact. Whether anything CHECKED the work is a different question, and it was
+  answerable only by reading journal events: a `ship-verify` row with `:ran
+  false` and a reason, or a `[:verify :skipped]` observation. So every consumer
+  of a run had to reconstruct assurance from the event log, and a run that
+  shipped unverified read as `completed` exactly like one whose suite passed.
+
+  A live run made that concrete: it completed with the ship gate skipped for
+  `:no-git-baseline` under the `:trust` policy, correct per that policy and
+  invisible in the run row.
+
+  `verification` holds the evidence as JSON — status (`passed`/`failed`/
+  `skipped`), the reason, and the identity of the check that ran or would have
+  — so the assurance question is answered where the run is read. It does NOT
+  change what `status` means, and an old row simply has none."
+  ["ALTER TABLE runs ADD COLUMN verification TEXT"])
+
 (def migrations
   "Ordered. Index 0 is migration 1; PRAGMA user_version holds the count applied."
   [v1 v2 v3 v4 v5 v6 v7 v8 v9 v10 v11 v12 v13 v14 v15 v16 v17 v18 v19 v20 v21 v22 v23 v24
-   v25 v26 v27 v28 v29 v30 v31 v32])
+   v25 v26 v27 v28 v29 v30 v31 v32 v33])

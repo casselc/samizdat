@@ -686,9 +686,14 @@
                           (str (if multi-candidate? "outranked by " "superseded by ")
                                (:id done-branch)
                                (when-not multi-candidate? " done()"))))
-    (runs/finish-run! conn run-id :completed (:final-answer done-branch))
+    (runs/finish-run! conn run-id :completed (:final-answer done-branch)
+                      (:verification done-branch))
     (assoc data :status :completed
            :result {:status :completed :answer (:final-answer done-branch)
+                    ;; Assurance travels with the result, not only in the run
+                    ;; row: a caller of run! reads what checked the work here
+                    ;; rather than going back to the journal for it.
+                    :verification (:verification done-branch)
                     :run-id run-id :branches branches})))
 
 (cell/defcell :beam/exhaust
@@ -721,9 +726,11 @@
       (doseq [b active]
         (runs/close-branch! conn run-id (:id b) :exhausted why))
       (if winner
-        (do (runs/finish-run! conn run-id :completed (:final-answer winner))
+        (do (runs/finish-run! conn run-id :completed (:final-answer winner)
+                              (:verification winner))
             (assoc data :status :completed :done-branch winner
                    :result {:status :completed :answer (:final-answer winner)
+                            :verification (:verification winner)
                             :run-id run-id :branches branches}))
         (let [residuals (keep state/residual branches)
               report (state/build-residual-report

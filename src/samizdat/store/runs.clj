@@ -121,21 +121,54 @@
   [run]
   (contains? terminal-statuses (str (:status run))))
 
+(def verification-statuses
+  "What a run's verification evidence can say, and all it can say.
+
+  Deliberately three values, not a boolean: `skipped` is not `failed`. A run
+  whose suite went red is a different fact from one where the gate had no
+  evidence to work with, and collapsing them is how a skipped check reads as a
+  passing one."
+  #{"passed" "failed" "skipped"})
+
 (defn finish-run!
   "Terminal only from 'running', decided by the ROW rather than the caller
   (provenance R2-4): abort!'s transient window could overwrite a run that completed
   between its registry read and this write. Returns rows written; 0 means the
-  run was already terminal and nothing changed, the journal says nothing."
-  [conn run-id status final-answer]
-  (let [n (db/with-writer
-            (db/execute! conn
-                         ["UPDATE runs SET status = ?, final_answer = ?, ended_at = ?
-                            WHERE id = ? AND status = 'running'"
-                          (name status) final-answer (db/now) run-id])
-            (db/change-count conn))]
-    (when (pos? n)
-      (journal/note! conn run-id :run-finished {:data {:status status}}))
-    n))
+  run was already terminal and nothing changed, the journal says nothing.
+
+  `verification` is the run's assurance evidence, SEPARATE from `status`:
+  {:status \"passed\"|\"failed\"|\"skipped\", :reason <keyword or string>,
+   :check <what ran, or would have>}. `status` stays a lifecycle fact —
+  `completed` means the run ended by shipping, whether or not anything checked
+  it — and this column answers the assurance question in the same row, so no
+  consumer has to reconstruct it from `ship-verify` journal events. Omitted or
+  nil writes nothing, which is what an older row already has."
+  ([conn run-id status final-answer]
+   (finish-run! conn run-id status final-answer nil))
+  ([conn run-id status final-answer verification]
+   (let [v (when (map? verification)
+             (let [st (some-> (:status verification) name)]
+               (json/write-str
+                (cond-> {:status (if (contains? verification-statuses st)
+                                   st
+                                   ;; An unrecognised status is recorded as
+                                   ;; such rather than silently dropped or
+                                   ;; coerced to a pass.
+                                   "unknown")}
+                  (:reason verification) (assoc :reason (str (name (:reason verification))))
+                  (:check verification) (assoc :check (str (:check verification)))))))
+         n (db/with-writer
+             (db/execute! conn
+                          ["UPDATE runs SET status = ?, final_answer = ?, ended_at = ?,
+                              verification = COALESCE(?, verification)
+                             WHERE id = ? AND status = 'running'"
+                           (name status) final-answer (db/now) v run-id])
+             (db/change-count conn))]
+     (when (pos? n)
+       (journal/note! conn run-id :run-finished
+                      {:data (cond-> {:status status}
+                               v (assoc :verification (json/read-str v :key-fn keyword)))}))
+     n)))
 
 (defn reconcile-orphans!
   "Mark every run still claiming to be running as interrupted. Returns how many.
@@ -202,6 +235,18 @@
   (:started_at (db/fetch-one conn ["SELECT started_at FROM runs
                                      ORDER BY started_at DESC LIMIT 1 OFFSET ?"
                                     (dec (long n))])))
+
+(defn verification-of
+  "A run row's verification evidence as a map, or nil when it has none.
+
+  nil means \"this run recorded no evidence\" - an older row, or a run that
+  ended without reaching the ship gate. It does NOT mean the work was
+  unverified, and it is not interchangeable with {:status \"skipped\"}, which
+  is a positive statement that the gate ran and could not decide."
+  [run]
+  (when-let [v (:verification run)]
+    (try (json/read-str (str v) :key-fn keyword)
+         (catch Throwable _ nil))))
 
 (defn get-run [conn run-id]
   (db/fetch-one conn ["SELECT * FROM runs WHERE id = ?" run-id]))

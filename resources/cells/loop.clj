@@ -272,8 +272,10 @@
       (let [status (if (:final-answer branch) :completed :abandoned)]
         (runs/close-branch! conn run-id (:id branch)
                             (:status branch) (:inactive-reason branch))
-        (runs/finish-run! conn run-id status (:final-answer branch))
-        (assoc data :status status :answer (:final-answer branch)))
+        (runs/finish-run! conn run-id status (:final-answer branch)
+                          (:verification branch))
+        (assoc data :status status :answer (:final-answer branch)
+               :verification (:verification branch)))
 
       :exhausted
       (let [residual (state/residual branch)]
