@@ -367,8 +367,13 @@
               result                          {:status "failed" :reason :red}
               :else
               {:status "skipped"
-               ;; The same reasons the ship-verify note records, so the row and
-               ;; the journal cannot disagree about why.
+               ;; The same reason vocabulary the ship-verify note uses, so the
+               ;; row and the event describe one event in one language. They
+               ;; are still computed SEPARATELY from the same inputs and
+               ;; written by separate operations - nothing here forces them to
+               ;; match, and this is not a claim that they cannot diverge.
+               ;; verification-integration-test pins that they agree on the
+               ;; accepted path, which is the one a consumer reads.
                :reason (cond
                          (nil? changed) :no-git-baseline
                          (empty? changed) :nothing-changed

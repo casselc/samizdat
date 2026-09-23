@@ -113,6 +113,7 @@
             [samizdat.config-test]
             [samizdat.branch-error-test]
             [samizdat.verification-status-test]
+            [samizdat.verification-integration-test]
             [samizdat.budget-proxy-e2e-test]
             [samizdat.fence-test]
             [samizdat.budget-proxy-routing-test]
@@ -304,6 +305,7 @@
     samizdat.config-test
     samizdat.branch-error-test
     samizdat.verification-status-test
+    samizdat.verification-integration-test
     samizdat.budget-proxy-e2e-test
     samizdat.fence-test
     samizdat.budget-proxy-routing-test
