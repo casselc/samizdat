@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- Keep database locking macros usable from other namespaces on strict
+  compilers: expand through public macro support while retaining one private
+  lock and unchanged read/write serialization.
+
+- Let embedded telemetry callers explicitly choose Oscope's encoding backend,
+  insert format, and approved typed schema without creating another SDK owner.
+  Omitted options keep existing behavior; Oscope still validates the selections.
+
 - Close synchronous OpenAI agent runs durably on exceptional task exit,
   preserving cancellation and concurrent terminal winners without masking the
   original exception or leaving active ownership behind.

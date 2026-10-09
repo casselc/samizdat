@@ -67,6 +67,11 @@
 
 (def ^:private conn-lock (Object.))
 
+(defn ^:no-doc connection-lock
+  "Public macro support: all callers receive the same private lock object."
+  []
+  conn-lock)
+
 (defmacro with-conn
   "Serialize ALL access to the connection, reads included.
 
@@ -93,7 +98,7 @@
   See samizdat-clj-dpj for the numbers. Reopen it if the store ever appears in
   a profile, which realistically means dropping this lock first."
   [& body]
-  `(locking conn-lock ~@body))
+  `(locking (connection-lock) ~@body))
 
 ;; Retained so existing call sites keep meaning what they say; a write is just
 ;; an access that mutates.

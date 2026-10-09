@@ -88,10 +88,12 @@
 
   Required: `:durable-root`, the local Durable object-store directory.
   Optional: `:durable` writer policy, `:sdk-options`, and explicit `:content`.
+  Explicit `:json-backend`, `:insert-format`, and `:typed-schema` options are
+  forwarded unchanged to Oscope, which validates and owns their installation.
   Content defaults off without consulting the environment. Returns a lifecycle
   containing the Oscope query `:source`; use flush!, status, and stop! below.
   Fails rather than replacing an already active Samizdat telemetry runtime."
-  [{:keys [durable-root durable sdk-options content]}]
+  [{:keys [durable-root durable sdk-options content] :as options}]
   (when-not (or (nil? durable) (map? durable))
     (throw (ex-info "embedded telemetry :durable must be a map" {})))
   (locking tel/runtime
@@ -103,8 +105,10 @@
       (throw (ex-info "Samizdat telemetry is already active" {})))
     (let [db-spec (durable-dbspec durable-root durable)
           oscope-lifecycle
-          (oscope/start! {:db-spec db-spec
-                          :sdk-options (merge default-sdk-options sdk-options)})
+          (oscope/start! (merge {:db-spec db-spec
+                                 :sdk-options (merge default-sdk-options sdk-options)}
+                                (select-keys options
+                                             [:json-backend :insert-format :typed-schema])))
           owner {:oscope oscope-lifecycle
                  :stop-lock (Object.)
                  :closed-result (atom nil)}]

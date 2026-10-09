@@ -144,6 +144,25 @@ harness exactly as for `jolt serve`.
 
 ### Embedded local-only server
 
+Programmatic callers of `samizdat.telemetry.embedded/start!` can also pass
+`:json-backend`, `:insert-format`, and `:typed-schema`. These options go directly
+to the same Oscope owner; they do not create a second SDK or remote exporter.
+For example, with a matching qualified experimental dependency/runtime stack:
+
+```clojure
+(embedded/start! {:durable-root "/path/to/telemetry"
+                  :json-backend :native-guarded-byte-batch
+                  :insert-format :json-compact-each-row})
+```
+
+Oscope validates explicit encoding choices and installs an approved typed
+manifest supplied through `:typed-schema`; Samizdat does not infer approval or
+install a schema itself. Omitted options retain existing defaults. This is a
+programmatic surface, not a new environment or launcher configuration option,
+and selecting it requires compatible dependencies rather than promising a
+throughput level. Application dependency aliases must explicitly select that
+stack; Oscope's aliases do not propagate to consumers.
+
 The explicit embedded launcher keeps Oscope, its in-process chDB exporter,
 and Durable storage in the Samizdat process. It opens no telemetry listener,
 does not select standalone OTLP or Langfuse, and never reads Langfuse endpoint

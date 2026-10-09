@@ -58,6 +58,10 @@
           (is (not= "must-not-be-reused" (:instance @db-spec*)))
           (is (.startsWith (:instance @db-spec*) "stable-owner-"))
           (is (= ::source (:source lifecycle)))
+          (let [start-options (second (first (filter #(= :start (first %)) @calls)))]
+            (is (not (contains? start-options :json-backend)))
+            (is (not (contains? start-options :insert-format)))
+            (is (not (contains? start-options :typed-schema))))
           (is (= :external (:owner @tel/runtime)))
           (is (true? (embedded/flush! lifecycle)))
           (is (= {:phase :open} (embedded/status lifecycle)))
@@ -69,6 +73,29 @@
           (is (nil? (find-ns 'oscope.server)))
           (finally
             (tel/shutdown!)))))))
+
+(deftest explicit-collector-options-reach-the-single-oscope-owner
+  (let [received (atom nil)
+        typed-schema {:mode :install :approved-manifest ::approved}]
+    (with-redefs [local-posix/local-backend (constantly ::backend)
+                  durable/writer-dbspec identity
+                  oscope/start! (fn [options]
+                                  (reset! received options)
+                                  {:source ::source})
+                  oscope/stop! (constantly {:status :closed :phase :closed})
+                  sdk/tracer (constantly ::tracer)]
+      (let [lifecycle (embedded/start! {:durable-root "/durable"
+                                       :json-backend :native-guarded-byte-batch
+                                       :insert-format :json-compact-each-row
+                                       :typed-schema typed-schema
+                                       :unrelated ::must-not-forward})]
+        (try
+          (is (= :native-guarded-byte-batch (:json-backend @received)))
+          (is (= :json-compact-each-row (:insert-format @received)))
+          (is (identical? typed-schema (:typed-schema @received)))
+          (is (not (contains? @received :unrelated)))
+          (is (= :external (:owner @tel/runtime)))
+          (finally (embedded/stop! lifecycle)))))))
 
 (deftest concurrent-start-has-one-owner-and-one-winner
   (let [ready-a (promise)

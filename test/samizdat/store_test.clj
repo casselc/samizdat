@@ -48,6 +48,16 @@
   `(let [~binding (db/open! ":memory:")]
      (try ~@body (finally (db/close ~binding)))))
 
+(deftest connection-lock-macros-work-from-a-consumer-namespace
+  (is (identical? (db/connection-lock) (db/connection-lock)))
+  (is (= :read (db/with-conn :read)))
+  (is (= :write (db/with-writer :write)))
+  (let [symbols (set (filter symbol?
+                            (tree-seq coll? seq
+                                      (macroexpand '(samizdat.store.db/with-conn :read)))))]
+    (is (contains? symbols 'samizdat.store.db/connection-lock))
+    (is (not (contains? symbols 'samizdat.store.db/conn-lock)))))
+
 (deftest journalling-a-value-json-cannot-write-does-not-kill-the-turn
   ;; The journal is a RECORD of the work. It must not be able to destroy the
   ;; work it is recording. gen-31 lost B1.3 and B2.2 — both on the run's actual
